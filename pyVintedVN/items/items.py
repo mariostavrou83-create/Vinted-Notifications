@@ -50,9 +50,11 @@ class Items:
         # Parse the URL to get the API parameters
         params = self.parse_url(url, nbr_items, page, time)
 
-        # Construct the API URL
+        # Construct the API URL. The catalogue moved to a dedicated host
+        # (api.vinted.<tld>) and no longer answers on the www host.
         api_url = (
-            f"https://{locale}{Urls.VINTED_API_URL}/{Urls.VINTED_PRODUCTS_ENDPOINT}"
+            f"https://{requester.get_api_host()}"
+            f"{Urls.VINTED_API_URL}/{Urls.VINTED_PRODUCTS_ENDPOINT}"
         )
 
         try:
@@ -66,7 +68,7 @@ class Items:
 
             # Return either Item objects or raw JSON data
             if not json:
-                return [Item(_item) for _item in items]
+                return [Item(_item, locale) for _item in items]
             else:
                 return items
 
@@ -91,12 +93,15 @@ class Items:
         # Parse the query parameters from the URL
         queries = parse_qsl(urlparse(url).query)
 
-        # Construct the parameters dictionary
+        # Construct the parameters dictionary. The id filters were renamed to
+        # attribute_ids[<singular>] with the September 2026 API move; the old
+        # *_ids names are still accepted but silently ignored, which returns
+        # unfiltered results rather than an error.
         params = {
             "search_text": "+".join(
                 map(str, [tpl[1] for tpl in queries if tpl[0] == "search_text"])
             ),
-            "video_game_platform_ids": ",".join(
+            "attribute_ids[video_game_platform]": ",".join(
                 map(
                     str,
                     [
@@ -106,24 +111,27 @@ class Items:
                     ],
                 )
             ),
-            "catalog_ids": ",".join(
+            "attribute_ids[catalog]": ",".join(
                 map(str, [tpl[1] for tpl in queries if tpl[0] == "catalog[]"])
             ),
-            "color_ids": ",".join(
+            "attribute_ids[color]": ",".join(
                 map(str, [tpl[1] for tpl in queries if tpl[0] == "color_ids[]"])
             ),
-            "brand_ids": ",".join(
+            "attribute_ids[brand]": ",".join(
                 map(str, [tpl[1] for tpl in queries if tpl[0] == "brand_ids[]"])
             ),
-            "size_ids": ",".join(
+            "attribute_ids[size]": ",".join(
                 map(str, [tpl[1] for tpl in queries if tpl[0] == "size_ids[]"])
             ),
-            "material_ids": ",".join(
+            "attribute_ids[material]": ",".join(
                 map(str, [tpl[1] for tpl in queries if tpl[0] == "material_ids[]"])
             ),
-            "status_ids": ",".join(
+            "attribute_ids[status]": ",".join(
                 map(str, [tpl[1] for tpl in queries if tpl[0] == "status_ids[]"])
             ),
+            # country and city have no working attribute_ids equivalent: the new
+            # names are accepted but match nothing, so zeroing a query is worse
+            # than the old names simply being ignored.
             "country_ids": ",".join(
                 map(str, [tpl[1] for tpl in queries if tpl[0] == "country_ids[]"])
             ),
@@ -150,7 +158,8 @@ class Items:
             "time": time,
         }
 
-        return params
+        # The legacy API ignored blank filters; svc-catalogue answers 400 to them.
+        return {k: v for k, v in params.items() if v not in ("", None)}
 
     # Aliases for backward compatibility
     parseUrl = parse_url
