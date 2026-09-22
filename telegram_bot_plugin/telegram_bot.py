@@ -1,6 +1,6 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from telegram.error import RetryAfter
+from telegram.error import RetryAfter, NetworkError, BadRequest
 import db
 import core
 import asyncio
@@ -251,30 +251,37 @@ class LeRobot:
     ### TELEGRAM SPECIFIC FUNCTIONS ###
 
     async def send_new_post(self, content, url, text, buy_url=None, buy_text=None):
-        try:
-            async with self.bot:
-                chat_ID = str(db.get_parameter("telegram_chat_id"))
-                buttons = [[InlineKeyboardButton(text=text, url=url)]]
-                if buy_url and buy_text:
-                    buttons.append([InlineKeyboardButton(text=buy_text, url=buy_url)])
-                await self.bot.send_message(
-                    chat_ID,
-                    content,
-                    parse_mode="HTML",
-                    read_timeout=40,
-                    write_timeout=40,
-                    reply_markup=InlineKeyboardMarkup(buttons),
-                )
-        except RetryAfter as e:
-            retry_after = e.retry_after
-            logger.error(
-                f"Flood control exceeded. Retrying in {retry_after + 2} seconds"
-            )
-            await asyncio.sleep(retry_after + 2)
-            # Retry sending the message
-            await self.send_new_post(content, url, text, buy_url, buy_text)
-        except Exception as e:
-            logger.error(f"Error sending new post: {str(e)}", exc_info=True)
+        delay = 2
+        while True:
+            try:
+                async with self.bot:
+                    chat_ID = str(db.get_parameter("telegram_chat_id"))
+                    buttons = [[InlineKeyboardButton(text=text, url=url)]]
+                    if buy_url and buy_text:
+                        buttons.append([InlineKeyboardButton(text=buy_text, url=buy_url)])
+                    await self.bot.send_message(
+                        chat_ID, content, parse_mode="HTML",
+                        read_timeout=40, write_timeout=40,
+                        reply_markup=InlineKeyboardMarkup(buttons),
+                    )
+                logger.info("Telegram accepted alert: %s", url)
+                return
+            except RetryAfter as exc:
+                seconds = exc.retry_after
+                if hasattr(seconds, "total_seconds"):
+                    seconds = seconds.total_seconds()
+                logger.warning("Telegram rate limited; retrying in %ss", seconds + 2)
+                await asyncio.sleep(seconds + 2)
+            except BadRequest:
+                logger.exception("Telegram rejected alert: %s", url)
+                return
+            except NetworkError:
+                logger.warning("Telegram connection failed; retaining alert and retrying in %ss", delay)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 60)
+            except Exception:
+                logger.exception("Telegram alert failed: %s", url)
+                return
 
     async def check_version(self, context: ContextTypes.DEFAULT_TYPE):
         try:
