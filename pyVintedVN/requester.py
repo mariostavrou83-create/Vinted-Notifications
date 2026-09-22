@@ -161,7 +161,7 @@ class Requester:
         while tried < self.MAX_RETRIES:
             tried += 1
             with self.session.get(
-                url, params=params, headers=self._auth_headers()
+                url, params=params, headers=self._auth_headers(), timeout=(5, 10)
             ) as response:
                 if response.status_code == 200:
                     return response
@@ -235,7 +235,7 @@ class Requester:
         """
         self.session.cookies.clear_session_cookies()
         try:
-            self.session.head(self.VINTED_AUTH_URL)
+            self.session.head(self.VINTED_AUTH_URL, timeout=(5, 10))
             if not self.session.cookies.get("access_token_web"):
                 logger.warning(
                     f"No access_token_web cookie returned by {self.VINTED_AUTH_URL}"
