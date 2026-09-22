@@ -1,17 +1,13 @@
 import db
 import requests
+from html import escape
+from time import monotonic, time
 from pyVintedVN import Vinted, requester
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from logger import get_logger
 
 # Get logger for this module
 logger = get_logger(__name__)
-
-# Vinted stopped publishing listing times in September 2026, so "is this item new?"
-# is answered purely by "have we recorded its id before?". That makes a wiped or
-# freshly seeded database the only real flood risk, and this caps the blast radius.
-MAX_NOTIFICATIONS_PER_RUN = 10
-
 
 def process_query(query, name=None):
     """
@@ -89,35 +85,15 @@ def process_query(query, name=None):
 
 
 def get_formatted_query_list():
-    """
-    Get a formatted list of all queries in the database.
-
-    Returns:
-        str: A formatted string with all queries, numbered
-    """
-    all_queries = db.get_queries()
-    queries_keywords = []
-    for query in all_queries:
-        parsed_url = urlparse(query[1])
-        query_params = parse_qs(parsed_url.query)
-
-        # Get the name or Extract the value of 'search_text'
-        query_name = (
-            query[3]
-            if query[3] is not None
-            else query_params.get("search_text", [None])[0]
-        )
-
-        if query_name[0] is None:
-            # Use query text instead of the whole query object
-            queries_keywords.append([query[1]])
-        else:
-            queries_keywords.append(query_name)
-
-    query_list = ("\n").join(
-        [str(i + 1) + ". " + j for i, j in enumerate(queries_keywords)]
-    )
-    return query_list
+    """Return numbered search names, falling back to keywords or the URL."""
+    labels = []
+    for query in db.get_queries():
+        params = parse_qs(urlparse(query[1]).query)
+        name = (query[3] or "").strip()
+        keyword = params.get("search_text", [""])[0].strip()
+        # Filter-only searches have no search_text. Keep the fallback a string.
+        labels.append(name or keyword or query[1])
+    return "\n".join(f"{number}. {label}" for number, label in enumerate(labels, 1))
 
 
 def process_remove_query(number):
@@ -299,13 +275,21 @@ def process_items(queue):
     # Get the number of items per query from the database
     items_per_query = int(db.get_parameter("items_per_query"))
 
-    # for each keyword we parse data
+    started = monotonic()
+    failures = 0
     for query in all_queries:
-        all_items = vinted.items.search(query[1], nbr_items=items_per_query)
+        try:
+            all_items = vinted.items.search(query[1], nbr_items=items_per_query)
+        except Exception:
+            failures += 1
+            logger.exception("Search %s failed; continuing with remaining searches", query[0])
+            continue
         # Filter to only include new items. This should reduce the amount of db calls.
         data = [item for item in all_items if item.is_new_item()]
         queue.put((data, query[0]))
         logger.info(f"Scraped {len(data)} items for query: {query[1]}")
+    logger.info("Search cycle finished: %s/%s succeeded in %.1fs",
+                len(all_queries) - failures, len(all_queries), monotonic() - started)
 
 
 def clear_item_queue(items_queue, new_items_queue):
@@ -373,26 +357,25 @@ def clear_item_queue(items_queue, new_items_queue):
             )
 
         if is_first_run:
+            # An empty successful first page is still a completed baseline.
+            # Otherwise the first future matching item would also be silenced.
+            if db.get_last_timestamp(query_id) is None:
+                db.update_last_timestamp(query_id, int(time()))
             return
 
-        # data arrives newest first and is walked in reverse, so to_notify runs
-        # oldest to newest. Trim from the front: a backlog is worth dropping, the
-        # listings that just appeared are not.
-        if len(to_notify) > MAX_NOTIFICATIONS_PER_RUN:
-            logger.warning(
-                f"{len(to_notify)} unseen items for query {query_id}; notifying the "
-                f"{MAX_NOTIFICATIONS_PER_RUN} most recent and recording the rest silently."
-            )
-            to_notify = to_notify[-MAX_NOTIFICATIONS_PER_RUN:]
-
+        # The silent first run handles the existing catalogue. On later runs,
+        # queue every unseen item: truncating here permanently loses alerts
+        # because all these IDs have already been recorded in the database.
+        if to_notify:
+            logger.info(f"Queuing {len(to_notify)} new item alerts for query {query_id}")
         for item in to_notify:
             # We create the message
             message_template = db.get_parameter("message_template")
             content = message_template.format(
-                title=item.title,
-                price=str(item.price) + " " + item.currency,
-                brand=item.brand_title,
-                image=None if item.photo is None else item.photo,
+                title=escape(item.title),
+                price=escape(str(item.price) + " " + item.currency),
+                brand=escape(item.brand_title or ""),
+                image=None if item.photo is None else escape(item.photo, quote=True),
             )
             # add the item to the queue
             new_items_queue.put((content, item.url, "Open Vinted", None, None))
