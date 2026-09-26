@@ -44,6 +44,18 @@ def is_item_in_db_by_id(id):
             conn.close()
 
 
+def get_seen_item_ids(item_ids):
+    if not item_ids:
+        return set()
+    conn = get_db_connection()
+    try:
+        marks = ','.join('?' for _ in item_ids)
+        return {str(row[0]) for row in conn.execute(
+            f'SELECT item FROM items WHERE item IN ({marks})', tuple(item_ids))}
+    finally:
+        conn.close()
+
+
 def get_last_timestamp(query_id):
     conn = None
     try:
