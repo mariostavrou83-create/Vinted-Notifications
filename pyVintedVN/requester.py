@@ -5,6 +5,8 @@ import os
 import db
 import random
 import requests
+import threading
+from polling import budget, retry_after_seconds
 from requests.exceptions import HTTPError
 
 # Add the parent directory to sys.path to import logger
@@ -14,6 +16,7 @@ from pyVintedVN.settings import Urls
 
 # Get logger for this module
 logger = get_logger(__name__)
+_proxy_lock = threading.Lock()
 
 
 class Requester:
@@ -148,7 +151,9 @@ class Requester:
         """
 
         # Set a random proxy for this request
-        proxy_configured = proxies.configure_proxy(self.session)
+        budget.check()
+        with _proxy_lock:
+            proxy_configured = proxies.configure_proxy(self.session)
         if self.debug and proxy_configured:
             logger.debug(f"Using proxy: {self.session.proxies}")
 
@@ -157,13 +162,19 @@ class Requester:
             self.set_cookies()
 
         tried = 0
-        new_session = False
         while tried < self.MAX_RETRIES:
             tried += 1
+            budget.check()
             with self.session.get(
                 url, params=params, headers=self._auth_headers(), timeout=(5, 10)
             ) as response:
                 if response.status_code == 200:
+                    return response
+                elif response.status_code == 429 or response.status_code >= 500:
+                    seconds = retry_after_seconds(response.headers.get("Retry-After"))
+                    budget.pause(seconds)
+                    logger.warning("Vinted HTTP %s; all searches backing off for %.1fs",
+                                   response.status_code, seconds)
                     return response
                 elif response.status_code in (401, 403) and tried < self.MAX_RETRIES:
                     logger.warning(
@@ -174,27 +185,9 @@ class Requester:
                     # If we've reached max retries, return the last response
                     # even if it's not a 200 status code
 
-                    # New try : if we still get a 401 or 403, we reset the session
-                    if response.status_code in (401, 403) and not new_session:
-                        # Log the error details, including headers and body snippet
-                        logger.error(
-                            f"Received {response.status_code} error for URL: {url}\n"
-                            f"Response headers: {dict(response.headers)}\n"
-                            f"Response body (first 500 chars): {response.text[:500]}"
-                        )
-
-                        new_session = True
-                        self.session = requests.Session()
-                        self._refresh_headers()
-                        # proxy
-                        proxy_configured = proxies.configure_proxy(self.session)
-                        self.set_cookies()
-                        if self.debug:
-                            logger.debug(
-                                f"Session reset due to {response.status_code} error"
-                            )
-                        tried = 0
-                        continue
+                    if response.status_code in (401, 403):
+                        budget.pause(60)
+                        logger.warning("Vinted authentication still rejected; backing off for 60s")
                     return response
 
         # This should only happen if the loop exits without returning
@@ -217,7 +210,8 @@ class Requester:
             HTTPError: If the request fails
         """
         # Set a random proxy for this request
-        proxy_configured = proxies.configure_proxy(self.session)
+        with _proxy_lock:
+            proxy_configured = proxies.configure_proxy(self.session)
         if self.debug and proxy_configured:
             logger.debug(f"Using proxy: {self.session.proxies}")
 
@@ -233,9 +227,13 @@ class Requester:
         www host, which hands back both `access_token_web` (the API bearer token)
         and `anon_id`. HEAD is enough and avoids downloading the ~2MB homepage.
         """
+        budget.check()
         self.session.cookies.clear_session_cookies()
         try:
-            self.session.head(self.VINTED_AUTH_URL, timeout=(5, 10))
+            response = self.session.head(self.VINTED_AUTH_URL, timeout=(5, 10))
+            if response.status_code == 429 or response.status_code >= 500:
+                budget.pause(retry_after_seconds(response.headers.get("Retry-After")))
+                response.raise_for_status()
             if not self.session.cookies.get("access_token_web"):
                 logger.warning(
                     f"No access_token_web cookie returned by {self.VINTED_AUTH_URL}"
