@@ -4,6 +4,9 @@ from telegram.error import RetryAfter, NetworkError, BadRequest
 import db
 import core
 import asyncio
+import re
+from telegram.ext import ApplicationHandlerStop, TypeHandler
+from telegram_bot_plugin.search_controls import SearchControls
 from logger import get_logger
 
 # Get logger for this module
@@ -41,12 +44,15 @@ class LeRobot:
             # Create the item queue to send to telegram
             self.new_items_queue = queue
 
+            # Only the configured chat may manage this private sourcing bot.
+            self.app.add_handler(TypeHandler(Update, self.restrict_access), group=-1)
+
             # Handler verify if bot is running
             self.app.add_handler(CommandHandler("hello", hello))
             # Keyword handlers
             self.app.add_handler(CommandHandler("add_query", self.add_query))
-            self.app.add_handler(CommandHandler("remove_query", self.remove_query))
-            self.app.add_handler(CommandHandler("queries", self.queries))
+            self.search_controls = SearchControls()
+            self.search_controls.register(self.app)
             # Allowlist handlers
             self.app.add_handler(
                 CommandHandler("clear_allowlist", self.clear_allowlist)
@@ -71,6 +77,11 @@ class LeRobot:
         except Exception as e:
             logger.error(f"Error initializing bot: {str(e)}", exc_info=True)
 
+    async def restrict_access(self, update, context):
+        expected = str(db.get_parameter("telegram_chat_id") or "")
+        if not update.effective_chat or str(update.effective_chat.id) != expected:
+            raise ApplicationHandlerStop
+
     ### QUERIES ###
 
     # Add a query to the db
@@ -78,26 +89,25 @@ class LeRobot:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         try:
-            query = context.args
-            if not query:
+            raw = update.message.text.split(maxsplit=1)
+            if len(raw) < 2:
                 await update.message.reply_text("No query provided.")
                 return
-
-            # Split the message into name=query if it contains an equal sign before the url. Store them separately
-            if "=http" in query[0]:
-                name, url = query[0].split("=", 1)
-            else:
-                name = None
-                url = query[0]
+            query = raw[1].strip()
+            match = re.fullmatch(r"(?:(.*?)\s*=\s*)?(https://\S+)", query, flags=re.DOTALL)
+            if not match:
+                await update.message.reply_text("Use /add_query Your search title=https://www.vinted.co.uk/catalog?... or /add_query URL")
+                return
+            name, url = match.groups()
+            if name and len(name.strip()) > 100:
+                await update.message.reply_text("Please use at most 100 characters for your title.")
+                return
+            name = name.strip() if name else None
             # Process the query using the core function
             message, is_new_query = core.process_query(url, name)
 
             if is_new_query:
-                # Create a string with all the keywords
-                query_list = core.get_formatted_query_list()
-                await update.message.reply_text(
-                    f"{message} \nCurrent queries: \n{query_list}"
-                )
+                await update.message.reply_text(f"{message} Use /queries to add a reminder or exclusions.")
             else:
                 await update.message.reply_text(message)
         except Exception as e:
@@ -303,6 +313,8 @@ class LeRobot:
                 if not self.new_items_queue.empty():
                     content, url, text, buy_url, buy_text = self.new_items_queue.get()
                     await self.send_new_post(content, url, text, buy_url, buy_text)
+                    # Smooth bursts into one chat and still honor RetryAfter.
+                    await asyncio.sleep(1.05)
                 else:
                     await asyncio.sleep(0.1)
                     pass
@@ -314,9 +326,16 @@ class LeRobot:
             await self.bot.set_my_commands(
                 [
                     ("hello", "Verify if bot is running"),
-                    ("add_query", "Add a keyword to the bot"),
-                    ("remove_query", "Remove a keyword from the bot"),
-                    ("queries", "List all queries"),
+                    ("add_query", "Add a named Vinted search"),
+                    ("remove_query", "Delete a search by #ID with confirmation"),
+                    ("queries", "Edit search titles, reminders and exclusions"),
+                    ("query", "Open one search by #ID"),
+                    ("rename_query", "Rename a saved search"),
+                    ("notes", "Set your buying reminder"),
+                    ("exclude", "Set excluded title words or phrases"),
+                    ("interval", "Change the checking target in seconds"),
+                    ("status", "Show actual checking times and failures"),
+                    ("cancel", "Cancel a pending edit"),
                     ("clear_allowlist", "Clear the allowlist"),
                     ("add_country", "Add a country to the allowlist"),
                     ("remove_country", "Remove a country from the allowlist"),
