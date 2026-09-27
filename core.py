@@ -299,9 +299,11 @@ def clear_item_queue(items_queue, new_items_queue):
     This function is scheduled to run frequently.
     """
     if not items_queue.empty():
-        data, query_id = items_queue.get()
+        batch = items_queue.get()
+        data, query_id = batch[:2]
         search = search_settings.get_search(query_id)
-        if search is None:
+        if (search is None or search.get('paused') or search.get('archived')
+                or (len(batch) > 2 and batch[2] != search['query'])):
             return True  # Deleted while the HTTP request was in flight.
         banwords_str = db.get_parameter("banwords")
 
@@ -309,7 +311,7 @@ def clear_item_queue(items_queue, new_items_queue):
         # ever produced anything?" flag, and the updates made below would otherwise
         # cut a first-run priming pass short right after the first item.
         last_query_timestamp = db.get_last_timestamp(query_id)
-        is_first_run = last_query_timestamp is None
+        is_first_run = last_query_timestamp is None or search.get('rebaseline', False)
         if is_first_run:
             logger.info(
                 f"First run for query {query_id}: recording {len(data)} item(s) "
@@ -385,6 +387,8 @@ def clear_item_queue(items_queue, new_items_queue):
             # Otherwise the first future matching item would also be silenced.
             if db.get_last_timestamp(query_id) is None:
                 db.update_last_timestamp(query_id, int(time()))
+            if search.get('rebaseline'):
+                search_settings.finish_baseline(query_id, search['query'])
             return True
 
         # The silent first run handles the existing catalogue. On later runs,
@@ -397,7 +401,11 @@ def clear_item_queue(items_queue, new_items_queue):
             message_template = db.get_parameter("message_template")
             content = format_alert(item, search, message_template)
             # add the item to the queue
-            new_items_queue.put((content, item.url, "Open Vinted", None, None))
+            reference = None
+            if search.get('reference_id'):
+                reference = {'id': search['reference_id'], 'query_id': query_id,
+                             'name': search['query_name'] or f'Search #{query_id}'}
+            new_items_queue.put((content, item.url, "Open Vinted", None, None, reference))
             logger.info("Queued item %s for search #%s; observed-to-queue %.3fs",
                         item.id, query_id, max(0, time() - getattr(item, 'observed_at', time())))
             # new_items_queue.put((content, item.url, "Open Vinted", item.buy_url, "Open buy page"))

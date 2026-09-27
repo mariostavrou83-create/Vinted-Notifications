@@ -54,7 +54,7 @@ def dispatcher_function(input_queue, rss_queue, telegram_queue):
             # Get from input queue
             item = input_queue.get()
             # Send to RSS queue
-            rss_queue.put(item)
+            rss_queue.put(item[:5])
             #
             telegram_queue.put(item)
     except (KeyboardInterrupt, SystemExit):
