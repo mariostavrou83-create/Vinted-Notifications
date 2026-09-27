@@ -35,13 +35,19 @@ class AlertTests(unittest.TestCase):
             get_parameter=lambda key: {'banwords': '', 'message_template': '{title} {price} {brand} {image}', 'items_per_query': '96'}[key],
             get_last_timestamp=lambda q: self.watermark,
             is_item_in_db_by_id=lambda item: item in self.seen,
+            get_seen_item_ids=lambda items: {str(item) for item in items if item in self.seen},
             update_last_timestamp=update, add_item_to_db=add,
             get_allowlist=lambda: 0,
             get_queries=lambda: [(1, 'https://www.vinted.co.uk/catalog?brand_ids[]=88', None, None)],
         )
-        self.ns = functions('core.py', {'clear_item_queue', 'contains_banwords', 'get_formatted_query_list', 'process_items'},
+        settings = SimpleNamespace(
+            get_search=lambda q: dict(id=q, query='https://www.vinted.co.uk/catalog', query_name='', reminder='', exclusions=[]),
+            filtered_ids=lambda q, ids: set(), excluded_by=lambda title, phrases: None,
+            remember_filtered=lambda q, ids: None,
+        )
+        self.ns = functions('core.py', {'clear_item_queue', 'format_alert', 'contains_banwords', 'get_formatted_query_list', 'process_items'},
                             dict(db=self.db, logger=logging.getLogger('test'), escape=html.escape,
-                                 time=time, monotonic=monotonic, parse_qs=parse_qs, urlparse=urlparse))
+                                 time=time, monotonic=monotonic, parse_qs=parse_qs, urlparse=urlparse, search_settings=settings))
     def item(self, i):
         return SimpleNamespace(id=i, title='A & B <top>', brand_title='A&B', price='9', currency='GBP',
                                photo=None, url=f'https://www.vinted.co.uk/items/{i}',
@@ -67,7 +73,7 @@ class AlertTests(unittest.TestCase):
         self.db.get_queries = lambda: [(1, base, None, None), (2, base + '&search_text=ralph', None, None),
                                       (3, base, None, 'Chosen'), (4, base + '&search_text=', None, '')]
         self.assertEqual(self.ns['get_formatted_query_list'](),
-                         f'1. {base}\n2. ralph\n3. Chosen\n4. {base}&search_text=')
+                         f'#1 · {base}\n#2 · ralph\n#3 · Chosen\n#4 · {base}&search_text=')
     def test_failed_search_does_not_skip_next_search(self):
         self.db.get_queries = lambda: [(1, 'bad'), (2, 'good')]
         search = Mock(side_effect=[ConnectionError('offline'), [self.item(2)]])

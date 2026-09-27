@@ -18,6 +18,9 @@ class Items:
         >>> results = items.search("https://www.vinted.fr/catalog?search_text=shoes")
     """
 
+    def __init__(self, client=None):
+        self.requester = requester if client is None else client
+
     def search(
         self,
         url: str,
@@ -44,6 +47,7 @@ class Items:
             HTTPError: If the request to the Vinted API fails.
         """
         # Extract the domain from the URL and set the locale
+        requester = self.requester
         locale = urlparse(url).netloc
         requester.set_locale(locale)
 

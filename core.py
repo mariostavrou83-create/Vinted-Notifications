@@ -1,5 +1,6 @@
 import db
 import requests
+import search_settings
 from html import escape
 from time import monotonic, time
 from pyVintedVN import Vinted, requester
@@ -92,8 +93,8 @@ def get_formatted_query_list():
         name = (query[3] or "").strip()
         keyword = params.get("search_text", [""])[0].strip()
         # Filter-only searches have no search_text. Keep the fallback a string.
-        labels.append(name or keyword or query[1])
-    return "\n".join(f"{number}. {label}" for number, label in enumerate(labels, 1))
+        labels.append(f"#{query[0]} · {name or keyword or query[1]}")
+    return "\n".join(labels)
 
 
 def process_remove_query(number):
@@ -299,6 +300,9 @@ def clear_item_queue(items_queue, new_items_queue):
     """
     if not items_queue.empty():
         data, query_id = items_queue.get()
+        search = search_settings.get_search(query_id)
+        if search is None:
+            return True  # Deleted while the HTTP request was in flight.
         banwords_str = db.get_parameter("banwords")
 
         # Read the watermark once, before the loop. It doubles as the "has this query
@@ -313,7 +317,23 @@ def clear_item_queue(items_queue, new_items_queue):
             )
 
         to_notify = []
+        filtered_ids = []
+        seen = db.get_seen_item_ids([item.id for item in data])
+        locally_filtered = search_settings.filtered_ids(query_id, [item.id for item in data])
+        allowlist = db.get_allowlist()
+        watermark = last_query_timestamp
         for item in reversed(data):
+
+            # Local filtering never marks the item globally seen: an overlapping
+            # search with different rules can still notify. Remember filtered IDs
+            # locally so clearing a rule does not replay the previous catalogue.
+            if str(item.id) in locally_filtered:
+                continue
+            blocked_by = search_settings.excluded_by(item.title, search['exclusions'])
+            if blocked_by:
+                filtered_ids.append(item.id)
+                logger.debug("Item %s excluded by search #%s rule %r", item.id, query_id, blocked_by)
+                continue
 
             # The watermark is only meaningful when the API actually supplied a
             # listing time. Otherwise raw_timestamp is merely when we saw the item,
@@ -325,27 +345,28 @@ def clear_item_queue(items_queue, new_items_queue):
             ):
                 continue
             # In case of multiple queries, we need to check if the item is already in the db
-            if db.is_item_in_db_by_id(item.id) is True:
-                # We update the timestamp
-                db.update_last_timestamp(query_id, item.raw_timestamp)
+            if str(item.id) in seen:
+                watermark = max(watermark or 0, item.raw_timestamp)
                 continue
             # If there's an allowlist and
             # If the user's country is not in the allowlist, we just update the timestamp
-            if db.get_allowlist() != 0 and (
+            if allowlist != 0 and (
                 get_user_country(item.raw_data["user"]["id"])
-            ) not in (db.get_allowlist() + ["XX"]):
-                db.update_last_timestamp(query_id, item.raw_timestamp)
+            ) not in (allowlist + ["XX"]):
+                watermark = max(watermark or 0, item.raw_timestamp)
                 continue
             # Check if the item title contains any banwords
             if banwords_str and contains_banwords(item.title, banwords_str):
                 # If it contains banwords, just update the timestamp and skip
-                db.update_last_timestamp(query_id, item.raw_timestamp)
+                watermark = max(watermark or 0, item.raw_timestamp)
                 continue
 
             # Being recorded is what stops an item coming back next run, so every
             # item that reaches this point is written to the db whether or not it
             # ends up being announced.
             to_notify.append(item)
+            seen.add(str(item.id))
+            watermark = max(watermark or 0, item.raw_timestamp)
             db.add_item_to_db(
                 id=item.id,
                 timestamp=item.raw_timestamp,
@@ -356,12 +377,15 @@ def clear_item_queue(items_queue, new_items_queue):
                 currency=item.currency,
             )
 
+        search_settings.remember_filtered(query_id, filtered_ids)
+        if watermark is not None and watermark != last_query_timestamp:
+            db.update_last_timestamp(query_id, watermark)
         if is_first_run:
             # An empty successful first page is still a completed baseline.
             # Otherwise the first future matching item would also be silenced.
             if db.get_last_timestamp(query_id) is None:
                 db.update_last_timestamp(query_id, int(time()))
-            return
+            return True
 
         # The silent first run handles the existing catalogue. On later runs,
         # queue every unseen item: truncating here permanently loses alerts
@@ -371,15 +395,34 @@ def clear_item_queue(items_queue, new_items_queue):
         for item in to_notify:
             # We create the message
             message_template = db.get_parameter("message_template")
-            content = message_template.format(
-                title=escape(item.title),
-                price=escape(str(item.price) + " " + item.currency),
-                brand=escape(item.brand_title or ""),
-                image=None if item.photo is None else escape(item.photo, quote=True),
-            )
+            content = format_alert(item, search, message_template)
             # add the item to the queue
             new_items_queue.put((content, item.url, "Open Vinted", None, None))
+            logger.info("Queued item %s for search #%s; observed-to-queue %.3fs",
+                        item.id, query_id, max(0, time() - getattr(item, 'observed_at', time())))
             # new_items_queue.put((content, item.url, "Open Vinted", item.buy_url, "Open buy page"))
+        return True
+    return False
+
+
+def format_alert(item, search, message_template):
+    keyword = parse_qs(urlparse(search['query']).query).get('search_text', [''])[0]
+    name = search['query_name'] or keyword or 'Filtered search'
+    prefix = f"🔎 <b>#{search['id']} · {escape(name[:100])}</b>\n\n"
+    reminder = ("\n\n📝 <b>Your buying reminder</b>\n" + escape(search['reminder'])) if search['reminder'] else ''
+    body = message_template.format(
+        title=escape(item.title[:500]),
+        price=escape(str(item.price) + ' ' + item.currency),
+        brand=escape((item.brand_title or '')[:120]),
+        image=None if item.photo is None else escape(item.photo, quote=True),
+    )
+    content = prefix + body + reminder
+    if len(content) > 4000:
+        # Keep valid HTML and all of the personal reminder if a custom template
+        # or image URL would otherwise push an alert over Telegram's limit.
+        content = (prefix + escape(item.title[:500]) + '\n' +
+                   escape(str(item.price) + ' ' + item.currency) + reminder)
+    return content
 
 
 def contains_banwords(title, banwords_str):

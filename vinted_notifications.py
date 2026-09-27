@@ -30,28 +30,9 @@ current_query_refresh_delay = None
 
 
 def scraper_process(items_queue):
-    logger.info("Scrape process started")
-
-    # Get the query refresh delay from the database
-    current_query_refresh_delay = int(db.get_parameter("query_refresh_delay"))
-    logger.info(f"Using query refresh delay of {current_query_refresh_delay} seconds")
-
-    scraper_scheduler = BackgroundScheduler()
-    scraper_scheduler.add_job(
-        core.process_items,
-        "interval",
-        seconds=current_query_refresh_delay,
-        args=[items_queue],
-        name="scraper",
-    )
-    scraper_scheduler.start()
-    try:
-        # Keep the process running
-        while True:
-            time.sleep(1)
-    except (KeyboardInterrupt, SystemExit):
-        scraper_scheduler.shutdown()
-        logger.info("Scrape process stopped")
+    from polling import Poller
+    logger.info("Scrape process started: four independent workers; interval updates apply without restart")
+    Poller(items_queue).run()
 
 
 def item_extractor(items_queue, new_items_queue):
@@ -59,8 +40,9 @@ def item_extractor(items_queue, new_items_queue):
     try:
         while True:
             # Check if there's an item in the queue
-            core.clear_item_queue(items_queue, new_items_queue)
-            time.sleep(0.1)  # Small sleep to prevent high CPU usage
+            while core.clear_item_queue(items_queue, new_items_queue):
+                pass
+            time.sleep(0.025)
     except (KeyboardInterrupt, SystemExit):
         logger.info("Consumer process stopped")
 
@@ -138,7 +120,7 @@ def monitor_processes(items_queue, telegram_queue, rss_queue):
     global telegram_process, rss_process
 
     # Check if the query refresh delay has changed
-    check_refresh_delay(items_queue)
+    # Poller reads the interval live, so changing it must not kill in-flight work.
 
     ### TELEGRAM ###
     # Check telegram process status
@@ -197,6 +179,11 @@ def plugin_checker():
 
 
 if __name__ == "__main__":
+
+    import search_settings
+    backup_path = search_settings.ensure_schema()
+    if backup_path:
+        logger.info("Search controls migration complete; verified database backup: %s", backup_path)
 
     # Run db migrations
     current_version = db.get_parameter("version")
