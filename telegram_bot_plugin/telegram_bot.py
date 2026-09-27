@@ -5,6 +5,7 @@ import db
 import core
 import asyncio
 import re
+import os
 from telegram.ext import ApplicationHandlerStop, TypeHandler
 from telegram_bot_plugin.search_controls import SearchControls
 from logger import get_logger
@@ -47,29 +48,14 @@ class LeRobot:
             # Only the configured chat may manage this private sourcing bot.
             self.app.add_handler(TypeHandler(Update, self.restrict_access), group=-1)
 
-            # Handler verify if bot is running
-            self.app.add_handler(CommandHandler("hello", hello))
-            # Keyword handlers
-            self.app.add_handler(CommandHandler("add_query", self.add_query))
-            self.search_controls = SearchControls()
-            self.search_controls.register(self.app)
-            # Allowlist handlers
-            self.app.add_handler(
-                CommandHandler("clear_allowlist", self.clear_allowlist)
-            )
-            self.app.add_handler(CommandHandler("add_country", self.add_country))
-            self.app.add_handler(CommandHandler("remove_country", self.remove_country))
-            self.app.add_handler(CommandHandler("allowlist", self.allowlist))
-
-            # TODO : Help command
-
-            # TODO : Manage removals after current items have been processed.
+            # Telegram is notifications-only; old editing commands no longer mutate data.
+            from telegram.ext import MessageHandler, filters
+            self.app.add_handler(MessageHandler(filters.COMMAND, self.open_dashboard))
 
             job_queue = self.app.job_queue
             # Set the commands
             job_queue.run_once(self.set_commands, when=1)
             # Every day we check for a new version
-            job_queue.run_repeating(self.check_version, interval=86400, first=1)
             # Every second we check for new posts to send to telegram
             job_queue.run_once(self.check_telegram_queue, when=1)
 
@@ -81,6 +67,14 @@ class LeRobot:
         expected = str(db.get_parameter("telegram_chat_id") or "")
         if not update.effective_chat or str(update.effective_chat.id) != expected:
             raise ApplicationHandlerStop
+
+    async def open_dashboard(self, update, context):
+        url = os.environ.get('DASHBOARD_URL', '')
+        if not url:
+            domain = os.environ.get('RAILWAY_PUBLIC_DOMAIN', '')
+            url = 'https://' + domain if domain else ''
+        message = 'Searches, reminders, exclusions and example photos are now managed in your dashboard. Telegram is for your item alerts.'
+        await update.message.reply_text(message + ('\n\n' + url if url else ''))
 
     ### QUERIES ###
 
@@ -260,7 +254,7 @@ class LeRobot:
 
     ### TELEGRAM SPECIFIC FUNCTIONS ###
 
-    async def send_new_post(self, content, url, text, buy_url=None, buy_text=None):
+    async def send_new_post(self, content, url, text, buy_url=None, buy_text=None, reference=None):
         delay = 2
         while True:
             try:
@@ -269,13 +263,13 @@ class LeRobot:
                     buttons = [[InlineKeyboardButton(text=text, url=url)]]
                     if buy_url and buy_text:
                         buttons.append([InlineKeyboardButton(text=buy_text, url=buy_url)])
-                    await self.bot.send_message(
+                    sent = await self.bot.send_message(
                         chat_ID, content, parse_mode="HTML",
                         read_timeout=40, write_timeout=40,
                         reply_markup=InlineKeyboardMarkup(buttons),
                     )
                 logger.info("Telegram accepted alert: %s", url)
-                return
+                break
             except RetryAfter as exc:
                 seconds = exc.retry_after
                 if hasattr(seconds, "total_seconds"):
@@ -292,6 +286,52 @@ class LeRobot:
             except Exception:
                 logger.exception("Telegram alert failed: %s", url)
                 return
+
+        # Separate retry boundary: never re-send an accepted listing if its example fails.
+        if reference:
+            try:
+                await self.send_reference(reference, sent.message_id)
+            except Exception:
+                logger.exception("Example photo failed for search #%s; listing was delivered", reference['query_id'])
+
+    async def send_reference(self, reference, message_id):
+        from telegram import ReplyParameters
+        import dashboard_store
+        media = dashboard_store.get_media(reference['id'])
+        if not media:
+            logger.warning("Example photo missing for search #%s", reference['query_id'])
+            return
+        delay = 2
+        await asyncio.sleep(1.05)
+        for attempt in range(6):
+            try:
+                async with self.bot:
+                    sent = await self.bot.send_photo(
+                        chat_id=str(db.get_parameter('telegram_chat_id')),
+                        photo=media['telegram_file_id'] or media['image'],
+                        caption=f"Your example · {reference['name'][:100]}\nCompare with the Vinted listing above.",
+                        reply_parameters=ReplyParameters(message_id, allow_sending_without_reply=True),
+                        disable_notification=True, read_timeout=40, write_timeout=40,
+                    )
+                logger.info("Telegram accepted example photo for search #%s", reference['query_id'])
+                dashboard_store.cache_telegram_photo(reference['id'], sent.photo[-1].file_id)
+                return
+            except RetryAfter as exc:
+                seconds = exc.retry_after
+                if hasattr(seconds, 'total_seconds'):
+                    seconds = seconds.total_seconds()
+                await asyncio.sleep(seconds + 2)
+            except BadRequest:
+                if media['telegram_file_id']:
+                    media['telegram_file_id'] = None
+                    dashboard_store.cache_telegram_photo(reference['id'], None)
+                    continue
+                logger.exception("Telegram rejected example photo for search #%s", reference['query_id'])
+                return
+            except NetworkError:
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 30)
+        logger.error("Example photo delivery exhausted retries for search #%s", reference['query_id'])
 
     async def check_version(self, context: ContextTypes.DEFAULT_TYPE):
         try:
@@ -311,8 +351,8 @@ class LeRobot:
         try:
             while 1:
                 if not self.new_items_queue.empty():
-                    content, url, text, buy_url, buy_text = self.new_items_queue.get()
-                    await self.send_new_post(content, url, text, buy_url, buy_text)
+                    alert = self.new_items_queue.get()
+                    await self.send_new_post(*alert)
                     # Smooth bursts into one chat and still honor RetryAfter.
                     await asyncio.sleep(1.05)
                 else:
@@ -324,23 +364,7 @@ class LeRobot:
     async def set_commands(self, context: ContextTypes.DEFAULT_TYPE):
         try:
             await self.bot.set_my_commands(
-                [
-                    ("hello", "Verify if bot is running"),
-                    ("add_query", "Add a named Vinted search"),
-                    ("remove_query", "Delete a search by #ID with confirmation"),
-                    ("queries", "Edit search titles, reminders and exclusions"),
-                    ("query", "Open one search by #ID"),
-                    ("rename_query", "Rename a saved search"),
-                    ("notes", "Set your buying reminder"),
-                    ("exclude", "Set excluded title words or phrases"),
-                    ("interval", "Change the checking target in seconds"),
-                    ("status", "Show actual checking times and failures"),
-                    ("cancel", "Cancel a pending edit"),
-                    ("clear_allowlist", "Clear the allowlist"),
-                    ("add_country", "Add a country to the allowlist"),
-                    ("remove_country", "Remove a country from the allowlist"),
-                    ("allowlist", "List all countries in the allowlist"),
-                ]
+                [("dashboard", "Open your search dashboard")]
             )
             logger.info("Bot commands set successfully")
         except Exception as e:

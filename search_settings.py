@@ -10,7 +10,7 @@ import unicodedata
 
 import db
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 
 def connection():
@@ -60,6 +60,18 @@ def ensure_schema():
                 error TEXT NOT NULL DEFAULT ''
             )""")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_items_item ON items(item)")
+            conn.execute("""CREATE TABLE IF NOT EXISTS search_dashboard (
+                query_id INTEGER PRIMARY KEY REFERENCES queries(id) ON DELETE CASCADE,
+                paused INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0,
+                reference_id TEXT, revision INTEGER NOT NULL DEFAULT 0,
+                rebaseline INTEGER NOT NULL DEFAULT 0)""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS dashboard_media (
+                id TEXT PRIMARY KEY, image BLOB NOT NULL, telegram_file_id TEXT,
+                created REAL NOT NULL)""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS dashboard_auth (
+                id INTEGER PRIMARY KEY CHECK(id=1), password_hash TEXT,
+                setup_hash TEXT NOT NULL, session_key TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0, window_start REAL NOT NULL DEFAULT 0)""")
             conn.execute("INSERT OR REPLACE INTO parameters VALUES ('msj_search_schema', ?)",
                          (SCHEMA_VERSION,))
         return str(backup)
@@ -69,14 +81,31 @@ def get_search(query_id):
     with closing(connection()) as conn:
         row = conn.execute("""SELECT q.id, q.query, q.last_item, q.query_name,
             COALESCE(p.reminder, '') AS reminder,
-            COALESCE(p.exclusions, '[]') AS exclusions
+            COALESCE(p.exclusions, '[]') AS exclusions,
+            COALESCE(d.paused, 0) AS paused, COALESCE(d.archived, 0) AS archived,
+            COALESCE(d.rebaseline, 0) AS rebaseline, d.reference_id,
+            COALESCE(d.revision, 0) AS revision
             FROM queries q LEFT JOIN search_preferences p ON p.query_id=q.id
+            LEFT JOIN search_dashboard d ON d.query_id=q.id
             WHERE q.id=?""", (query_id,)).fetchone()
     if row is None:
         return None
     result = dict(row)
     result["exclusions"] = json.loads(result["exclusions"])
     return result
+
+
+def active_queries():
+    with closing(connection()) as conn:
+        return [tuple(row) for row in conn.execute("""SELECT q.* FROM queries q
+            LEFT JOIN search_dashboard d ON d.query_id=q.id
+            WHERE COALESCE(d.paused,0)=0 AND COALESCE(d.archived,0)=0""")]
+
+
+def finish_baseline(query_id, url):
+    with closing(connection()) as conn, conn:
+        conn.execute("""UPDATE search_dashboard SET rebaseline=0 WHERE query_id=?
+            AND EXISTS(SELECT 1 FROM queries WHERE id=? AND query=?)""", (query_id, query_id, url))
 
 
 def update_search(query_id, field, value):

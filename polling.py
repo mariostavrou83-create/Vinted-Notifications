@@ -85,7 +85,7 @@ class Poller:
     def tick(self):
         now = time.monotonic()
         if now >= self.config_checked:
-            self.queries = {q[0]: q for q in db.get_queries()}
+            self.queries = {q[0]: q for q in search_settings.active_queries()}
             self.target = max(3.0, float(db.get_parameter("query_refresh_delay") or 15))
             self.count = int(db.get_parameter("items_per_query") or 96)
             self.config_checked = now + 1
@@ -102,7 +102,8 @@ class Poller:
                 observed = time.time()
                 for item in items:
                     item.observed_at = observed
-                self.queue.put(([item for item in items if item.is_new_item()], query_id))
+                self.queue.put(([item for item in items if item.is_new_item()], query_id,
+                                getattr(future, "search_url", queries[query_id][1])))
                 self.failures[query_id] = 0
                 self.successes += 1
             except Exception as exc:
@@ -137,6 +138,7 @@ class Poller:
                 self.previous_start[query_id] = now
                 self.pending[query_id] = (self.executor.submit(self.fetch, queries[query_id], count),
                                           now, time.time(), actual_interval)
+                self.pending[query_id][0].search_url = queries[query_id][1]
         if now - self.last_report >= 30:
             logger.info("Poller: %s searches; target %.1fs; %s successes/%s errors in last %.1fs; cooldown %.1fs",
                         len(queries), target, self.successes, self.errors,
