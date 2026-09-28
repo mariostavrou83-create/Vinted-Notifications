@@ -312,6 +312,7 @@ def clear_item_queue(items_queue, new_items_queue):
         # cut a first-run priming pass short right after the first item.
         last_query_timestamp = db.get_last_timestamp(query_id)
         is_first_run = last_query_timestamp is None or search.get('rebaseline', False)
+        listing_floor = search_settings.listing_cutoff(query_id, [item.id for item in data], time())
         if is_first_run:
             logger.info(
                 f"First run for query {query_id}: recording {len(data)} item(s) "
@@ -325,6 +326,12 @@ def clear_item_queue(items_queue, new_items_queue):
         allowlist = db.get_allowlist()
         watermark = last_query_timestamp
         for item in reversed(data):
+
+            if not is_first_run and (not str(item.id).isdigit() or int(item.id) <= listing_floor):
+                # Price changes, bumps and late matches keep their original ID.
+                # Do not mistake first appearance in this query for a new listing.
+                filtered_ids.append(item.id)
+                continue
 
             # Local filtering never marks the item globally seen: an overlapping
             # search with different rules can still notify. Remember filtered IDs
@@ -386,6 +393,7 @@ def clear_item_queue(items_queue, new_items_queue):
                 to_notify.append(item)
 
         search_settings.remember_filtered(query_id, filtered_ids)
+        search_settings.remember_listing_frontier(query_id, [item.id for item in data], time())
         if watermark is not None and watermark != last_query_timestamp:
             db.update_last_timestamp(query_id, watermark)
         if is_first_run:

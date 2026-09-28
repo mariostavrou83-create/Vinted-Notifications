@@ -98,6 +98,16 @@ def ensure_schema():
             conn.execute('CREATE INDEX IF NOT EXISTS idx_outbox_photo ON alert_outbox(photo_status,photo_next_attempt)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_outbox_found ON alert_outbox(found_at DESC)')
             conn.execute('CREATE TABLE IF NOT EXISTS delivery_runtime (key TEXT PRIMARY KEY,value REAL NOT NULL)')
+            conn.execute('''CREATE TABLE IF NOT EXISTS listing_frontiers (
+                query_id INTEGER PRIMARY KEY REFERENCES queries(id) ON DELETE CASCADE,
+                max_item_id INTEGER NOT NULL, last_check REAL NOT NULL)''')
+            conn.execute('''CREATE TABLE IF NOT EXISTS listing_checkpoints (
+                minute INTEGER PRIMARY KEY, max_item_id INTEGER NOT NULL)''')
+            # Seed the cutoff from existing history without rewriting any item.
+            import time
+            conn.execute('''INSERT OR IGNORE INTO listing_checkpoints
+                SELECT ?,COALESCE(MAX(CAST(item AS INTEGER)),0) FROM items
+                WHERE NOT EXISTS(SELECT 1 FROM listing_checkpoints)''', (int(time.time()/60)-21,))
             conn.execute("INSERT OR REPLACE INTO parameters VALUES ('msj_search_schema', ?)",
                          (SCHEMA_VERSION,))
         return str(backup)
@@ -227,3 +237,37 @@ def health_rows():
     with closing(connection()) as conn:
         return [dict(row) for row in conn.execute("""SELECT q.id, h.* FROM queries q
             LEFT JOIN search_health h ON q.id=h.query_id ORDER BY q.id""")]
+
+
+def listing_cutoff(query_id, item_ids, now):
+    """Conservative ID-order heuristic when Vinted omits creation dates.
+
+    Existing IDs do not become new when the price changes. The per-search
+    frontier rejects resurfaced lower IDs; a shared twenty-minute frontier
+    catches old IDs entering a quiet search's price range for the first time.
+    After a long search outage, its first page is quiet to avoid stale alerts.
+    """
+    with closing(connection()) as conn:
+        row = conn.execute('SELECT * FROM listing_frontiers WHERE query_id=?',(query_id,)).fetchone()
+        global_floor = conn.execute('SELECT COALESCE(MAX(max_item_id),0) FROM listing_checkpoints WHERE minute<=?',
+                                    (int((now-1200)/60),)).fetchone()[0]
+    floor = max(global_floor,row['max_item_id'] if row else 0)
+    if row and now-row['last_check']>1200:
+        floor = max([floor]+[int(i) for i in item_ids if str(i).isdigit()])
+    return floor
+
+
+def remember_listing_frontier(query_id, item_ids, now):
+    """Only advance after the whole batch's alert transactions succeeded."""
+    maximum = max([0]+[int(i) for i in item_ids if str(i).isdigit()])
+    with closing(connection()) as conn,conn:
+        conn.execute('''INSERT INTO listing_frontiers VALUES (?,?,?) ON CONFLICT(query_id)
+            DO UPDATE SET max_item_id=MAX(max_item_id,excluded.max_item_id),last_check=excluded.last_check''',
+            (query_id,maximum,now))
+        global_max = conn.execute('SELECT COALESCE(MAX(max_item_id),0) FROM listing_checkpoints').fetchone()[0]
+        conn.execute('''INSERT INTO listing_checkpoints VALUES (?,?) ON CONFLICT(minute)
+            DO UPDATE SET max_item_id=MAX(max_item_id,excluded.max_item_id)''',
+            (int(now/60),max(maximum,global_max)))
+        # Retain the last old checkpoint as the boundary, plus the recent window.
+        conn.execute('''DELETE FROM listing_checkpoints WHERE minute <
+            (SELECT MAX(minute) FROM listing_checkpoints WHERE minute<=?)''',(int((now-1200)/60),))

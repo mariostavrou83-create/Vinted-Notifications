@@ -23,7 +23,7 @@ Schema version 3 adds dashboard, buying-guide, folder and durable delivery table
 
 `python -m unittest discover -s tests`
 
-37 offline tests cover existing alert reliability, 44-search preservation, scheduler behavior, authenticated search/photo round trips, one-time setup/login/logout, CSRF, rate limiting, unsafe links/uploads, stale edits and responses, archive/restore, and paired Telegram delivery with retries and cached photos.
+40 offline tests cover existing alert reliability, 44-search preservation, scheduler behavior, authenticated search/photo round trips, one-time setup/login/logout, CSRF, rate limiting, unsafe links/uploads, stale edits and responses, archive/restore, and paired Telegram delivery with retries and cached photos.
 
 Before/after deployment compare live query identities/URLs/names, preferences, historical items, watermarks and parameters against the pre-migration backup. Verify 44 active healthy searches and normal Telegram acceptance. No synthetic alert is required.
 
@@ -44,3 +44,11 @@ Transport calls have bounded timeouts. First photo attempts normally follow thei
 Delivery is at least once, not exactly once: if Telegram accepts a request but its acknowledgement is lost (or the worker dies before committing it), a retry can duplicate it. Confirmed messages are not resent because their example photo failed. Pending alerts and Recent Finds share the existing persistent database; in-memory queues no longer decide Telegram delivery.
 
 Additional offline coverage exercises atomic rollback, restart/lease recovery, stale acknowledgements, rate-limit persistence, photo retry priority, cached-photo fallback, private Recent Finds/status controls, currency validation, folders and dashboard-schema preservation.
+
+## New listings only
+
+The current UK catalogue response was checked directly: it exposes item IDs but no listing-created timestamp or price-drop flag (and its current photo URLs use hashes, not timestamps). An unseen ID alone is therefore not proof that an item was just listed.
+
+A persistent per-search ID frontier now skips lower/equal IDs that resurface after reductions, bumps or filter changes. A shared twenty-minute ID checkpoint also rejects old IDs that enter a quiet search's price range for the first time. Existing seen-item deduplication remains in place. The migration seeds the shared floor from existing history without modifying that history. After a search has been inactive for more than twenty minutes, its first returned page is quiet. Frontier writes happen only after alert writes succeed, so a failed database transaction does not advance past unsaved alerts.
+
+This is a conservative ID-order heuristic, not an authoritative creation-date guarantee. Late-indexed listings, delayed responses, or seller drafts with earlier allocated IDs can be skipped. Where actual timestamp information is supplied, the existing twenty-minute age check also applies. No extra Vinted requests are needed, and polling settings are unchanged.
