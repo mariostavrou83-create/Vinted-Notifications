@@ -2,6 +2,7 @@
 from contextlib import closing
 import io
 import sqlite3
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock
@@ -23,6 +24,33 @@ def outbox(item_id):
 
 
 class OutboxTests(DatabaseFixture, unittest.TestCase):
+    def test_old_unseen_price_drop_is_rejected_but_new_id_alerts(self):
+        self.batch(1,[200])
+        # This item was previously above the saved price limit, so it has never
+        # been in the seen-item table. A price reduction does not change its ID.
+        self.assertEqual(self.batch(1,[150],title='Older jacket now reduced'),[])
+        self.assertIsNone(outbox(150))
+        self.assertFalse(db.is_item_in_db_by_id(150))
+        self.assertEqual(len(self.batch(1,[201])),1)
+
+    def test_shared_age_frontier_protects_a_quiet_search(self):
+        now=time.time()
+        with closing(settings.connection()) as conn,conn:
+            conn.execute('DELETE FROM listing_checkpoints')
+        settings.remember_listing_frontier(2,[500],now-1500)
+        settings.remember_listing_frontier(1,[100],now-10)
+        self.assertEqual(self.batch(1,[300],title='Old reduced item newly in budget'),[])
+        self.assertIsNone(outbox(300))
+        self.assertEqual(len(self.batch(1,[501])),1)
+
+    def test_outage_page_is_quiet_and_frontier_survives_restart(self):
+        now=time.time()
+        settings.remember_listing_frontier(1,[150],now-7200)
+        self.assertEqual(self.batch(1,[180,200]),[])
+        self.assertEqual(settings.listing_cutoff(1,[],now),200)
+        self.assertEqual(len(self.batch(1,[201])),1)
+        self.assertEqual(self.batch(1,[190]),[])
+
     def test_atomic_write_rolls_back_seen_item_and_watermark_on_outbox_failure(self):
         with closing(settings.connection()) as conn,conn:
             conn.execute("CREATE TRIGGER fail_outbox BEFORE INSERT ON alert_outbox BEGIN SELECT RAISE(ABORT,'disk simulation'); END")
