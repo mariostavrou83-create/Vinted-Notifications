@@ -1,6 +1,7 @@
 """Single-owner dashboard. Every search/photo route requires authentication."""
 from contextlib import closing
-from datetime import timedelta
+from datetime import timedelta, datetime
+from zoneinfo import ZoneInfo
 import hashlib
 import io
 import json
@@ -63,13 +64,14 @@ def create_app(test_config=None):
     def headers(response):
         response.headers.update({'Cache-Control':'no-store', 'X-Content-Type-Options':'nosniff',
             'X-Frame-Options':'DENY', 'Referrer-Policy':'no-referrer',
-            'Content-Security-Policy':"default-src 'self'; img-src 'self' blob:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+            'Content-Security-Policy':"default-src 'self'; img-src 'self' blob: https://*.vinted.net https://vinted.net; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
             'Strict-Transport-Security':'max-age=31536000'})
         return response
 
     @app.context_processor
     def common():
-        return {'csrf':session.get('csrf'), 'loads':json.loads}
+        return {'csrf':session.get('csrf'), 'loads':json.loads,
+                'money':lambda cents: '' if cents is None else f'{cents/100:.2f}'}
 
     def count_attempt():
         # A persistent global limit cannot be bypassed by changing IPs/cookies or restarting.
@@ -140,6 +142,11 @@ def create_app(test_config=None):
     def dashboard():
         archived = request.args.get('view') == 'archive'
         rows = store.list_searches(archived)
+        folder = request.args.get('folder','')
+        if folder == 'unfiled':
+            rows = [row for row in rows if row['folder_id'] is None]
+        elif folder.isdigit():
+            rows = [row for row in rows if str(row['folder_id'])==folder]
         now = time.time()
         for row in rows:
             age = now-(row['last_success'] or 0)
@@ -150,7 +157,7 @@ def create_app(test_config=None):
                 'Checked just now' if age < 60 else f'Checked {int(age/60)} min ago')
         return render_template('msj_dashboard.html', rows=rows, archived=archived,
             active=sum(not r['paused'] for r in rows), photos=sum(bool(r['reference_id']) for r in rows),
-            interval=db.get_parameter('query_refresh_delay'))
+            interval=db.get_parameter('query_refresh_delay'), folders=store.list_folders(), folder=folder)
 
     @app.route('/search/new', methods=['GET','POST'])
     @app.route('/search/<int:query_id>', methods=['GET','POST'])
@@ -159,7 +166,10 @@ def create_app(test_config=None):
         if query_id is not None and original is None:
             abort(404)
         row = dict(original) if original else {'id':None, 'query_name':'', 'query':'',
-            'reminder':'', 'exclusions':[], 'reference_id':None, 'revision':0}
+            'reminder':'', 'exclusions':[], 'reference_id':None, 'revision':0,
+            'max_buy':None,'resale_low':None,'resale_high':None,'must_have':'','folder_id':None}
+        prices = {key: '' if row[key] is None else f'{row[key]/100:.2f}'
+                  for key in ('max_buy','resale_low','resale_high')}
         if request.method == 'POST':
             try:
                 upload = request.files.get('photo')
@@ -169,10 +179,53 @@ def create_app(test_config=None):
                 return redirect(url_for('dashboard'))
             except ValueError as exc:
                 flash(str(exc), 'error')
-                for key in ('query_name','query','reminder','revision'):
+                for key in ('query_name','query','reminder','revision','must_have','folder_id'):
                     row[key] = request.form.get(key,'')
                 row['exclusions'] = request.form.get('exclusions','').splitlines()
-        return render_template('msj_edit.html', row=row)
+                prices = {key:request.form.get(key,'') for key in prices}
+        return render_template('msj_edit.html', row=row, prices=prices, folders=store.list_folders())
+
+    @app.route('/folders', methods=['GET','POST'])
+    def folders():
+        if request.method == 'POST':
+            try:
+                action = request.form.get('action','save')
+                folder_id = request.form.get('folder_id') or None
+                if action == 'delete' and folder_id:
+                    store.delete_folder(folder_id)
+                    flash('Folder removed. Its searches are now unfiled.','success')
+                elif action == 'save':
+                    store.save_folder(request.form.get('name',''),folder_id)
+                    flash('Folder saved. Choose it when editing a search.','success')
+                else:
+                    raise ValueError('Unknown folder action.')
+                return redirect(url_for('folders'))
+            except ValueError as exc:
+                flash(str(exc),'error')
+        return render_template('msj_folders.html',folders=store.list_folders())
+
+    def find_filters(source):
+        return {'q':source.get('q','')[:100], 'status':source.get('status','') if source.get('status','') in store.FIND_STATUSES else '',
+                'folder':source.get('folder','')[:20], 'page':min(100000,max(1,source.get('page',1,type=int) or 1))}
+
+    @app.get('/finds')
+    def finds():
+        filters = find_filters(request.args)
+        rows,total = store.list_finds(filters['q'],filters['status'],filters['folder'],filters['page'])
+        for row in rows:
+            row['safe_photo'] = store.safe_photo_url(row['photo_url'])
+            row['found_label'] = datetime.fromtimestamp(row['found_at'],ZoneInfo('Europe/London')).strftime('%d %b · %H:%M')
+        return render_template('msj_finds.html',rows=rows,total=total,filters=filters,
+            folders=store.list_folders(),pages=max(1,(total+35)//36))
+
+    @app.post('/finds/<item_id>/status')
+    def find_status(item_id):
+        try:
+            store.set_find_status(item_id,request.form.get('new_status'))
+            flash('Find updated.','success')
+        except ValueError as exc:
+            flash(str(exc),'error')
+        return redirect(url_for('finds',**find_filters(request.form)))
 
     @app.post('/search/<int:query_id>/<action>')
     def state(query_id, action):

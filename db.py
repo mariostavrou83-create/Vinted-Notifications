@@ -5,7 +5,7 @@ DB_PATH = "./data/vinted_notifications.db"
 
 
 def get_db_connection():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
@@ -90,11 +90,14 @@ def update_last_timestamp(query_id, timestamp):
             conn.close()
 
 
-def add_item_to_db(id, title, query_id, price, timestamp, photo_url, currency="EUR"):
+def add_item_to_db(id, title, query_id, price, timestamp, photo_url, currency="EUR", alert=None):
     conn = None
     try:
         conn = get_db_connection()
+        conn.execute('BEGIN IMMEDIATE')
         cursor = conn.cursor()
+        if cursor.execute('SELECT 1 FROM items WHERE item=?', (id,)).fetchone():
+            return False
         # Insert into db the id and the query_id related to the item
         cursor.execute(
             "INSERT INTO items (item, title, price, currency, timestamp, photo_url, query_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -102,11 +105,22 @@ def add_item_to_db(id, title, query_id, price, timestamp, photo_url, currency="E
         )
         # Update the last item for the query
         cursor.execute(
-            "UPDATE queries SET last_item=? WHERE id=?", (timestamp, query_id)
+            "UPDATE queries SET last_item=MAX(COALESCE(last_item,0),?) WHERE id=?", (timestamp, query_id)
         )
+        if alert is not None:
+            import time
+            cursor.execute('''INSERT INTO alert_outbox
+                (item_id,query_id,search_name,content,url,title,price,currency,photo_url,
+                 reference_id,found_at,photo_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''',
+                (str(id),query_id,alert['search_name'],alert['content'],alert['url'],title,
+                 str(price),currency,photo_url,alert.get('reference_id'),time.time(),
+                 'pending' if alert.get('reference_id') else 'none'))
         conn.commit()
+        return True
     except Exception:
-        print_exc()
+        if conn:
+            conn.rollback()
+        raise
     finally:
         if conn:
             conn.close()

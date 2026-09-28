@@ -348,18 +348,8 @@ class LeRobot:
             logger.error(f"Error checking for new version: {str(e)}", exc_info=True)
 
     async def check_telegram_queue(self, context: ContextTypes.DEFAULT_TYPE):
-        try:
-            while 1:
-                if not self.new_items_queue.empty():
-                    alert = self.new_items_queue.get()
-                    await self.send_new_post(*alert)
-                    # Smooth bursts into one chat and still honor RetryAfter.
-                    await asyncio.sleep(1.05)
-                else:
-                    await asyncio.sleep(0.1)
-                    pass
-        except Exception as e:
-            logger.error(f"Error checking telegram queue: {str(e)}", exc_info=True)
+        from alert_delivery import DeliveryWorker
+        await DeliveryWorker(context.bot, db.get_parameter("telegram_chat_id")).run()
 
     async def set_commands(self, context: ContextTypes.DEFAULT_TYPE):
         try:

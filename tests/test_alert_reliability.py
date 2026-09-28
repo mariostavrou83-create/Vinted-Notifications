@@ -44,6 +44,8 @@ class AlertTests(unittest.TestCase):
             get_search=lambda q: dict(id=q, query='https://www.vinted.co.uk/catalog', query_name='', reminder='', exclusions=[]),
             filtered_ids=lambda q, ids: set(), excluded_by=lambda title, phrases: None,
             remember_filtered=lambda q, ids: None,
+            listing_cutoff=lambda q, ids, now: 0,
+            remember_listing_frontier=lambda q, ids, now: None,
         )
         self.ns = functions('core.py', {'clear_item_queue', 'format_alert', 'contains_banwords', 'get_formatted_query_list', 'process_items'},
                             dict(db=self.db, logger=logging.getLogger('test'), escape=html.escape,
