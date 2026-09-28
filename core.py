@@ -366,10 +366,13 @@ def clear_item_queue(items_queue, new_items_queue):
             # Being recorded is what stops an item coming back next run, so every
             # item that reaches this point is written to the db whether or not it
             # ends up being announced.
-            to_notify.append(item)
+            alert = None if is_first_run else {
+                'content': format_alert(item, search, db.get_parameter('message_template')),
+                'url': item.url, 'search_name': search['query_name'] or f'Search #{query_id}',
+                'reference_id': search.get('reference_id')}
             seen.add(str(item.id))
             watermark = max(watermark or 0, item.raw_timestamp)
-            db.add_item_to_db(
+            recorded = db.add_item_to_db(
                 id=item.id,
                 timestamp=item.raw_timestamp,
                 price=item.price,
@@ -377,7 +380,10 @@ def clear_item_queue(items_queue, new_items_queue):
                 photo_url=item.photo,
                 query_id=query_id,
                 currency=item.currency,
+                alert=alert,
             )
+            if recorded is not False:
+                to_notify.append(item)
 
         search_settings.remember_filtered(query_id, filtered_ids)
         if watermark is not None and watermark != last_query_timestamp:
@@ -418,6 +424,18 @@ def format_alert(item, search, message_template):
     name = search['query_name'] or keyword or 'Filtered search'
     prefix = f"🔎 <b>#{search['id']} · {escape(name[:100])}</b>\n\n"
     reminder = ("\n\n📝 <b>Your buying reminder</b>\n" + escape(search['reminder'])) if search['reminder'] else ''
+    guide = []
+    if search.get('max_buy') is not None:
+        guide.append(f"Buy up to <b>£{search['max_buy']/100:.2f}</b>")
+    low, high = search.get('resale_low'), search.get('resale_high')
+    if low is not None or high is not None:
+        target = (f'£{low/100:.2f}–£{high/100:.2f}' if low is not None and high is not None else
+                  f'from £{low/100:.2f}' if low is not None else f'up to £{high/100:.2f}')
+        guide.append('Your resale target: ' + target)
+    if search.get('must_have'):
+        guide.append('Must have: ' + escape(search['must_have'][:400]))
+    if guide:
+        reminder = '\n\n💷 <b>Your buying guide</b>\n' + '\n'.join(guide) + reminder
     body = message_template.format(
         title=escape(item.title[:500]),
         price=escape(str(item.price) + ' ' + item.currency),

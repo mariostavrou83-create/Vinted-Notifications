@@ -10,7 +10,7 @@ import unicodedata
 
 import db
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 
 
 def connection():
@@ -72,6 +72,32 @@ def ensure_schema():
                 id INTEGER PRIMARY KEY CHECK(id=1), password_hash TEXT,
                 setup_hash TEXT NOT NULL, session_key TEXT NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0, window_start REAL NOT NULL DEFAULT 0)""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS search_folders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL COLLATE NOCASE UNIQUE)""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS search_buying_guide (
+                query_id INTEGER PRIMARY KEY REFERENCES queries(id) ON DELETE CASCADE,
+                max_buy INTEGER, resale_low INTEGER, resale_high INTEGER,
+                must_have TEXT NOT NULL DEFAULT '',
+                folder_id INTEGER REFERENCES search_folders(id) ON DELETE SET NULL)""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS alert_outbox (
+                item_id TEXT PRIMARY KEY,
+                query_id INTEGER REFERENCES queries(id) ON DELETE SET NULL,
+                search_name TEXT NOT NULL, content TEXT NOT NULL, url TEXT NOT NULL,
+                title TEXT NOT NULL, price TEXT NOT NULL, currency TEXT NOT NULL,
+                photo_url TEXT, reference_id TEXT, found_at REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt REAL NOT NULL DEFAULT 0, telegram_message_id INTEGER,
+                sent_at REAL, error TEXT NOT NULL DEFAULT '',
+                photo_status TEXT NOT NULL DEFAULT 'none',
+                photo_attempts INTEGER NOT NULL DEFAULT 0,
+                photo_next_attempt REAL NOT NULL DEFAULT 0, photo_error TEXT NOT NULL DEFAULT '',
+                lease_token TEXT, leased_until REAL NOT NULL DEFAULT 0,
+                user_status TEXT NOT NULL DEFAULT 'new')""")
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_outbox_delivery ON alert_outbox(status,next_attempt)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_outbox_photo ON alert_outbox(photo_status,photo_next_attempt)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_outbox_found ON alert_outbox(found_at DESC)')
+            conn.execute('CREATE TABLE IF NOT EXISTS delivery_runtime (key TEXT PRIMARY KEY,value REAL NOT NULL)')
             conn.execute("INSERT OR REPLACE INTO parameters VALUES ('msj_search_schema', ?)",
                          (SCHEMA_VERSION,))
         return str(backup)
@@ -84,9 +110,13 @@ def get_search(query_id):
             COALESCE(p.exclusions, '[]') AS exclusions,
             COALESCE(d.paused, 0) AS paused, COALESCE(d.archived, 0) AS archived,
             COALESCE(d.rebaseline, 0) AS rebaseline, d.reference_id,
-            COALESCE(d.revision, 0) AS revision
+            COALESCE(d.revision, 0) AS revision,
+            g.max_buy, g.resale_low, g.resale_high, COALESCE(g.must_have,'') AS must_have,
+            g.folder_id, f.name AS folder_name
             FROM queries q LEFT JOIN search_preferences p ON p.query_id=q.id
             LEFT JOIN search_dashboard d ON d.query_id=q.id
+            LEFT JOIN search_buying_guide g ON g.query_id=q.id
+            LEFT JOIN search_folders f ON f.id=g.folder_id
             WHERE q.id=?""", (query_id,)).fetchone()
     if row is None:
         return None

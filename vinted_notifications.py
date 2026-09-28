@@ -40,8 +40,13 @@ def item_extractor(items_queue, new_items_queue):
     try:
         while True:
             # Check if there's an item in the queue
-            while core.clear_item_queue(items_queue, new_items_queue):
-                pass
+            try:
+                while core.clear_item_queue(items_queue, new_items_queue):
+                    pass
+            except Exception as exc:
+                # The next poll retries unseen items after a failed atomic write.
+                logger.error("Item extraction will retry after %s", type(exc).__name__)
+                time.sleep(1)
             time.sleep(0.025)
     except (KeyboardInterrupt, SystemExit):
         logger.info("Consumer process stopped")
@@ -53,10 +58,10 @@ def dispatcher_function(input_queue, rss_queue, telegram_queue):
         while True:
             # Get from input queue
             item = input_queue.get()
-            # Send to RSS queue
-            rss_queue.put(item[:5])
-            #
-            telegram_queue.put(item)
+            # Telegram consumes the persistent outbox directly. Do not also
+            # enqueue it in memory, or grow queues for disabled consumers.
+            if db.get_parameter("rss_process_running") == "True":
+                rss_queue.put(item[:5])
     except (KeyboardInterrupt, SystemExit):
         logger.info("Dispatcher process stopped")
     except Exception as e:
