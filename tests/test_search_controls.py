@@ -163,7 +163,7 @@ class TelegramTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
 
 
 class SchedulerTests(DatabaseFixture, unittest.TestCase):
-    def simulate(self, seconds=12, slow_first=False):
+    def simulate(self, seconds=12, slow_first=False, workers=4, target=3):
         clock = [100.0]
         starts = []
         class Future:
@@ -173,15 +173,15 @@ class SchedulerTests(DatabaseFixture, unittest.TestCase):
             def done(self): return clock[0] >= self.started + (30 if slow_first and self.query[0] == 1 else 0.24)
             def result(self): return []
         executor = SimpleNamespace(submit=lambda fn,q,n: (starts.append((q[0],clock[0])) or Future(q, clock[0])))
-        db.set_parameter('query_refresh_delay', '3')
+        db.set_parameter('query_refresh_delay', str(target))
         with patch.object(polling, 'ThreadPoolExecutor', return_value=executor), patch.object(polling.time, 'monotonic', side_effect=lambda:clock[0]), patch.object(polling, 'budget', polling.RequestBudget()):
-            poller = polling.Poller(Queue())
+            poller = polling.Poller(Queue(), workers=workers)
             max_pending = 0
             for step in range(int(seconds / .025)):
                 clock[0] = 100 + step * .025
                 poller.tick()
                 max_pending = max(max_pending, len(poller.pending))
-                self.assertLessEqual(len(poller.pending), 4)
+                self.assertLessEqual(len(poller.pending), workers)
             return starts, max_pending
 
     def test_44_searches_hit_target_with_four_workers_and_no_overlap(self):
@@ -198,6 +198,20 @@ class SchedulerTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(len([q for q,t in starts if q == 1]), 1)
         self.assertEqual({q for q,t in starts}, set(range(1,45)))
 
+    def test_one_second_target_reaches_all_44_without_overlapping_queries(self):
+        starts, max_pending = self.simulate(workers=12,target=1)
+        self.assertLessEqual(max_pending,12)
+        for query_id in range(1,45):
+            times=[t for q,t in starts if q==query_id]
+            self.assertGreaterEqual(len(times),10)
+            self.assertTrue(all(.999<=b-a<=1.1 for a,b in zip(times,times[1:])))
+
+    def test_one_second_mode_isolates_stalled_query(self):
+        starts, _ = self.simulate(workers=12,target=1,slow_first=True)
+        self.assertEqual(len([q for q,t in starts if q==1]),1)
+        for query_id in range(2,45):
+            self.assertGreaterEqual(len([q for q,t in starts if q==query_id]),8)
+
     def test_rate_limit_blocks_other_workers_and_honours_retry_after(self):
         self.assertEqual(polling.retry_after_seconds('120'), 120)
         with patch.object(polling.time, 'monotonic', return_value=10):
@@ -209,6 +223,31 @@ class SchedulerTests(DatabaseFixture, unittest.TestCase):
                     poller.tick()
                     factory.return_value.submit.assert_not_called()
             with self.assertRaises(polling.CoolingDown): budget.check()
+
+    def test_resume_after_rate_limit_uses_slower_rate_then_recovers(self):
+        clock=[100.0]
+        db.set_parameter('query_refresh_delay','1')
+        with patch.object(polling.time,'monotonic',side_effect=lambda:clock[0]), \
+                patch.object(polling,'ThreadPoolExecutor'), \
+                patch.object(settings,'active_queries',return_value=[]):
+            budget=polling.RequestBudget()
+            with patch.object(polling,'budget',budget):
+                poller=polling.Poller(Queue())
+                budget.pause(60)
+                poller.tick()
+                self.assertEqual(poller.backoff_target,2)
+                clock[0]=161
+                poller.tick()
+                self.assertEqual(poller.backoff_target,2)
+                budget.pause(60)
+                poller.tick()
+                self.assertEqual(poller.backoff_target,4)
+                clock[0]=522
+                poller.tick()
+                self.assertEqual(poller.backoff_target,2)
+                clock[0]=823
+                poller.tick()
+                self.assertEqual(poller.backoff_target,0)
 
     def test_requester_stops_on_429_without_retrying(self):
         requester_module = importlib.import_module('pyVintedVN.requester')

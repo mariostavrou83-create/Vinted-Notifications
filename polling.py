@@ -61,11 +61,15 @@ def fetch_query(query, count):
         _local.clients = {}
     if host not in _local.clients:
         _local.clients[host] = Items(client=Requester())
-    return _local.clients[host].search(query[1], nbr_items=count)
+    items = _local.clients[host].search(query[1], nbr_items=count)
+    observed = time.time()
+    for item in items:
+        item.observed_at = observed
+    return items
 
 
 class Poller:
-    def __init__(self, queue, workers=4, fetch=fetch_query):
+    def __init__(self, queue, workers=12, fetch=fetch_query):
         self.queue = queue
         self.workers = workers
         self.fetch = fetch
@@ -81,15 +85,34 @@ class Poller:
         self.queries = {}
         self.target = 15
         self.count = 96
+        self.intervals = []
+        self.durations = []
+        self.backoff_target = 0.0
+        self.was_cooling = False
+        self.recover_at = 0.0
 
     def tick(self):
         now = time.monotonic()
         if now >= self.config_checked:
             self.queries = {q[0]: q for q in search_settings.active_queries()}
-            self.target = max(3.0, float(db.get_parameter("query_refresh_delay") or 15))
+            self.target = max(1.0, float(db.get_parameter("query_refresh_delay") or 15))
             self.count = int(db.get_parameter("items_per_query") or 96)
             self.config_checked = now + 1
         queries, target, count = self.queries, self.target, self.count
+        cooling = budget.remaining() > 0
+        if cooling and not self.was_cooling:
+            # Do not resume a refused request rate immediately after Retry-After.
+            self.backoff_target = min(60.0, max(target,self.backoff_target) * 2)
+            self.recover_at = now + budget.remaining() + 300
+            logger.warning('Slowing checks after Vinted cooldown; effective target %.1fs',
+                           max(target,self.backoff_target))
+        elif not cooling and self.backoff_target and now >= self.recover_at:
+            self.backoff_target /= 2
+            if self.backoff_target <= target:
+                self.backoff_target = 0.0
+            self.recover_at = now + 300
+        self.was_cooling = cooling
+        target = max(target,self.backoff_target)
         for query_id, (future, started, wall_start, actual_interval) in list(self.pending.items()):
             if not future.done():
                 continue
@@ -101,7 +124,8 @@ class Poller:
                 items = future.result()
                 observed = time.time()
                 for item in items:
-                    item.observed_at = observed
+                    if not hasattr(item, 'observed_at'):
+                        item.observed_at = observed
                 self.queue.put(([item for item in items if item.is_new_item()], query_id,
                                 getattr(future, "search_url", queries[query_id][1])))
                 self.failures[query_id] = 0
@@ -114,6 +138,9 @@ class Poller:
                 self.errors += 1
                 logger.warning("Search #%s failed: %s", query_id, error)
             duration = now - started
+            if actual_interval is not None:
+                self.intervals.append(actual_interval)
+            self.durations.append(duration)
             search_settings.record_health(query_id, wall_start, duration, actual_interval, error)
             delay = target if not error else max(target, min(300, 5 * 2 ** min(self.failures[query_id], 6)))
             # No catch-up bursts after a slow response or a cooldown.
@@ -140,10 +167,17 @@ class Poller:
                                           now, time.time(), actual_interval)
                 self.pending[query_id][0].search_url = queries[query_id][1]
         if now - self.last_report >= 30:
-            logger.info("Poller: %s searches; target %.1fs; %s successes/%s errors in last %.1fs; cooldown %.1fs",
+            intervals = sorted(self.intervals)
+            durations = sorted(self.durations)
+            def percentile(values, fraction):
+                return values[min(len(values)-1, int(len(values)*fraction))] if values else 0
+            logger.info("Poller: %s searches; target %.1fs; %s successes/%s errors in last %.1fs; cooldown %.1fs; interval median %.3fs p95 %.3fs; fetch p95 %.3fs",
                         len(queries), target, self.successes, self.errors,
-                        now - self.last_report, budget.remaining())
+                        now - self.last_report, budget.remaining(),
+                        percentile(intervals,.5),percentile(intervals,.95),percentile(durations,.95))
             self.successes = self.errors = 0
+            self.intervals.clear()
+            self.durations.clear()
             self.last_report = now
 
     def run(self):

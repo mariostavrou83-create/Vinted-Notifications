@@ -27,16 +27,16 @@ def claim(now=None, preferred_photo=None):
         cooldown = conn.execute("SELECT value FROM delivery_runtime WHERE key='cooldown_until'").fetchone()
         if cooldown and cooldown[0] > now:
             return None
-        row, kind = None, 'listing'
-        if preferred_photo:
+        # A buying example must never take the next send slot from a new deal.
+        row = conn.execute('''SELECT * FROM alert_outbox WHERE status='pending'
+            AND next_attempt<=? AND leased_until<=? ORDER BY found_at,item_id LIMIT 1''', (now,now)).fetchone()
+        kind = 'listing'
+        if row is None and preferred_photo:
             row = conn.execute('''SELECT * FROM alert_outbox WHERE item_id=? AND status='sent'
                 AND photo_status='pending' AND photo_attempts=0 AND photo_next_attempt<=?
                 AND leased_until<=?''', (preferred_photo,now,now)).fetchone()
             if row:
                 kind = 'photo'
-        if row is None:
-            row = conn.execute('''SELECT * FROM alert_outbox WHERE status='pending'
-                AND next_attempt<=? AND leased_until<=? ORDER BY found_at,item_id LIMIT 1''', (now,now)).fetchone()
         if row is None:
             kind = 'photo'
             row = conn.execute('''SELECT * FROM alert_outbox WHERE status='sent'
@@ -75,6 +75,12 @@ class DeliveryWorker:
     def __init__(self, bot, chat_id):
         self.bot, self.chat_id = bot, chat_id
         self.preferred_photo = None
+        self.last_send_started = None
+
+    def send_slot_delay(self):
+        if self.last_send_started is None:
+            return 0.0
+        return max(0.0, self.last_send_started + 1.05 - time.monotonic())
 
     async def tick(self, now=None):
         row = claim(now, self.preferred_photo)
@@ -90,6 +96,7 @@ class DeliveryWorker:
                     finish(row,failure='Example photo unavailable',permanent=True,now=now)
                     return True
                 image = media['telegram_file_id'] or io.BytesIO(media['image'])
+                self.last_send_started = time.monotonic()
                 result = await self.bot.send_photo(chat_id=self.chat_id, photo=image,
                     caption=f"Your example · #{row['query_id'] or '—'} · {row['search_name'][:100]}",
                     disable_notification=True,
@@ -102,12 +109,15 @@ class DeliveryWorker:
                 except Exception:
                     logger.warning('Could not cache reference file ID for item %s',row['item_id'])
             else:
+                self.last_send_started = time.monotonic()
                 result = await self.bot.send_message(chat_id=self.chat_id,text=row['content'],parse_mode='HTML',
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Open Vinted',url=row['url'])]]),
                     read_timeout=10,write_timeout=10,connect_timeout=5,pool_timeout=5)
                 finish(row,message_id=result.message_id,now=now)
                 self.preferred_photo = row['item_id']
-                logger.info('Telegram accepted item %s; message_id=%s',row['item_id'],result.message_id)
+                logger.info('Telegram accepted item %s; message_id=%s; outbox-to-accepted %.3fs; send %.3fs',
+                    row['item_id'],result.message_id,max(0,time.time()-row['found_at']),
+                    time.monotonic()-self.last_send_started)
         except RetryAfter as exc:
             delay = exc.retry_after.total_seconds() if hasattr(exc.retry_after,'total_seconds') else float(exc.retry_after)
             finish(row,failure='Telegram rate limit',delay=delay+1,cooldown=True,now=now)
@@ -128,8 +138,15 @@ class DeliveryWorker:
     async def run(self):
         while True:
             try:
+                # Space starts, not completions: a 0.5s HTTP call already uses
+                # half of the one-second chat budget. Choose the next job only
+                # after this wait so new listings can jump ahead of examples.
+                delay = self.send_slot_delay()
+                if delay:
+                    await asyncio.sleep(delay)
                 worked = await self.tick()
-                await asyncio.sleep(1.05 if worked else 0.15)
+                if not worked:
+                    await asyncio.sleep(0.05)
             except Exception as exc:
                 # Leave the durable lease in place; another tick can reclaim it
                 # after expiry. Never terminate the queue worker on one bad item.
