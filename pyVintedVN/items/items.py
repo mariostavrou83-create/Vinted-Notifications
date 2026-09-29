@@ -4,6 +4,26 @@ from urllib.parse import urlparse, parse_qsl
 from requests.exceptions import HTTPError
 from typing import List, Dict, Optional
 from pyVintedVN.settings import Urls
+import threading
+import time as clock
+from logger import get_logger
+
+_cache_report_lock = threading.Lock()
+_cache_report_at = 0.0
+_logger = get_logger(__name__)
+
+
+def report_catalogue_cache(response):
+    """Sample public cache metadata only; never log auth headers or cookies."""
+    global _cache_report_at
+    now = clock.monotonic()
+    with _cache_report_lock:
+        if now < _cache_report_at:
+            return
+        _cache_report_at = now + 30
+    names = ('Age', 'Cache-Control', 'CF-Cache-Status', 'X-Cache')
+    values = tuple(str(response.headers.get(name, 'absent'))[:160] for name in names)
+    _logger.info('Catalogue cache sample: age=%r control=%r cdn=%r upstream=%r', *values)
 
 
 class Items:
@@ -65,6 +85,7 @@ class Items:
             # Make the request to the Vinted API
             response = requester.get(url=api_url, params=params)
             response.raise_for_status()
+            report_catalogue_cache(response)
 
             # Parse the response
             items = response.json()
