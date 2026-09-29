@@ -31,7 +31,7 @@ current_query_refresh_delay = None
 
 def scraper_process(items_queue):
     from polling import Poller
-    logger.info("Scrape process started: four independent workers; interval updates apply without restart")
+    logger.info("Scrape process started: twelve independent workers; interval updates apply without restart")
     Poller(items_queue).run()
 
 

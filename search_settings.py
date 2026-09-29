@@ -10,7 +10,7 @@ import unicodedata
 
 import db
 
-SCHEMA_VERSION = "3"
+SCHEMA_VERSION = "4"
 
 
 def connection():
@@ -110,6 +110,9 @@ def ensure_schema():
                 WHERE NOT EXISTS(SELECT 1 FROM listing_checkpoints)''', (int(time.time()/60)-21,))
             conn.execute("INSERT OR REPLACE INTO parameters VALUES ('msj_search_schema', ?)",
                          (SCHEMA_VERSION,))
+            # Mario requested faster checking. Upgrade the previous three-second
+            # setting once, keeping intentionally slower intervals untouched.
+            conn.execute("UPDATE parameters SET value='1' WHERE key='query_refresh_delay' AND value='3'")
         return str(backup)
 
 
