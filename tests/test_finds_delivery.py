@@ -5,7 +5,7 @@ import sqlite3
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from telegram.error import NetworkError, RetryAfter, BadRequest
 import alert_delivery as delivery
@@ -24,6 +24,24 @@ def outbox(item_id):
 
 
 class OutboxTests(DatabaseFixture, unittest.TestCase):
+    def test_speed_upgrade_backs_up_and_preserves_searches_and_history(self):
+        db.set_parameter('query_refresh_delay','3')
+        db.set_parameter('msj_search_schema','3')
+        with closing(settings.connection()) as conn:
+            originals={table:[tuple(r) for r in conn.execute('SELECT * FROM '+table)]
+                for table in ('queries','items','search_preferences','search_dashboard','dashboard_media','listing_frontiers','alert_outbox')}
+        backup=settings.ensure_schema()
+        with closing(sqlite3.connect(backup)) as conn:
+            self.assertEqual(conn.execute("SELECT value FROM parameters WHERE key='query_refresh_delay'").fetchone()[0],'3')
+            self.assertEqual(conn.execute('PRAGMA integrity_check').fetchone()[0],'ok')
+        self.assertEqual(db.get_parameter('query_refresh_delay'),'1')
+        with closing(settings.connection()) as conn:
+            for table,rows in originals.items():
+                self.assertEqual(rows,[tuple(r) for r in conn.execute('SELECT * FROM '+table)])
+        db.set_parameter('query_refresh_delay','3')
+        self.assertIsNone(settings.ensure_schema())
+        self.assertEqual(db.get_parameter('query_refresh_delay'),'3')
+
     def test_old_unseen_price_drop_is_rejected_but_new_id_alerts(self):
         self.batch(1,[200])
         # This item was previously above the saved price limit, so it has never
@@ -101,6 +119,28 @@ class WorkerTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         bot=SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=42)),
             send_photo=AsyncMock(return_value=SimpleNamespace(photo=[SimpleNamespace(file_id='cached')])) )
         return delivery.DeliveryWorker(bot,'123')
+
+    async def test_new_listing_preempts_first_example_photo(self):
+        store.save_search(1,dict(query_name='Fur',query=db.get_queries()[0][1],revision='0'),b'photo')
+        self.batch(1,[110])
+        worker=self.robot()
+        await worker.tick(now=1000)
+        self.batch(2,[111])
+        await worker.tick(now=1002)
+        self.assertEqual(outbox(111)['status'],'sent')
+        self.assertEqual(worker.bot.send_photo.await_count,0)
+        await worker.tick(now=1004)
+        self.assertEqual(outbox(110)['photo_status'],'sent')
+        self.assertEqual(worker.bot.send_message.await_count,2)
+
+    async def test_transport_time_counts_towards_chat_pacing(self):
+        worker=self.robot()
+        self.assertEqual(worker.send_slot_delay(),0)
+        worker.last_send_started=100
+        with patch.object(delivery.time,'monotonic',return_value=100.6):
+            self.assertAlmostEqual(worker.send_slot_delay(),.45)
+        with patch.object(delivery.time,'monotonic',return_value=101.5):
+            self.assertEqual(worker.send_slot_delay(),0)
 
     async def test_photo_retry_yields_to_new_listing_without_resending_confirmed_one(self):
         store.save_search(1,dict(query_name='Fur',query=db.get_queries()[0][1],revision='0'),b'photo')
