@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from email.utils import parsedate_to_datetime
 import threading
 import time
+import os
 
 import db
 from logger import get_logger
@@ -90,6 +91,12 @@ class Poller:
         self.backoff_target = 0.0
         self.was_cooling = False
         self.recover_at = 0.0
+        self.shadow = None
+        if os.environ.get('MSJ_DISCOVERY_SHADOW') == '1':
+            from discovery_shadow import DiscoveryShadow
+            # Put the two searches implicated in the reported misses first.
+            self.shadow = DiscoveryShadow(self.fetch, budget, query_ids=(10, 7))
+            logger.info('Starting bounded discovery comparison for up to 30 minutes; alerts unchanged')
 
     def tick(self):
         now = time.monotonic()
@@ -99,6 +106,13 @@ class Poller:
             self.count = int(db.get_parameter("items_per_query") or 96)
             self.config_checked = now + 1
         queries, target, count = self.queries, self.target, self.count
+        if self.shadow:
+            try:
+                self.shadow.tick(queries)
+            except Exception as exc:
+                logger.warning('Discovery comparison disabled after %s', type(exc).__name__)
+                self.shadow.close()
+                self.shadow = None
         cooling = budget.remaining() > 0
         if cooling and not self.was_cooling:
             # Do not resume a refused request rate immediately after Retry-After.
@@ -126,6 +140,14 @@ class Poller:
                 for item in items:
                     if not hasattr(item, 'observed_at'):
                         item.observed_at = observed
+                if self.shadow:
+                    try:
+                        self.shadow.observe('canonical', query_id,
+                                            getattr(future, 'search_url', queries[query_id][1]), items)
+                    except Exception as exc:
+                        logger.warning('Discovery comparison disabled after %s', type(exc).__name__)
+                        self.shadow.close()
+                        self.shadow = None
                 self.queue.put(([item for item in items if item.is_new_item()], query_id,
                                 getattr(future, "search_url", queries[query_id][1])))
                 self.failures[query_id] = 0
@@ -186,4 +208,6 @@ class Poller:
                 self.tick()
                 time.sleep(0.025)
         finally:
+            if self.shadow:
+                self.shadow.close()
             self.executor.shutdown(wait=True, cancel_futures=True)
