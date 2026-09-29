@@ -59,3 +59,27 @@ Offline tests cover 44 searches at the one-second target, stalled-query
 isolation, cooldown recovery, first-example-photo priority, Telegram spacing,
 backup/upgrade preservation, and the existing alert/dashboard regressions.
 Synthetic scheduling results are not a live speed guarantee.
+
+## Query-free comparison
+
+`MSJ_DISCOVERY_SHADOW=1` starts a finite, observation-only experiment for up to
+30 minutes per process start. It compares up to four searches with nonempty
+keywords and structural filters, prioritizing searches 10 and 7 from the reported
+misses. Only `search_text` is removed from a temporary copy of each URL. Saved
+queries and all alert decisions remain unchanged.
+
+The experiment uses one extra worker and at most one extra request per second
+in total. It stops on a global cooldown or its first fetch error. Initial page
+contents are excluded from results. Logs compare first observation of the exact
+same query/item ID on the ordinary and query-free routes; positive lead means
+query-free discovery was earlier. It has no access to an alert queue, never
+writes the database and cannot send notifications. Up to 20,000 observations
+are held in memory; query edits reset observations so incompatible filters are
+not compared.
+
+This is still catalogue discovery, not proof of access before Vinted indexes
+a listing. A result only counts as evidence for a particular route after the
+same listing appears in the original saved search. Text matching, exclusions,
+coverage and sustained timing would need validation before active alerts.
+Reference investigated: https://github.com/JakobAIOdev/Vintrack-Vinted-Monitor/blob/main/docs/worker-speed.md
+No code, proxy pools or anti-bot workarounds from that project are included.
