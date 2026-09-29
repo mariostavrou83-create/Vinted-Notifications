@@ -188,14 +188,14 @@ class SearchControls:
 
     async def interval(self, update, context):
         if not context.args:
-            await update.message.reply_text(f"Checking target: {db.get_parameter('query_refresh_delay')} seconds. Use /interval 3 to set a three-second target for all searches. Actual timing is in /status; rate limits can slow checks.")
+            await update.message.reply_text(f"Checking target: {db.get_parameter('query_refresh_delay')} seconds. Use /interval 1 to set a one-second target for all searches. Actual timing is in /status; rate limits can slow checks.")
             return
         try:
             seconds = int(context.args[0])
-            if not 3 <= seconds <= 3600:
+            if not 1 <= seconds <= 3600:
                 raise ValueError()
         except ValueError:
-            await update.message.reply_text("Use a whole number from 3 to 3600 seconds.")
+            await update.message.reply_text("Use a whole number from 1 to 3600 seconds.")
             return
         db.set_parameter("query_refresh_delay", str(seconds))
         await update.message.reply_text(f"Target set to {seconds} seconds for all searches. Automatic backoff remains active. Use /status to see achieved timing.")
