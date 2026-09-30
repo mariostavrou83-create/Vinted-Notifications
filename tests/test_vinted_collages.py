@@ -23,6 +23,7 @@ import dashboard_store as store
 import db
 import search_settings as settings
 import vinted_alerts
+import vinted_gallery
 
 
 class CollageTests(unittest.TestCase):
@@ -85,6 +86,72 @@ class UploadTests(DatabaseFixture, unittest.TestCase):
     owner = dashboard_tests.DashboardTests.owner
     form = dashboard_tests.DashboardTests.form
 
+    def add_photos(self, count=1, **changes):
+        form = self.form(
+            photo=[(io.BytesIO(photo_bytes()), f"{i}.png") for i in range(count)]
+        )
+        form["revision"] = str(settings.get_search(1)["revision"])
+        form.update(changes)
+        return self.client.post("/search/1", data=form)
+
+    def test_add_later_keeps_original_and_remove_only_selected_slot(self):
+        self.owner()
+        before = [r[:3] for r in db.get_queries()]
+        self.assertEqual(self.add_photos().status_code, 302)
+        first = store.reference_photos(1)[0]["media_id"]
+        for count in (2, 3, 4):
+            self.assertEqual(self.add_photos().status_code, 302)
+            slots = store.reference_photos(1)
+            self.assertEqual(len(slots), count)
+            self.assertEqual(slots[0]["media_id"], first)
+        original_row = settings.get_search(1)
+        self.assertEqual(self.add_photos().status_code, 200)
+        self.assertEqual(settings.get_search(1), original_row)
+        # Make room and append in one atomic save, retaining the other originals.
+        self.assertEqual(self.add_photos(remove_reference=["1", "2"]).status_code, 302)
+        self.assertEqual(len(store.reference_photos(1)), 3)
+        self.assertEqual(store.reference_photos(1)[0]["media_id"], first)
+        self.assertEqual([r[:3] for r in db.get_queries()], before)
+        self.assertEqual(settings.get_search(1)["rebaseline"], 0)
+        self.assertEqual(
+            self.add_photos(0, remove_reference=["0", "1", "2"]).status_code, 302
+        )
+        self.assertEqual(store.reference_photos(1), [])
+        self.assertIsNone(settings.get_search(1)["reference_id"])
+
+    def test_stale_addition_and_invalid_removal_are_atomic(self):
+        self.owner()
+        self.add_photos()
+        before = settings.get_search(1), store.reference_photos(1)
+        self.assertEqual(self.add_photos(revision="0").status_code, 200)
+        self.assertEqual(self.add_photos(remove_reference=["3"]).status_code, 200)
+        self.assertEqual((settings.get_search(1), store.reference_photos(1)), before)
+
+    def test_migration_preserves_existing_flattened_collage_and_poll_interval(self):
+        self.owner()
+        self.add_photos(2)
+        before = settings.get_search(1)
+        with closing(settings.connection()) as conn, conn:
+            conn.execute("DROP TABLE search_reference_photos")
+            conn.execute(
+                "UPDATE parameters SET value='8' WHERE key='msj_search_schema'"
+            )
+            conn.execute(
+                "UPDATE parameters SET value='3' WHERE key='query_refresh_delay'"
+            )
+        settings.ensure_schema()
+        self.assertEqual(settings.get_search(1), before)
+        self.assertEqual(
+            store.reference_photos(1),
+            [{"position": 0, "media_id": before["reference_id"]}],
+        )
+        self.assertEqual(db.get_parameter("query_refresh_delay"), "3")
+        with closing(settings.connection()) as conn, conn:
+            conn.execute("UPDATE dashboard_media SET created=0")
+        self.assertEqual(self.add_photos().status_code, 302)
+        self.assertEqual(len(store.reference_photos(1)), 2)
+        self.assertIsNotNone(store.get_media(before["reference_id"]))
+
     def test_batch_upload_preview_route_auth_and_no_search_reset(self):
         self.assertEqual(
             self.client.post("/search/1/preview-notification").status_code, 400
@@ -118,6 +185,11 @@ class UploadTests(DatabaseFixture, unittest.TestCase):
 class RichWorkerTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         super().setUp()
+        gallery = patch.object(
+            vinted_gallery, "fetch_gallery", return_value=([], "unavailable")
+        )
+        gallery.start()
+        self.addCleanup(gallery.stop)
         db.set_parameter("vinted_single_message_alerts", "1")
         store.save_search(
             1,
