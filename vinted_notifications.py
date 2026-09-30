@@ -1,8 +1,10 @@
 import multiprocessing
-import time
 import os
-import db
+import time
+
 from apscheduler.schedulers.background import BackgroundScheduler
+
+import db
 from logger import get_logger
 
 # Get logger for this module
@@ -21,17 +23,20 @@ import core
 from rss_feed_plugin.rss_feed import rss_feed_process
 from web_ui_plugin.web_ui import web_ui_process
 
-
 # Global process references
 telegram_process = None
 rss_process = None
+ebay_worker_process = None
 scrape_process = None
 current_query_refresh_delay = None
 
 
 def scraper_process(items_queue):
     from polling import Poller
-    logger.info("Scrape process started: twelve independent workers; interval updates apply without restart")
+
+    logger.info(
+        "Scrape process started: twelve independent workers; interval updates apply without restart"
+    )
     Poller(items_queue).run()
 
 
@@ -43,7 +48,7 @@ def item_extractor(items_queue, new_items_queue):
             try:
                 while core.clear_item_queue(items_queue, new_items_queue):
                     pass
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 # The next poll retries unseen items after a failed atomic write.
                 logger.error("Item extraction will retry after %s", type(exc).__name__)
                 time.sleep(1)
@@ -64,8 +69,8 @@ def dispatcher_function(input_queue, rss_queue, telegram_queue):
                 rss_queue.put(item[:5])
     except (KeyboardInterrupt, SystemExit):
         logger.info("Dispatcher process stopped")
-    except Exception as e:
-        logger.error(f"Error in dispatcher process: {e}", exc_info=True)
+    except Exception:
+        logger.exception("Error in dispatcher process")
 
 
 def telegram_bot_process(queue):
@@ -80,8 +85,8 @@ def telegram_bot_process(queue):
         asyncio.run(LeRobot(queue))
     except (KeyboardInterrupt, SystemExit):
         logger.info("Telegram bot process stopped")
-    except Exception as e:
-        logger.error(f"Error in telegram bot process: {e}", exc_info=True)
+    except Exception:
+        logger.exception("Error in telegram bot process")
 
 
 def check_refresh_delay(items_queue):
@@ -117,12 +122,20 @@ def check_refresh_delay(items_queue):
             logger.info(
                 f"Scheduler updated with new refresh delay of {new_delay} seconds"
             )
-    except Exception as e:
-        logger.error(f"Error updating refresh delay: {e}", exc_info=True)
+    except Exception:
+        logger.exception("Error updating refresh delay")
 
 
 def monitor_processes(items_queue, telegram_queue, rss_queue):
-    global telegram_process, rss_process
+    global telegram_process, rss_process, ebay_worker_process
+
+    if ebay_worker_process is None or not ebay_worker_process.is_alive():
+        from ebay_monitor import ebay_process
+
+        ebay_worker_process = multiprocessing.Process(
+            target=ebay_process, name="ebay-monitor"
+        )
+        ebay_worker_process.start()
 
     # Check if the query refresh delay has changed
     # Poller reads the interval live, so changing it must not kill in-flight work.
@@ -174,9 +187,9 @@ def monitor_processes(items_queue, telegram_queue, rss_queue):
 def plugin_checker():
     # Get telegram and rss enable status
     telegram_enabled = db.get_parameter("telegram_enabled")
-    logger.info("Telegram enabled: {}".format(telegram_enabled))
+    logger.info(f"Telegram enabled: {telegram_enabled}")
     rss_enabled = db.get_parameter("rss_enabled")
-    logger.info("RSS enabled: {}".format(rss_enabled))
+    logger.info(f"RSS enabled: {rss_enabled}")
 
     # Reset process status at startup
     db.set_parameter("telegram_process_running", telegram_enabled)
@@ -186,9 +199,13 @@ def plugin_checker():
 if __name__ == "__main__":
 
     import search_settings
+
     backup_path = search_settings.ensure_schema()
     if backup_path:
-        logger.info("Search controls migration complete; verified database backup: %s", backup_path)
+        logger.info(
+            "Search controls migration complete; verified database backup: %s",
+            backup_path,
+        )
 
     # Run db migrations
     current_version = db.get_parameter("version")
@@ -287,6 +304,9 @@ if __name__ == "__main__":
         web_ui_process_instance.terminate()
 
         # Plugins
+        if ebay_worker_process and ebay_worker_process.is_alive():
+            ebay_worker_process.terminate()
+            ebay_worker_process.join()
 
         if telegram_process and telegram_process.is_alive():
             telegram_process.terminate()

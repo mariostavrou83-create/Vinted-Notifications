@@ -1,13 +1,15 @@
 import json
-import proxies
-import sys
 import os
-import db
 import random
-import requests
+import sys
 import threading
-from polling import budget, retry_after_seconds
+
+import requests
 from requests.exceptions import HTTPError
+
+import db
+import proxies
+from polling import budget, retry_after_seconds
 
 # Add the parent directory to sys.path to import logger
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -44,7 +46,6 @@ class Requester:
 
         # Add the parent directory to sys.path to import db
         sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        import db
 
         self.locale = "www.vinted.fr"
         self.VINTED_AUTH_URL = f"https://{self.locale}/"
@@ -108,8 +109,7 @@ class Requester:
             str: The host serving the catalogue API.
         """
         locale = self.locale
-        if locale.startswith(Urls.VINTED_AUTH_HOST_PREFIX):
-            locale = locale[len(Urls.VINTED_AUTH_HOST_PREFIX) :]
+        locale = locale.removeprefix(Urls.VINTED_AUTH_HOST_PREFIX)
         return f"{Urls.VINTED_API_HOST_PREFIX}{locale}"
 
     def _auth_headers(self):
@@ -173,8 +173,11 @@ class Requester:
                 elif response.status_code == 429 or response.status_code >= 500:
                     seconds = retry_after_seconds(response.headers.get("Retry-After"))
                     budget.pause(seconds)
-                    logger.warning("Vinted HTTP %s; all searches backing off for %.1fs",
-                                   response.status_code, seconds)
+                    logger.warning(
+                        "Vinted HTTP %s; all searches backing off for %.1fs",
+                        response.status_code,
+                        seconds,
+                    )
                     return response
                 elif response.status_code in (401, 403) and tried < self.MAX_RETRIES:
                     logger.warning(
@@ -187,7 +190,9 @@ class Requester:
 
                     if response.status_code in (401, 403):
                         budget.pause(60)
-                        logger.warning("Vinted authentication still rejected; backing off for 60s")
+                        logger.warning(
+                            "Vinted authentication still rejected; backing off for 60s"
+                        )
                     return response
 
         # This should only happen if the loop exits without returning
@@ -242,9 +247,7 @@ class Requester:
                 logger.debug("Cookies set!")
         except Exception:
             if self.debug:
-                logger.error(
-                    "There was an error fetching cookies for vinted", exc_info=True
-                )
+                logger.exception("There was an error fetching cookies for vinted")
 
     def update_cookies(self, cookies: dict):
         """

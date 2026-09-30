@@ -1,12 +1,11 @@
-from pyVintedVN.items.item import Item
-from pyVintedVN.requester import requester
-from urllib.parse import urlparse, parse_qsl
-from requests.exceptions import HTTPError
-from typing import List, Dict, Optional
-from pyVintedVN.settings import Urls
 import threading
 import time as clock
+from urllib.parse import parse_qsl, urlparse
+
 from logger import get_logger
+from pyVintedVN.items.item import Item
+from pyVintedVN.requester import requester
+from pyVintedVN.settings import Urls
 
 _cache_report_lock = threading.Lock()
 _cache_report_at = 0.0
@@ -21,9 +20,11 @@ def report_catalogue_cache(response):
         if now < _cache_report_at:
             return
         _cache_report_at = now + 30
-    names = ('Age', 'Cache-Control', 'CF-Cache-Status', 'X-Cache')
-    values = tuple(str(response.headers.get(name, 'absent'))[:160] for name in names)
-    _logger.info('Catalogue cache sample: age=%r control=%r cdn=%r upstream=%r', *values)
+    names = ("Age", "Cache-Control", "CF-Cache-Status", "X-Cache")
+    values = tuple(str(response.headers.get(name, "absent"))[:160] for name in names)
+    _logger.info(
+        "Catalogue cache sample: age=%r control=%r cdn=%r upstream=%r", *values
+    )
 
 
 class Items:
@@ -46,9 +47,9 @@ class Items:
         url: str,
         nbr_items: int = 20,
         page: int = 1,
-        time: Optional[int] = None,
+        time: int | None = None,
         json: bool = False,
-    ) -> List[Item]:
+    ) -> list[Item]:
         """
         Retrieve items from a given search URL on Vinted.
 
@@ -81,28 +82,24 @@ class Items:
             f"{Urls.VINTED_API_URL}/{Urls.VINTED_PRODUCTS_ENDPOINT}"
         )
 
-        try:
-            # Make the request to the Vinted API
-            response = requester.get(url=api_url, params=params)
-            response.raise_for_status()
-            report_catalogue_cache(response)
+        # Make the request to the Vinted API
+        response = requester.get(url=api_url, params=params)
+        response.raise_for_status()
+        report_catalogue_cache(response)
 
-            # Parse the response
-            items = response.json()
-            items = items["items"]
+        # Parse the response
+        items = response.json()
+        items = items["items"]
 
-            # Return either Item objects or raw JSON data
-            if not json:
-                return [Item(_item, locale) for _item in items]
-            else:
-                return items
-
-        except HTTPError as err:
-            raise err
+        # Return either Item objects or raw JSON data
+        if not json:
+            return [Item(_item, locale) for _item in items]
+        else:
+            return items
 
     def parse_url(
-        self, url: str, nbr_items: int = 20, page: int = 1, time: Optional[int] = None
-    ) -> Dict:
+        self, url: str, nbr_items: int = 20, page: int = 1, time: int | None = None
+    ) -> dict:
         """
         Parse a Vinted search URL to get parameters for the API call.
 

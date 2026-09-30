@@ -1,11 +1,13 @@
-from flask import Flask, Response
-import threading
-import time
-import db
 import datetime
 import html
-from logger import get_logger
+import threading
+import time
+
 from feedgen.feed import FeedGenerator
+from flask import Flask, Response
+
+import db
+from logger import get_logger
 
 # Get logger for this module
 logger = get_logger(__name__)
@@ -38,20 +40,18 @@ class RSSFeed:
             try:
                 self.check_rss_queue()
                 time.sleep(0.1)  # Small sleep to prevent high CPU usage
-            except Exception as e:
-                logger.error(f"Error checking RSS queue: {str(e)}", exc_info=True)
+            except Exception:
+                logger.exception("Error checking RSS queue")
 
     def check_rss_queue(self):
         if not self.queue.empty():
             try:
-                content, url, text, buy_url, buy_text = self.queue.get()
+                content, url, _text, _buy_url, _buy_text = self.queue.get()
 
                 # Add item to the feed
                 self.add_item_to_feed(content, url)
-            except Exception as e:
-                logger.error(
-                    f"Error processing item for RSS feed: {str(e)}", exc_info=True
-                )
+            except Exception:
+                logger.exception("Error processing item for RSS feed")
 
     def add_item_to_feed(self, content, url):
         # Extract title from content (assuming it's in the format from configuration_values.MESSAGE)
@@ -63,9 +63,8 @@ class RSSFeed:
                 title_end = content.find("\n", title_start)
                 if title_end > 0:
                     title = content[title_start:title_end]
-        except Exception as e:
+        except AttributeError as e:
             logger.debug(f"Error extracting title from content: {e}")
-            pass
 
         # Create a new entry
         fe = self.fg.add_entry()
@@ -76,7 +75,9 @@ class RSSFeed:
         fe.published(datetime.datetime.now(datetime.timezone.utc))
 
         # Add to our items list (for tracking)
-        self.items.append((title, url, content, datetime.datetime.now()))
+        self.items.append(
+            (title, url, content, datetime.datetime.now(datetime.timezone.utc))
+        )
 
         # Limit the number of items
         if len(self.items) > self.max_items:
@@ -91,8 +92,8 @@ class RSSFeed:
             port = db.get_parameter("rss_port")
             logger.info(f"Starting RSS feed server on port {port}")
             self.app.run(host="0.0.0.0", port=port)
-        except Exception as e:
-            logger.error(f"Error starting RSS feed server: {str(e)}", exc_info=True)
+        except Exception:
+            logger.exception("Error starting RSS feed server")
 
 
 def rss_feed_process(queue):
@@ -108,5 +109,5 @@ def rss_feed_process(queue):
         feed.run()
     except (KeyboardInterrupt, SystemExit):
         logger.info("RSS feed process stopped")
-    except Exception as e:
-        logger.error(f"Error in RSS feed process: {e}", exc_info=True)
+    except Exception:
+        logger.exception("Error in RSS feed process")

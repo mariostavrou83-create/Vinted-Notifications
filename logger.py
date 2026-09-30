@@ -33,10 +33,9 @@ class ExcludeFilter(logging.Filter):
             return False
 
         # Filter out log refresh requests from the web UI
-        if record.name == "werkzeug" and "GET /api/logs" in record.getMessage():
-            return False
-
-        return True
+        return not (
+            record.name == "werkzeug" and "GET /api/logs" in record.getMessage()
+        )
 
 
 # Configure the root logger

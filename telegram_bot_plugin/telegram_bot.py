@@ -1,13 +1,13 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes
-from telegram.error import RetryAfter, NetworkError, BadRequest
-import db
-import core
 import asyncio
-import re
 import os
-from telegram.ext import ApplicationHandlerStop, TypeHandler
-from telegram_bot_plugin.search_controls import SearchControls
+import re
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
+from telegram.ext import ApplicationHandlerStop, ContextTypes, TypeHandler
+
+import core
+import db
 from logger import get_logger
 
 # Get logger for this module
@@ -20,20 +20,20 @@ async def hello(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
             f"Hello {update.effective_user.first_name}! Vinted-Notifications is running under version {ver}.\n"
         )
-    except Exception as e:
-        logger.error(f"Error in hello command: {str(e)}", exc_info=True)
+    except Exception:
+        logger.exception("Error in hello command")
         try:
             await update.message.reply_text(
                 "An error occurred. Please try again later."
             )
-        except Exception as e2:
-            logger.error(f"Error sending error message: {str(e2)}")
+        except TelegramError as e2:
+            logger.error(f"Error sending error message: {e2!s}")
 
 
 class LeRobot:
     def __init__(self, queue):
         from telegram import Bot
-        from telegram.ext import ApplicationBuilder, CommandHandler
+        from telegram.ext import ApplicationBuilder
 
         try:
 
@@ -50,6 +50,7 @@ class LeRobot:
 
             # Telegram is notifications-only; old editing commands no longer mutate data.
             from telegram.ext import MessageHandler, filters
+
             self.app.add_handler(MessageHandler(filters.COMMAND, self.open_dashboard))
 
             job_queue = self.app.job_queue
@@ -60,8 +61,8 @@ class LeRobot:
             job_queue.run_once(self.check_telegram_queue, when=1)
 
             self.app.run_polling()
-        except Exception as e:
-            logger.error(f"Error initializing bot: {str(e)}", exc_info=True)
+        except Exception:
+            logger.exception("Error initializing bot")
 
     async def restrict_access(self, update, context):
         expected = str(db.get_parameter("telegram_chat_id") or "")
@@ -69,12 +70,12 @@ class LeRobot:
             raise ApplicationHandlerStop
 
     async def open_dashboard(self, update, context):
-        url = os.environ.get('DASHBOARD_URL', '')
+        url = os.environ.get("DASHBOARD_URL", "")
         if not url:
-            domain = os.environ.get('RAILWAY_PUBLIC_DOMAIN', '')
-            url = 'https://' + domain if domain else ''
-        message = 'Searches, reminders, exclusions and example photos are now managed in your dashboard. Telegram is for your item alerts.'
-        await update.message.reply_text(message + ('\n\n' + url if url else ''))
+            domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
+            url = "https://" + domain if domain else ""
+        message = "Searches, reminders, exclusions and example photos are now managed in your dashboard. Telegram is for your item alerts."
+        await update.message.reply_text(message + ("\n\n" + url if url else ""))
 
     ### QUERIES ###
 
@@ -88,30 +89,38 @@ class LeRobot:
                 await update.message.reply_text("No query provided.")
                 return
             query = raw[1].strip()
-            match = re.fullmatch(r"(?:(.*?)\s*=\s*)?(https://\S+)", query, flags=re.DOTALL)
+            match = re.fullmatch(
+                r"(?:(.*?)\s*=\s*)?(https://\S+)", query, flags=re.DOTALL
+            )
             if not match:
-                await update.message.reply_text("Use /add_query Your search title=https://www.vinted.co.uk/catalog?... or /add_query URL")
+                await update.message.reply_text(
+                    "Use /add_query Your search title=https://www.vinted.co.uk/catalog?... or /add_query URL"
+                )
                 return
             name, url = match.groups()
             if name and len(name.strip()) > 100:
-                await update.message.reply_text("Please use at most 100 characters for your title.")
+                await update.message.reply_text(
+                    "Please use at most 100 characters for your title."
+                )
                 return
             name = name.strip() if name else None
             # Process the query using the core function
             message, is_new_query = core.process_query(url, name)
 
             if is_new_query:
-                await update.message.reply_text(f"{message} Use /queries to add a reminder or exclusions.")
+                await update.message.reply_text(
+                    f"{message} Use /queries to add a reminder or exclusions."
+                )
             else:
                 await update.message.reply_text(message)
-        except Exception as e:
-            logger.error(f"Error adding query: {str(e)}", exc_info=True)
+        except Exception:
+            logger.exception("Error adding query")
             try:
                 await update.message.reply_text(
                     "An error occurred while adding the query. Please try again later."
                 )
-            except Exception as e2:
-                logger.error(f"Error sending error message: {str(e2)}")
+            except TelegramError as e2:
+                logger.error(f"Error sending error message: {e2!s}")
 
     # Remove a query from the db
     async def remove_query(
@@ -139,28 +148,28 @@ class LeRobot:
                     )
             else:
                 await update.message.reply_text(message)
-        except Exception as e:
-            logger.error(f"Error removing query: {str(e)}", exc_info=True)
+        except Exception:
+            logger.exception("Error removing query")
             try:
                 await update.message.reply_text(
                     "An error occurred while removing the query. Please try again later."
                 )
-            except Exception as e2:
-                logger.error(f"Error sending error message: {str(e2)}")
+            except TelegramError as e2:
+                logger.error(f"Error sending error message: {e2!s}")
 
     # get all queries from the db
     async def queries(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             query_list = core.get_formatted_query_list()
             await update.message.reply_text(f"Current queries: \n{query_list}")
-        except Exception as e:
-            logger.error(f"Error retrieving queries: {str(e)}", exc_info=True)
+        except Exception:
+            logger.exception("Error retrieving queries")
             try:
                 await update.message.reply_text(
                     "An error occurred while retrieving the queries. Please try again later."
                 )
-            except Exception as e2:
-                logger.error(f"Error sending error message: {str(e2)}")
+            except TelegramError as e2:
+                logger.error(f"Error sending error message: {e2!s}")
 
     ### ALLOWLIST ###
 
@@ -172,14 +181,14 @@ class LeRobot:
             await update.message.reply_text(
                 "Allowlist cleared. All countries are allowed."
             )
-        except Exception as e:
-            logger.error(f"Error clearing allowlist: {str(e)}", exc_info=True)
+        except Exception:
+            logger.exception("Error clearing allowlist")
             try:
                 await update.message.reply_text(
                     "An error occurred while clearing the allowlist. Please try again later."
                 )
-            except Exception as e2:
-                logger.error(f"Error sending error message: {str(e2)}")
+            except TelegramError as e2:
+                logger.error(f"Error sending error message: {e2!s}")
 
     async def add_country(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -196,14 +205,14 @@ class LeRobot:
             await update.message.reply_text(
                 f"{message} Current allowlist: {country_list}"
             )
-        except Exception as e:
-            logger.error(f"Error adding country to allowlist: {str(e)}", exc_info=True)
+        except Exception:
+            logger.exception("Error adding country to allowlist")
             try:
                 await update.message.reply_text(
                     "An error occurred while adding the country to the allowlist. Please try again later."
                 )
-            except Exception as e2:
-                logger.error(f"Error sending error message: {str(e2)}")
+            except TelegramError as e2:
+                logger.error(f"Error sending error message: {e2!s}")
 
     async def remove_country(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -220,16 +229,14 @@ class LeRobot:
             await update.message.reply_text(
                 f"{message} Current allowlist: {country_list}"
             )
-        except Exception as e:
-            logger.error(
-                f"Error removing country from allowlist: {str(e)}", exc_info=True
-            )
+        except Exception:
+            logger.exception("Error removing country from allowlist")
             try:
                 await update.message.reply_text(
                     "An error occurred while removing the country from the allowlist. Please try again later."
                 )
-            except Exception as e2:
-                logger.error(f"Error sending error message: {str(e2)}")
+            except TelegramError as e2:
+                logger.error(f"Error sending error message: {e2!s}")
 
     async def allowlist(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -243,18 +250,20 @@ class LeRobot:
                 await update.message.reply_text(
                     f"Current allowlist: {db.get_allowlist()}"
                 )
-        except Exception as e:
-            logger.error(f"Error retrieving allowlist: {str(e)}", exc_info=True)
+        except Exception:
+            logger.exception("Error retrieving allowlist")
             try:
                 await update.message.reply_text(
                     "An error occurred while retrieving the allowlist. Please try again later."
                 )
-            except Exception as e2:
-                logger.error(f"Error sending error message: {str(e2)}")
+            except TelegramError as e2:
+                logger.error(f"Error sending error message: {e2!s}")
 
     ### TELEGRAM SPECIFIC FUNCTIONS ###
 
-    async def send_new_post(self, content, url, text, buy_url=None, buy_text=None, reference=None):
+    async def send_new_post(
+        self, content, url, text, buy_url=None, buy_text=None, reference=None
+    ):
         delay = 2
         while True:
             try:
@@ -262,10 +271,15 @@ class LeRobot:
                     chat_ID = str(db.get_parameter("telegram_chat_id"))
                     buttons = [[InlineKeyboardButton(text=text, url=url)]]
                     if buy_url and buy_text:
-                        buttons.append([InlineKeyboardButton(text=buy_text, url=buy_url)])
+                        buttons.append(
+                            [InlineKeyboardButton(text=buy_text, url=buy_url)]
+                        )
                     sent = await self.bot.send_message(
-                        chat_ID, content, parse_mode="HTML",
-                        read_timeout=40, write_timeout=40,
+                        chat_ID,
+                        content,
+                        parse_mode="HTML",
+                        read_timeout=40,
+                        write_timeout=40,
                         reply_markup=InlineKeyboardMarkup(buttons),
                     )
                 logger.info("Telegram accepted alert: %s", url)
@@ -280,7 +294,10 @@ class LeRobot:
                 logger.exception("Telegram rejected alert: %s", url)
                 return
             except NetworkError:
-                logger.warning("Telegram connection failed; retaining alert and retrying in %ss", delay)
+                logger.warning(
+                    "Telegram connection failed; retaining alert and retrying in %ss",
+                    delay,
+                )
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 60)
             except Exception:
@@ -292,14 +309,21 @@ class LeRobot:
             try:
                 await self.send_reference(reference, sent.message_id)
             except Exception:
-                logger.exception("Example photo failed for search #%s; listing was delivered", reference['query_id'])
+                logger.exception(
+                    "Example photo failed for search #%s; listing was delivered",
+                    reference["query_id"],
+                )
 
     async def send_reference(self, reference, message_id):
         from telegram import ReplyParameters
+
         import dashboard_store
-        media = dashboard_store.get_media(reference['id'])
+
+        media = dashboard_store.get_media(reference["id"])
         if not media:
-            logger.warning("Example photo missing for search #%s", reference['query_id'])
+            logger.warning(
+                "Example photo missing for search #%s", reference["query_id"]
+            )
             return
         delay = 2
         await asyncio.sleep(1.05)
@@ -307,36 +331,51 @@ class LeRobot:
             try:
                 async with self.bot:
                     sent = await self.bot.send_photo(
-                        chat_id=str(db.get_parameter('telegram_chat_id')),
-                        photo=media['telegram_file_id'] or media['image'],
+                        chat_id=str(db.get_parameter("telegram_chat_id")),
+                        photo=media["telegram_file_id"] or media["image"],
                         caption=f"Your example · {reference['name'][:100]}\nCompare with the Vinted listing above.",
-                        reply_parameters=ReplyParameters(message_id, allow_sending_without_reply=True),
-                        disable_notification=True, read_timeout=40, write_timeout=40,
+                        reply_parameters=ReplyParameters(
+                            message_id, allow_sending_without_reply=True
+                        ),
+                        disable_notification=True,
+                        read_timeout=40,
+                        write_timeout=40,
                     )
-                logger.info("Telegram accepted example photo for search #%s", reference['query_id'])
-                dashboard_store.cache_telegram_photo(reference['id'], sent.photo[-1].file_id)
+                logger.info(
+                    "Telegram accepted example photo for search #%s",
+                    reference["query_id"],
+                )
+                dashboard_store.cache_telegram_photo(
+                    reference["id"], sent.photo[-1].file_id
+                )
                 return
             except RetryAfter as exc:
                 seconds = exc.retry_after
-                if hasattr(seconds, 'total_seconds'):
+                if hasattr(seconds, "total_seconds"):
                     seconds = seconds.total_seconds()
                 await asyncio.sleep(seconds + 2)
             except BadRequest:
-                if media['telegram_file_id']:
-                    media['telegram_file_id'] = None
-                    dashboard_store.cache_telegram_photo(reference['id'], None)
+                if media["telegram_file_id"]:
+                    media["telegram_file_id"] = None
+                    dashboard_store.cache_telegram_photo(reference["id"], None)
                     continue
-                logger.exception("Telegram rejected example photo for search #%s", reference['query_id'])
+                logger.exception(
+                    "Telegram rejected example photo for search #%s",
+                    reference["query_id"],
+                )
                 return
             except NetworkError:
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30)
-        logger.error("Example photo delivery exhausted retries for search #%s", reference['query_id'])
+        logger.error(
+            "Example photo delivery exhausted retries for search #%s",
+            reference["query_id"],
+        )
 
     async def check_version(self, context: ContextTypes.DEFAULT_TYPE):
         try:
             # get latest version from the repository
-            should_update, VER, latest_version, url = core.check_version()
+            should_update, _VER, latest_version, url = core.check_version()
 
             if not should_update:
                 await self.send_new_post(
@@ -344,11 +383,12 @@ class LeRobot:
                     url,
                     "Open Github",
                 )
-        except Exception as e:
-            logger.error(f"Error checking for new version: {str(e)}", exc_info=True)
+        except Exception:
+            logger.exception("Error checking for new version")
 
     async def check_telegram_queue(self, context: ContextTypes.DEFAULT_TYPE):
         from alert_delivery import DeliveryWorker
+
         await DeliveryWorker(context.bot, db.get_parameter("telegram_chat_id")).run()
 
     async def set_commands(self, context: ContextTypes.DEFAULT_TYPE):
@@ -357,5 +397,5 @@ class LeRobot:
                 [("dashboard", "Open your search dashboard")]
             )
             logger.info("Bot commands set successfully")
-        except Exception as e:
-            logger.error(f"Error setting bot commands: {str(e)}", exc_info=True)
+        except Exception:
+            logger.exception("Error setting bot commands")

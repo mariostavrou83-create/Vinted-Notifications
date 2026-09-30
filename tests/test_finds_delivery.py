@@ -1,269 +1,381 @@
 """Restart recovery, transport scheduling and dashboard data preservation."""
-from contextlib import closing
+
 import io
 import sqlite3
 import time
-from types import SimpleNamespace
 import unittest
+from contextlib import closing
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from telegram.error import NetworkError, RetryAfter, BadRequest
+import test_dashboard as dashboard_tests
+from telegram.error import BadRequest, NetworkError, RetryAfter
+from test_dashboard import photo_bytes
+from test_search_controls import DatabaseFixture
+
 import alert_delivery as delivery
 import dashboard_store as store
 import db
 import search_settings as settings
-from test_search_controls import DatabaseFixture
-import test_dashboard as dashboard_tests
-from test_dashboard import photo_bytes
 
 
 def outbox(item_id):
     with closing(settings.connection()) as conn:
-        row=conn.execute('SELECT * FROM alert_outbox WHERE item_id=?',(str(item_id),)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM alert_outbox WHERE item_id=?", (str(item_id),)
+        ).fetchone()
         return dict(row) if row else None
 
 
 class OutboxTests(DatabaseFixture, unittest.TestCase):
     def test_speed_upgrade_backs_up_and_preserves_searches_and_history(self):
-        db.set_parameter('query_refresh_delay','3')
-        db.set_parameter('msj_search_schema','3')
+        db.set_parameter("query_refresh_delay", "3")
+        db.set_parameter("msj_search_schema", "3")
         with closing(settings.connection()) as conn:
-            originals={table:[tuple(r) for r in conn.execute('SELECT * FROM '+table)]
-                for table in ('queries','items','search_preferences','search_dashboard','dashboard_media','listing_frontiers','alert_outbox')}
-        backup=settings.ensure_schema()
+            originals = {
+                table: [tuple(r) for r in conn.execute("SELECT * FROM " + table)]
+                for table in (
+                    "queries",
+                    "items",
+                    "search_preferences",
+                    "search_dashboard",
+                    "dashboard_media",
+                    "listing_frontiers",
+                    "alert_outbox",
+                )
+            }
+        backup = settings.ensure_schema()
         with closing(sqlite3.connect(backup)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM parameters WHERE key='query_refresh_delay'").fetchone()[0],'3')
-            self.assertEqual(conn.execute('PRAGMA integrity_check').fetchone()[0],'ok')
-        self.assertEqual(db.get_parameter('query_refresh_delay'),'1')
+            self.assertEqual(
+                conn.execute(
+                    "SELECT value FROM parameters WHERE key='query_refresh_delay'"
+                ).fetchone()[0],
+                "3",
+            )
+            self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+        self.assertEqual(db.get_parameter("query_refresh_delay"), "1")
         with closing(settings.connection()) as conn:
-            for table,rows in originals.items():
-                self.assertEqual(rows,[tuple(r) for r in conn.execute('SELECT * FROM '+table)])
-        db.set_parameter('query_refresh_delay','3')
+            for table, rows in originals.items():
+                self.assertEqual(
+                    rows, [tuple(r) for r in conn.execute("SELECT * FROM " + table)]
+                )
+        db.set_parameter("query_refresh_delay", "3")
         self.assertIsNone(settings.ensure_schema())
-        self.assertEqual(db.get_parameter('query_refresh_delay'),'3')
+        self.assertEqual(db.get_parameter("query_refresh_delay"), "3")
 
     def test_old_unseen_price_drop_is_rejected_but_new_id_alerts(self):
-        self.batch(1,[200])
+        self.batch(1, [200])
         # This item was previously above the saved price limit, so it has never
         # been in the seen-item table. A price reduction does not change its ID.
-        self.assertEqual(self.batch(1,[150],title='Older jacket now reduced'),[])
+        self.assertEqual(self.batch(1, [150], title="Older jacket now reduced"), [])
         self.assertIsNone(outbox(150))
         self.assertFalse(db.is_item_in_db_by_id(150))
-        self.assertEqual(len(self.batch(1,[201])),1)
+        self.assertEqual(len(self.batch(1, [201])), 1)
 
     def test_shared_age_frontier_protects_a_quiet_search(self):
-        now=time.time()
-        with closing(settings.connection()) as conn,conn:
-            conn.execute('DELETE FROM listing_checkpoints')
-        settings.remember_listing_frontier(2,[500],now-1500)
-        settings.remember_listing_frontier(1,[100],now-10)
-        self.assertEqual(self.batch(1,[300],title='Old reduced item newly in budget'),[])
+        now = time.time()
+        with closing(settings.connection()) as conn, conn:
+            conn.execute("DELETE FROM listing_checkpoints")
+        settings.remember_listing_frontier(2, [500], now - 1500)
+        settings.remember_listing_frontier(1, [100], now - 10)
+        self.assertEqual(
+            self.batch(1, [300], title="Old reduced item newly in budget"), []
+        )
         self.assertIsNone(outbox(300))
-        self.assertEqual(len(self.batch(1,[501])),1)
+        self.assertEqual(len(self.batch(1, [501])), 1)
 
     def test_outage_page_is_quiet_and_frontier_survives_restart(self):
-        now=time.time()
-        settings.remember_listing_frontier(1,[150],now-7200)
-        self.assertEqual(self.batch(1,[180,200]),[])
-        self.assertEqual(settings.listing_cutoff(1,[],now),200)
-        self.assertEqual(len(self.batch(1,[201])),1)
-        self.assertEqual(self.batch(1,[190]),[])
+        now = time.time()
+        settings.remember_listing_frontier(1, [150], now - 7200)
+        self.assertEqual(self.batch(1, [180, 200]), [])
+        self.assertEqual(settings.listing_cutoff(1, [], now), 200)
+        self.assertEqual(len(self.batch(1, [201])), 1)
+        self.assertEqual(self.batch(1, [190]), [])
 
     def test_atomic_write_rolls_back_seen_item_and_watermark_on_outbox_failure(self):
-        with closing(settings.connection()) as conn,conn:
-            conn.execute("CREATE TRIGGER fail_outbox BEFORE INSERT ON alert_outbox BEGIN SELECT RAISE(ABORT,'disk simulation'); END")
-        with self.assertRaises(sqlite3.IntegrityError): self.batch(1,[110])
+        with closing(settings.connection()) as conn, conn:
+            conn.execute(
+                "CREATE TRIGGER fail_outbox BEFORE INSERT ON alert_outbox BEGIN SELECT RAISE(ABORT,'disk simulation'); END"
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.batch(1, [110])
         self.assertFalse(db.is_item_in_db_by_id(110))
-        self.assertEqual(db.get_last_timestamp(1),100)
+        self.assertEqual(db.get_last_timestamp(1), 100)
         self.assertIsNone(outbox(110))
-        with closing(settings.connection()) as conn,conn: conn.execute('DROP TRIGGER fail_outbox')
-        self.batch(1,[110])
-        self.assertEqual(outbox(110)['status'],'pending')
+        with closing(settings.connection()) as conn, conn:
+            conn.execute("DROP TRIGGER fail_outbox")
+        self.batch(1, [110])
+        self.assertEqual(outbox(110)["status"], "pending")
 
     def test_restart_lease_recovery_dedup_and_silent_baseline(self):
-        self.batch(1,[110])
-        self.batch(2,[110])
-        first=delivery.claim(now=1000)
-        self.assertEqual(first['item_id'],'110')
+        self.batch(1, [110])
+        self.batch(2, [110])
+        first = delivery.claim(now=1000)
+        self.assertEqual(first["item_id"], "110")
         self.assertIsNone(delivery.claim(now=1119))
-        recovered=delivery.claim(now=1121)
-        self.assertNotEqual(first['lease_token'],recovered['lease_token'])
-        delivery.finish(first,message_id=1,now=1122) # stale worker cannot overwrite new lease
-        self.assertEqual(outbox(110)['status'],'pending')
-        delivery.finish(recovered,message_id=42,now=1123)
-        self.assertEqual(outbox(110)['telegram_message_id'],42)
+        recovered = delivery.claim(now=1121)
+        self.assertNotEqual(first["lease_token"], recovered["lease_token"])
+        delivery.finish(
+            first, message_id=1, now=1122
+        )  # stale worker cannot overwrite new lease
+        self.assertEqual(outbox(110)["status"], "pending")
+        delivery.finish(recovered, message_id=42, now=1123)
+        self.assertEqual(outbox(110)["telegram_message_id"], 42)
         self.assertIsNone(delivery.claim(now=2000))
-        db.add_query_to_db('https://www.vinted.co.uk/catalog?search_text=new')
-        self.batch(45,[111])
+        db.add_query_to_db("https://www.vinted.co.uk/catalog?search_text=new")
+        self.batch(45, [111])
         self.assertIsNone(outbox(111))
-        self.batch(45,[112])
+        self.batch(45, [112])
         self.assertIsNotNone(outbox(112))
 
     def test_migration_from_dashboard_schema_preserves_auth_media_preferences(self):
         from web_ui_plugin.web_ui import create_app
-        create_app({'TESTING':True})
-        store.save_search(1,dict(query_name='Fur',query=db.get_queries()[0][1],revision='0',reminder='Keep me',exclusions='teddy'),b'preserved blob')
-        with closing(settings.connection()) as conn,conn:
-            conn.execute("UPDATE parameters SET value='2' WHERE key='msj_search_schema'")
-            originals={table:[tuple(r) for r in conn.execute('SELECT * FROM '+table)]
-                       for table in ('queries','items','search_preferences','search_dashboard','dashboard_media','dashboard_auth')}
-        backup=settings.ensure_schema()
+
+        create_app({"TESTING": True})
+        store.save_search(
+            1,
+            {
+                "query_name": "Fur",
+                "query": db.get_queries()[0][1],
+                "revision": "0",
+                "reminder": "Keep me",
+                "exclusions": "teddy",
+            },
+            b"preserved blob",
+        )
+        with closing(settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE parameters SET value='2' WHERE key='msj_search_schema'"
+            )
+            originals = {
+                table: [tuple(r) for r in conn.execute("SELECT * FROM " + table)]
+                for table in (
+                    "queries",
+                    "items",
+                    "search_preferences",
+                    "search_dashboard",
+                    "dashboard_media",
+                    "dashboard_auth",
+                )
+            }
+        backup = settings.ensure_schema()
         self.assertIsNotNone(backup)
         with closing(settings.connection()) as conn:
-            for table,rows in originals.items():
-                self.assertEqual(rows,[tuple(r) for r in conn.execute('SELECT * FROM '+table)],table)
+            for table, rows in originals.items():
+                self.assertEqual(
+                    rows,
+                    [tuple(r) for r in conn.execute("SELECT * FROM " + table)],
+                    table,
+                )
 
 
 class WorkerTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
     def robot(self):
-        bot=SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=42)),
-            send_photo=AsyncMock(return_value=SimpleNamespace(photo=[SimpleNamespace(file_id='cached')])) )
-        return delivery.DeliveryWorker(bot,'123')
+        bot = SimpleNamespace(
+            send_message=AsyncMock(return_value=SimpleNamespace(message_id=42)),
+            send_photo=AsyncMock(
+                return_value=SimpleNamespace(photo=[SimpleNamespace(file_id="cached")])
+            ),
+        )
+        return delivery.DeliveryWorker(bot, "123")
 
     async def test_new_listing_preempts_first_example_photo(self):
-        store.save_search(1,dict(query_name='Fur',query=db.get_queries()[0][1],revision='0'),b'photo')
-        self.batch(1,[110])
-        worker=self.robot()
+        store.save_search(
+            1,
+            {"query_name": "Fur", "query": db.get_queries()[0][1], "revision": "0"},
+            b"photo",
+        )
+        self.batch(1, [110])
+        worker = self.robot()
         await worker.tick(now=1000)
-        self.batch(2,[111])
+        self.batch(2, [111])
         await worker.tick(now=1002)
-        self.assertEqual(outbox(111)['status'],'sent')
-        self.assertEqual(worker.bot.send_photo.await_count,0)
+        self.assertEqual(outbox(111)["status"], "sent")
+        self.assertEqual(worker.bot.send_photo.await_count, 0)
         await worker.tick(now=1004)
-        self.assertEqual(outbox(110)['photo_status'],'sent')
-        self.assertEqual(worker.bot.send_message.await_count,2)
+        self.assertEqual(outbox(110)["photo_status"], "sent")
+        self.assertEqual(worker.bot.send_message.await_count, 2)
 
     async def test_transport_time_counts_towards_chat_pacing(self):
-        worker=self.robot()
-        self.assertEqual(worker.send_slot_delay(),0)
-        worker.last_send_started=100
-        with patch.object(delivery.time,'monotonic',return_value=100.6):
-            self.assertAlmostEqual(worker.send_slot_delay(),.45)
-        with patch.object(delivery.time,'monotonic',return_value=101.5):
-            self.assertEqual(worker.send_slot_delay(),0)
+        worker = self.robot()
+        self.assertEqual(worker.send_slot_delay(), 0)
+        worker.last_send_started = 100
+        with patch.object(delivery.time, "monotonic", return_value=100.6):
+            self.assertAlmostEqual(worker.send_slot_delay(), 0.45)
+        with patch.object(delivery.time, "monotonic", return_value=101.5):
+            self.assertEqual(worker.send_slot_delay(), 0)
 
-    async def test_photo_retry_yields_to_new_listing_without_resending_confirmed_one(self):
-        store.save_search(1,dict(query_name='Fur',query=db.get_queries()[0][1],revision='0'),b'photo')
-        self.batch(1,[110])
-        worker=self.robot()
+    async def test_photo_retry_yields_to_new_listing_without_resending_confirmed_one(
+        self,
+    ):
+        store.save_search(
+            1,
+            {"query_name": "Fur", "query": db.get_queries()[0][1], "revision": "0"},
+            b"photo",
+        )
+        self.batch(1, [110])
+        worker = self.robot()
         await worker.tick(now=1000)
-        self.assertEqual(outbox(110)['status'],'sent')
-        self.assertEqual(outbox(110)['photo_status'],'pending')
-        worker.bot.send_photo.side_effect=NetworkError('offline')
+        self.assertEqual(outbox(110)["status"], "sent")
+        self.assertEqual(outbox(110)["photo_status"], "pending")
+        worker.bot.send_photo.side_effect = NetworkError("offline")
         await worker.tick(now=1002)
-        self.batch(2,[111])
-        restarted=delivery.DeliveryWorker(worker.bot,'123')
+        self.batch(2, [111])
+        restarted = delivery.DeliveryWorker(worker.bot, "123")
         await restarted.tick(now=1004)
-        self.assertEqual(outbox(111)['status'],'sent')
-        worker.bot.send_photo.side_effect=None
+        self.assertEqual(outbox(111)["status"], "sent")
+        worker.bot.send_photo.side_effect = None
         await restarted.tick(now=1006)
-        self.assertEqual(outbox(110)['photo_status'],'sent')
-        self.assertEqual(worker.bot.send_message.await_count,2)
-        self.assertEqual(worker.bot.send_photo.await_args.kwargs['reply_parameters'].message_id,42)
-        self.assertTrue(worker.bot.send_photo.await_args.kwargs['disable_notification'])
+        self.assertEqual(outbox(110)["photo_status"], "sent")
+        self.assertEqual(worker.bot.send_message.await_count, 2)
+        self.assertEqual(
+            worker.bot.send_photo.await_args.kwargs["reply_parameters"].message_id, 42
+        )
+        self.assertTrue(worker.bot.send_photo.await_args.kwargs["disable_notification"])
 
-    async def test_rate_limit_persists_across_restart_and_permanent_error_is_visible(self):
-        self.batch(1,[110,111])
-        worker=self.robot()
-        worker.bot.send_message.side_effect=RetryAfter(30)
+    async def test_rate_limit_persists_across_restart_and_permanent_error_is_visible(
+        self,
+    ):
+        self.batch(1, [110, 111])
+        worker = self.robot()
+        worker.bot.send_message.side_effect = RetryAfter(30)
         await worker.tick(now=1000)
         self.assertIsNone(delivery.claim(now=1030))
-        worker=delivery.DeliveryWorker(worker.bot,'123')
-        worker.bot.send_message.side_effect=BadRequest('invalid')
+        worker = delivery.DeliveryWorker(worker.bot, "123")
+        worker.bot.send_message.side_effect = BadRequest("invalid")
         await worker.tick(now=1032)
-        self.assertEqual(outbox(111)['status'],'failed')
-        self.assertEqual(outbox(111)['error'],'BadRequest')
-        worker.bot.send_message.side_effect=None
+        self.assertEqual(outbox(111)["status"], "failed")
+        self.assertEqual(outbox(111)["error"], "BadRequest")
+        worker.bot.send_message.side_effect = None
         await worker.tick(now=1034)
-        self.assertEqual(outbox(110)['status'],'sent')
+        self.assertEqual(outbox(110)["status"], "sent")
 
     async def test_network_failure_stays_pending_and_cached_photo_can_fall_back(self):
-        store.save_search(1,dict(query_name='Fur',query=db.get_queries()[0][1],revision='0'),b'photo')
-        reference=settings.get_search(1)['reference_id']
-        store.cache_telegram_photo(reference,'stale')
-        self.batch(1,[110])
-        worker=self.robot()
-        worker.bot.send_message.side_effect=NetworkError('timeout')
+        store.save_search(
+            1,
+            {"query_name": "Fur", "query": db.get_queries()[0][1], "revision": "0"},
+            b"photo",
+        )
+        reference = settings.get_search(1)["reference_id"]
+        store.cache_telegram_photo(reference, "stale")
+        self.batch(1, [110])
+        worker = self.robot()
+        worker.bot.send_message.side_effect = NetworkError("timeout")
         await worker.tick(now=1000)
-        self.assertEqual(outbox(110)['status'],'pending')
-        worker.bot.send_message.side_effect=None
+        self.assertEqual(outbox(110)["status"], "pending")
+        worker.bot.send_message.side_effect = None
         await worker.tick(now=1003)
-        worker.bot.send_photo.side_effect=BadRequest('bad file')
+        worker.bot.send_photo.side_effect = BadRequest("bad file")
         await worker.tick(now=1005)
-        self.assertIsNone(store.get_media(reference)['telegram_file_id'])
-        worker.bot.send_photo.side_effect=None
+        self.assertIsNone(store.get_media(reference)["telegram_file_id"])
+        worker.bot.send_photo.side_effect = None
         await worker.tick(now=1008)
-        self.assertIsInstance(worker.bot.send_photo.await_args.kwargs['photo'],io.BytesIO)
-        self.assertEqual(outbox(110)['photo_status'],'sent')
+        self.assertIsInstance(
+            worker.bot.send_photo.await_args.kwargs["photo"], io.BytesIO
+        )
+        self.assertEqual(outbox(110)["photo_status"], "sent")
 
 
 class FindsTests(DatabaseFixture, unittest.TestCase):
     def setUp(self):
         super().setUp()
         from web_ui_plugin.web_ui import create_app
-        self.app=create_app({'TESTING':True,'SESSION_COOKIE_SECURE':False})
-        self.client=self.app.test_client()
 
-    owner=dashboard_tests.DashboardTests.owner
-    form=dashboard_tests.DashboardTests.form
+        self.app = create_app({"TESTING": True, "SESSION_COOKIE_SECURE": False})
+        self.client = self.app.test_client()
+
+    owner = dashboard_tests.DashboardTests.owner
+    form = dashboard_tests.DashboardTests.form
 
     def test_guide_folder_edit_preserves_history_and_one_photo(self):
         self.owner()
-        originals=db.get_queries()
-        folder=store.save_folder('Hollister')
-        form=self.form(folder_id=str(folder),max_buy='15.25',resale_low='30',resale_high='45.50',must_have='Fur <hood> & fitted',photo=(io.BytesIO(photo_bytes()),'one.png'))
-        response=self.client.post('/search/1',data=form,content_type='multipart/form-data')
-        self.assertEqual(response.location,'/')
-        row=settings.get_search(1)
-        self.assertEqual(row['max_buy'],1525)
-        self.assertEqual(row['resale_high'],4550)
-        self.assertEqual(row['folder_name'],'Hollister')
-        self.assertEqual([r[:3] for r in originals],[r[:3] for r in db.get_queries()])
-        content=self.batch(1,[110])[0][0]
-        self.assertIn('£15.25',content)
-        self.assertIn('£30.00–£45.50',content)
-        self.assertIn('Fur &lt;hood&gt; &amp; fitted',content)
-        self.assertEqual(len(self.batch(1,[110])),0)
-        self.assertIn(b'value="15.25"',self.client.get('/search/1').data)
-        self.assertIn(b'Hollister',self.client.get('/?folder='+str(folder)).data)
-        store.save_folder('Fur favourites',folder)
-        self.assertEqual(settings.get_search(1)['folder_name'],'Fur favourites')
+        originals = db.get_queries()
+        folder = store.save_folder("Hollister")
+        form = self.form(
+            folder_id=str(folder),
+            max_buy="15.25",
+            resale_low="30",
+            resale_high="45.50",
+            must_have="Fur <hood> & fitted",
+            photo=(io.BytesIO(photo_bytes()), "one.png"),
+        )
+        response = self.client.post(
+            "/search/1", data=form, content_type="multipart/form-data"
+        )
+        self.assertEqual(response.location, "/")
+        row = settings.get_search(1)
+        self.assertEqual(row["max_buy"], 1525)
+        self.assertEqual(row["resale_high"], 4550)
+        self.assertEqual(row["folder_name"], "Hollister")
+        self.assertEqual([r[:3] for r in originals], [r[:3] for r in db.get_queries()])
+        content = self.batch(1, [110])[0][0]
+        self.assertIn("£15.25", content)
+        self.assertIn("£30.00–£45.50", content)
+        self.assertIn("Fur &lt;hood&gt; &amp; fitted", content)
+        self.assertEqual(len(self.batch(1, [110])), 0)
+        self.assertIn(b'value="15.25"', self.client.get("/search/1").data)
+        self.assertIn(b"Hollister", self.client.get("/?folder=" + str(folder)).data)
+        store.save_folder("Fur favourites", folder)
+        self.assertEqual(settings.get_search(1)["folder_name"], "Fur favourites")
         store.delete_folder(folder)
-        self.assertIsNone(settings.get_search(1)['folder_id'])
-        self.assertEqual(settings.get_search(1)['reference_id'],row['reference_id'])
-        self.assertEqual(len(db.get_queries()),44)
+        self.assertIsNone(settings.get_search(1)["folder_id"])
+        self.assertEqual(settings.get_search(1)["reference_id"], row["reference_id"])
+        self.assertEqual(len(db.get_queries()), 44)
 
     def test_finds_filters_status_private_routes_and_csrf(self):
-        for route in ('/finds','/folders'):
-            self.assertEqual(self.client.get(route).location,'/login')
+        for route in ("/finds", "/folders"):
+            self.assertEqual(self.client.get(route).location, "/login")
         self.owner()
-        self.batch(1,[110,111],title='Fur hood & cuffs')
-        self.assertEqual(self.client.get('/finds').status_code,200)
-        self.assertEqual(self.client.post('/finds/110/status',data={'new_status':'bought'}).status_code,400)
-        response=self.client.post('/finds/110/status',data={'csrf':'offline-csrf','new_status':'bought','q':'Fur','page':'1'})
-        self.assertEqual(response.status_code,302)
-        self.assertEqual(outbox(110)['user_status'],'bought')
-        rows,total=store.list_finds(text='cuffs',status='bought')
-        self.assertEqual([r['item_id'] for r in rows],['110'])
-        self.assertEqual(total,1)
-        self.assertEqual(store.list_finds(text='%')[1],0)
-        self.assertIn(b'Bought',self.client.get('/finds?status=bought').data)
-        self.assertIsNone(store.safe_photo_url('https://evil.test/a.jpg'))
-        self.assertEqual(store.safe_photo_url('https://images1.vinted.net/a.jpg'),'https://images1.vinted.net/a.jpg')
-        self.assertEqual(self.client.get('/folders').status_code,200)
-        self.assertEqual(self.client.post('/folders',data={'csrf':'offline-csrf','name':'Jackets'}).status_code,302)
-        with self.assertRaises(ValueError): store.save_folder('jackets')
+        self.batch(1, [110, 111], title="Fur hood & cuffs")
+        self.assertEqual(self.client.get("/finds").status_code, 200)
+        self.assertEqual(
+            self.client.post(
+                "/finds/110/status", data={"new_status": "bought"}
+            ).status_code,
+            400,
+        )
+        response = self.client.post(
+            "/finds/110/status",
+            data={
+                "csrf": "offline-csrf",
+                "new_status": "bought",
+                "q": "Fur",
+                "page": "1",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(outbox(110)["user_status"], "bought")
+        rows, total = store.list_finds(text="cuffs", status="bought")
+        self.assertEqual([r["item_id"] for r in rows], ["110"])
+        self.assertEqual(total, 1)
+        self.assertEqual(store.list_finds(text="%")[1], 0)
+        self.assertIn(b"Bought", self.client.get("/finds?status=bought").data)
+        self.assertIsNone(store.safe_photo_url("https://evil.test/a.jpg"))
+        self.assertEqual(
+            store.safe_photo_url("https://images1.vinted.net/a.jpg"),
+            "https://images1.vinted.net/a.jpg",
+        )
+        self.assertEqual(self.client.get("/folders").status_code, 200)
+        self.assertEqual(
+            self.client.post(
+                "/folders", data={"csrf": "offline-csrf", "name": "Jackets"}
+            ).status_code,
+            302,
+        )
+        with self.assertRaises(ValueError):
+            store.save_folder("jackets")
 
     def test_invalid_guide_is_atomic_and_retained_in_form(self):
         self.owner()
-        original=settings.get_search(1)
-        for low,high in [('40','20'),('nan','30'),('15.001','30'),('-1','30')]:
-            form=self.form(resale_low=low,resale_high=high)
-            response=self.client.post('/search/1',data=form)
-            self.assertEqual(response.status_code,200)
-            self.assertEqual(settings.get_search(1),original)
-        self.assertEqual(store.parse_money('0.01'),1)
-        self.assertIsNone(store.parse_money(''))
+        original = settings.get_search(1)
+        for low, high in [("40", "20"), ("nan", "30"), ("15.001", "30"), ("-1", "30")]:
+            form = self.form(resale_low=low, resale_high=high)
+            response = self.client.post("/search/1", data=form)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(settings.get_search(1), original)
+        self.assertEqual(store.parse_money("0.01"), 1)
+        self.assertIsNone(store.parse_money(""))
 
 
-if __name__=='__main__': unittest.main()
+if __name__ == "__main__":
+    unittest.main()

@@ -1,9 +1,10 @@
-import random
-import requests
-import time
-from requests.exceptions import RequestException
 import concurrent.futures
-from typing import List, Optional
+import random
+import time
+
+import requests
+from requests.exceptions import RequestException
+
 from logger import get_logger
 
 # Get logger for this module
@@ -23,7 +24,7 @@ MAX_PROXY_WORKERS = 10
 PROXY_RECHECK_INTERVAL = 6 * 60 * 60
 
 
-def fetch_proxies_from_link(url: str) -> List[str]:
+def fetch_proxies_from_link(url: str) -> list[str]:
     """
     Fetch proxies from a URL.
 
@@ -39,12 +40,12 @@ def fetch_proxies_from_link(url: str) -> List[str]:
             # Split by newlines and filter out empty lines
             return [line.strip() for line in response.text.splitlines() if line.strip()]
         return []
-    except Exception:
+    except RequestException:
         # If there's any error fetching proxies, return an empty list
         return []
 
 
-def check_proxies_parallel(proxies_list: List[str]) -> List[str]:
+def check_proxies_parallel(proxies_list: list[str]) -> list[str]:
     """
     Check multiple proxies in parallel using a thread pool.
 
@@ -72,14 +73,14 @@ def check_proxies_parallel(proxies_list: List[str]) -> List[str]:
                 is_working = future.result()
                 if is_working:
                     working_proxies.append(proxy)
-            except Exception:
-                # If an exception occurred during checking, consider the proxy not working
-                pass
+            except RequestException:
+                # A failed check makes this proxy unusable; never log credentials in its URL.
+                logger.debug("Proxy connectivity check failed")
 
     return working_proxies
 
 
-def get_random_proxy() -> Optional[str]:
+def get_random_proxy() -> str | None:
     """
     Get a random proxy from the configuration values.
 
@@ -203,8 +204,9 @@ def check_proxy(proxy: str) -> bool:
         session = requests.Session()
 
         # Import db here to avoid circular imports
-        import db
         import json
+
+        import db
 
         # Get user agents and default headers from the database
         user_agents_json = db.get_parameter("user_agents")
@@ -237,7 +239,7 @@ def check_proxy(proxy: str) -> bool:
             session.close()
 
 
-def convert_proxy_string_to_dict(proxy: Optional[str]) -> dict:
+def convert_proxy_string_to_dict(proxy: str | None) -> dict:
     """
     Convert a proxy string to a dictionary format.
 
@@ -252,7 +254,7 @@ def convert_proxy_string_to_dict(proxy: Optional[str]) -> dict:
 
     if "://" in proxy:
         # Protocol is specified (e.g., "http://127.0.0.1:8080")
-        protocol, address = proxy.split("://")
+        protocol, _address = proxy.split("://")
         if protocol == "http":
             return {"http": f"{proxy}", "https": f"{proxy}"}
         return {protocol: proxy}
@@ -261,7 +263,7 @@ def convert_proxy_string_to_dict(proxy: Optional[str]) -> dict:
         return {"http": f"http://{proxy}", "https": f"https://{proxy}"}
 
 
-def configure_proxy(session: requests.Session, proxy: Optional[str] = None) -> bool:
+def configure_proxy(session: requests.Session, proxy: str | None = None) -> bool:
     """
     Configure the proxy settings for a requests session.
 
