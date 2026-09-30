@@ -421,11 +421,16 @@ def create_app(test_config=None):
                 (time.time(),),
             )
         try:
-            preview = asyncio.run(preview_and_enable(query_id))
+            photo_first = request.form.get("preview_mode") == "photo_first"
+            preview = asyncio.run(preview_and_enable(query_id, photo_first=photo_first))
             flash(
-                "Telegram accepted the single-message preview with "
-                + str(preview["photo_count"])
-                + " listing photo(s). New Vinted alerts now use this layout.",
+                (
+                    "Photo-first test sent. Press and hold its notification on your iPhone to check the picture. Live alerts still send the link first."
+                    if photo_first
+                    else "Telegram accepted the single-message preview with "
+                    + str(preview["photo_count"])
+                    + " listing photo(s). New Vinted alerts now use this layout."
+                ),
                 "success",
             )
             if preview.get("gallery_state") not in ("ready", "catalogue"):
