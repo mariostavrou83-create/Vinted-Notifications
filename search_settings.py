@@ -11,7 +11,7 @@ from pathlib import Path
 
 import db
 
-SCHEMA_VERSION = "8"
+SCHEMA_VERSION = "9"
 
 
 def connection():
@@ -69,6 +69,18 @@ def ensure_schema():
             conn.execute("""CREATE TABLE IF NOT EXISTS dashboard_media (
                 id TEXT PRIMARY KEY, image BLOB NOT NULL, telegram_file_id TEXT,
                 created REAL NOT NULL)""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS search_reference_photos (
+                query_id INTEGER NOT NULL REFERENCES queries(id) ON DELETE CASCADE,
+                position INTEGER NOT NULL CHECK(position BETWEEN 0 AND 3),
+                media_id TEXT NOT NULL REFERENCES dashboard_media(id),
+                PRIMARY KEY(query_id, position))""")
+            # Earlier uploads only kept a flattened image. Preserve it as one
+            # editable slot; future uploads retain each original separately.
+            conn.execute("""INSERT INTO search_reference_photos
+                SELECT d.query_id,0,d.reference_id FROM search_dashboard d
+                JOIN dashboard_media m ON m.id=d.reference_id
+                WHERE NOT EXISTS (SELECT 1 FROM search_reference_photos p
+                    WHERE p.query_id=d.query_id)""")
             conn.execute(
                 """CREATE TABLE IF NOT EXISTS dashboard_auth (
                 id INTEGER PRIMARY KEY CHECK(id=1), password_hash TEXT,
@@ -137,9 +149,10 @@ def ensure_schema():
             )
             # Mario requested faster checking. Upgrade the previous three-second
             # setting once, keeping intentionally slower intervals untouched.
-            conn.execute(
-                "UPDATE parameters SET value='1' WHERE key='query_refresh_delay' AND value='3'"
-            )
+            if not version or int(version[0]) <= 3:
+                conn.execute(
+                    "UPDATE parameters SET value='1' WHERE key='query_refresh_delay' AND value='3'"
+                )
         return str(backup)
 
 
