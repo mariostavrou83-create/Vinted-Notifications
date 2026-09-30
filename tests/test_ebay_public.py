@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from test_ebay_monitor import EbayFixture, item
 
+import ebay_connections as connections
 import ebay_monitor as monitor
 import ebay_public as public
 import ebay_store as store
@@ -116,10 +117,13 @@ class PublicParserTests(unittest.TestCase):
         )
 
     def test_transport_respects_rate_limit_and_halts_on_access_denial(self):
-        for status, halt in [(429, False), (403, True)]:
+        for status, halt in [(429, False), (401, True), (403, True)]:
             response = MagicMock()
             response.status_code = status
             response.headers = {"Retry-After": "120"}
+            response.url = public.search_url(self.config)
+            response.history = []
+            response.iter_content.return_value = iter([b"Access denied"])
             response.__enter__.return_value = response
             session = MagicMock()
             session.get.return_value = response
@@ -132,9 +136,71 @@ class PublicParserTests(unittest.TestCase):
             session.get.assert_called_once()
             if status == 429:
                 self.assertEqual(raised.exception.retry_after, 120)
+            else:
+                self.assertIn(f"HTTP {status}", str(raised.exception))
+                self.assertIn("access-denied", str(raised.exception))
+
+    def test_diagnostic_classifies_bounded_sample_without_leaking_response_data(self):
+        response = MagicMock()
+        response.status_code = 403
+        response.url = "https://www.ebay.co.uk/sch/i.html?secret=private-canary"
+        response.history = []
+        response.headers = {
+            "Content-Type": "text/html; private-canary",
+            "Server": "AkamaiGHost",
+            "Set-Cookie": "private-canary",
+            "WWW-Authenticate": "Bearer private-canary",
+        }
+        response.iter_content.return_value = iter(
+            [b"Verify you are human private-canary" + b"x" * 4000] * 100
+        )
+        with self.assertLogs(public.logger, level="WARNING") as captured:
+            diagnostic = public.response_diagnostic(response, public.time.monotonic())
+        self.assertEqual(diagnostic["page_kind"], "human-verification")
+        self.assertEqual(diagnostic["sample_bytes"], public.DIAGNOSTIC_BYTES)
+        self.assertEqual(diagnostic["sample_state"], "limited")
+        self.assertNotIn("private-canary", str(diagnostic) + str(captured.output))
+
+    def test_denial_keeps_status_and_pause_when_error_body_times_out(self):
+        response = MagicMock()
+        response.status_code = 401
+        response.url = public.search_url(self.config)
+        response.history = []
+        response.headers = {}
+        response.iter_content.side_effect = public.requests.ReadTimeout(
+            "private-canary"
+        )
+        response.__enter__.return_value = response
+        session = MagicMock()
+        session.get.return_value = response
+        with self.assertRaises(monitor.EbayError) as raised:
+            public.PublicClient(session=session).search(self.config)
+        self.assertIn("HTTP 401", str(raised.exception))
+        self.assertNotIn("private-canary", str(raised.exception))
+        self.assertTrue(raised.exception.halt)
+        session.get.assert_called_once()
 
 
 class PublicDeliveryTests(EbayFixture, unittest.TestCase):
+    def test_manual_denial_persists_pause_and_success_clears_it_without_alerts(self):
+        before = search_settings.active_queries()
+        with patch.object(
+            connections, "configuration", return_value={"source": "public"}
+        ):
+            with patch.object(
+                public.PublicClient,
+                "search",
+                side_effect=monitor.EbayError("HTTP 403", 3600, True, halt=True),
+            ) as check, self.assertRaisesRegex(ValueError, "HTTP 403"):
+                connections.test_connection("ebay")
+            check.assert_called_once()
+            self.assertTrue(store.connection_summary()["public_paused"])
+            with patch.object(public.PublicClient, "search", return_value=([], "")):
+                connections.test_connection("ebay")
+            self.assertFalse(store.connection_summary()["public_paused"])
+        self.assertEqual(search_settings.active_queries(), before)
+        self.assertEqual(self.outbox(), [])
+
     def snapshot_public(self, search, items, now):
         with patch.object(monitor.time, "time", return_value=now):
             return monitor.record_snapshot(search, items, now, source="public")
