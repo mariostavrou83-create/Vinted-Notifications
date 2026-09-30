@@ -186,7 +186,7 @@ async def enrich(bot, chat_id, row, details, before_edit):
     return not missing_listing
 
 
-async def preview_and_enable(query_id):
+async def preview_and_enable(query_id, *, photo_first=False):
     """Exercise the actual text-to-rich edit before switching the live worker."""
     import asyncio
     from types import SimpleNamespace
@@ -219,7 +219,8 @@ async def preview_and_enable(query_id):
         brand_title=saved.get("brand"),
         raw_data={"photos": saved.get("photos", [])},
     )
-    search["query_name"] = "LAYOUT PREVIEW · " + (search["query_name"] or "")
+    label = "PHONE PHOTO TEST · " if photo_first else "LAYOUT PREVIEW · "
+    search["query_name"] = label + (search["query_name"] or "")
     details = snapshot(item, search)
     row["reference_id"] = search["reference_id"]
     row["search_name"] = search["query_name"]
@@ -253,18 +254,22 @@ async def preview_and_enable(query_id):
             "The example photo could not be read. Replace it and try again."
         )
     async with Bot(token) as bot:
-        first = await bot.send_message(
-            chat_id,
-            fast_text(item, search),
-            parse_mode="HTML",
-            link_preview_options=LinkPreviewOptions(is_disabled=True),
-        )
-        row["telegram_message_id"] = first.message_id
+        if not photo_first:
+            first = await bot.send_message(
+                chat_id,
+                fast_text(item, search),
+                parse_mode="HTML",
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
+            )
+            row["telegram_message_id"] = first.message_id
         data = rich_request(row, details, listing, reference_image)
         data["chat_id"] = chat_id
-        await asyncio.sleep(1.1)
+        if photo_first:
+            data.pop("message_id")
+        else:
+            await asyncio.sleep(1.1)
         result = await bot.do_api_request(
-            "editMessageText",
+            "sendRichMessage" if photo_first else "editMessageText",
             api_kwargs=data,
             read_timeout=8,
             write_timeout=8,
@@ -273,11 +278,13 @@ async def preview_and_enable(query_id):
         )
         if (
             not isinstance(result, dict)
-            or result.get("message_id") != first.message_id
+            or not result.get("message_id")
+            or (not photo_first and result.get("message_id") != first.message_id)
             or not result.get("rich_message")
         ):
             raise TelegramError("Telegram did not confirm the rich message edit")
-    db.set_parameter("vinted_single_message_alerts", "1")
+    if not photo_first:
+        db.set_parameter("vinted_single_message_alerts", "1")
     return {
         "photo_count": len(details["photos"]),
         "gallery_state": gallery_details.get("gallery_state"),
