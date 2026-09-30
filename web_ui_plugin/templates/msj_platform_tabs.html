@@ -1,0 +1,34 @@
+<div class="guide-section platform-editor">
+<h2>Where to search</h2>
+<label for="platform_mode">Platforms for this search</label>
+<select id="platform_mode" name="platform_mode">
+{% for mode,label in [('vinted','Vinted only'),('ebay','eBay only'),('both','Vinted + eBay')] %}<option value="{{mode}}" {{'selected' if row.platform_mode==mode}}>{{label}}</option>{% endfor %}
+</select>
+<p class="shared-note">Name, folder, buying guide, reminder, exclusions and example photo are shared. Each platform has its own search filters.</p>
+<div class="platform-tabs" role="tablist" aria-label="Search platform">
+<button type="button" role="tab" id="tab-vinted" aria-controls="panel-vinted" aria-selected="true" data-platform-tab="vinted">Vinted <span id="vinted-enabled-label"></span></button>
+<button type="button" role="tab" id="tab-ebay" aria-controls="panel-ebay" aria-selected="false" data-platform-tab="ebay">eBay <span id="ebay-enabled-label"></span></button>
+</div>
+<section id="panel-vinted" role="tabpanel" aria-labelledby="tab-vinted">
+<p class="platform-disabled" data-disabled-note="vinted" hidden>Vinted is off for this search. Saved filters are kept for later.</p>
+<label for="query">Vinted search link</label><textarea id="query" name="query" rows="3" maxlength="6000" placeholder="https://www.vinted.co.uk/catalog?…">{{row.query}}</textarea>
+<small>Choose your filters on Vinted, then paste the search results link here. A new or changed link starts with a quiet first check.</small>
+</section>
+<section id="panel-ebay" role="tabpanel" aria-labelledby="tab-ebay">
+<p class="platform-disabled" data-disabled-note="ebay" hidden>eBay is off for this search. You can prepare its filters before enabling it.</p>
+{% if ebay_connection.missing %}<p class="notice">eBay connection needs setting up. <a href="/connections" target="_blank" rel="noopener">Connect the new bot and eBay ↗</a></p>{% endif %}
+<button type="button" id="copy-vinted" class="secondary">Copy keywords &amp; prices from Vinted</button>
+<p id="copy-feedback" role="status" class="muted"></p>
+<label for="ebay_keywords">eBay keywords</label><input id="ebay_keywords" name="ebay_keywords" maxlength="100" value="{{row.ebay.keywords}}" placeholder="e.g. Hollister fur gilet">
+<div class="price-pair"><div><label for="ebay_min_price">Minimum (£)</label><input id="ebay_min_price" name="ebay_min_price" inputmode="decimal" maxlength="8" value="{{row.ebay.min_price_input if 'min_price_input' in row.ebay else money(row.ebay.min_price)}}"></div><div><label for="ebay_max_price">Maximum (£)</label><input id="ebay_max_price" name="ebay_max_price" inputmode="decimal" maxlength="8" value="{{row.ebay.max_price_input if 'max_price_input' in row.ebay else money(row.ebay.max_price)}}"></div></div>
+<button type="button" id="copy-buying-max" class="text-button">Use my buying-guide maximum</button>
+<label class="checkbox"><input type="checkbox" name="ebay_include_shipping" value="yes" {{'checked' if row.ebay.include_shipping}}> Include estimated postage in the price limit</label>
+<small>If postage is unknown, a listing cannot pass a postage-inclusive limit.</small>
+<label for="ebay_buying">Listing type</label><select id="ebay_buying" name="ebay_buying">{% for value,label in [('fixed','Buy it now'),('auction','Auctions'),('both','Buy it now + auctions')] %}<option value="{{value}}" {{'selected' if row.ebay.buying==value}}>{{label}}</option>{% endfor %}</select>
+<small>Auction prices are current bids and can increase.</small>
+<label for="ebay_condition">Condition</label><select id="ebay_condition" name="ebay_condition">{% for value,label in [('any','Any condition'),('new','New'),('used','Used')] %}<option value="{{value}}" {{'selected' if row.ebay.condition==value}}>{{label}}</option>{% endfor %}</select>
+<label for="ebay_category">eBay category ID <span>optional</span></label><input id="ebay_category" name="ebay_category" inputmode="numeric" maxlength="10" value="{{row.ebay.category}}" placeholder="Leave blank for all categories">
+<label class="checkbox"><input type="checkbox" name="ebay_uk_only" value="yes" {{'checked' if row.ebay.uk_only}}> Items located in the UK only</label>
+<small>Results must ship to the UK. Vinted brand, size and category IDs do not map to eBay; review your eBay keywords and category separately.</small>
+<p class="shared-note">New listings only. The first check is quiet. Changes to these filters start a fresh baseline without replaying old items.</p>
+</section></div>
