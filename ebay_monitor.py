@@ -566,7 +566,7 @@ class Poller:
 
 
 async def run_delivery():
-    from alert_delivery import DeliveryWorker
+    from alert_delivery import EbayDeliveryWorker
 
     while True:
         config = store.configuration()
@@ -575,21 +575,23 @@ async def run_delivery():
             continue
         try:
             async with Bot(config["telegram_token"]) as bot:
-                worker = DeliveryWorker(
+                worker = EbayDeliveryWorker(
                     bot,
                     config["chat_id"],
-                    platform="ebay",
                     bot_id=config["telegram_token"].split(":")[0],
                 )
-                while True:
-                    latest = store.configuration()
-                    if any(
-                        latest[k] != config[k] for k in ("telegram_token", "chat_id")
-                    ) or store.missing_configuration(latest):
-                        break
-                    await asyncio.sleep(worker.send_slot_delay())
-                    if not await worker.tick():
-                        await asyncio.sleep(0.05)
+                try:
+                    while True:
+                        latest = store.configuration()
+                        if any(
+                            latest[k] != config[k]
+                            for k in ("telegram_token", "chat_id")
+                        ) or store.missing_configuration(latest):
+                            break
+                        if not await worker.tick():
+                            await asyncio.sleep(0.05)
+                finally:
+                    await worker.close()
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "eBay Telegram connection retry after %s", type(exc).__name__

@@ -120,6 +120,13 @@ the quota or that listings become searchable within 15 seconds. The automated
   button; external image previews are disabled so the alert does not depend on
   fetching an image. A saved reference photo follows silently, replying to that
   message, once pending listing alerts have priority. Dashboard images remain.
+  An eBay example-photo upload runs separately, so a slow upload does not block
+  the next listing link. There is at most one photo upload and one listing send
+  in flight; both share the same 1.05-second spacing between request starts and
+  the same persistent Telegram rate-limit cooldown. An upload already in flight
+  can finish after a newer listing, and a later rate-limit response cannot recall
+  a request already sent. Shutdown cancels the upload; its durable lease allows
+  photo recovery without replaying the confirmed listing link.
 - Browse transient failures retry the affected search after five seconds. Public
   failures retry after 15–30 seconds. Public HTTP 401/403, a verification challenge
   or a redirect away from search pauses discovery until an explicit successful
