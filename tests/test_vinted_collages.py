@@ -312,6 +312,32 @@ class RichWorkerTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             self.assertTrue(vinted_alerts.enabled())
         self.bot.send_photo.assert_not_awaited()
 
+    async def test_phone_preview_contains_photos_in_initial_message_without_changing_live_mode(
+        self,
+    ):
+        self.batch(1, [110])
+        db.set_parameter("vinted_single_message_alerts", "0")
+        db.set_parameter("telegram_token", "123456:offline-test-token")
+        with closing(settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE alert_outbox SET photo_url='https://images1.vinted.net/a.jpg'"
+            )
+        context = AsyncMock()
+        context.__aenter__.return_value = self.bot
+        with patch("telegram.Bot", return_value=context), patch.object(
+            alert_images, "listing_collage", new=AsyncMock(return_value=photo_bytes())
+        ):
+            await vinted_alerts.preview_and_enable(1, photo_first=True)
+        self.bot.send_message.assert_not_awaited()
+        self.bot.send_photo.assert_not_awaited()
+        call = self.bot.do_api_request.await_args
+        self.assertEqual(call.args, ("sendRichMessage",))
+        data = call.kwargs["api_kwargs"]
+        self.assertNotIn("message_id", data)
+        self.assertEqual(len(data["rich_message"]["media"]), 2)
+        self.assertIn("PHONE PHOTO TEST", data["rich_message"]["html"])
+        self.assertFalse(vinted_alerts.enabled())
+
 
 class WireRequest(BaseRequest):
     read_timeout = 8
