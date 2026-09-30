@@ -19,18 +19,21 @@ automatic image or must-have matching.
 3. In the dashboard's **Connections** page, save the new token. The Vinted bot's
    token cannot be reused. The existing personal Telegram chat ID is the default;
    enter a different numeric destination only if needed.
-4. Save the **production App ID / Client ID** and **Cert ID / Client Secret** from
-   [eBay application keys](https://developer.ebay.com/my/keys). The application
-   needs production Browse access. No eBay buyer account password is needed.
+4. Choose **Public search** to read ordinary newly-listed eBay UK results without
+   an eBay login or API keys. Alternatively choose **Browse API** and save the
+   production Client ID / Client Secret from
+   [eBay application keys](https://developer.ebay.com/my/keys). Browse needs
+   production access and sufficient approved quota.
 5. Use **Check eBay access** and **Send test to new bot**. These are explicit
    owner-only POST actions. Merely opening the page never sends a message.
-6. Set the approved daily capacity, then enable eBay on a search and review its
+6. In API mode, set the approved daily capacity. Enable eBay on a search and review its
    keywords, price, postage, category, condition and listing type.
 
 Values are stored in the private persistent SQLite volume, like the existing
 bot's configuration. Secrets are password inputs, never returned to HTML, and
 never written to code or logs. Blank fields retain saved values. Environment
-variables override database values: `EBAY_CLIENT_ID`, `EBAY_CLIENT_SECRET`,
+variables override database values: `EBAY_SOURCE` (`public` or `browse`),
+`EBAY_CLIENT_ID`, `EBAY_CLIENT_SECRET`,
 `EBAY_TELEGRAM_TOKEN`, `EBAY_CHAT_ID`, `EBAY_DAILY_BUDGET`, `EBAY_TARGET_INTERVAL`.
 If an environment override is in use, change it through the hosting settings.
 
@@ -43,12 +46,15 @@ target, not a verified guarantee. A listing that eBay has not exposed cannot be
 discovered by polling faster. Telegram server acceptance also does not prove
 that a phone received its push notification.
 
-The scheduler uses up to 32
-concurrent request workers. Identical remote criteria share one request even
+The scheduler uses up to 64 concurrent request workers. Public search has a local
+ceiling of 10 request starts/second, shared across all searches. That is a local
+load bound, not permission from eBay or a guarantee of sustained access. At 100
+distinct queries it implies at least a 10-second start cycle, plus request time;
+network delay or rate limiting can exceed the 15-second goal. Identical remote criteria share one request even
 when their local price limits, notes or exclusions differ. Distinct queries are
 not broadened or combined in ways that change their meaning.
 
-With `G` distinct requests and target `T` seconds:
+For the optional Browse API source, with `G` distinct requests and target `T` seconds:
 
 ```
 daily search calls = G * 86,400 / T
@@ -95,13 +101,18 @@ the quota or that listings become searchable within 15 seconds. The automated
 
 ## New-listing and delivery behavior
 
-- Production Browse endpoint, `EBAY_GB`, `sort=newlyListed`, up to 200 results per
-  request. Price limits and shared title exclusions run locally.
-- First successful check, enabling/re-enabling eBay, or changing eBay filters
+- Public source: ordinary eBay UK search, Newly listed order, newest 60 results.
+  Browse source: production endpoint, `EBAY_GB`, `sort=newlyListed`, up to 200
+  results. Price limits and shared title exclusions run locally.
+- First successful check, switching source, enabling/re-enabling eBay, or changing eBay filters
   creates a quiet baseline. Shared note/photo edits do not reset it.
 - Prefer `itemOriginDate`, falling back to `itemCreationDate`. Missing dates,
   non-GBP prices, ended items and listings more than one hour old are skipped.
-  Previously observed items do not become new when their prices change.
+  Previously observed items do not become new when their prices change. Public
+  dates have minute precision and are interpreted as UK local time for freshness
+  only; that display timezone is unverified. Public records are excluded from the
+  15-second listing-to-alert score. Their response-to-Telegram delay is measured.
+  Up to 59 seconds of timestamp tolerance avoids discarding a same-minute arrival.
 - A page that fails to overlap the previous successful check raises a broad-search
   warning. Search APIs have finite result windows: narrow such queries. This
   version does not paginate the full catalogue or promise every listing.
@@ -109,7 +120,11 @@ the quota or that listings become searchable within 15 seconds. The automated
   button; external image previews are disabled so the alert does not depend on
   fetching an image. A saved reference photo follows silently, replying to that
   message, once pending listing alerts have priority. Dashboard images remain.
-- Transient search failures retry the affected search after five seconds.
+- Browse transient failures retry the affected search after five seconds. Public
+  failures retry after 15–30 seconds. Public HTTP 401/403, a verification challenge
+  or a redirect away from search pauses discovery until an explicit successful
+  access check. HTTP 429 waits at least 30 seconds and respects longer Retry-After.
+  There are no proxy pools, account rotation or challenge bypasses.
   Invalid query errors stay local. Authentication denial and API rate limits
   use a shared cooldown; `Retry-After` starts when the response is received.
   A slow request cannot stall other searches. Sending still obeys Telegram's
@@ -123,11 +138,11 @@ the quota or that listings become searchable within 15 seconds. The automated
 
 ## Deployment and rollback
 
-No new package dependencies are required. The existing entry point supervises a
+The public parser uses `lxml>=6.1.3` (also a dependency of the existing feed library). The existing entry point supervises a
 separate eBay process. Without the complete eBay connection, that process is idle;
 it cannot reuse the Vinted bot. Keep the existing persistent `/app/data` volume.
 
-Search schema 6 is additive. Before migration, startup creates and integrity-checks
+Search schema 7 is additive. Before migration, startup creates and integrity-checks
 a mode-0600 SQLite backup under `data/backups`. Existing rows are not rewritten.
 For rollback after eBay-only searches have been created, restore the verified
 pre-upgrade database backup **while all workers are stopped**, or retain this
@@ -144,8 +159,9 @@ platform isolation, stale responses, quiet baselines, price changes, overlapping
 searches, durable delivery, separate photo caches, auction/shipping checks,
 rolling quotas, concurrency, deadline accounting and a 100-search/5-second
 scheduler simulation. Simulation results do not establish live delivery speed.
-Live Browse access, granted quota and delivery from the new bot must be checked
-using the owner's production credentials.
+Live public access (or Browse access and quota) and delivery from the new bot
+must be checked from the deployment host. Local tests do not establish live
+100-search capacity or fifteen-second end-to-end delivery.
 
 Primary references:
 - [Browse inventory discovery](https://developer.ebay.com/develop/guides/buy/inventory-discovery-and-refresh-guide)
@@ -156,8 +172,10 @@ Primary references:
 
 ## Alternatives researched on 30 September 2026
 
-The implemented live worker still uses Browse. Public-page collection is a
-candidate alternative, not an enabled or proven 15-second source.
+The worker supports both public search and Browse. Existing configuration
+defaults to Browse until the owner explicitly selects public mode. Public search
+is implemented and tested but sustained live capacity and the 15-second deadline
+remain unverified.
 
 | Implementation | Verified approach | Relevance |
 | --- | --- | --- |
@@ -183,11 +201,14 @@ and stops on an error or challenge. For a deployment-host transport check:
 python diagnostics/ebay_public_probe.py --keywords "hollister gilet" --checks 2
 ```
 
-The next candidate design is a public-page collector sharing compatible broad
-searches, followed by local per-search filtering and the existing durable
-Telegram outbox. Broad result windows, query semantics, promoted/placeholder
-cards, changing layouts, transport delay and timestamp precision must be
-validated before switching discovery. Broader queries cannot be assumed to
-preserve eBay's relevance matching or capture every result. A public source
-removes Browse-call dependence; it does not make access unlimited or establish
-the requested deadline. Account rotation is not part of this design.
+The public collector shares only equivalent remote criteria and applies local
+price/exclusion filtering through the existing durable Telegram outbox. It does
+not broaden unrelated queries. The parser ignores placeholders and relaxed
+recommendations, requires newly-listed sorting and dates, and fails closed on
+unknown markup. Public pages are not an unlimited or guaranteed source.
+
+Implementation checks on 30 September 2026: 95 offline tests passed; Ruff, Black
+and dependency vulnerability checks passed. A captured 1.66 MB page produced 60
+readable results in about 96 ms offline. Ordinary page fetches took 6–12 seconds
+on successful workspace probes; other attempts timed out. Those results do not
+prove production latency or the alert deadline.

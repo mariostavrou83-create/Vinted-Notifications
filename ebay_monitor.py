@@ -29,10 +29,11 @@ PAGE_SIZE = 200
 
 
 class EbayError(Exception):
-    def __init__(self, message, retry_after=5, global_cooldown=False):
+    def __init__(self, message, retry_after=5, global_cooldown=False, halt=False):
         super().__init__(message)
         self.retry_after = retry_after
         self.global_cooldown = global_cooldown
+        self.halt = halt
 
 
 def retry_delay(value, now=None):
@@ -198,7 +199,9 @@ def parse_item(raw, config, now):
         not in ("www.ebay.co.uk", "www.ebay.com", "ebay.co.uk", "ebay.com")
     ):
         return None
-    if created is None or created > now + 60 or created < now - MAX_AGE:
+    public = raw.get("_dateSource") == "publicSearchMinute"
+    precision = 59 if public else 0
+    if created is None or created > now + 60 or created + precision < now - MAX_AGE:
         return None
     end = timestamp(raw.get("itemEndDate"))
     if end is not None and end <= now:
@@ -240,6 +243,8 @@ def parse_item(raw, config, now):
         "created": created,
         "auction": auction,
         "condition": str(raw.get("condition", "Not specified"))[:80],
+        "public": public,
+        "listed_label": str(raw.get("_listedLabel", ""))[:40],
     }
 
 
@@ -256,9 +261,13 @@ def format_alert(item, search):
         f"<b>{escape(item['title'])}</b>",
         f"{price_label}: <b>£{item['price'] / 100:.2f}</b> · Postage: {postage}",
         escape(item["condition"]),
-        "Listed: "
-        + datetime.fromtimestamp(item["created"], timezone.utc).strftime(
-            "%d %b %H:%M:%S UTC"
+        (
+            ("Listed (eBay): " + escape(item["listed_label"]) + " · minute precision")
+            if item.get("public")
+            else "Listed: "
+            + datetime.fromtimestamp(item["created"], timezone.utc).strftime(
+                "%d %b %H:%M:%S UTC"
+            )
         ),
     ]
     if item["auction"]:
@@ -278,7 +287,9 @@ def format_alert(item, search):
     return "\n".join(lines)
 
 
-def record_snapshot(search, items, attempted, warning="", interval=0, received_at=None):
+def record_snapshot(
+    search, items, attempted, warning="", interval=0, received_at=None, source="browse"
+):
     now = time.time()
     received_at = now if received_at is None else received_at
     with closing(connection()) as conn, conn:
@@ -301,7 +312,9 @@ def record_snapshot(search, items, attempted, warning="", interval=0, received_a
         ).fetchone()
         baseline = (
             state["baseline_at"]
-            if state and state["generation"] == search["ebay_generation"]
+            if state
+            and state["generation"] == search["ebay_generation"]
+            and state["source"] == source
             else None
         )
         if warning.startswith("Broad search:") and state and state["last_success"]:
@@ -333,7 +346,7 @@ def record_snapshot(search, items, attempted, warning="", interval=0, received_a
             item = parse_item(raw, search["ebay"], now)
             if (
                 not item
-                or item["created"] <= baseline
+                or item["created"] + (59 if item.get("public") else 0) <= baseline
                 or excluded_by(item["title"], search["exclusions"])
             ):
                 continue
@@ -362,9 +375,15 @@ def record_snapshot(search, items, attempted, warning="", interval=0, received_a
                     (
                         item["item_id"],
                         item["created"],
-                        "itemOriginDate"
-                        if timestamp(raw.get("itemOriginDate"))
-                        else "itemCreationDate",
+                        (
+                            "publicSearchMinute"
+                            if item.get("public")
+                            else (
+                                "itemOriginDate"
+                                if timestamp(raw.get("itemOriginDate"))
+                                else "itemCreationDate"
+                            )
+                        ),
                         attempted,
                         received_at,
                     ),
@@ -382,10 +401,15 @@ def record_snapshot(search, items, attempted, warning="", interval=0, received_a
                 now,
                 attempted + interval,
                 warning,
-                attempted - state["last_attempt"]
-                if state and state["last_attempt"]
-                else None,
+                (
+                    attempted - state["last_attempt"]
+                    if state and state["last_attempt"]
+                    else None
+                ),
             ),
+        )
+        conn.execute(
+            "UPDATE ebay_state SET source=? WHERE query_id=?", (source, search["id"])
         )
         # Dates reject older listings; only IDs from the recent window need local storage.
         conn.execute("DELETE FROM ebay_seen WHERE first_seen<?", (now - 2 * MAX_AGE,))
@@ -418,10 +442,14 @@ def record_failure(search, error, now):
                 ON CONFLICT(key) DO UPDATE SET value=MAX(value,excluded.value)""",
                 (now + error.retry_after,),
             )
+        if error.halt:
+            conn.execute(
+                "INSERT OR REPLACE INTO delivery_runtime VALUES ('ebay_public_paused',1)"
+            )
 
 
 class Poller:
-    def __init__(self, workers=32):
+    def __init__(self, workers=64):
         self.executor = ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="ebay-search"
         )
@@ -434,9 +462,16 @@ class Poller:
         )
 
     def fetch_group(self, group, config, attempted, interval):
-        identity = (config["client_id"], config["client_secret"])
+        source = config.get("source", "browse")
+        identity = (source, config["client_id"], config["client_secret"])
         if getattr(self.local, "identity", None) != identity:
-            self.local.client, self.local.identity = BrowseClient(config), identity
+            if source == "public":
+                from ebay_public import PublicClient
+
+                self.local.client = PublicClient(config)
+            else:
+                self.local.client = BrowseClient(config)
+            self.local.identity = identity
         try:
             items, warning = self.local.client.search(group[0]["ebay"])
             received_at = time.time()
@@ -444,7 +479,7 @@ class Poller:
                 fresh = get_search(search["id"])
                 if fresh and fresh["ebay_generation"] == search["ebay_generation"]:
                     record_snapshot(
-                        fresh, items, attempted, warning, interval, received_at
+                        fresh, items, attempted, warning, interval, received_at, source
                     )
         except EbayError as exc:
             for search in group:
@@ -458,7 +493,7 @@ class Poller:
                 del self.inflight[key]
                 try:
                     future.result()
-                except Exception as exc:  # noqa: BLE001 — supervisor must recover without logging tokens.
+                except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "eBay request worker recovered after %s", type(exc).__name__
                     )
@@ -528,7 +563,7 @@ async def run_delivery():
                     await asyncio.sleep(worker.send_slot_delay())
                     if not await worker.tick():
                         await asyncio.sleep(0.05)
-        except Exception as exc:  # noqa: BLE001 — supervisor must recover without logging tokens.
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "eBay Telegram connection retry after %s", type(exc).__name__
             )
@@ -541,6 +576,6 @@ def ebay_process():
     while True:
         try:
             time.sleep(poller.tick())
-        except Exception as exc:  # noqa: BLE001 — supervisor must recover without logging tokens.
+        except Exception as exc:  # noqa: BLE001
             logger.warning("eBay monitor recovering after %s", type(exc).__name__)
             time.sleep(5)

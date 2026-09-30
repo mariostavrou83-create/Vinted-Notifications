@@ -26,6 +26,7 @@ DEFAULTS = {
     "include_shipping": False,
 }
 CONFIG_KEYS = (
+    "source",
     "client_id",
     "client_secret",
     "telegram_token",
@@ -53,9 +54,7 @@ def platform_details(query_id):
     result["platform_mode"] = (
         "both"
         if result["vinted_enabled"] and result["ebay_enabled"]
-        else "ebay"
-        if result["ebay_enabled"]
-        else "vinted"
+        else "ebay" if result["ebay_enabled"] else "vinted"
     )
     result["ebay_url"] = search_url(result["ebay"])
     return result
@@ -155,10 +154,12 @@ def active_searches():
     with closing(connection()) as conn:
         ids = [
             r[0]
-            for r in conn.execute("""SELECT q.id FROM queries q
+            for r in conn.execute(
+                """SELECT q.id FROM queries q
             JOIN search_platforms s ON s.query_id=q.id
             LEFT JOIN search_dashboard d ON d.query_id=q.id
-            WHERE s.ebay_enabled=1 AND COALESCE(d.paused,0)=0 AND COALESCE(d.archived,0)=0""")
+            WHERE s.ebay_enabled=1 AND COALESCE(d.paused,0)=0 AND COALESCE(d.archived,0)=0"""
+            )
         ]
     from search_settings import get_search
 
@@ -174,6 +175,9 @@ def configuration():
         k: os.environ.get("EBAY_" + k.upper(), values.get("ebay_" + k, ""))
         for k in CONFIG_KEYS
     }
+    result["source"] = (
+        result["source"] if result["source"] in ("browse", "public") else "browse"
+    )
     try:
         result["daily_budget"] = max(
             100, min(MAX_DAILY_BUDGET, int(result["daily_budget"] or 5000))
@@ -199,6 +203,9 @@ def missing_configuration(config=None):
         "telegram_token": "new Telegram bot token",
         "chat_id": "Telegram chat ID",
     }
+    if config.get("source") == "public":
+        labels.pop("client_id")
+        labels.pop("client_secret")
     missing = [label for key, label in labels.items() if not config[key]]
     current = db.get_parameter("telegram_token") or ""
     if (
@@ -218,6 +225,8 @@ def save_configuration(form):
             continue  # Blank password fields mean keep the saved value.
         if len(value) > 1000 or any(ord(c) < 32 for c in value):
             raise ValueError("That connection value is invalid.")
+        if key == "source" and value not in ("browse", "public"):
+            raise ValueError("Choose public search or Browse API.")
         if key == "daily_budget" and (
             not value.isdigit() or not 100 <= int(value) <= MAX_DAILY_BUDGET
         ):
@@ -242,6 +251,19 @@ def save_configuration(form):
             raise ValueError("The Telegram chat ID must be a number.")
         values["ebay_" + key] = value
     with closing(connection()) as conn, conn:
+        old_source = conn.execute(
+            "SELECT value FROM parameters WHERE key='ebay_source'"
+        ).fetchone()
+        if "ebay_source" in values and values["ebay_source"] != (
+            old_source[0] if old_source else "browse"
+        ):
+            conn.execute(
+                "UPDATE search_platforms SET ebay_generation=ebay_generation+1"
+            )
+            conn.execute("DELETE FROM ebay_state")
+            conn.execute(
+                "UPDATE alert_outbox SET status='cancelled',error='eBay source changed' WHERE platform='ebay' AND status='pending'"
+            )
         conn.executemany(
             "INSERT OR REPLACE INTO parameters(key,value) VALUES (?,?)", values.items()
         )
@@ -259,9 +281,14 @@ def connection_summary():
             "SELECT COALESCE(SUM(calls),0) FROM ebay_call_buckets WHERE minute>=?",
             (int((time.time() - 86400) / 60),),
         ).fetchone()[0]
+        public_paused = conn.execute(
+            "SELECT value FROM delivery_runtime WHERE key='ebay_public_paused'"
+        ).fetchone()
     capacity_interval = call_spacing(config) * max(1, groups)
     target = config["target_interval"]
     return {
+        "source": config["source"],
+        "public_paused": bool(public_paused and public_paused[0]),
         "alert_target": ALERT_TARGET_SECONDS,
         "timing": delivery_timing(),
         "target_interval": target,
@@ -289,12 +316,17 @@ def delivery_timing(now=None):
             (now - 86400,),
         ).fetchall()
     totals, discovery, dispatch = [], [], []
-    pending_late = invalid = fallback = failed = 0
+    pending_late = invalid = fallback = failed = public = 0
     for row in rows:
         if row["status"] == "cancelled":
             continue
         failed += row["status"] == "failed"
         listed, seen, sent = row["listed_at"], row["response_received"], row["sent_at"]
+        if row["date_source"] == "publicSearchMinute":
+            public += 1
+            if sent is not None and sent >= seen and row["status"] == "sent":
+                dispatch.append(sent - seen)
+            continue  # Minute timestamps and an unverified display timezone cannot prove a 15s deadline.
         fallback += row["date_source"] != "itemOriginDate"
         if listed > seen or (sent is not None and sent < seen):
             invalid += 1
@@ -315,6 +347,7 @@ def delivery_timing(now=None):
 
     return {
         "sample_size": len(rows),
+        "public_records": public,
         "sent": len(totals),
         "within_target": sum(t <= ALERT_TARGET_SECONDS for t in totals),
         "late": sum(t > ALERT_TARGET_SECONDS for t in totals),
@@ -329,6 +362,8 @@ def delivery_timing(now=None):
 
 
 def call_spacing(config):
+    if config.get("source") == "public":
+        return 0.1  # A local ceiling of 10 public requests/second, not an eBay quota grant.
     # Ten percent headroom; rolling 24h accounting also survives restarts.
     return max(0.02, 86400 / (config["daily_budget"] * 0.9))
 
@@ -336,6 +371,29 @@ def call_spacing(config):
 def reserve_call(config, now):
     with closing(connection()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
+        if config.get("source") == "public":
+            paused = conn.execute(
+                "SELECT value FROM delivery_runtime WHERE key='ebay_public_paused'"
+            ).fetchone()
+            if paused and paused[0]:
+                return now + 3600
+            latest = conn.execute(
+                "SELECT value FROM delivery_runtime WHERE key='ebay_public_last_call'"
+            ).fetchone()
+            cooldown = conn.execute(
+                "SELECT value FROM delivery_runtime WHERE key='ebay_api_cooldown'"
+            ).fetchone()
+            due = max(
+                (latest[0] if latest else 0) + call_spacing(config),
+                cooldown[0] if cooldown else 0,
+            )
+            if now < due:
+                return due
+            conn.execute(
+                "INSERT OR REPLACE INTO delivery_runtime VALUES ('ebay_public_last_call',?)",
+                (now,),
+            )
+            return None
         cutoff = int((now - 86400) // 60)
         conn.execute("DELETE FROM ebay_call_buckets WHERE minute<?", (cutoff,))
         count, oldest = conn.execute(

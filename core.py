@@ -1,14 +1,17 @@
-import db
-import requests
-import search_settings
 from html import escape
 from time import monotonic, time
-from pyVintedVN import Vinted, requester
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+
+import requests
+
+import db
+import search_settings
 from logger import get_logger
+from pyVintedVN import Vinted, requester
 
 # Get logger for this module
 logger = get_logger(__name__)
+
 
 def process_query(query, name=None):
     """
@@ -283,14 +286,20 @@ def process_items(queue):
             all_items = vinted.items.search(query[1], nbr_items=items_per_query)
         except Exception:
             failures += 1
-            logger.exception("Search %s failed; continuing with remaining searches", query[0])
+            logger.exception(
+                "Search %s failed; continuing with remaining searches", query[0]
+            )
             continue
         # Filter to only include new items. This should reduce the amount of db calls.
         data = [item for item in all_items if item.is_new_item()]
         queue.put((data, query[0]))
         logger.info(f"Scraped {len(data)} items for query: {query[1]}")
-    logger.info("Search cycle finished: %s/%s succeeded in %.1fs",
-                len(all_queries) - failures, len(all_queries), monotonic() - started)
+    logger.info(
+        "Search cycle finished: %s/%s succeeded in %.1fs",
+        len(all_queries) - failures,
+        len(all_queries),
+        monotonic() - started,
+    )
 
 
 def clear_item_queue(items_queue, new_items_queue):
@@ -302,8 +311,13 @@ def clear_item_queue(items_queue, new_items_queue):
         batch = items_queue.get()
         data, query_id = batch[:2]
         search = search_settings.get_search(query_id)
-        if (search is None or not search.get('vinted_enabled', True) or search.get('paused') or search.get('archived')
-                or (len(batch) > 2 and batch[2] != search['query'])):
+        if (
+            search is None
+            or not search.get("vinted_enabled", True)
+            or search.get("paused")
+            or search.get("archived")
+            or (len(batch) > 2 and batch[2] != search["query"])
+        ):
             return True  # Deleted while the HTTP request was in flight.
         banwords_str = db.get_parameter("banwords")
 
@@ -311,8 +325,10 @@ def clear_item_queue(items_queue, new_items_queue):
         # ever produced anything?" flag, and the updates made below would otherwise
         # cut a first-run priming pass short right after the first item.
         last_query_timestamp = db.get_last_timestamp(query_id)
-        is_first_run = last_query_timestamp is None or search.get('rebaseline', False)
-        listing_floor = search_settings.listing_cutoff(query_id, [item.id for item in data], time())
+        is_first_run = last_query_timestamp is None or search.get("rebaseline", False)
+        listing_floor = search_settings.listing_cutoff(
+            query_id, [item.id for item in data], time()
+        )
         if is_first_run:
             logger.info(
                 f"First run for query {query_id}: recording {len(data)} item(s) "
@@ -322,12 +338,16 @@ def clear_item_queue(items_queue, new_items_queue):
         to_notify = []
         filtered_ids = []
         seen = db.get_seen_item_ids([item.id for item in data])
-        locally_filtered = search_settings.filtered_ids(query_id, [item.id for item in data])
+        locally_filtered = search_settings.filtered_ids(
+            query_id, [item.id for item in data]
+        )
         allowlist = db.get_allowlist()
         watermark = last_query_timestamp
         for item in reversed(data):
 
-            if not is_first_run and (not str(item.id).isdigit() or int(item.id) <= listing_floor):
+            if not is_first_run and (
+                not str(item.id).isdigit() or int(item.id) <= listing_floor
+            ):
                 # Price changes, bumps and late matches keep their original ID.
                 # Do not mistake first appearance in this query for a new listing.
                 filtered_ids.append(item.id)
@@ -338,10 +358,15 @@ def clear_item_queue(items_queue, new_items_queue):
             # locally so clearing a rule does not replay the previous catalogue.
             if str(item.id) in locally_filtered:
                 continue
-            blocked_by = search_settings.excluded_by(item.title, search['exclusions'])
+            blocked_by = search_settings.excluded_by(item.title, search["exclusions"])
             if blocked_by:
                 filtered_ids.append(item.id)
-                logger.debug("Item %s excluded by search #%s rule %r", item.id, query_id, blocked_by)
+                logger.debug(
+                    "Item %s excluded by search #%s rule %r",
+                    item.id,
+                    query_id,
+                    blocked_by,
+                )
                 continue
 
             # The watermark is only meaningful when the API actually supplied a
@@ -373,10 +398,18 @@ def clear_item_queue(items_queue, new_items_queue):
             # Being recorded is what stops an item coming back next run, so every
             # item that reaches this point is written to the db whether or not it
             # ends up being announced.
-            alert = None if is_first_run else {
-                'content': format_alert(item, search, db.get_parameter('message_template')),
-                'url': item.url, 'search_name': search['query_name'] or f'Search #{query_id}',
-                'reference_id': search.get('reference_id')}
+            alert = (
+                None
+                if is_first_run
+                else {
+                    "content": format_alert(
+                        item, search, db.get_parameter("message_template")
+                    ),
+                    "url": item.url,
+                    "search_name": search["query_name"] or f"Search #{query_id}",
+                    "reference_id": search.get("reference_id"),
+                }
+            )
             seen.add(str(item.id))
             watermark = max(watermark or 0, item.raw_timestamp)
             recorded = db.add_item_to_db(
@@ -393,7 +426,9 @@ def clear_item_queue(items_queue, new_items_queue):
                 to_notify.append(item)
 
         search_settings.remember_filtered(query_id, filtered_ids)
-        search_settings.remember_listing_frontier(query_id, [item.id for item in data], time())
+        search_settings.remember_listing_frontier(
+            query_id, [item.id for item in data], time()
+        )
         if watermark is not None and watermark != last_query_timestamp:
             db.update_last_timestamp(query_id, watermark)
         if is_first_run:
@@ -401,61 +436,84 @@ def clear_item_queue(items_queue, new_items_queue):
             # Otherwise the first future matching item would also be silenced.
             if db.get_last_timestamp(query_id) is None:
                 db.update_last_timestamp(query_id, int(time()))
-            if search.get('rebaseline'):
-                search_settings.finish_baseline(query_id, search['query'])
+            if search.get("rebaseline"):
+                search_settings.finish_baseline(query_id, search["query"])
             return True
 
         # The silent first run handles the existing catalogue. On later runs,
         # queue every unseen item: truncating here permanently loses alerts
         # because all these IDs have already been recorded in the database.
         if to_notify:
-            logger.info(f"Queuing {len(to_notify)} new item alerts for query {query_id}")
+            logger.info(
+                f"Queuing {len(to_notify)} new item alerts for query {query_id}"
+            )
         for item in to_notify:
             # We create the message
             message_template = db.get_parameter("message_template")
             content = format_alert(item, search, message_template)
             # add the item to the queue
             reference = None
-            if search.get('reference_id'):
-                reference = {'id': search['reference_id'], 'query_id': query_id,
-                             'name': search['query_name'] or f'Search #{query_id}'}
-            new_items_queue.put((content, item.url, "Open Vinted", None, None, reference))
-            logger.info("Queued item %s for search #%s; observed-to-queue %.3fs",
-                        item.id, query_id, max(0, time() - getattr(item, 'observed_at', time())))
+            if search.get("reference_id"):
+                reference = {
+                    "id": search["reference_id"],
+                    "query_id": query_id,
+                    "name": search["query_name"] or f"Search #{query_id}",
+                }
+            new_items_queue.put(
+                (content, item.url, "Open Vinted", None, None, reference)
+            )
+            logger.info(
+                "Queued item %s for search #%s; observed-to-queue %.3fs",
+                item.id,
+                query_id,
+                max(0, time() - getattr(item, "observed_at", time())),
+            )
             # new_items_queue.put((content, item.url, "Open Vinted", item.buy_url, "Open buy page"))
         return True
     return False
 
 
 def format_alert(item, search, message_template):
-    keyword = parse_qs(urlparse(search['query']).query).get('search_text', [''])[0]
-    name = search['query_name'] or keyword or 'Filtered search'
+    keyword = parse_qs(urlparse(search["query"]).query).get("search_text", [""])[0]
+    name = search["query_name"] or keyword or "Filtered search"
     prefix = f"🔎 <b>#{search['id']} · {escape(name[:100])}</b>\n\n"
-    reminder = ("\n\n📝 <b>Your buying reminder</b>\n" + escape(search['reminder'])) if search['reminder'] else ''
+    reminder = (
+        ("\n\n📝 <b>Your buying reminder</b>\n" + escape(search["reminder"]))
+        if search["reminder"]
+        else ""
+    )
     guide = []
-    if search.get('max_buy') is not None:
+    if search.get("max_buy") is not None:
         guide.append(f"Buy up to <b>£{search['max_buy']/100:.2f}</b>")
-    low, high = search.get('resale_low'), search.get('resale_high')
+    low, high = search.get("resale_low"), search.get("resale_high")
     if low is not None or high is not None:
-        target = (f'£{low/100:.2f}–£{high/100:.2f}' if low is not None and high is not None else
-                  f'from £{low/100:.2f}' if low is not None else f'up to £{high/100:.2f}')
-        guide.append('Your resale target: ' + target)
-    if search.get('must_have'):
-        guide.append('Must have: ' + escape(search['must_have'][:400]))
+        target = (
+            f"£{low/100:.2f}–£{high/100:.2f}"
+            if low is not None and high is not None
+            else f"from £{low/100:.2f}" if low is not None else f"up to £{high/100:.2f}"
+        )
+        guide.append("Your resale target: " + target)
+    if search.get("must_have"):
+        guide.append("Must have: " + escape(search["must_have"][:400]))
     if guide:
-        reminder = '\n\n💷 <b>Your buying guide</b>\n' + '\n'.join(guide) + reminder
+        reminder = "\n\n💷 <b>Your buying guide</b>\n" + "\n".join(guide) + reminder
     body = message_template.format(
         title=escape(item.title[:500]),
-        price=escape(str(item.price) + ' ' + item.currency),
-        brand=escape((item.brand_title or '')[:120]),
+        price=escape(str(item.price) + " " + item.currency),
+        brand=escape((item.brand_title or "")[:120]),
         image=None if item.photo is None else escape(item.photo, quote=True),
     )
     content = prefix + body + reminder
     if len(content) > 4000:
         # Keep valid HTML and all of the personal reminder if a custom template
         # or image URL would otherwise push an alert over Telegram's limit.
-        content = (prefix + escape(item.title[:500]) + '\n' +
-                   escape(str(item.price) + ' ' + item.currency) + reminder)
+        content = (
+            prefix
+            + escape(item.title[:500])
+            + "\n"
+            + escape(str(item.price) + " " + item.currency)
+            + reminder
+        )
     return content
 
 
@@ -508,7 +566,7 @@ def check_version():
         else:
             # If we can't check, assume it's up to date
             return True, ver, ver, github_url
-    except Exception as e:
-        logger.error(f"Error checking for new version: {str(e)}", exc_info=True)
+    except Exception:
+        logger.exception("Error checking for new version")
         # If we can't check, assume it's up to date
         return True, ver, ver, github_url

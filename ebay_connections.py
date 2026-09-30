@@ -1,11 +1,13 @@
 """Owner-triggered connection checks. Tokens and response bodies never leave here."""
 
 import time
+from contextlib import closing
 
 import requests
 
 from ebay_monitor import BrowseClient, EbayError
 from ebay_store import DEFAULTS, configuration, missing_configuration, reserve_call
+from search_settings import connection
 
 
 def test_connection(kind):
@@ -22,7 +24,7 @@ def test_connection(kind):
                 + "/sendMessage",
                 json={
                     "chat_id": config["chat_id"],
-                    "text": "MSJ eBay Finder connected. New eBay listing alerts will arrive in this bot.",
+                    "text": "MSJ eBay Finder — connection test received. Listing monitoring is configured separately in your dashboard.",
                 },
                 timeout=(5, 15),
             )
@@ -36,6 +38,23 @@ def test_connection(kind):
             ) from None
         return "Test sent to your new eBay Telegram bot."
     if kind == "ebay":
+        if config["source"] == "public":
+            from ebay_public import PublicClient
+
+            try:
+                items, warning = PublicClient(config).search(
+                    dict(DEFAULTS, keywords="hollister jacket")
+                )
+            except EbayError as exc:
+                raise ValueError(str(exc)) from None
+            with closing(connection()) as conn, conn:
+                conn.execute(
+                    "DELETE FROM delivery_runtime WHERE key IN ('ebay_public_paused','ebay_api_cooldown')"
+                )
+            return (
+                f"Public eBay search succeeded: {len(items)} readable listings. No listing alerts were sent by this check."
+                + (" " + warning if warning else "")
+            )
         if not config["client_id"] or not config["client_secret"]:
             raise ValueError("Save your production eBay App ID and Cert ID first.")
         wait = reserve_call(config, time.time())

@@ -18,6 +18,11 @@ def migrate(conn):
         query_id INTEGER NOT NULL REFERENCES queries(id) ON DELETE CASCADE,
         item_id TEXT NOT NULL, first_seen REAL NOT NULL,
         PRIMARY KEY(query_id,item_id))""")
+    state_columns = {row[1] for row in conn.execute("PRAGMA table_info(ebay_state)")}
+    if "source" not in state_columns:
+        conn.execute(
+            "ALTER TABLE ebay_state ADD COLUMN source TEXT NOT NULL DEFAULT 'browse'"
+        )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_ebay_seen_time ON ebay_seen(first_seen)"
     )
