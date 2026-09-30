@@ -5,6 +5,7 @@ missing dates fail closed. Public dates have minute precision and cannot
 prove a fifteen-second publication-to-notification deadline.
 """
 
+import json
 import re
 import time
 from datetime import datetime
@@ -15,8 +16,12 @@ from zoneinfo import ZoneInfo
 import requests
 from lxml import etree, html
 
+from logger import get_logger
+
 MAX_BYTES = 4_000_000
+DIAGNOSTIC_BYTES = 16_384
 PAGE_SIZE = 60
+logger = get_logger(__name__)
 UK = ZoneInfo("Europe/London")
 MONTHS = {
     name: i
@@ -275,6 +280,94 @@ def parse_page(body, config, now=None):
     return items, warning
 
 
+def response_diagnostic(response, started, body=None):
+    """Classify a bounded sample; never return response text, URLs or cookies."""
+    sample = bytearray()
+    read_state = "complete"
+    if body is not None:
+        sample.extend(body[:DIAGNOSTIC_BYTES])
+        if len(body) > DIAGNOSTIC_BYTES:
+            read_state = "limited"
+    else:
+        try:
+            for chunk in response.iter_content(4096):
+                sample.extend(chunk[: DIAGNOSTIC_BYTES - len(sample)])
+                if len(sample) >= DIAGNOSTIC_BYTES or time.monotonic() - started > 10:
+                    read_state = "limited"
+                    break
+        except requests.RequestException:
+            read_state = "read-failed"
+    lower = bytes(sample).lower()
+    markers = {
+        "human-verification": (
+            b"verify you are human",
+            b"verifying your browser",
+            b"pardon our interruption",
+            b"complete the captcha",
+            b"checking your browser",
+        ),
+        "automated-traffic": (
+            b"automated queries",
+            b"automated traffic",
+            b"unusual traffic",
+        ),
+        "network-policy": (
+            b"egress policy",
+            b"proxy access denied",
+            b"blocked by policy",
+            b"robots_denied",
+        ),
+        "access-denied": (
+            b"access denied",
+            b"you don't have permission",
+            b"request blocked",
+            b"forbidden",
+        ),
+        "sign-in": (b"sign in to your account", b"sign in to ebay"),
+    }
+    page_kind = next(
+        (
+            name
+            for name, values in markers.items()
+            if any(value in lower for value in values)
+        ),
+        "unclassified" if sample else "empty",
+    )
+    content_type = (
+        response.headers.get("Content-Type", "").split(";", 1)[0].lower().strip()
+    )
+    if content_type not in ("text/html", "text/plain", "application/json", ""):
+        content_type = "other"
+    server = response.headers.get("Server", "").lower().strip()
+    if server not in (
+        "akamaighost",
+        "envoy",
+        "cloudflare",
+        "nginx",
+        "ebay-proxy-server",
+        "",
+    ):
+        server = "other"
+    destination = urlparse(response.url)
+    on_ebay = destination.hostname in ("www.ebay.co.uk", "ebay.co.uk")
+    endpoint = (
+        "ebay-search" if on_ebay and destination.path.startswith("/sch/") else "other"
+    )
+    result = {
+        "status": response.status_code,
+        "page_kind": page_kind,
+        "content_type": content_type or "absent",
+        "server": server or "absent",
+        "destination": endpoint,
+        "redirects": len(response.history),
+        "authentication_header": bool(response.headers.get("WWW-Authenticate")),
+        "sample_bytes": len(sample),
+        "sample_state": read_state,
+    }
+    logger.warning("ebay_public_response %s", json.dumps(result, sort_keys=True))
+    return result
+
+
 class PublicClient:
     def __init__(self, config=None, session=None):
         self.session = session or requests.Session()
@@ -300,13 +393,17 @@ class PublicClient:
                         True,
                     )
                 if response.status_code in (401, 403):
+                    diagnostic = response_diagnostic(response, started)
                     raise EbayError(
-                        "eBay public search access denied. Monitoring paused.",
+                        f"eBay public search returned HTTP {response.status_code} "
+                        f"(page type: {diagnostic['page_kind']}). Monitoring paused. "
+                        "This response alone does not identify the cause; safe diagnostics were logged.",
                         3600,
                         True,
                         halt=True,
                     )
                 if response.status_code != 200:
+                    response_diagnostic(response, started)
                     raise EbayError(
                         f"eBay public search returned HTTP {response.status_code}.", 30
                     )
@@ -315,6 +412,7 @@ class PublicClient:
                     not in ("www.ebay.co.uk", "ebay.co.uk")
                     or "/sch/" not in urlparse(response.url).path
                 ):
+                    response_diagnostic(response, started)
                     raise EbayError(
                         "eBay redirected away from public search. Monitoring paused.",
                         3600,
@@ -329,7 +427,11 @@ class PublicClient:
                             "eBay public search exceeded its response budget; retrying.",
                             15,
                         )
-                return parse_page(bytes(body), config)
+                try:
+                    return parse_page(bytes(body), config)
+                except EbayError:
+                    response_diagnostic(response, started, body)
+                    raise
         except requests.RequestException:
             raise EbayError(
                 "eBay public search connection failed; will retry.", 15

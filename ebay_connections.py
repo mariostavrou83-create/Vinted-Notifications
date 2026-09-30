@@ -46,6 +46,17 @@ def test_connection(kind):
                     dict(DEFAULTS, keywords="hollister jacket")
                 )
             except EbayError as exc:
+                with closing(connection()) as conn, conn:
+                    if exc.halt:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO delivery_runtime VALUES ('ebay_public_paused',1)"
+                        )
+                    if exc.global_cooldown:
+                        conn.execute(
+                            """INSERT INTO delivery_runtime VALUES ('ebay_api_cooldown',?)
+                            ON CONFLICT(key) DO UPDATE SET value=MAX(value,excluded.value)""",
+                            (time.time() + exc.retry_after,),
+                        )
                 raise ValueError(str(exc)) from None
             with closing(connection()) as conn, conn:
                 conn.execute(
