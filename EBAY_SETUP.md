@@ -29,6 +29,18 @@ automatic image or must-have matching.
 6. In API mode, set the approved daily capacity. Enable eBay on a search and review its
    keywords, price, postage, category, condition and listing type.
 
+In API mode, **Check eBay access** also requests the application's Browse limits
+from eBay Developer Analytics after a successful production search. Connections
+shows the observed limits, remaining calls, reset times and check time, and
+compares all recognized search windows with the enabled distinct search groups.
+It excludes the separate bulk-item lookup quota. Unknown resources, missing daily
+limits, failed responses and observations older than 24 hours do not establish
+capacity. Changing either credential invalidates the displayed observation.
+The check does not change the configured scheduler budget or reset its durable
+usage ledger. Remaining calls are an observation, not a live balance; limits
+shared with other callers and indexing/network delays still matter. Verify
+the actual response from the production keyset before relying on capacity.
+
 Values are stored in the private persistent SQLite volume, like the existing
 bot's configuration. Secrets are password inputs, never returned to HTML, and
 never written to code or logs. Blank fields retain saved values. Environment
@@ -171,6 +183,7 @@ must be checked from the deployment host. Local tests do not establish live
 100-search capacity or fifteen-second end-to-end delivery.
 
 Primary references:
+- [Developer Analytics response and authentication specification](https://developer.ebay.com/api-docs/developer/analytics/openapi/3/developer_analytics_v1_beta_oas3.json)
 - [Browse inventory discovery](https://developer.ebay.com/develop/guides/buy/inventory-discovery-and-refresh-guide)
 - [eBay call limits](https://www.developer.ebay.com/develop/get-started/api-call-limits)
 - [eBay production requirements](https://developer.ebay.com/api-docs/buy/static/buy-requirements.html)

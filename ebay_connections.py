@@ -74,8 +74,15 @@ def test_connection(kind):
                 f"The next eBay request slot is in {max(1, int(wait - time.time()))} seconds. Try again then."
             )
         try:
-            BrowseClient(config).search(dict(DEFAULTS, keywords="hollister"))
+            client = BrowseClient(config)
+            client.search(dict(DEFAULTS, keywords="hollister"))
         except EbayError as exc:
             raise ValueError(str(exc)) from None
-        return "eBay production search succeeded. No listing alerts were sent by this check."
+        from ebay_quota import check_allowance
+
+        allowance = check_allowance(client, config)
+        return (
+            "eBay production search succeeded. No listing alerts were sent by this check. "
+            + allowance
+        )
     raise ValueError("Unknown connection check.")

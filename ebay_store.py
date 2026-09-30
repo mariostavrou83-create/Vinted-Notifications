@@ -272,6 +272,7 @@ def save_configuration(form):
 def connection_summary():
     config = configuration()
     from ebay_monitor import grouped_searches
+    from ebay_quota import allowance_summary
 
     searches = active_searches()
     active = len(searches)
@@ -298,6 +299,7 @@ def connection_summary():
         "missing": missing_configuration(config),
         "configured": {k: bool(config[k]) for k in CONFIG_KEYS},
         "daily_budget": config["daily_budget"],
+        "allowance": allowance_summary(config, groups),
         "calls_used": used,
         "active": active,
         "groups": groups,
