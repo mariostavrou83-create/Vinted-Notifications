@@ -55,7 +55,7 @@ def create_app(test_config=None):
     app = Flask(__name__)
     app.config.update(
         SECRET_KEY=auth_row()["session_key"],
-        MAX_CONTENT_LENGTH=9 * 1024 * 1024,
+        MAX_CONTENT_LENGTH=33 * 1024 * 1024,
         MAX_FORM_MEMORY_SIZE=100_000,
         MAX_FORM_PARTS=50,
         SESSION_COOKIE_NAME="msj_session",
@@ -300,10 +300,14 @@ def create_app(test_config=None):
         }
         if request.method == "POST":
             try:
-                upload = request.files.get("photo")
+                from alert_images import reference_collage
+
+                uploads = [
+                    file for file in request.files.getlist("photo") if file.filename
+                ]
                 photo = (
-                    store.normalize_photo(upload.stream)
-                    if upload and upload.filename
+                    reference_collage([file.stream for file in uploads])
+                    if uploads
                     else None
                 )
                 store.save_search(query_id, request.form, photo)
@@ -397,6 +401,48 @@ def create_app(test_config=None):
             "page": min(100000, max(1, source.get("page", 1, type=int) or 1)),
         }
 
+    @app.post("/search/<int:query_id>/preview-notification")
+    def preview_notification(query_id):
+        import asyncio
+
+        from telegram.error import BadRequest, TelegramError
+
+        from vinted_alerts import preview_and_enable
+
+        if not search_settings.get_search(query_id):
+            abort(404)
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            previous = conn.execute(
+                "SELECT value FROM delivery_runtime WHERE key='preview_at'"
+            ).fetchone()
+            if previous and previous[0] > time.time() - 30:
+                flash("Please wait 30 seconds before sending another preview.", "error")
+                return redirect(url_for("edit", query_id=query_id))
+            conn.execute(
+                "INSERT OR REPLACE INTO delivery_runtime VALUES ('preview_at', ?)",
+                (time.time(),),
+            )
+        try:
+            asyncio.run(preview_and_enable(query_id))
+            flash(
+                "Telegram accepted the single-message preview. New Vinted alerts now use this layout.",
+                "success",
+            )
+        except ValueError as exc:
+            flash(str(exc), "error")
+        except TelegramError as exc:
+            reason = (
+                str(exc)[:200] if isinstance(exc, BadRequest) else type(exc).__name__
+            )
+            flash(
+                "Telegram could not accept the new layout ("
+                + reason
+                + "). The current format is unchanged.",
+                "error",
+            )
+        return redirect(url_for("edit", query_id=query_id))
+
     @app.get("/finds")
     def finds():
         filters = find_filters(request.args)
@@ -459,7 +505,7 @@ def create_app(test_config=None):
         return (
             render_template(
                 "msj_error.html",
-                message="That upload is too large. Choose a photo smaller than 8 MB.",
+                message="That upload is too large. Choose up to four photos, each smaller than 8 MB.",
             ),
             413,
         )
