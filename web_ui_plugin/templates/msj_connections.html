@@ -17,6 +17,23 @@
 <aside class="form-card"><h2>Connection checks</h2><p>Save your details first, then check each connection.</p>
 {% if info.source=='public' and info.public_paused %}<p class="coverage-warning">Public search is paused after an access restriction. A successful access check resumes it.</p>{% endif %}<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="ebay">Check eBay access</button></form>
 <form method="post" class="connection-actions"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="telegram">Send test to new bot</button></form>
+{% if info.source=='browse' %}
+<div class="guide-section"><h2>eBay-reported allowance</h2>
+{% set allowance = info.allowance %}
+{% if not allowance.checked %}<p><b>Allowance not checked for these credentials.</b> Save your production keys, then use Check eBay access. The configured allowance below is not confirmation from eBay.</p>
+{% else %}<p>Last check: {{allowance.checked_at}}.</p>
+{% if allowance.rows %}
+{% for rate in allowance.rows %}<p><b>{{rate.limit}} search calls per {{rate.window_label}}</b>. Remaining when checked: <b>{{rate.remaining if rate.remaining is not none else 'not reported'}}</b>.{% if rate.reset_label %}<br><small>Reported reset: {{rate.reset_label}}.</small>{% endif %}</p>{% endfor %}
+{% if allowance.stale %}<p class="coverage-warning">This allowance snapshot is out of date. Check eBay access again before relying on it.</p>
+{% elif not allowance.complete %}<p class="coverage-warning">The response did not identify every relevant limit or a daily search allowance. Capacity remains unverified.</p>
+{% else %}<p>The reported limits budget for up to <b>{{allowance.capacity}} distinct searches every {{info.target_interval}} seconds</b>, with 10% headroom.</p>
+{% if not info.active %}<p>No eBay searches are enabled yet.</p>{% elif allowance.meets_target %}<p>The reported limits cover the configured polling rate for {{info.groups}} distinct searches. This is a capacity calculation, not a live speed measurement.</p>{% else %}<p class="coverage-warning">The reported limits do not cover your {{info.groups}} distinct searches at the {{info.target_interval}}-second polling target.</p>{% endif %}
+{% endif %}
+{% if allowance.exceeds_reported %}<p class="coverage-warning">Your configured allowance exceeds the last daily limit reported by eBay. Correct it before enabling or increasing searches.</p>{% endif %}
+{% else %}<p class="coverage-warning">{{allowance.message}}</p>{% endif %}
+{% endif %}
+<small>This check does not change the scheduler allowance or grant more calls. Remaining calls are a snapshot, not a live balance. Other applications using these keys, shorter limits, request time and eBay indexing can reduce capacity. Separate bulk-item lookup limits are excluded.</small>
+</div>{% endif %}
 <div class="guide-section"><h2>eBay checking speed</h2><p><b>{{info.active}}</b> active eBay searches · <b>{{info.groups}}</b> distinct requests per cycle.</p><p>Polling target: <b>{{info.target_interval}} seconds per search</b>. Alert target: <b>{{info.alert_target}} seconds from listing</b>.</p>{% if info.source=='browse' and not info.meets_target %}<p class="coverage-warning">Configured capacity cannot meet the polling target. These searches need approximately {{info.required_budget}} approved calls per day, including retry headroom.</p>{% endif %}{% if info.active and not info.has_delivery_headroom %}<p class="coverage-warning">The estimated polling cycle leaves no delivery headroom for your 15-second alert requirement.</p>{% endif %}<p>Estimated cycle: <b>{{info.interval}} seconds</b>, plus request time. Equivalent requests are shared across searches.</p>{% if info.source=='browse' %}<p>{{info.calls_used}} API calls used in the last 24 hours. The scheduler keeps 10% headroom.</p>{% else %}<p>Public search uses no Browse API calls. Requests share connections, run concurrently and respect eBay retry delays. The estimated cycle is a scheduling target, not a verified live measurement.</p>{% endif %}<small>Listings can only alert once eBay makes them searchable. Broad searches show a coverage warning when the result window may be incomplete. Auctions show the current bid, not a guaranteed purchase price.</small></div>
 <div class="guide-section"><h2>Measured alert delay</h2>
 {% set timing = info.timing %}
