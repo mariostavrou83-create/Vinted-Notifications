@@ -411,6 +411,52 @@ class QuotaTests(EbayFixture, unittest.TestCase):
         self.assertTrue(all(len(c) >= 2 for c in calls.values()))
         self.assertTrue(all(4.99 <= c[1] - c[0] <= 5.02 for c in calls.values()))
 
+    def test_settings_reload_during_request_preserves_poll_reservation(self):
+        self.enable(1)
+        config = {
+            "client_id": "id",
+            "client_secret": "secret",
+            "telegram_token": "12345:" + "x" * 25,
+            "chat_id": "123",
+            "daily_budget": 100000,
+            "target_interval": 5,
+        }
+        jobs = []
+
+        class ControlledExecutor:
+            def submit(self, fn, group, config, now, interval):
+                future = Future()
+                jobs.append((now, future))
+                return future
+
+            def shutdown(self, **kwargs):
+                pass
+
+        poller = monitor.Poller()
+        poller.executor.shutdown()
+        poller.executor = ControlledExecutor()
+        with patch.object(store, "configuration", return_value=config):
+            poller.tick(now=1000)
+            # Reads fresh dictionaries from SQLite before the worker has
+            # committed its new next_poll. The database still says 'due'.
+            poller.tick(now=1001)
+            self.assertEqual(len(jobs), 1)
+            jobs[0][1].set_result(None)
+            poller.tick(now=1001.1)
+            poller.tick(now=1004.99)
+            self.assertEqual(len(jobs), 1)
+            poller.tick(now=1005)
+            self.assertEqual([job[0] for job in jobs], [1000, 1005])
+            # A slow failure finishes after the normal polling deadline.
+            # Its returned retry deadline must win over a stale cache too.
+            jobs[1][1].set_result(1020)
+            poller.tick(now=1011)
+            poller.tick(now=1019.99)
+            self.assertEqual(len(jobs), 2)
+            poller.tick(now=1020)
+            self.assertEqual([job[0] for job in jobs], [1000, 1005, 1020])
+            jobs[2][1].set_result(None)
+
 
 class ClientTests(unittest.TestCase):
     def client(self, response):
