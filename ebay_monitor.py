@@ -454,6 +454,7 @@ class Poller:
             max_workers=workers, thread_name_prefix="ebay-search"
         )
         self.workers, self.inflight = workers, {}
+        self.dispatch_deadlines = {}
         self.local = threading.local()
         self.cached_groups, self.cached_config, self.last_reload = (
             [],
@@ -482,9 +483,12 @@ class Poller:
                         fresh, items, attempted, warning, interval, received_at, source
                     )
         except EbayError as exc:
+            failed_at = time.time()
             for search in group:
-                record_failure(search, exc, time.time())
+                record_failure(search, exc, failed_at)
             logger.warning("%s", exc)
+            return failed_at + exc.retry_after
+        return attempted + interval
 
     def tick(self, now=None):
         now = time.time() if now is None else now
@@ -492,7 +496,11 @@ class Poller:
             if future.done():
                 del self.inflight[key]
                 try:
-                    future.result()
+                    deadline = future.result()
+                    if deadline is not None:
+                        self.dispatch_deadlines[key] = max(
+                            self.dispatch_deadlines.get(key, 0), deadline
+                        )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "eBay request worker recovered after %s", type(exc).__name__
@@ -500,6 +508,15 @@ class Poller:
         if now - self.last_reload >= 1:
             self.cached_config = store.configuration()
             self.cached_groups = grouped_searches(store.active_searches())
+            active_keys = {
+                json.dumps(search_params(group[0]["ebay"]), sort_keys=True)
+                for group in self.cached_groups
+            }
+            self.dispatch_deadlines = {
+                key: deadline
+                for key, deadline in self.dispatch_deadlines.items()
+                if deadline > now and (key in active_keys or key in self.inflight)
+            }
             self.last_reload = now
         config = self.cached_config
         if store.missing_configuration(config):
@@ -516,11 +533,17 @@ class Poller:
         ]
         if not groups or len(self.inflight) >= self.workers:
             return 0.1 if self.inflight else 2
-        groups.sort(
-            key=lambda group: min(s["ebay_health"].get("next_poll", 0) for s in group)
-        )
+
+        def next_due(group):
+            key = json.dumps(search_params(group[0]["ebay"]), sort_keys=True)
+            return max(
+                self.dispatch_deadlines.get(key, 0),
+                min(s["ebay_health"].get("next_poll", 0) for s in group),
+            )
+
+        groups.sort(key=next_due)
         group = groups[0]
-        due = min(s["ebay_health"].get("next_poll", 0) for s in group)
+        due = next_due(group)
         if due > now:
             return min(0.1, due - now)
         wait = store.reserve_call(config, now)
@@ -530,6 +553,10 @@ class Poller:
         self.inflight[key] = self.executor.submit(
             self.fetch_group, group, config, now, interval
         )
+        # A settings reload can read the old database deadline while this
+        # request is still running. Keep the reservation independently so a
+        # completed request cannot be repeated before its polling interval.
+        self.dispatch_deadlines[key] = now + interval
         for search in group:
             search["ebay_health"]["next_poll"] = now + interval
         return 0.01
