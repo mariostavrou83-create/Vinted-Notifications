@@ -420,9 +420,12 @@ class ClientTests(unittest.TestCase):
             json=lambda: {"access_token": "test-token", "expires_in": 7200},
         )
         session.get.return_value = response
-        return monitor.BrowseClient(
-            {"client_id": "id", "client_secret": "secret"}, session
-        ), session
+        return (
+            monitor.BrowseClient(
+                {"client_id": "id", "client_secret": "secret"}, session
+            ),
+            session,
+        )
 
     def test_uk_newly_listed_oauth_cached_and_200_result_warning(self):
         client, session = self.client(
