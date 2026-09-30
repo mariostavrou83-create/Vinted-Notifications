@@ -15,6 +15,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 import db
 import dashboard_store as store
 import search_settings
+import ebay_store
 
 
 def auth_row():
@@ -39,7 +40,7 @@ def create_app(test_config=None):
     initialize_auth()
     app = Flask(__name__)
     app.config.update(SECRET_KEY=auth_row()['session_key'], MAX_CONTENT_LENGTH=9*1024*1024,
-        MAX_FORM_MEMORY_SIZE=100_000, MAX_FORM_PARTS=30,
+        MAX_FORM_MEMORY_SIZE=100_000, MAX_FORM_PARTS=50,
         SESSION_COOKIE_NAME='msj_session', SESSION_COOKIE_SECURE=True,
         SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Lax',
         PERMANENT_SESSION_LIFETIME=timedelta(days=7))
@@ -64,7 +65,7 @@ def create_app(test_config=None):
     def headers(response):
         response.headers.update({'Cache-Control':'no-store', 'X-Content-Type-Options':'nosniff',
             'X-Frame-Options':'DENY', 'Referrer-Policy':'no-referrer',
-            'Content-Security-Policy':"default-src 'self'; img-src 'self' blob: https://*.vinted.net https://vinted.net; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+            'Content-Security-Policy':"default-src 'self'; img-src 'self' blob: https://*.vinted.net https://vinted.net https://i.ebayimg.com; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
             'Strict-Transport-Security':'max-age=31536000'})
         return response
 
@@ -148,16 +149,20 @@ def create_app(test_config=None):
         elif folder.isdigit():
             rows = [row for row in rows if str(row['folder_id'])==folder]
         now = time.time()
+        ebay_connection = ebay_store.connection_summary()
         for row in rows:
             age = now-(row['last_success'] or 0)
             row['status'] = ('Archived' if archived else 'Paused' if row['paused'] else
                 'Checking' if row['last_success'] and age < 90 and not row['failures'] else
                 'Waiting' if not row['last_success'] else 'Retrying')
+            eh = row['ebay_health']
+            row['ebay_status'] = ('Off' if not row['ebay_enabled'] else 'Paused' if row['paused'] or archived else 'Setup needed' if ebay_connection['missing'] else 'Retrying' if eh.get('error') else 'Waiting' if not eh.get('last_success') else 'Checking' if now-eh['last_success'] < max(90,ebay_connection['interval']*2) else 'Delayed')
+            row['ebay_ago'] = ('Not checked yet' if not eh.get('last_success') else f"Checked {max(0,int(now-eh['last_success']))}s ago")
             row['ago'] = ('Not checked yet' if not row['last_success'] else
                 'Checked just now' if age < 60 else f'Checked {int(age/60)} min ago')
         return render_template('msj_dashboard.html', rows=rows, archived=archived,
             active=sum(not r['paused'] for r in rows), photos=sum(bool(r['reference_id']) for r in rows),
-            interval=db.get_parameter('query_refresh_delay'), folders=store.list_folders(), folder=folder)
+            interval=db.get_parameter('query_refresh_delay'), folders=store.list_folders(), folder=folder, ebay_connection=ebay_connection)
 
     @app.route('/search/new', methods=['GET','POST'])
     @app.route('/search/<int:query_id>', methods=['GET','POST'])
@@ -168,6 +173,8 @@ def create_app(test_config=None):
         row = dict(original) if original else {'id':None, 'query_name':'', 'query':'',
             'reminder':'', 'exclusions':[], 'reference_id':None, 'revision':0,
             'max_buy':None,'resale_low':None,'resale_high':None,'must_have':'','folder_id':None}
+        if not original:
+            row.update(ebay_store.platform_details(None))
         prices = {key: '' if row[key] is None else f'{row[key]/100:.2f}'
                   for key in ('max_buy','resale_low','resale_high')}
         if request.method == 'POST':
@@ -183,7 +190,30 @@ def create_app(test_config=None):
                     row[key] = request.form.get(key,'')
                 row['exclusions'] = request.form.get('exclusions','').splitlines()
                 prices = {key:request.form.get(key,'') for key in prices}
-        return render_template('msj_edit.html', row=row, prices=prices, folders=store.list_folders())
+                row['platform_mode'] = request.form.get('platform_mode', row['platform_mode'])
+                for key in ('keywords','category','buying','condition'):
+                    row['ebay'][key] = request.form.get('ebay_'+key,row['ebay'][key])
+                for key in ('min_price','max_price'):
+                    row['ebay'][key+'_input'] = request.form.get('ebay_'+key,'')
+                for key in ('uk_only','include_shipping'):
+                    row['ebay'][key] = request.form.get('ebay_'+key) == 'yes'
+        return render_template('msj_edit.html', row=row, prices=prices, folders=store.list_folders(), ebay_connection=ebay_store.connection_summary())
+
+    @app.route('/connections', methods=['GET','POST'])
+    def connections():
+        if request.method == 'POST':
+            try:
+                action = request.form.get('action', 'save')
+                if action == 'save':
+                    ebay_store.save_configuration(request.form)
+                    flash('eBay connection details saved. They apply automatically.', 'success')
+                else:
+                    from ebay_connections import test_connection
+                    flash(test_connection(action), 'success')
+                return redirect(url_for('connections'))
+            except ValueError as exc:
+                flash(str(exc), 'error')
+        return render_template('msj_connections.html', info=ebay_store.connection_summary())
 
     @app.route('/folders', methods=['GET','POST'])
     def folders():
@@ -206,12 +236,13 @@ def create_app(test_config=None):
 
     def find_filters(source):
         return {'q':source.get('q','')[:100], 'status':source.get('status','') if source.get('status','') in store.FIND_STATUSES else '',
+                'platform':source.get('platform','') if source.get('platform','') in ('vinted','ebay') else '',
                 'folder':source.get('folder','')[:20], 'page':min(100000,max(1,source.get('page',1,type=int) or 1))}
 
     @app.get('/finds')
     def finds():
         filters = find_filters(request.args)
-        rows,total = store.list_finds(filters['q'],filters['status'],filters['folder'],filters['page'])
+        rows,total = store.list_finds(filters['q'],filters['status'],filters['folder'],filters['page'],filters['platform'])
         for row in rows:
             row['safe_photo'] = store.safe_photo_url(row['photo_url'])
             row['found_label'] = datetime.fromtimestamp(row['found_at'],ZoneInfo('Europe/London')).strftime('%d %b · %H:%M')
