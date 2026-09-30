@@ -12,6 +12,7 @@ from telegram.error import BadRequest, TelegramError
 import alert_images
 import dashboard_store
 import db
+import vinted_gallery
 from search_settings import connection
 
 
@@ -141,7 +142,8 @@ def rich_request(row, details, listing_image, reference_image):
 
 
 async def enrich(bot, chat_id, row, details, before_edit):
-    listing = await alert_images.listing_collage(details.get("photos", []))
+    photos = await vinted_gallery.resolve(row, details)
+    listing = await alert_images.listing_collage(photos)
     reference = (
         dashboard_store.get_media(row["reference_id"]) if row["reference_id"] else None
     )
@@ -227,6 +229,12 @@ async def preview_and_enable(query_id):
     if not token or not chat_id:
         raise ValueError("Connect your Vinted Telegram bot first.")
     # Complete downloads first, so missing CDN photos never enable a partial layout.
+    # Preview uses current gallery extraction, without overwriting the original
+    # alert's name, guide or reminder snapshot.
+    gallery_details = dict(details)
+    details["photos"] = await vinted_gallery.resolve(
+        row, gallery_details, persist=False
+    )
     listing = await alert_images.listing_collage(details["photos"])
     if listing is None:
         raise ValueError(
@@ -270,3 +278,7 @@ async def preview_and_enable(query_id):
         ):
             raise TelegramError("Telegram did not confirm the rich message edit")
     db.set_parameter("vinted_single_message_alerts", "1")
+    return {
+        "photo_count": len(details["photos"]),
+        "gallery_state": gallery_details.get("gallery_state"),
+    }

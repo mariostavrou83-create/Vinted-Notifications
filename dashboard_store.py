@@ -75,7 +75,7 @@ def normalize_photo(stream):
         ) from None
 
 
-def save_search(query_id, form, photo=None):
+def save_search(query_id, form, photo=None, *, photos=None):
     name, reminder = (
         form.get("query_name", "").strip(),
         form.get("reminder", "").strip(),
@@ -161,29 +161,15 @@ def save_search(query_id, form, photo=None):
             (bool(old and old["query"] != url), query_id),
         )
         ebay_store.save_platforms(conn, query_id, vinted, ebay, ebay_config)
-        if photo:
-            digest = hashlib.sha256(photo).hexdigest()
-            # Keep recently detached photos for alerts already in the delivery queue.
+        if photos is not None:
+            _save_reference_photos(conn, query_id, form, photos)
+        elif photo:
+            digest = _store_media(conn, photo)
             conn.execute(
-                """DELETE FROM dashboard_media WHERE created<? AND id NOT IN
-                (SELECT reference_id FROM search_dashboard WHERE reference_id IS NOT NULL)
-                AND id NOT IN (SELECT reference_id FROM alert_outbox WHERE reference_id IS NOT NULL
-                    AND photo_status='pending')""",
-                (time.time() - 86400,),
+                "DELETE FROM search_reference_photos WHERE query_id=?", (query_id,)
             )
-            size = conn.execute(
-                "SELECT COALESCE(SUM(length(image)),0) FROM dashboard_media"
-            ).fetchone()[0]
-            exists = conn.execute(
-                "SELECT 1 FROM dashboard_media WHERE id=?", (digest,)
-            ).fetchone()
-            if size + (0 if exists else len(photo)) > 50 * 1024 * 1024:
-                raise ValueError(
-                    "Photo storage is full. Remove unused example photos and try again tomorrow."
-                )
             conn.execute(
-                "INSERT OR IGNORE INTO dashboard_media(id,image,created) VALUES (?,?,?)",
-                (digest, photo, time.time()),
+                "INSERT INTO search_reference_photos VALUES (?,0,?)", (query_id, digest)
             )
             conn.execute(
                 "UPDATE search_dashboard SET reference_id=? WHERE query_id=?",
@@ -191,10 +177,99 @@ def save_search(query_id, form, photo=None):
             )
         elif form.get("remove_photo") == "yes":
             conn.execute(
+                "DELETE FROM search_reference_photos WHERE query_id=?", (query_id,)
+            )
+            conn.execute(
                 "UPDATE search_dashboard SET reference_id=NULL WHERE query_id=?",
                 (query_id,),
             )
         return query_id
+
+
+def _store_media(conn, photo):
+    digest = hashlib.sha256(photo).hexdigest()
+    # Keep recently detached photos for alerts already in the delivery queue.
+    conn.execute(
+        """DELETE FROM dashboard_media WHERE created<? AND id NOT IN
+                (SELECT reference_id FROM search_dashboard WHERE reference_id IS NOT NULL)
+                AND id NOT IN (SELECT media_id FROM search_reference_photos)
+                AND id NOT IN (SELECT reference_id FROM alert_outbox WHERE reference_id IS NOT NULL
+                    AND photo_status='pending')""",
+        (time.time() - 86400,),
+    )
+    size = conn.execute(
+        "SELECT COALESCE(SUM(length(image)),0) FROM dashboard_media"
+    ).fetchone()[0]
+    exists = conn.execute(
+        "SELECT 1 FROM dashboard_media WHERE id=?", (digest,)
+    ).fetchone()
+    if size + (0 if exists else len(photo)) > 50 * 1024 * 1024:
+        raise ValueError(
+            "Photo storage is full. Remove unused example photos and try again tomorrow."
+        )
+    conn.execute(
+        "INSERT OR IGNORE INTO dashboard_media(id,image,created) VALUES (?,?,?)",
+        (digest, photo, time.time()),
+    )
+    return digest
+
+
+def reference_photos(query_id):
+    with closing(connection()) as conn:
+        return [
+            dict(row)
+            for row in conn.execute(
+                "SELECT position,media_id FROM search_reference_photos WHERE query_id=? ORDER BY position",
+                (query_id,),
+            )
+        ]
+
+
+def _save_reference_photos(conn, query_id, form, photos):
+    from alert_images import collage
+
+    existing = list(
+        conn.execute(
+            """SELECT p.position,p.media_id,m.image FROM search_reference_photos p
+        JOIN dashboard_media m ON m.id=p.media_id WHERE query_id=? ORDER BY position""",
+            (query_id,),
+        )
+    )
+    removals = (
+        form.getlist("remove_reference")
+        if hasattr(form, "getlist")
+        else form.get("remove_reference", [])
+    )
+    if isinstance(removals, str):
+        removals = [removals]
+    if set(removals) - {str(row["position"]) for row in existing}:
+        raise ValueError("The saved photos changed. Reload before editing them.")
+    keep = (
+        []
+        if form.get("remove_photo") == "yes"
+        else [row for row in existing if str(row["position"]) not in removals]
+    )
+    if len(keep) + len(photos) > 4:
+        raise ValueError(
+            "Keep up to four example photos in total. Remove a saved photo to make room."
+        )
+    if not photos and len(keep) == len(existing):
+        return
+    originals = [row["image"] for row in keep] + list(photos)
+    compiled = collage(originals) if originals else None
+    ids = [row["media_id"] for row in keep] + [
+        _store_media(conn, raw) for raw in photos
+    ]
+    digest = _store_media(conn, compiled) if compiled else None
+    conn.execute("DELETE FROM search_reference_photos WHERE query_id=?", (query_id,))
+    conn.executemany(
+        "INSERT INTO search_reference_photos VALUES (?,?,?)",
+        [(query_id, position, media_id) for position, media_id in enumerate(ids)],
+    )
+    conn.execute(
+        "UPDATE search_dashboard SET reference_id=? WHERE query_id=?",
+        (digest, query_id),
+    )
 
 
 def list_searches(archived=False):

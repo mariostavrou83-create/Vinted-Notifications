@@ -124,4 +124,12 @@ async def listing_collage(urls):
     images = await asyncio.gather(
         *(asyncio.to_thread(download_photo, url) for url in urls[:4])
     )
-    return await asyncio.to_thread(normalize_available, images)
+    result = await asyncio.to_thread(normalize_available, images)
+    from logger import get_logger
+
+    get_logger(__name__).info(
+        "Vinted collage downloaded %s/%s photos",
+        sum(bool(raw) for raw in images),
+        len(urls[:4]),
+    )
+    return result

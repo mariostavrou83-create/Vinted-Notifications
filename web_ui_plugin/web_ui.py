@@ -300,17 +300,13 @@ def create_app(test_config=None):
         }
         if request.method == "POST":
             try:
-                from alert_images import reference_collage
-
                 uploads = [
                     file for file in request.files.getlist("photo") if file.filename
                 ]
-                photo = (
-                    reference_collage([file.stream for file in uploads])
-                    if uploads
-                    else None
-                )
-                store.save_search(query_id, request.form, photo)
+                if len(uploads) > 4:
+                    raise ValueError("Choose up to four example photos in total.")
+                photos = [store.normalize_photo(file.stream) for file in uploads]
+                store.save_search(query_id, request.form, photos=photos)
                 flash("Search saved. Changes apply automatically.", "success")
                 return redirect(url_for("dashboard"))
             except ValueError as exc:
@@ -340,6 +336,7 @@ def create_app(test_config=None):
             row=row,
             prices=prices,
             folders=store.list_folders(),
+            reference_photos=store.reference_photos(query_id),
             ebay_connection=ebay_store.connection_summary(),
         )
 
@@ -424,11 +421,18 @@ def create_app(test_config=None):
                 (time.time(),),
             )
         try:
-            asyncio.run(preview_and_enable(query_id))
+            preview = asyncio.run(preview_and_enable(query_id))
             flash(
-                "Telegram accepted the single-message preview. New Vinted alerts now use this layout.",
+                "Telegram accepted the single-message preview with "
+                + str(preview["photo_count"])
+                + " listing photo(s). New Vinted alerts now use this layout.",
                 "success",
             )
+            if preview.get("gallery_state") not in ("ready", "catalogue"):
+                flash(
+                    "Vinted's full gallery is currently unavailable to the bot. This preview uses the available search photo.",
+                    "error",
+                )
         except ValueError as exc:
             flash(str(exc), "error")
         except TelegramError as exc:
