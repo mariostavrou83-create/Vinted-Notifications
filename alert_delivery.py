@@ -33,7 +33,7 @@ from search_settings import connection
 logger = get_logger(__name__)
 
 
-def claim(now=None, preferred_photo=None, platform="vinted"):
+def claim(now=None, preferred_photo=None, platform="vinted", allow_photos=True):
     now = time.time() if now is None else now
     with closing(connection()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -56,7 +56,7 @@ def claim(now=None, preferred_photo=None, platform="vinted"):
             (platform, now, now),
         ).fetchone()
         kind = "listing"
-        if row is None and preferred_photo:
+        if row is None and allow_photos and preferred_photo:
             row = conn.execute(
                 """SELECT * FROM alert_outbox WHERE platform=? AND item_id=? AND status='sent'
                 AND photo_status='pending' AND photo_attempts=0 AND photo_next_attempt<=?
@@ -65,7 +65,7 @@ def claim(now=None, preferred_photo=None, platform="vinted"):
             ).fetchone()
             if row:
                 kind = "photo"
-        if row is None:
+        if row is None and allow_photos:
             kind = "photo"
             row = conn.execute(
                 """SELECT * FROM alert_outbox WHERE platform=? AND status='sent'
@@ -151,6 +151,10 @@ class DeliveryWorker:
         self.preferred_photo = None
         if row is None:
             return False
+        return await self.deliver(row, now)
+
+    async def deliver(self, row, now=None):
+        """Send one leased job. Listing and photo acknowledgements stay separate."""
         photo = row["kind"] == "photo"
         media = None
         try:
@@ -196,7 +200,7 @@ class DeliveryWorker:
                         "Could not cache reference file ID for item %s", row["item_id"]
                     )
             else:
-                self.last_send_started = time.monotonic()
+                send_started = self.last_send_started = time.monotonic()
                 extra = {}
                 if self.platform == "ebay":
                     # The clickable listing must not depend on an external image fetch.
@@ -232,7 +236,7 @@ class DeliveryWorker:
                     row["item_id"],
                     result.message_id,
                     max(0, time.time() - row["found_at"]),
-                    time.monotonic() - self.last_send_started,
+                    time.monotonic() - send_started,
                 )
         except RetryAfter as exc:
             delay = (
@@ -313,3 +317,48 @@ class DeliveryWorker:
                     "Delivery worker will recover after %s", type(exc).__name__
                 )
                 await asyncio.sleep(2)
+
+
+class EbayDeliveryWorker(DeliveryWorker):
+    """One photo may remain in flight while the next listing uses its send slot.
+
+    A single dispatcher owns chat pacing. Only photos are detached; listing
+    sends remain serial, and every claim checks the shared durable cooldown.
+    """
+
+    def __init__(self, bot, chat_id, bot_id=None):
+        super().__init__(bot, chat_id, platform="ebay", bot_id=bot_id)
+        self.photo_task = None
+
+    async def tick(self, now=None):
+        await asyncio.sleep(self.send_slot_delay())
+        if self.photo_task is not None and self.photo_task.done():
+            try:
+                self.photo_task.result()
+            except Exception as exc:  # noqa: BLE001
+                # Unexpected failures keep their lease for normal restart recovery.
+                logger.warning(
+                    "eBay example photo will recover after %s", type(exc).__name__
+                )
+            self.photo_task = None
+        row = claim(
+            now,
+            self.preferred_photo,
+            self.platform,
+            allow_photos=self.photo_task is None,
+        )
+        self.preferred_photo = None
+        if row is None:
+            return False
+        if row["kind"] == "photo":
+            self.photo_task = asyncio.create_task(self.deliver(row, now))
+            # Let the upload record its start before calculating another send slot.
+            await asyncio.sleep(0)
+            return True
+        return await self.deliver(row, now)
+
+    async def close(self):
+        if self.photo_task is not None:
+            self.photo_task.cancel()
+            await asyncio.gather(self.photo_task, return_exceptions=True)
+            self.photo_task = None
