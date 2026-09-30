@@ -131,9 +131,24 @@ def add_item_to_db(
                     photo_url,
                     alert.get("reference_id"),
                     time.time(),
-                    "pending" if alert.get("reference_id") else "none",
+                    (
+                        "pending"
+                        if alert.get("reference_id")
+                        or (
+                            alert.get("vinted_details", {}).get("single_message")
+                            and alert.get("vinted_details", {}).get("photos")
+                        )
+                        else "none"
+                    ),
                 ),
             )
+            if alert.get("vinted_details"):
+                import json
+
+                cursor.execute(
+                    "INSERT INTO vinted_alert_details(item_id,payload) VALUES (?,?)",
+                    (str(id), json.dumps(alert["vinted_details"], ensure_ascii=False)),
+                )
         conn.commit()
         return True
     except (sqlite3.Error, OSError):

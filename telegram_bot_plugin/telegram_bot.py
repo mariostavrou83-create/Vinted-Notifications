@@ -387,9 +387,11 @@ class LeRobot:
             logger.exception("Error checking for new version")
 
     async def check_telegram_queue(self, context: ContextTypes.DEFAULT_TYPE):
-        from alert_delivery import DeliveryWorker
+        from alert_delivery import VintedDeliveryWorker
 
-        await DeliveryWorker(context.bot, db.get_parameter("telegram_chat_id")).run()
+        await VintedDeliveryWorker(
+            context.bot, db.get_parameter("telegram_chat_id")
+        ).run()
 
     async def set_commands(self, context: ContextTypes.DEFAULT_TYPE):
         try:

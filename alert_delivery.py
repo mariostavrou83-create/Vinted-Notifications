@@ -135,6 +135,8 @@ def finish(
 
 
 class DeliveryWorker:
+    disable_previews = False
+
     def __init__(self, bot, chat_id, platform="vinted", bot_id=None):
         self.bot, self.chat_id = bot, chat_id
         self.platform, self.bot_id = platform, bot_id
@@ -202,7 +204,7 @@ class DeliveryWorker:
             else:
                 send_started = self.last_send_started = time.monotonic()
                 extra = {}
-                if self.platform == "ebay":
+                if self.platform == "ebay" or self.disable_previews:
                     # The clickable listing must not depend on an external image fetch.
                     extra["link_preview_options"] = LinkPreviewOptions(is_disabled=True)
                 result = await self.bot.send_message(
@@ -331,14 +333,15 @@ class EbayDeliveryWorker(DeliveryWorker):
         self.photo_task = None
 
     async def tick(self, now=None):
-        await asyncio.sleep(self.send_slot_delay())
+        while delay := self.send_slot_delay():
+            await asyncio.sleep(delay)
         if self.photo_task is not None and self.photo_task.done():
             try:
                 self.photo_task.result()
             except Exception as exc:  # noqa: BLE001
                 # Unexpected failures keep their lease for normal restart recovery.
                 logger.warning(
-                    "eBay example photo will recover after %s", type(exc).__name__
+                    "Example photo will recover after %s", type(exc).__name__
                 )
             self.photo_task = None
         row = claim(
@@ -362,3 +365,108 @@ class EbayDeliveryWorker(DeliveryWorker):
             self.photo_task.cancel()
             await asyncio.gather(self.photo_task, return_exceptions=True)
             self.photo_task = None
+
+
+class VintedDeliveryWorker(EbayDeliveryWorker):
+    """One fast alert, with photos edited into that same message in the background."""
+
+    @property
+    def disable_previews(self):
+        from vinted_alerts import enabled
+
+        return enabled()
+
+    def __init__(self, bot, chat_id):
+        super().__init__(bot, chat_id)
+        self.platform = "vinted"
+
+    async def photo_slot(self):
+        # Downloads happen before reserving a Telegram send slot. Recheck after
+        # every await so a listing cannot race an edit into the same chat slot.
+        while True:
+            delay = self.send_slot_delay()
+            with closing(connection()) as conn:
+                cooldown = conn.execute(
+                    "SELECT value FROM delivery_runtime WHERE key='cooldown_until'"
+                ).fetchone()
+                pending = conn.execute(
+                    """SELECT 1 FROM alert_outbox WHERE platform='vinted' AND status='pending'
+                    AND next_attempt<=? AND leased_until<=? LIMIT 1""",
+                    (time.time(), time.time()),
+                ).fetchone()
+            if cooldown:
+                delay = max(delay, cooldown[0] - time.time())
+            if delay > 0 or pending:
+                await asyncio.sleep(min(1, max(delay, 0.05)))
+                continue
+            self.last_send_started = time.monotonic()
+            return
+
+    async def deliver(self, row, now=None):
+        from vinted_alerts import enabled
+
+        if not enabled():
+            return await DeliveryWorker.deliver(self, row, now)
+        if row["kind"] != "photo":
+            return await DeliveryWorker.deliver(self, row, now)
+        from vinted_alerts import enrich, get_details
+
+        details = get_details(row)
+        if details is None:
+            # Historical in-flight alerts have no structured snapshot. Preserve
+            # their original text rather than attaching a separate reply.
+            finish(
+                row,
+                failure="Older alert has no collage snapshot",
+                permanent=True,
+                now=now,
+            )
+            return True
+        try:
+            # This task is detached by the dispatcher; downloads and uploads
+            # cannot hold up the next listing's link.
+            complete = await enrich(
+                self.bot, self.chat_id, row, details, self.photo_slot
+            )
+            logger.info(
+                "Vinted collage edit accepted for item %s; message_id=%s",
+                row["item_id"],
+                row["telegram_message_id"],
+            )
+            finish(
+                row,
+                failure=None if complete else "Listing photo temporarily unavailable",
+                delay=10,
+                permanent=not complete and row["photo_attempts"] >= 2,
+                now=now,
+            )
+        except RetryAfter as exc:
+            delay = (
+                exc.retry_after.total_seconds()
+                if hasattr(exc.retry_after, "total_seconds")
+                else float(exc.retry_after)
+            )
+            finish(
+                row,
+                failure="Telegram rate limit",
+                delay=delay + 1,
+                cooldown=True,
+                now=now,
+            )
+        except (BadRequest, Forbidden) as exc:
+            finish(row, failure=type(exc).__name__, permanent=True, now=now)
+            logger.warning(
+                "Telegram collage edit rejected for item %s: %s",
+                row["item_id"],
+                type(exc).__name__,
+            )
+        except (NetworkError, TelegramError) as exc:
+            attempts = row["photo_attempts"] + 1
+            finish(
+                row,
+                failure=type(exc).__name__,
+                delay=min(60, 2 ** min(attempts, 6)),
+                permanent=attempts >= 6,
+                now=now,
+            )
+        return True
