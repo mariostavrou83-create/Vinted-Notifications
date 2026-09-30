@@ -11,7 +11,7 @@ from pathlib import Path
 
 import db
 
-SCHEMA_VERSION = "7"
+SCHEMA_VERSION = "8"
 
 
 def connection():
@@ -126,6 +126,11 @@ def ensure_schema():
             from ebay_schema import migrate
 
             migrate(conn)
+            conn.execute("""CREATE TABLE IF NOT EXISTS vinted_alert_details (
+                item_id TEXT PRIMARY KEY REFERENCES alert_outbox(item_id) ON DELETE CASCADE,
+                payload TEXT NOT NULL)""")
+            conn.execute("""INSERT OR IGNORE INTO parameters
+                VALUES ('vinted_single_message_alerts', '0')""")
             conn.execute(
                 "INSERT OR REPLACE INTO parameters VALUES ('msj_search_schema', ?)",
                 (SCHEMA_VERSION,),

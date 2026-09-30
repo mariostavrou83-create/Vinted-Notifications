@@ -1,4 +1,3 @@
-from html import escape
 from time import monotonic, time
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
@@ -398,16 +397,20 @@ def clear_item_queue(items_queue, new_items_queue):
             # Being recorded is what stops an item coming back next run, so every
             # item that reaches this point is written to the db whether or not it
             # ends up being announced.
+            from vinted_alerts import snapshot
+
+            details = None if is_first_run else snapshot(item, search)
             alert = (
                 None
                 if is_first_run
                 else {
                     "content": format_alert(
-                        item, search, db.get_parameter("message_template")
+                        item, search, db.get_parameter("message_template"), details
                     ),
                     "url": item.url,
                     "search_name": search["query_name"] or f"Search #{query_id}",
                     "reference_id": search.get("reference_id"),
+                    "vinted_details": details,
                 }
             )
             seen.add(str(item.id))
@@ -473,7 +476,13 @@ def clear_item_queue(items_queue, new_items_queue):
     return False
 
 
-def format_alert(item, search, message_template):
+def format_alert(item, search, message_template, details=None):
+    from html import escape
+
+    from vinted_alerts import enabled, fast_text
+
+    if details["single_message"] if details is not None else enabled():
+        return fast_text(item, search, details)
     keyword = parse_qs(urlparse(search["query"]).query).get("search_text", [""])[0]
     name = search["query_name"] or keyword or "Filtered search"
     prefix = f"🔎 <b>#{search['id']} · {escape(name[:100])}</b>\n\n"
