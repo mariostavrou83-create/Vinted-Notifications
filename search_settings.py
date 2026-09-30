@@ -10,7 +10,7 @@ import unicodedata
 
 import db
 
-SCHEMA_VERSION = "4"
+SCHEMA_VERSION = "6"
 
 
 def connection():
@@ -108,6 +108,8 @@ def ensure_schema():
             conn.execute('''INSERT OR IGNORE INTO listing_checkpoints
                 SELECT ?,COALESCE(MAX(CAST(item AS INTEGER)),0) FROM items
                 WHERE NOT EXISTS(SELECT 1 FROM listing_checkpoints)''', (int(time.time()/60)-21,))
+            from ebay_schema import migrate
+            migrate(conn)
             conn.execute("INSERT OR REPLACE INTO parameters VALUES ('msj_search_schema', ?)",
                          (SCHEMA_VERSION,))
             # Mario requested faster checking. Upgrade the previous three-second
@@ -135,6 +137,8 @@ def get_search(query_id):
         return None
     result = dict(row)
     result["exclusions"] = json.loads(result["exclusions"])
+    from ebay_store import platform_details
+    result.update(platform_details(query_id))
     return result
 
 
@@ -142,7 +146,9 @@ def active_queries():
     with closing(connection()) as conn:
         return [tuple(row) for row in conn.execute("""SELECT q.* FROM queries q
             LEFT JOIN search_dashboard d ON d.query_id=q.id
-            WHERE COALESCE(d.paused,0)=0 AND COALESCE(d.archived,0)=0""")]
+            LEFT JOIN search_platforms s ON s.query_id=q.id
+            WHERE COALESCE(d.paused,0)=0 AND COALESCE(d.archived,0)=0
+            AND COALESCE(s.vinted_enabled,1)=1""")]
 
 
 def finish_baseline(query_id, url):

@@ -60,7 +60,11 @@ def save_search(query_id, form, photo=None):
     name, reminder = form.get('query_name', '').strip(), form.get('reminder', '').strip()
     if not name or len(name) > 100 or len(reminder) > 800:
         raise ValueError('Give your search a name (up to 100 characters) and a reminder of up to 800 characters.')
-    url = normalize_url(form.get('query', ''))
+    import ebay_store
+    previous = ebay_store.platform_details(query_id) if query_id is not None else None
+    vinted, ebay, ebay_config = ebay_store.parse_form(form, previous)
+    raw_url = form.get('query', '').strip()
+    url = normalize_url(raw_url) if raw_url or vinted else ''
     exclusions = json.dumps(parse_exclusions(form.get('exclusions', '')), ensure_ascii=False)
     prices = [parse_money(form.get(key,'')) for key in ('max_buy','resale_low','resale_high')]
     if prices[1] is not None and prices[2] is not None and prices[1] > prices[2]:
@@ -81,10 +85,10 @@ def save_search(query_id, form, photo=None):
             if str(old['revision']) != form.get('revision'):
                 raise ValueError('This search changed in another tab. Reload it before saving again.')
             # Preserve byte-for-byte URLs when their meaning is unchanged.
-            if normalize_url(old['query']) == url:
+            if old['query'] and normalize_url(old['query']) == url:
                 url = old['query']
         duplicate = conn.execute('SELECT id FROM queries WHERE query=? AND id!=?', (url, query_id or -1)).fetchone()
-        if duplicate:
+        if url and duplicate:
             raise ValueError(f'This link is already saved as search #{duplicate[0]}.')
         if query_id is None:
             query_id = conn.execute('INSERT INTO queries(query,query_name) VALUES (?,?)', (url, name)).lastrowid
@@ -100,6 +104,7 @@ def save_search(query_id, form, photo=None):
         conn.execute('''UPDATE search_dashboard SET revision=revision+1,
             rebaseline=CASE WHEN ? THEN 1 ELSE rebaseline END WHERE query_id=?''',
             (bool(old and old['query'] != url), query_id))
+        ebay_store.save_platforms(conn, query_id, vinted, ebay, ebay_config)
         if photo:
             digest = hashlib.sha256(photo).hexdigest()
             # Keep recently detached photos for alerts already in the delivery queue.
@@ -120,7 +125,7 @@ def save_search(query_id, form, photo=None):
 
 def list_searches(archived=False):
     with closing(connection()) as conn:
-        return [dict(row) for row in conn.execute('''SELECT q.*,
+        rows = [dict(row) for row in conn.execute('''SELECT q.*,
             COALESCE(p.reminder,'') reminder, COALESCE(p.exclusions,'[]') exclusions,
             COALESCE(d.paused,0) paused, COALESCE(d.archived,0) archived, d.reference_id,
             COALESCE(d.revision,0) revision, h.last_success, h.actual_interval, h.failures,
@@ -131,6 +136,10 @@ def list_searches(archived=False):
             LEFT JOIN search_buying_guide g ON g.query_id=q.id
             LEFT JOIN search_folders f ON f.id=g.folder_id
             WHERE COALESCE(d.archived,0)=? ORDER BY q.id DESC''', (int(archived),))]
+    from ebay_store import platform_details
+    for row in rows:
+        row.update(platform_details(row['id']))
+    return rows
 
 
 def change_state(query_id, action, revision):
@@ -147,6 +156,9 @@ def change_state(query_id, action, revision):
         changes = {'pause':'paused=1', 'resume':'paused=0, rebaseline=1',
                    'archive':'archived=1, paused=1', 'restore':'archived=0, paused=1'}
         conn.execute(f'UPDATE search_dashboard SET {changes[action]}, revision=revision+1 WHERE query_id=?', (query_id,))
+        conn.execute('UPDATE search_platforms SET ebay_generation=ebay_generation+1 WHERE query_id=?', (query_id,))
+        conn.execute('DELETE FROM ebay_state WHERE query_id=?', (query_id,))
+        conn.execute("UPDATE alert_outbox SET status='cancelled',error='Search paused or reset' WHERE query_id=? AND platform='ebay' AND status='pending'", (query_id,))
 
 
 def get_media(media_id):
@@ -201,8 +213,10 @@ def delete_folder(folder_id):
 FIND_STATUSES = ('new','interested','bought','pass')
 
 
-def list_finds(text='', status='', folder='', page=1):
+def list_finds(text='', status='', folder='', page=1, platform=''):
     clauses, params = [], []
+    if platform in ('vinted', 'ebay'):
+        clauses.append('a.platform=?'); params.append(platform)
     if text:
         clauses.append('(a.title LIKE ? ESCAPE \'\\\' OR a.search_name LIKE ? ESCAPE \'\\\')')
         literal = text.replace('\\','\\\\').replace('%','\\%').replace('_','\\_')
@@ -233,4 +247,4 @@ def set_find_status(item_id, status):
 def safe_photo_url(value):
     parsed = urlparse(value or '')
     host = parsed.hostname or ''
-    return value if parsed.scheme=='https' and (host=='vinted.net' or host.endswith('.vinted.net')) else None
+    return value if parsed.scheme=='https' and (host=='vinted.net' or host.endswith('.vinted.net') or host=='i.ebayimg.com') else None

@@ -11,7 +11,7 @@ import io
 import secrets
 import time
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters, LinkPreviewOptions
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TelegramError
 import dashboard_store
 from search_settings import connection
@@ -20,28 +20,28 @@ from logger import get_logger
 logger = get_logger(__name__)
 
 
-def claim(now=None, preferred_photo=None):
+def claim(now=None, preferred_photo=None, platform="vinted"):
     now = time.time() if now is None else now
     with closing(connection()) as conn, conn:
         conn.execute('BEGIN IMMEDIATE')
-        cooldown = conn.execute("SELECT value FROM delivery_runtime WHERE key='cooldown_until'").fetchone()
+        cooldown = conn.execute("SELECT value FROM delivery_runtime WHERE key=?", ("cooldown_until" if platform == "vinted" else platform + "_cooldown_until",)).fetchone()
         if cooldown and cooldown[0] > now:
             return None
         # A buying example must never take the next send slot from a new deal.
-        row = conn.execute('''SELECT * FROM alert_outbox WHERE status='pending'
-            AND next_attempt<=? AND leased_until<=? ORDER BY found_at,item_id LIMIT 1''', (now,now)).fetchone()
+        row = conn.execute('''SELECT * FROM alert_outbox WHERE platform=? AND status='pending'
+            AND next_attempt<=? AND leased_until<=? ORDER BY found_at,item_id LIMIT 1''', (platform,now,now)).fetchone()
         kind = 'listing'
         if row is None and preferred_photo:
-            row = conn.execute('''SELECT * FROM alert_outbox WHERE item_id=? AND status='sent'
+            row = conn.execute('''SELECT * FROM alert_outbox WHERE platform=? AND item_id=? AND status='sent'
                 AND photo_status='pending' AND photo_attempts=0 AND photo_next_attempt<=?
-                AND leased_until<=?''', (preferred_photo,now,now)).fetchone()
+                AND leased_until<=?''', (platform,preferred_photo,now,now)).fetchone()
             if row:
                 kind = 'photo'
         if row is None:
             kind = 'photo'
-            row = conn.execute('''SELECT * FROM alert_outbox WHERE status='sent'
+            row = conn.execute('''SELECT * FROM alert_outbox WHERE platform=? AND status='sent'
                 AND photo_status='pending' AND photo_next_attempt<=? AND leased_until<=?
-                ORDER BY found_at,item_id LIMIT 1''', (now,now)).fetchone()
+                ORDER BY found_at,item_id LIMIT 1''', (platform,now,now)).fetchone()
         if row is None:
             return None
         token = secrets.token_hex(16)
@@ -56,8 +56,8 @@ def finish(row, *, message_id=None, failure=None, delay=0, permanent=False, cool
     prefix = 'photo_' if photo else ''
     with closing(connection()) as conn, conn:
         if cooldown:
-            conn.execute('''INSERT INTO delivery_runtime VALUES ('cooldown_until',?)
-                ON CONFLICT(key) DO UPDATE SET value=MAX(value,excluded.value)''', (now+delay,))
+            conn.execute('''INSERT INTO delivery_runtime VALUES (?,?)
+                ON CONFLICT(key) DO UPDATE SET value=MAX(value,excluded.value)''', ('cooldown_until' if row.get('platform','vinted') == 'vinted' else row['platform'] + '_cooldown_until',now+delay))
         if failure is None:
             extra = '' if photo else ',telegram_message_id=?,sent_at=?'
             args = [] if photo else [message_id,now]
@@ -72,8 +72,9 @@ def finish(row, *, message_id=None, failure=None, delay=0, permanent=False, cool
 
 
 class DeliveryWorker:
-    def __init__(self, bot, chat_id):
+    def __init__(self, bot, chat_id, platform="vinted", bot_id=None):
         self.bot, self.chat_id = bot, chat_id
+        self.platform, self.bot_id = platform, bot_id
         self.preferred_photo = None
         self.last_send_started = None
 
@@ -83,7 +84,7 @@ class DeliveryWorker:
         return max(0.0, self.last_send_started + 1.05 - time.monotonic())
 
     async def tick(self, now=None):
-        row = claim(now, self.preferred_photo)
+        row = claim(now, self.preferred_photo, self.platform)
         self.preferred_photo = None
         if row is None:
             return False
@@ -95,6 +96,10 @@ class DeliveryWorker:
                 if not media:
                     finish(row,failure='Example photo unavailable',permanent=True,now=now)
                     return True
+                if self.platform == 'ebay':
+                    with closing(connection()) as conn:
+                        cached = conn.execute('SELECT file_id FROM platform_media_cache WHERE media_id=? AND bot_id=?', (row['reference_id'],self.bot_id)).fetchone()
+                    media['telegram_file_id'] = cached[0] if cached else None
                 image = media['telegram_file_id'] or io.BytesIO(media['image'])
                 self.last_send_started = time.monotonic()
                 result = await self.bot.send_photo(chat_id=self.chat_id, photo=image,
@@ -105,13 +110,17 @@ class DeliveryWorker:
                 # Record success first. A cache failure must never resend a confirmed photo.
                 finish(row,now=now)
                 try:
-                    dashboard_store.cache_telegram_photo(row['reference_id'],result.photo[-1].file_id)
+                    self.cache_photo(row['reference_id'],result.photo[-1].file_id)
                 except Exception:
                     logger.warning('Could not cache reference file ID for item %s',row['item_id'])
             else:
                 self.last_send_started = time.monotonic()
-                result = await self.bot.send_message(chat_id=self.chat_id,text=row['content'],parse_mode='HTML',
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Open Vinted',url=row['url'])]]),
+                extra = {}
+                if self.platform == 'ebay':
+                    # The clickable listing must not depend on an external image fetch.
+                    extra['link_preview_options'] = LinkPreviewOptions(is_disabled=True)
+                result = await self.bot.send_message(**extra,chat_id=self.chat_id,text=row['content'],parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Open eBay' if self.platform == 'ebay' else 'Open Vinted',url=row['url'])]]),
                     read_timeout=10,write_timeout=10,connect_timeout=5,pool_timeout=5)
                 finish(row,message_id=result.message_id,now=now)
                 self.preferred_photo = row['item_id']
@@ -123,7 +132,7 @@ class DeliveryWorker:
             finish(row,failure='Telegram rate limit',delay=delay+1,cooldown=True,now=now)
         except (BadRequest, Forbidden) as exc:
             if photo and media and media['telegram_file_id'] and isinstance(exc,BadRequest):
-                dashboard_store.cache_telegram_photo(row['reference_id'],None)
+                self.cache_photo(row['reference_id'],None)
                 finish(row,failure='Retrying example upload',delay=2,now=now)
             else:
                 finish(row,failure=type(exc).__name__,permanent=True,now=now)
@@ -134,6 +143,16 @@ class DeliveryWorker:
                    permanent=photo and attempts>=6,now=now)
             logger.warning('Telegram %s retry scheduled for item %s',row['kind'],row['item_id'])
         return True
+
+    def cache_photo(self, media_id, file_id):
+        if self.platform == 'vinted':
+            dashboard_store.cache_telegram_photo(media_id, file_id)
+        else:
+            with closing(connection()) as conn, conn:
+                if file_id:
+                    conn.execute('INSERT OR REPLACE INTO platform_media_cache VALUES (?,?,?)', (media_id,self.bot_id,file_id))
+                else:
+                    conn.execute('DELETE FROM platform_media_cache WHERE media_id=? AND bot_id=?', (media_id,self.bot_id))
 
     async def run(self):
         while True:

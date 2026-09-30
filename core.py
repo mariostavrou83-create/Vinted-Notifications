@@ -302,7 +302,7 @@ def clear_item_queue(items_queue, new_items_queue):
         batch = items_queue.get()
         data, query_id = batch[:2]
         search = search_settings.get_search(query_id)
-        if (search is None or search.get('paused') or search.get('archived')
+        if (search is None or not search.get('vinted_enabled', True) or search.get('paused') or search.get('archived')
                 or (len(batch) > 2 and batch[2] != search['query'])):
             return True  # Deleted while the HTTP request was in flight.
         banwords_str = db.get_parameter("banwords")

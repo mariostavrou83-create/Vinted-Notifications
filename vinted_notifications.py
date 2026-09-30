@@ -25,6 +25,7 @@ from web_ui_plugin.web_ui import web_ui_process
 # Global process references
 telegram_process = None
 rss_process = None
+ebay_worker_process = None
 scrape_process = None
 current_query_refresh_delay = None
 
@@ -122,7 +123,12 @@ def check_refresh_delay(items_queue):
 
 
 def monitor_processes(items_queue, telegram_queue, rss_queue):
-    global telegram_process, rss_process
+    global telegram_process, rss_process, ebay_worker_process
+
+    if ebay_worker_process is None or not ebay_worker_process.is_alive():
+        from ebay_monitor import ebay_process
+        ebay_worker_process = multiprocessing.Process(target=ebay_process, name="ebay-monitor")
+        ebay_worker_process.start()
 
     # Check if the query refresh delay has changed
     # Poller reads the interval live, so changing it must not kill in-flight work.
@@ -287,6 +293,9 @@ if __name__ == "__main__":
         web_ui_process_instance.terminate()
 
         # Plugins
+        if ebay_worker_process and ebay_worker_process.is_alive():
+            ebay_worker_process.terminate()
+            ebay_worker_process.join()
 
         if telegram_process and telegram_process.is_alive():
             telegram_process.terminate()
