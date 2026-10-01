@@ -90,7 +90,7 @@ class ControlsDashboardTests(EbayFixture, unittest.TestCase):
         self.assertEqual(self.client.post("/connections", data=form).status_code, 302)
         self.assertEqual([s["id"] for s in ebay_store.active_searches()], [11])
         self.assertIn("Standby", self.client.get("/").text)
-        for rate in ("0", "21", "bad"):
+        for rate in ("-1", "21", "bad"):
             with self.assertRaises(ValueError):
                 resource_controls.save_rate(rate)
         resource_controls.save_rate("5")
@@ -99,6 +99,19 @@ class ControlsDashboardTests(EbayFixture, unittest.TestCase):
 
 class ScalingTests(test_search_controls.DatabaseFixture, unittest.TestCase):
     simulate = test_search_controls.SchedulerTests.simulate
+
+    def test_fast_mode_restores_one_second_checks_without_overlap(self):
+        resource_controls.save_rate("0")
+        starts, pending = self.simulate(workers=12, target=1)
+        self.assertEqual(resource_controls.summary()["rate"], 0)
+        self.assertEqual(resource_controls.summary()["cycle"], 1)
+        self.assertLessEqual(pending, 12)
+        for query_id in range(1, 45):
+            times = [t for q, t in starts if q == query_id]
+            self.assertGreaterEqual(len(times), 10)
+            self.assertTrue(
+                all(0.999 <= b - a <= 1.1 for a, b in itertools.pairwise(times))
+            )
 
     def test_200_searches_are_fair_and_do_not_multiply_request_rate(self):
         with closing(search_settings.connection()) as conn, conn:

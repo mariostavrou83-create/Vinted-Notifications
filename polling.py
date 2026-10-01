@@ -143,7 +143,11 @@ class Poller:
                 self.backoff_target = 0.0
             self.recover_at = now + 300
         self.was_cooling = cooling
-        target = max(target, self.backoff_target, len(queries) / self.request_rate)
+        target = max(
+            target,
+            self.backoff_target,
+            len(queries) / self.request_rate if self.request_rate else 0,
+        )
         for query_id, (future, started, wall_start, actual_interval) in list(
             self.pending.items()
         ):
@@ -216,7 +220,9 @@ class Poller:
                 query_id, now + index * target / max(1, len(queries))
             )
 
-        if not budget.remaining() and now >= self.next_dispatch:
+        if not budget.remaining() and (
+            not self.request_rate or now >= self.next_dispatch
+        ):
             eligible = sorted(
                 (self.next_due[q], q) for q in queries if q not in self.pending
             )
@@ -235,8 +241,9 @@ class Poller:
                 )
                 self.pending[query_id][0].search_url = queries[query_id][1]
                 # One global slot, with no burst credits after idle time or errors.
-                self.next_dispatch = now + 1 / self.request_rate
-                break
+                if self.request_rate:
+                    self.next_dispatch = now + 1 / self.request_rate
+                    break
         if now - self.last_report >= 30:
             intervals = sorted(self.intervals)
             durations = sorted(self.durations)
