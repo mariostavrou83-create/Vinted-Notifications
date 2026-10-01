@@ -233,7 +233,10 @@ class Requester:
         and `anon_id`. HEAD is enough and avoids downloading the ~2MB homepage.
         """
         budget.check()
-        self.session.cookies.clear_session_cookies()
+        # Authentication cookies can be persistent (discard=False). Clearing
+        # only session cookies sends the rejected token back to the auth host,
+        # which can leave every worker stuck in the same 401 refresh loop.
+        self.session.cookies.clear()
         try:
             response = self.session.head(self.VINTED_AUTH_URL, timeout=(5, 10))
             if response.status_code == 429 or response.status_code >= 500:

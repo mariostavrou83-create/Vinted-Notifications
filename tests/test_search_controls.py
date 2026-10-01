@@ -364,6 +364,54 @@ class SchedulerTests(DatabaseFixture, unittest.TestCase):
             self.assertEqual(get.call_count, 1)
             self.assertGreater(budget.remaining(), 119)
 
+    def test_auth_refresh_discards_rejected_persistent_token(self):
+        requester_module = importlib.import_module("pyVintedVN.requester")
+        from requests.cookies import create_cookie
+
+        client = requester_module.Requester()
+        client.set_locale("www.vinted.co.uk")
+        client.session.cookies.set_cookie(
+            create_cookie(
+                "access_token_web",
+                "rejected-offline-test-token",
+                domain=".vinted.co.uk",
+                expires=2000000000,
+                discard=False,
+            )
+        )
+        bootstrap_cookies = []
+
+        def bootstrap(*args, **kwargs):
+            bootstrap_cookies.append(dict(client.session.cookies))
+            if not client.session.cookies.get("access_token_web"):
+                client.session.cookies.set(
+                    "access_token_web", "fresh-offline-test-token"
+                )
+            return MagicMock(status_code=200)
+
+        rejected = MagicMock(status_code=401)
+        rejected.__enter__.return_value = rejected
+        accepted = MagicMock(status_code=200)
+        accepted.__enter__.return_value = accepted
+        with patch.object(
+            requester_module, "budget", polling.RequestBudget()
+        ), patch.object(
+            requester_module.proxies, "configure_proxy", return_value=False
+        ), patch.object(
+            client.session, "head", side_effect=bootstrap
+        ), patch.object(
+            client.session, "get", side_effect=[rejected, accepted]
+        ) as get:
+            self.assertIs(
+                client.get("https://api.vinted.co.uk/svc-catalogue/items"), accepted
+            )
+        self.assertEqual(bootstrap_cookies, [{}])
+        self.assertEqual(get.call_count, 2)
+        self.assertEqual(
+            get.call_args_list[1].kwargs["headers"]["Authorization"],
+            "Bearer fresh-offline-test-token",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
