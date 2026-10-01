@@ -427,9 +427,9 @@ def create_app(test_config=None):
                 (
                     "STANDARD PHOTO TEST sent. Press and hold its notification on your iPhone to check the listing picture. Your live alert layout is unchanged."
                     if photo_first
-                    else "Telegram accepted the single-message preview with "
+                    else "Telegram accepted the photo-notification preview with "
                     + str(preview["photo_count"])
-                    + " listing photo(s). New Vinted alerts now use this layout."
+                    + " listing photo(s). Photo-first notifications are now enabled for all new Vinted alerts."
                 ),
                 "success",
             )

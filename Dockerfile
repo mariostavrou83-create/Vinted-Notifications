@@ -9,7 +9,7 @@ WORKDIR /app
 
 # System deps: gosu to drop privileges cleanly
 RUN apt-get update \
- && apt-get install -y --no-install-recommends gosu \
+ && apt-get install -y --no-install-recommends gosu fonts-dejavu-core \
  && rm -rf /var/lib/apt/lists/*
 
 # Create runtime user/group and app dirs (inside image)

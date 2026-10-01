@@ -202,35 +202,8 @@ class DeliveryWorker:
                         "Could not cache reference file ID for item %s", row["item_id"]
                     )
             else:
-                send_started = self.last_send_started = time.monotonic()
-                extra = {}
-                if self.platform == "ebay" or self.disable_previews:
-                    # The clickable listing must not depend on an external image fetch.
-                    extra["link_preview_options"] = LinkPreviewOptions(is_disabled=True)
-                result = await self.bot.send_message(
-                    **extra,
-                    chat_id=self.chat_id,
-                    text=row["content"],
-                    parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup(
-                        [
-                            [
-                                InlineKeyboardButton(
-                                    (
-                                        "Open eBay"
-                                        if self.platform == "ebay"
-                                        else "Open Vinted"
-                                    ),
-                                    url=row["url"],
-                                )
-                            ]
-                        ]
-                    ),
-                    read_timeout=10,
-                    write_timeout=10,
-                    connect_timeout=5,
-                    pool_timeout=5,
-                )
+                send_started = time.monotonic()
+                result = await self.send_listing(row)
                 finish(row, message_id=result.message_id, now=now)
                 self.preferred_photo = row["item_id"]
                 logger.info(
@@ -283,6 +256,33 @@ class DeliveryWorker:
                 "Telegram %s retry scheduled for item %s", row["kind"], row["item_id"]
             )
         return True
+
+    async def send_listing(self, row):
+        extra = {}
+        if self.platform == "ebay" or self.disable_previews:
+            # The clickable listing must not depend on an external image fetch.
+            extra["link_preview_options"] = LinkPreviewOptions(is_disabled=True)
+        self.last_send_started = time.monotonic()
+        return await self.bot.send_message(
+            **extra,
+            chat_id=self.chat_id,
+            text=row["content"],
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            ("Open eBay" if self.platform == "ebay" else "Open Vinted"),
+                            url=row["url"],
+                        )
+                    ]
+                ]
+            ),
+            read_timeout=10,
+            write_timeout=10,
+            connect_timeout=5,
+            pool_timeout=5,
+        )
 
     def cache_photo(self, media_id, file_id):
         if self.platform == "vinted":
@@ -368,7 +368,7 @@ class EbayDeliveryWorker(DeliveryWorker):
 
 
 class VintedDeliveryWorker(EbayDeliveryWorker):
-    """One fast alert, with photos edited into that same message in the background."""
+    """One notification; native listing photos precede a silent comparison edit."""
 
     @property
     def disable_previews(self):
@@ -379,6 +379,21 @@ class VintedDeliveryWorker(EbayDeliveryWorker):
     def __init__(self, bot, chat_id):
         super().__init__(bot, chat_id)
         self.platform = "vinted"
+
+    async def send_listing(self, row):
+        from vinted_alerts import get_details
+        from vinted_native import send_initial
+
+        details = get_details(row)
+        if not details or not details.get("native_photo"):
+            return await super().send_listing(row)
+
+        async def reserve_slot():
+            while delay := self.send_slot_delay():
+                await asyncio.sleep(delay)
+            self.last_send_started = time.monotonic()
+
+        return await send_initial(self.bot, self.chat_id, row, details, reserve_slot)
 
     async def photo_slot(self):
         # Downloads happen before reserving a Telegram send slot. Recheck after
@@ -425,9 +440,16 @@ class VintedDeliveryWorker(EbayDeliveryWorker):
         try:
             # This task is detached by the dispatcher; downloads and uploads
             # cannot hold up the next listing's link.
-            complete = await enrich(
-                self.bot, self.chat_id, row, details, self.photo_slot
-            )
+            if details.get("native_photo"):
+                from vinted_native import enrich as native_enrich
+
+                complete = await native_enrich(
+                    self.bot, self.chat_id, row, details, self.photo_slot
+                )
+            else:
+                complete = await enrich(
+                    self.bot, self.chat_id, row, details, self.photo_slot
+                )
             logger.info(
                 "Vinted collage edit accepted for item %s; message_id=%s",
                 row["item_id"],
