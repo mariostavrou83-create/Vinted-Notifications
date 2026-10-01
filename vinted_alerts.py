@@ -187,7 +187,7 @@ async def enrich(bot, chat_id, row, details, before_edit):
 
 
 async def preview_and_enable(query_id, *, photo_first=False):
-    """Exercise the actual text-to-rich edit before switching the live worker."""
+    """Enable a verified rich layout, or test a native photo without changing it."""
     import asyncio
     from types import SimpleNamespace
 
@@ -219,7 +219,7 @@ async def preview_and_enable(query_id, *, photo_first=False):
         brand_title=saved.get("brand"),
         raw_data={"photos": saved.get("photos", [])},
     )
-    label = "PHONE PHOTO TEST · " if photo_first else "LAYOUT PREVIEW · "
+    label = "STANDARD PHOTO TEST · " if photo_first else "LAYOUT PREVIEW · "
     search["query_name"] = label + (search["query_name"] or "")
     details = snapshot(item, search)
     row["reference_id"] = search["reference_id"]
@@ -233,14 +233,36 @@ async def preview_and_enable(query_id, *, photo_first=False):
     # Preview uses current gallery extraction, without overwriting the original
     # alert's name, guide or reminder snapshot.
     gallery_details = dict(details)
-    details["photos"] = await vinted_gallery.resolve(
-        row, gallery_details, persist=False
-    )
+    if not photo_first:
+        details["photos"] = await vinted_gallery.resolve(
+            row, gallery_details, persist=False
+        )
+    else:
+        # Test native photo transport separately: rich-message photos were not
+        # shown by the owner's iPhone notification preview.
+        details["photos"] = details["photos"][:1]
     listing = await alert_images.listing_collage(details["photos"])
     if listing is None:
         raise ValueError(
             "The listing photo is unavailable. Try a search with a newer find."
         )
+    if photo_first:
+        heading, link, listing_text, _, _ = sections(row, details)
+        async with Bot(token) as bot:
+            result = await bot.send_photo(
+                chat_id=chat_id,
+                photo=InputFile(listing, filename="vinted-photo-test.jpg"),
+                caption=f"{heading}\n\n{link}\n\n{listing_text}",
+                parse_mode="HTML",
+                show_caption_above_media=True,
+                read_timeout=8,
+                write_timeout=8,
+                connect_timeout=3,
+                pool_timeout=3,
+            )
+            if not result.message_id or not result.photo:
+                raise TelegramError("Telegram did not confirm the photo message")
+        return {"photo_count": 1, "gallery_state": "catalogue"}
     reference = (
         dashboard_store.get_media(row["reference_id"]) if row["reference_id"] else None
     )
@@ -254,22 +276,18 @@ async def preview_and_enable(query_id, *, photo_first=False):
             "The example photo could not be read. Replace it and try again."
         )
     async with Bot(token) as bot:
-        if not photo_first:
-            first = await bot.send_message(
-                chat_id,
-                fast_text(item, search),
-                parse_mode="HTML",
-                link_preview_options=LinkPreviewOptions(is_disabled=True),
-            )
-            row["telegram_message_id"] = first.message_id
+        first = await bot.send_message(
+            chat_id,
+            fast_text(item, search),
+            parse_mode="HTML",
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+        row["telegram_message_id"] = first.message_id
         data = rich_request(row, details, listing, reference_image)
         data["chat_id"] = chat_id
-        if photo_first:
-            data.pop("message_id")
-        else:
-            await asyncio.sleep(1.1)
+        await asyncio.sleep(1.1)
         result = await bot.do_api_request(
-            "sendRichMessage" if photo_first else "editMessageText",
+            "editMessageText",
             api_kwargs=data,
             read_timeout=8,
             write_timeout=8,
@@ -279,12 +297,11 @@ async def preview_and_enable(query_id, *, photo_first=False):
         if (
             not isinstance(result, dict)
             or not result.get("message_id")
-            or (not photo_first and result.get("message_id") != first.message_id)
+            or result.get("message_id") != first.message_id
             or not result.get("rich_message")
         ):
             raise TelegramError("Telegram did not confirm the rich message edit")
-    if not photo_first:
-        db.set_parameter("vinted_single_message_alerts", "1")
+    db.set_parameter("vinted_single_message_alerts", "1")
     return {
         "photo_count": len(details["photos"]),
         "gallery_state": gallery_details.get("gallery_state"),

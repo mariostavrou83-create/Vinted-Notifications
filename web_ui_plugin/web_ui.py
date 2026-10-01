@@ -425,7 +425,7 @@ def create_app(test_config=None):
             preview = asyncio.run(preview_and_enable(query_id, photo_first=photo_first))
             flash(
                 (
-                    "Photo-first test sent. Press and hold its notification on your iPhone to check the picture. Live alerts still send the link first."
+                    "STANDARD PHOTO TEST sent. Press and hold its notification on your iPhone to check the listing picture. Your live alert layout is unchanged."
                     if photo_first
                     else "Telegram accepted the single-message preview with "
                     + str(preview["photo_count"])
