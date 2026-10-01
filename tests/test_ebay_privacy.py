@@ -9,9 +9,9 @@ import sqlite3
 import unittest
 from contextlib import closing
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
-from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from test_ebay_monitor import EbayFixture, item
 
@@ -54,7 +54,9 @@ class PrivacyTests(EbayFixture, unittest.TestCase):
                 }
             ).encode()
         ).decode()
-        with patch.object(privacy, "public_key", return_value=self.key.public_key()):
+        with patch.object(
+            privacy, "public_key", return_value=(self.key.public_key(), "SHA256")
+        ):
             return self.client.post(
                 privacy.PATH,
                 data=body + (b" " if tamper else b""),
@@ -158,7 +160,9 @@ class PrivacyTests(EbayFixture, unittest.TestCase):
                 {"kid": "test-key", "signature": base64.b64encode(signature).decode()}
             ).encode()
         ).decode()
-        with patch.object(privacy, "public_key", return_value=self.key.public_key()):
+        with patch.object(
+            privacy, "public_key", return_value=(self.key.public_key(), "SHA256")
+        ):
             self.assertEqual(
                 self.client.post(
                     privacy.PATH,
@@ -203,3 +207,35 @@ class PrivacyTests(EbayFixture, unittest.TestCase):
             )
         self.assertEqual(r.status_code, 503)
         self.assertEqual(len(self.outbox()), 3)
+
+    def test_official_ebay_sdk_signatures_and_trusted_key_digest(self):
+        fixtures = json.loads(
+            (Path(__file__).parent / "ebay_notification_fixture.json").read_text()
+        )
+        valid = fixtures["valid"]
+        pem = (
+            valid["response"]["key"]
+            .replace("-----BEGIN PUBLIC KEY-----", "-----BEGIN PUBLIC KEY-----\n")
+            .replace("-----END PUBLIC KEY-----", "\n-----END PUBLIC KEY-----")
+        )
+        key = serialization.load_pem_public_key(pem.encode())
+        body = json.dumps(valid["message"], separators=(",", ":")).encode()
+        with patch.object(privacy, "public_key", return_value=(key, "SHA1")):
+            self.assertEqual(privacy.verify(body, valid["signature"]), valid["message"])
+            with self.assertRaisesRegex(ValueError, "signature_mismatch"):
+                privacy.verify(body, fixtures["invalid"]["signature"])
+        with patch.object(
+            privacy, "public_key", return_value=(key, "SHA256")
+        ), self.assertRaisesRegex(ValueError, "digest_mismatch"):
+            privacy.verify(body, valid["signature"])
+        client = Mock()
+        client.token = "test-token"
+        client.session.get.return_value.status_code = 200
+        client.session.get.return_value.json.return_value = valid["response"]
+        with patch.dict(privacy._keys, {}, clear=True), patch.object(
+            privacy, "_next_key_fetch", 0
+        ), patch("ebay_monitor.BrowseClient", return_value=client):
+            first = privacy.public_key(valid["public_key"])
+            self.assertEqual(first[1], "SHA1")
+            self.assertEqual(privacy.public_key(valid["public_key"]), first)
+            self.assertEqual(client.session.get.call_count, 1)
