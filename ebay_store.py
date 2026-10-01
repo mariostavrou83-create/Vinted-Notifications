@@ -13,6 +13,7 @@ from search_settings import connection
 
 ALERT_TARGET_SECONDS = 15
 DEFAULT_POLL_SECONDS = 5
+MAX_LIVE_SEARCHES = 10
 MAX_DAILY_BUDGET = 10_000_000
 
 DEFAULTS = {
@@ -150,17 +151,85 @@ def save_platforms(conn, query_id, vinted, ebay, config):
         )
 
 
+def live_ids(conn):
+    """At most ten eligible searches, including after restart or concurrent edits."""
+    eligible = [r[0] for r in conn.execute("""SELECT q.id FROM queries q
+        JOIN search_platforms s ON s.query_id=q.id
+        LEFT JOIN search_dashboard d ON d.query_id=q.id
+        WHERE s.ebay_enabled=1 AND COALESCE(d.paused,0)=0
+        AND COALESCE(d.archived,0)=0 ORDER BY q.id""")]
+    row = conn.execute(
+        "SELECT value FROM parameters WHERE key='ebay_live_ids'"
+    ).fetchone()
+    if row is None:
+        return eligible[:MAX_LIVE_SEARCHES]
+    try:
+        chosen = set(json.loads(row[0]))
+    except (ValueError, TypeError):
+        return []  # Invalid saved selection must not silently enable searches.
+    return [i for i in eligible if i in chosen][:MAX_LIVE_SEARCHES]
+
+
+def save_live_selection(values):
+    try:
+        chosen = sorted({int(v) for v in values})
+    except (ValueError, TypeError):
+        raise ValueError("Choose valid saved eBay searches.") from None
+    if len(chosen) > MAX_LIVE_SEARCHES:
+        raise ValueError(
+            "Choose up to 10 live eBay searches. Untick one to swap another in."
+        )
+    with closing(connection()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        eligible = {
+            r[0] for r in conn.execute("""SELECT s.query_id FROM search_platforms s
+            LEFT JOIN search_dashboard d ON d.query_id=s.query_id
+            WHERE s.ebay_enabled=1 AND COALESCE(d.archived,0)=0""")
+        }
+        if not set(chosen) <= eligible:
+            raise ValueError(
+                "A selected search was removed or eBay was disabled. Refresh and choose again."
+            )
+        old = set(live_ids(conn))
+        conn.execute(
+            "INSERT OR REPLACE INTO parameters VALUES ('ebay_live_ids',?)",
+            (json.dumps(chosen),),
+        )
+        for query_id in old.symmetric_difference(chosen):
+            conn.execute(
+                "UPDATE search_platforms SET ebay_generation=ebay_generation+1 WHERE query_id=?",
+                (query_id,),
+            )
+            conn.execute("DELETE FROM ebay_state WHERE query_id=?", (query_id,))
+            conn.execute(
+                """UPDATE alert_outbox SET status='cancelled',error='Live eBay selection changed'
+                WHERE query_id=? AND platform='ebay' AND status='pending'""",
+                (query_id,),
+            )
+
+
+def selection_summary():
+    with closing(connection()) as conn:
+        active = live_ids(conn)
+        saved = conn.execute(
+            "SELECT value FROM parameters WHERE key='ebay_live_ids'"
+        ).fetchone()
+        try:
+            chosen = set(json.loads(saved[0])) if saved else set(active)
+        except (ValueError, TypeError):
+            chosen = set()
+        rows = conn.execute(
+            """SELECT q.id,q.query_name,COALESCE(d.paused,0) AS paused
+            FROM queries q JOIN search_platforms s ON s.query_id=q.id
+            LEFT JOIN search_dashboard d ON d.query_id=q.id
+            WHERE s.ebay_enabled=1 AND COALESCE(d.archived,0)=0 ORDER BY q.id"""
+        ).fetchall()
+    return [{**dict(r), "selected": r["id"] in chosen} for r in rows]
+
+
 def active_searches():
     with closing(connection()) as conn:
-        ids = [
-            r[0]
-            for r in conn.execute(
-                """SELECT q.id FROM queries q
-            JOIN search_platforms s ON s.query_id=q.id
-            LEFT JOIN search_dashboard d ON d.query_id=q.id
-            WHERE s.ebay_enabled=1 AND COALESCE(d.paused,0)=0 AND COALESCE(d.archived,0)=0"""
-            )
-        ]
+        ids = live_ids(conn)
     from search_settings import get_search
 
     return [search for i in ids if (search := get_search(i)) is not None]
@@ -302,6 +371,9 @@ def connection_summary():
         "allowance": allowance_summary(config, groups),
         "calls_used": used,
         "active": active,
+        "live_ids": [s["id"] for s in searches],
+        "selection": selection_summary(),
+        "max_live": MAX_LIVE_SEARCHES,
         "groups": groups,
         "interval": math.ceil(max(target, capacity_interval)),
     }

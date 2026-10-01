@@ -66,8 +66,8 @@ class SharedDashboardTests(EbayFixture, unittest.TestCase):
         self.login()
         self.enable()
         html = self.client.get("/connections").text
-        self.assertIn("15-second delivery is unverified", html)
-        self.assertIn("leaves no delivery headroom", html)
+        self.assertIn("No completed live measurements in this window", html)
+        self.assertIn("daily budget takes priority", html)
         self.assertIn("phone receipt is not exposed", html)
         self.assertIn('value="5"', html)
 

@@ -1,0 +1,40 @@
+"""A shared Vinted polling ceiling: adding searches changes cycle length, not load."""
+
+from contextlib import closing
+
+import db
+import search_settings
+
+DEFAULT_REQUESTS_PER_SECOND = 10
+
+
+def request_rate():
+    try:
+        value = int(
+            db.get_parameter("vinted_requests_per_second")
+            or DEFAULT_REQUESTS_PER_SECOND
+        )
+        return max(1, min(20, value))
+    except (ValueError, TypeError):
+        return DEFAULT_REQUESTS_PER_SECOND
+
+
+def save_rate(value):
+    if not str(value).isdigit() or not 1 <= int(value) <= 20:
+        raise ValueError("Choose between 1 and 20 total Vinted checks per second.")
+    with closing(search_settings.connection()) as conn, conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO parameters VALUES ('vinted_requests_per_second',?)",
+            (str(value),),
+        )
+
+
+def summary():
+    active = len(search_settings.active_queries())
+    rate = request_rate()
+    target = max(1, float(db.get_parameter("query_refresh_delay") or 15))
+    return {
+        "active": active,
+        "rate": rate,
+        "cycle": round(max(target, active / rate), 1),
+    }

@@ -27,6 +27,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 import dashboard_store as store
 import db
 import ebay_store
+import resource_controls
 import search_settings
 
 
@@ -242,6 +243,13 @@ def create_app(test_config=None):
                     )
                 )
             )
+            if (
+                row["ebay_enabled"]
+                and not row["paused"]
+                and not archived
+                and row["id"] not in ebay_connection["live_ids"]
+            ):
+                row["ebay_status"] = "Standby"
             row["ebay_ago"] = (
                 "Not checked yet"
                 if not eh.get("last_success")
@@ -351,6 +359,18 @@ def create_app(test_config=None):
                         "eBay connection details saved. They apply automatically.",
                         "success",
                     )
+                elif action == "live_searches":
+                    ebay_store.save_live_selection(request.form.getlist("live_search"))
+                    flash(
+                        "Live eBay selection saved. Newly selected searches first record existing results silently, then alert on new listings.",
+                        "success",
+                    )
+                elif action == "vinted_rate":
+                    resource_controls.save_rate(request.form.get("request_rate", ""))
+                    flash(
+                        "Vinted workload ceiling saved. It applies automatically to all searches.",
+                        "success",
+                    )
                 else:
                     from ebay_connections import test_connection
 
@@ -359,7 +379,9 @@ def create_app(test_config=None):
             except ValueError as exc:
                 flash(str(exc), "error")
         return render_template(
-            "msj_connections.html", info=ebay_store.connection_summary()
+            "msj_connections.html",
+            info=ebay_store.connection_summary(),
+            resources=resource_controls.summary(),
         )
 
     @app.route("/folders", methods=["GET", "POST"])

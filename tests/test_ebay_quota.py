@@ -239,7 +239,7 @@ class QuotaDashboardTests(EbayFixture, unittest.TestCase):
         self.assertIn("Remaining when checked: <b>0</b>", html)
         self.assertIn("configured allowance exceeds", html)
         self.assertIn("reported limits do not cover", html)
-        self.assertIn("15-second delivery is unverified", html)
+        self.assertIn("No completed live measurements in this window", html)
         for secret in ("private-id", "private-secret", "private-token"):
             self.assertNotIn(secret, html)
         api.session.get.assert_not_called()
