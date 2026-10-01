@@ -27,6 +27,26 @@ import vinted_gallery
 
 
 class CollageTests(unittest.TestCase):
+    def test_checkout_link_targets_the_listing_item_on_vinted(self):
+        from urllib.parse import parse_qs, urlparse
+
+        for listing in (
+            "https://www.vinted.co.uk/items/123-jeans?ref=alert",
+            "https://vinted.co.uk/items/123",
+        ):
+            target = urlparse(vinted_alerts.checkout_url(listing))
+            self.assertEqual(target.netloc, "www.vinted.co.uk")
+            self.assertEqual(target.path, "/transaction/buy/new")
+            self.assertEqual(parse_qs(target.query)["transaction[item_id]"], ["123"])
+        for listing in (
+            "https://www.vinted.co.uk/catalog",
+            "https://example.com/items/123",
+            "https://www.vinted.co.uk.evil.test/items/123",
+            "https://www.vinted.co.uk/items/not-an-id",
+            "http://www.vinted.co.uk/items/123",
+        ):
+            self.assertIsNone(vinted_alerts.checkout_url(listing))
+
     def test_one_to_four_squares_keep_all_images_and_reject_five(self):
         colours = [(220, 10, 10), (10, 220, 10), (10, 10, 220), (220, 220, 10)]
         raw = []
@@ -244,6 +264,7 @@ class RichWorkerTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         ordered = [
             "#1 · Fur &amp; cuffs",
             "Open Vinted listing",
+            "Buy now → Checkout",
             "Hollister fur jacket",
             "Price:",
             "Brand:",
@@ -256,6 +277,8 @@ class RichWorkerTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             [html.index(x) for x in ordered], sorted(html.index(x) for x in ordered)
         )
         self.assertIn("Check &lt;label&gt;", html)
+        self.assertIn("transaction%5Bitem_id%5D=110", html)
+        self.assertEqual(html.count('<tg-button type="url"'), 2)
         self.assertEqual(outbox(110)["photo_status"], "sent")
 
     async def test_failed_edit_retries_without_resending_original_notification(self):
@@ -353,6 +376,15 @@ class RichWorkerTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             data["caption"].index("Hollister fur jacket"),
         )
         self.assertTrue(data["show_caption_above_media"])
+        self.assertLess(
+            data["caption"].index("Open Vinted"),
+            data["caption"].index("Buy now → Checkout"),
+        )
+        self.assertLess(
+            data["caption"].index("Buy now → Checkout"),
+            data["caption"].index("Hollister fur jacket"),
+        )
+        self.assertIn("transaction%5Bitem_id%5D=110", data["caption"])
         self.assertEqual(data["parse_mode"], "HTML")
         self.assertEqual(data["photo"].filename, "vinted-photo-test.jpg")
 

@@ -1,6 +1,7 @@
 """A Vinted alert is one message, enriched in place after its fast text delivery."""
 
 import json
+import re
 from contextlib import closing
 from html import escape
 from pathlib import Path
@@ -49,10 +50,29 @@ def snapshot(item, search):
     }
 
 
+def checkout_url(listing_url):
+    """Link to Vinted's buy page; the buyer confirms payment on Vinted."""
+    parsed = urlparse(listing_url)
+    item = re.fullmatch(r"/items/([1-9][0-9]*)(?:-[^/]*)?/?", parsed.path)
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc not in ("www.vinted.co.uk", "vinted.co.uk")
+        or not item
+    ):
+        return None
+    return (
+        "https://www.vinted.co.uk/transaction/buy/new?source_screen=item"
+        "&transaction%5Bitem_id%5D=" + item.group(1)
+    )
+
+
 def sections(row, details):
     name = escape(details.get("name") or row["search_name"][:100])
     heading = f"🔎 <b>#{row['query_id'] or '—'} · {name}</b>"
     link = f'<a href="{escape(row["url"], quote=True)}">Open Vinted listing ↗</a>'
+    buy_url = checkout_url(row["url"])
+    if buy_url:
+        link += f'\n<a href="{escape(buy_url, quote=True)}">Buy now → Checkout</a>'
     price = str(row["price"])
     price = "£" + price if row["currency"] == "GBP" else price + " " + row["currency"]
     listing = (
@@ -105,6 +125,13 @@ def rich_request(row, details, listing_image, reference_image):
         + escape(row["url"], quote=True)
         + '">Open Vinted listing ↗</tg-button></tg-button-row>'
     )
+    buy_url = checkout_url(row["url"])
+    if buy_url:
+        button += (
+            '<tg-button-row align="left"><tg-button type="url" url="'
+            + escape(buy_url, quote=True)
+            + '">Buy now → Checkout</tg-button></tg-button-row>'
+        )
     parts = [
         "<p>" + heading + "</p>",
         button,
