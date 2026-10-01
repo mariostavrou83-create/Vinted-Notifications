@@ -368,7 +368,7 @@ def create_app(test_config=None):
                 elif action == "vinted_rate":
                     resource_controls.save_rate(request.form.get("request_rate", ""))
                     flash(
-                        "Vinted workload ceiling saved. It applies automatically to all searches.",
+                        "Vinted checking mode saved. It applies automatically to all searches.",
                         "success",
                     )
                 else:
