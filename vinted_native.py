@@ -200,7 +200,8 @@ async def enrich(bot, chat_id, row, details, before_edit, *, persist=True):
             chat_id=chat_id,
             message_id=row["telegram_message_id"],
             media=InputMediaPhoto(
-                media=InputFile(image, filename="vinted-comparison.jpg"),
+                media=image,
+                filename="vinted-comparison.jpg",
                 caption=caption(row, details),
                 parse_mode="HTML",
                 show_caption_above_media=True,

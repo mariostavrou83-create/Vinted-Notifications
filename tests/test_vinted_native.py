@@ -11,7 +11,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from PIL import Image
+from telegram import Bot
 from telegram.error import NetworkError
+from telegram.request import BaseRequest
 from test_dashboard import photo_bytes
 from test_finds_delivery import outbox
 from test_search_controls import DatabaseFixture
@@ -24,6 +26,77 @@ import search_settings
 import vinted_alerts
 import vinted_gallery
 import vinted_native
+
+
+class NativeWireRequest(BaseRequest):
+    read_timeout = 8
+
+    async def initialize(self):
+        pass
+
+    async def shutdown(self):
+        pass
+
+    async def do_request(self, url, method, request_data=None, **kwargs):
+        self.data = request_data
+        result = {
+            "message_id": 42,
+            "date": 0,
+            "chat": {"id": 123, "type": "private"},
+            "photo": [
+                {
+                    "file_id": "offline",
+                    "file_unique_id": "offline",
+                    "width": 100,
+                    "height": 100,
+                }
+            ],
+        }
+        return 200, json.dumps({"ok": True, "result": result}).encode()
+
+
+class NativeWireTests(unittest.IsolatedAsyncioTestCase):
+    async def test_comparison_edit_uploads_the_referenced_multipart_image(self):
+        request = NativeWireRequest()
+        bot = Bot(
+            "123456:offline-test-token", request=request, get_updates_request=request
+        )
+        row = {
+            "query_id": 50,
+            "item_id": "123",
+            "telegram_message_id": 42,
+            "reference_id": None,
+            "search_name": "Jeans",
+            "url": "https://www.vinted.co.uk/items/123",
+            "title": "Jeans",
+            "price": "15",
+            "currency": "GBP",
+        }
+        details = {
+            "name": "Jeans",
+            "brand": "7 for all mankind",
+            "photos": ["https://images1.vinted.net/a.jpg"],
+            "reminder": "Check pockets",
+        }
+        with patch.object(
+            vinted_gallery, "resolve", new=AsyncMock(return_value=details["photos"])
+        ), patch.object(
+            alert_images, "listing_collage", new=AsyncMock(return_value=photo_bytes())
+        ):
+            self.assertTrue(
+                await vinted_native.enrich(
+                    bot, "123", row, details, AsyncMock(), persist=False
+                )
+            )
+        media = json.loads(request.data.json_parameters["media"])
+        self.assertTrue(media["media"].startswith("attach://"))
+        attachment = media["media"].removeprefix("attach://")
+        self.assertIn(attachment, request.data.multipart_data)
+        filename, raw, mime = request.data.multipart_data[attachment]
+        self.assertEqual(filename, "vinted-comparison.jpg")
+        self.assertTrue(raw.startswith(b"\xff\xd8"))
+        self.assertEqual(mime, "image/jpeg")
+        self.assertEqual(request.data.json_parameters["message_id"], "42")
 
 
 class NativeImageTests(unittest.TestCase):
