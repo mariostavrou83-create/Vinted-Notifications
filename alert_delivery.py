@@ -97,6 +97,19 @@ def finish(
     photo = row["kind"] == "photo"
     prefix = "photo_" if photo else ""
     with closing(connection()) as conn, conn:
+        # A closure can arrive while Telegram is accepting an in-flight send.
+        if (
+            row.get("platform") == "ebay"
+            and not photo
+            and failure is None
+            and not conn.execute(
+                "SELECT 1 FROM alert_outbox WHERE item_id=?", (row["item_id"],)
+            ).fetchone()
+        ):
+            from ebay_privacy import queue_redaction
+
+            queue_redaction(conn, message_id)
+            return
         if cooldown:
             conn.execute(
                 """INSERT INTO delivery_runtime VALUES (?,?)
@@ -157,6 +170,13 @@ class DeliveryWorker:
 
     async def deliver(self, row, now=None):
         """Send one leased job. Listing and photo acknowledgements stay separate."""
+        if self.platform == "ebay":
+            with closing(connection()) as conn:
+                if not conn.execute(
+                    "SELECT 1 FROM alert_outbox WHERE item_id=? AND lease_token=?",
+                    (row["item_id"], row["lease_token"]),
+                ).fetchone():
+                    return True
         photo = row["kind"] == "photo"
         media = None
         try:
@@ -335,6 +355,12 @@ class EbayDeliveryWorker(DeliveryWorker):
     async def tick(self, now=None):
         while delay := self.send_slot_delay():
             await asyncio.sleep(delay)
+        if self.platform == "ebay":
+            from ebay_privacy import redact_one
+
+            if await redact_one(self.bot, self.chat_id):
+                self.last_send_started = time.monotonic()
+                return True
         if self.photo_task is not None and self.photo_task.done():
             try:
                 self.photo_task.result()

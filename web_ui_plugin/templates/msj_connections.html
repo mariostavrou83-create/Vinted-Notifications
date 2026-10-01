@@ -1,5 +1,14 @@
 {% extends 'msj_base.html' %}{% block content %}
 <div class="page-heading"><div><span class="eyebrow">YOUR TWO TELEGRAM BOTS</span><h1>Connections & usage.</h1><p class="muted">One dashboard. Separate Vinted and eBay notifications.</p></div></div>
+<section class="form-card guide-section"><h2>Activate your eBay production keys</h2>
+<p>If eBay shows “Non Compliant” or “Your keyset is currently disabled”, use <b>Alerts &amp; Notifications → Marketplace Account Deletion</b>. Leave the exemption switch off. Save your notification email there, then copy these two values and save the endpoint.</p>
+{% if deletion.endpoint %}
+<label for="deletion_endpoint">Marketplace account deletion notification endpoint</label><input id="deletion_endpoint" readonly value="{{deletion.endpoint}}">
+<label for="deletion_token">Verification token</label><input id="deletion_token" readonly value="{{deletion.token}}">
+<p>After saving in eBay, select <b>Send Test Notification</b>, then <b>Check eBay access</b> below. No user sign-in token is needed for these searches.</p>
+<p>Verified closure notifications received: <b>{{deletion.received}}</b>. Telegram removals awaiting completion: <b>{{deletion.pending}}</b>.</p>
+{% else %}<p>Set the dashboard HTTPS address before registering the endpoint.</p>{% endif %}
+</section>
 <div class="connection-grid"><section class="form-card">
 <h2>eBay connection</h2><p class="muted">{% if info.missing %}Still needed: {{info.missing|join(', ')}}.{% else %}Details saved. Use the checks below to verify live access.{% endif %}</p>
 <form method="post" autocomplete="off"><input type="hidden" name="csrf" value="{{csrf}}">

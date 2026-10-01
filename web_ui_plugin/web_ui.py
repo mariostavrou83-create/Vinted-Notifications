@@ -26,6 +26,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 import dashboard_store as store
 import db
+import ebay_privacy
 import ebay_store
 import resource_controls
 import search_settings
@@ -70,6 +71,10 @@ def create_app(test_config=None):
 
     @app.before_request
     def protect():
+        # This single callback uses eBay's cryptographic signature instead of
+        # an owner cookie/CSRF form. All dashboard routes stay protected.
+        if request.endpoint == "ebay_account_deletion":
+            return None
         if "csrf" not in session:
             session["csrf"] = secrets.token_urlsafe(32)
         if request.method == "POST" and not secrets.compare_digest(
@@ -185,6 +190,32 @@ def create_app(test_config=None):
     def logout():
         session.clear()
         return redirect(url_for("login"))
+
+    @app.route(ebay_privacy.PATH, methods=["GET", "POST"])
+    def ebay_account_deletion():
+        try:
+            if request.method == "GET":
+                return {
+                    "challengeResponse": ebay_privacy.challenge(
+                        request.args.get("challenge_code", "")
+                    )
+                }
+            if not request.is_json:
+                abort(415)
+            if request.content_length is not None and request.content_length > 16384:
+                abort(413)
+            body = request.stream.read(16385)
+            if len(body) > 16384:
+                abort(413)
+            payload = ebay_privacy.verify(
+                body, request.headers.get("X-EBAY-SIGNATURE", "")
+            )
+            ebay_privacy.process(payload)
+            return "", 204
+        except ValueError:
+            return {"error": "Invalid eBay notification or signature"}, 412
+        except ebay_privacy.VerificationUnavailable:
+            return {"error": "eBay verification temporarily unavailable"}, 503
 
     @app.get("/healthz")
     def health():
@@ -382,6 +413,7 @@ def create_app(test_config=None):
             "msj_connections.html",
             info=ebay_store.connection_summary(),
             resources=resource_controls.summary(),
+            deletion=ebay_privacy.setup_values(),
         )
 
     @app.route("/folders", methods=["GET", "POST"])

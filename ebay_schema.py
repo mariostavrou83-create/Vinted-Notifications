@@ -1,7 +1,26 @@
 """Additive marketplace schema. Called inside the backed-up search migration."""
 
+import secrets
+
 
 def migrate(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS ebay_item_owners (
+        raw_id TEXT PRIMARY KEY, item_id TEXT NOT NULL, seller_hash TEXT NOT NULL)""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ebay_owner ON ebay_item_owners(seller_hash)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ebay_deleted_sellers (digest TEXT PRIMARY KEY)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ebay_deletion_events (event_hash TEXT PRIMARY KEY, received_at REAL NOT NULL)"
+    )
+    conn.execute("""CREATE TABLE IF NOT EXISTS ebay_privacy_redactions (
+        message_id INTEGER PRIMARY KEY, next_attempt REAL NOT NULL DEFAULT 0)""")
+    conn.execute(
+        "INSERT OR IGNORE INTO parameters VALUES ('ebay_deletion_verification',?)",
+        (secrets.token_urlsafe(48),),
+    )
     conn.execute("""CREATE TABLE IF NOT EXISTS search_platforms (
         query_id INTEGER PRIMARY KEY REFERENCES queries(id) ON DELETE CASCADE,
         vinted_enabled INTEGER NOT NULL DEFAULT 1,
