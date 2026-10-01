@@ -187,7 +187,7 @@ async def enrich(bot, chat_id, row, details, before_edit):
 
 
 async def preview_and_enable(query_id, *, photo_first=False):
-    """Exercise the actual text-to-rich edit before switching the live worker."""
+    """Enable a verified rich layout, or test a native photo without changing it."""
     import asyncio
     from types import SimpleNamespace
 
