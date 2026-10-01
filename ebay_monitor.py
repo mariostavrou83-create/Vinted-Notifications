@@ -305,6 +305,7 @@ def record_snapshot(
             or current["paused"]
             or current["archived"]
             or current["ebay_generation"] != search["ebay_generation"]
+            or search["id"] not in store.live_ids(conn)
         ):
             return 0  # Discard requests completed after a pause, edit or disable.
         state = conn.execute(
@@ -449,7 +450,7 @@ def record_failure(search, error, now):
 
 
 class Poller:
-    def __init__(self, workers=64):
+    def __init__(self, workers=2):
         self.executor = ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="ebay-search"
         )
@@ -545,10 +546,10 @@ class Poller:
         group = groups[0]
         due = next_due(group)
         if due > now:
-            return min(0.1, due - now)
+            return min(1.0, due - now)
         wait = store.reserve_call(config, now)
         if wait is not None:
-            return min(0.1, max(0.01, wait - now))
+            return min(1.0, max(0.01, wait - now))
         key = json.dumps(search_params(group[0]["ebay"]), sort_keys=True)
         self.inflight[key] = self.executor.submit(
             self.fetch_group, group, config, now, interval

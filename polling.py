@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from email.utils import parsedate_to_datetime
 
 import db
+import resource_controls
 import search_settings
 from logger import get_logger
 
@@ -98,6 +99,8 @@ class Poller:
         self.was_cooling = False
         self.recover_at = 0.0
         self.shadow = None
+        self.request_rate = resource_controls.DEFAULT_REQUESTS_PER_SECOND
+        self.next_dispatch = 0.0
         if os.environ.get("MSJ_DISCOVERY_SHADOW") == "1":
             from discovery_shadow import DiscoveryShadow
 
@@ -113,6 +116,7 @@ class Poller:
             self.queries = {q[0]: q for q in search_settings.active_queries()}
             self.target = max(1.0, float(db.get_parameter("query_refresh_delay") or 15))
             self.count = int(db.get_parameter("items_per_query") or 96)
+            self.request_rate = resource_controls.request_rate()
             self.config_checked = now + 1
         queries, target, count = self.queries, self.target, self.count
         if self.shadow:
@@ -139,7 +143,7 @@ class Poller:
                 self.backoff_target = 0.0
             self.recover_at = now + 300
         self.was_cooling = cooling
-        target = max(target, self.backoff_target)
+        target = max(target, self.backoff_target, len(queries) / self.request_rate)
         for query_id, (future, started, wall_start, actual_interval) in list(
             self.pending.items()
         ):
@@ -212,7 +216,7 @@ class Poller:
                 query_id, now + index * target / max(1, len(queries))
             )
 
-        if not budget.remaining():
+        if not budget.remaining() and now >= self.next_dispatch:
             eligible = sorted(
                 (self.next_due[q], q) for q in queries if q not in self.pending
             )
@@ -230,6 +234,9 @@ class Poller:
                     actual_interval,
                 )
                 self.pending[query_id][0].search_url = queries[query_id][1]
+                # One global slot, with no burst credits after idle time or errors.
+                self.next_dispatch = now + 1 / self.request_rate
+                break
         if now - self.last_report >= 30:
             intervals = sorted(self.intervals)
             durations = sorted(self.durations)
