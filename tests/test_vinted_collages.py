@@ -27,26 +27,6 @@ import vinted_gallery
 
 
 class CollageTests(unittest.TestCase):
-    def test_checkout_link_targets_the_listing_item_on_vinted(self):
-        from urllib.parse import parse_qs, urlparse
-
-        for listing in (
-            "https://www.vinted.co.uk/items/123-jeans?ref=alert",
-            "https://vinted.co.uk/items/123",
-        ):
-            target = urlparse(vinted_alerts.checkout_url(listing))
-            self.assertEqual(target.netloc, "www.vinted.co.uk")
-            self.assertEqual(target.path, "/transaction/buy/new")
-            self.assertEqual(parse_qs(target.query)["transaction[item_id]"], ["123"])
-        for listing in (
-            "https://www.vinted.co.uk/catalog",
-            "https://example.com/items/123",
-            "https://www.vinted.co.uk.evil.test/items/123",
-            "https://www.vinted.co.uk/items/not-an-id",
-            "http://www.vinted.co.uk/items/123",
-        ):
-            self.assertIsNone(vinted_alerts.checkout_url(listing))
-
     def test_one_to_four_squares_keep_all_images_and_reject_five(self):
         colours = [(220, 10, 10), (10, 220, 10), (10, 10, 220), (220, 220, 10)]
         raw = []
@@ -264,7 +244,6 @@ class RichWorkerTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         ordered = [
             "#1 · Fur &amp; cuffs",
             "Open Vinted listing",
-            "Buy now → Checkout",
             "Hollister fur jacket",
             "Price:",
             "Brand:",
@@ -277,8 +256,6 @@ class RichWorkerTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             [html.index(x) for x in ordered], sorted(html.index(x) for x in ordered)
         )
         self.assertIn("Check &lt;label&gt;", html)
-        self.assertIn("transaction%5Bitem_id%5D=110", html)
-        self.assertEqual(html.count('<tg-button type="url"'), 2)
         self.assertEqual(outbox(110)["photo_status"], "sent")
 
     async def test_failed_edit_retries_without_resending_original_notification(self):
@@ -313,7 +290,9 @@ class RichWorkerTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             self.bot.send_message.await_args.kwargs["link_preview_options"].is_disabled
         )
 
-    async def test_preview_enables_only_after_confirmed_same_message_edit(self):
+    async def test_preview_enables_native_delivery_only_after_confirmed_media_edit(
+        self,
+    ):
         self.batch(1, [110])
         db.set_parameter("vinted_single_message_alerts", "0")
         db.set_parameter("telegram_token", "123456:offline-test-token")
@@ -323,17 +302,27 @@ class RichWorkerTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             )
         context = AsyncMock()
         context.__aenter__.return_value = self.bot
+        self.bot.send_photo.return_value = SimpleNamespace(message_id=42, photo=[1])
+        self.bot.edit_message_media = AsyncMock(
+            return_value=SimpleNamespace(message_id=42, photo=[1])
+        )
         with patch("telegram.Bot", return_value=context), patch.object(
             alert_images, "listing_collage", new=AsyncMock(return_value=photo_bytes())
         ):
-            self.bot.do_api_request.side_effect = BadRequest("Unsupported rich message")
+            self.bot.edit_message_media.side_effect = BadRequest("Invalid media")
             with self.assertRaises(BadRequest):
                 await vinted_alerts.preview_and_enable(1)
             self.assertFalse(vinted_alerts.enabled())
-            self.bot.do_api_request.side_effect = None
+            self.assertNotEqual(db.get_parameter("vinted_native_photo_alerts"), "1")
+            self.bot.edit_message_media.side_effect = None
             await vinted_alerts.preview_and_enable(1)
             self.assertTrue(vinted_alerts.enabled())
-        self.bot.send_photo.assert_not_awaited()
+            self.assertEqual(db.get_parameter("vinted_native_photo_alerts"), "1")
+        self.bot.send_message.assert_not_awaited()
+        self.bot.do_api_request.assert_not_awaited()
+        self.assertEqual(
+            self.bot.edit_message_media.await_args.kwargs["message_id"], 42
+        )
 
     async def test_phone_preview_uses_native_photo_without_changing_live_mode(
         self,
@@ -376,17 +365,8 @@ class RichWorkerTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             data["caption"].index("Hollister fur jacket"),
         )
         self.assertTrue(data["show_caption_above_media"])
-        self.assertLess(
-            data["caption"].index("Open Vinted"),
-            data["caption"].index("Buy now → Checkout"),
-        )
-        self.assertLess(
-            data["caption"].index("Buy now → Checkout"),
-            data["caption"].index("Hollister fur jacket"),
-        )
-        self.assertIn("transaction%5Bitem_id%5D=110", data["caption"])
         self.assertEqual(data["parse_mode"], "HTML")
-        self.assertEqual(data["photo"].filename, "vinted-photo-test.jpg")
+        self.assertEqual(data["photo"].filename, "vinted-listing.jpg")
 
 
 class WireRequest(BaseRequest):

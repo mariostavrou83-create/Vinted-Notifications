@@ -1,7 +1,6 @@
 """A Vinted alert is one message, enriched in place after its fast text delivery."""
 
 import json
-import re
 from contextlib import closing
 from html import escape
 from pathlib import Path
@@ -14,6 +13,7 @@ import alert_images
 import dashboard_store
 import db
 import vinted_gallery
+import vinted_native
 from search_settings import connection
 
 
@@ -42,6 +42,7 @@ def snapshot(item, search):
     return {
         "version": 1,
         "single_message": enabled(),
+        "native_photo": enabled() and vinted_native.enabled(),
         "name": (search.get("query_name") or keyword or "Filtered search")[:100],
         "brand": (getattr(item, "brand_title", None) or "Not specified")[:120],
         "photos": alert_images.photo_urls(item),
@@ -50,29 +51,10 @@ def snapshot(item, search):
     }
 
 
-def checkout_url(listing_url):
-    """Link to Vinted's buy page; the buyer confirms payment on Vinted."""
-    parsed = urlparse(listing_url)
-    item = re.fullmatch(r"/items/([1-9][0-9]*)(?:-[^/]*)?/?", parsed.path)
-    if (
-        parsed.scheme != "https"
-        or parsed.netloc not in ("www.vinted.co.uk", "vinted.co.uk")
-        or not item
-    ):
-        return None
-    return (
-        "https://www.vinted.co.uk/transaction/buy/new?source_screen=item"
-        "&transaction%5Bitem_id%5D=" + item.group(1)
-    )
-
-
 def sections(row, details):
     name = escape(details.get("name") or row["search_name"][:100])
     heading = f"🔎 <b>#{row['query_id'] or '—'} · {name}</b>"
     link = f'<a href="{escape(row["url"], quote=True)}">Open Vinted listing ↗</a>'
-    buy_url = checkout_url(row["url"])
-    if buy_url:
-        link += f'\n<a href="{escape(buy_url, quote=True)}">Buy now → Checkout</a>'
     price = str(row["price"])
     price = "£" + price if row["currency"] == "GBP" else price + " " + row["currency"]
     listing = (
@@ -125,13 +107,6 @@ def rich_request(row, details, listing_image, reference_image):
         + escape(row["url"], quote=True)
         + '">Open Vinted listing ↗</tg-button></tg-button-row>'
     )
-    buy_url = checkout_url(row["url"])
-    if buy_url:
-        button += (
-            '<tg-button-row align="left"><tg-button type="url" url="'
-            + escape(buy_url, quote=True)
-            + '">Buy now → Checkout</tg-button></tg-button-row>'
-        )
     parts = [
         "<p>" + heading + "</p>",
         button,
@@ -214,11 +189,11 @@ async def enrich(bot, chat_id, row, details, before_edit):
 
 
 async def preview_and_enable(query_id, *, photo_first=False):
-    """Enable a verified rich layout, or test a native photo without changing it."""
+    """Enable verified native photo delivery, or send a one-photo diagnostic."""
     import asyncio
     from types import SimpleNamespace
 
-    from telegram import Bot, LinkPreviewOptions
+    from telegram import Bot
 
     from search_settings import get_search
 
@@ -256,80 +231,42 @@ async def preview_and_enable(query_id, *, photo_first=False):
     )
     if not token or not chat_id:
         raise ValueError("Connect your Vinted Telegram bot first.")
-    # Complete downloads first, so missing CDN photos never enable a partial layout.
-    # Preview uses current gallery extraction, without overwriting the original
-    # alert's name, guide or reminder snapshot.
-    gallery_details = dict(details)
-    if not photo_first:
-        details["photos"] = await vinted_gallery.resolve(
-            row, gallery_details, persist=False
-        )
-    else:
-        # Test native photo transport separately: rich-message photos were not
-        # shown by the owner's iPhone notification preview.
-        details["photos"] = details["photos"][:1]
-    listing = await alert_images.listing_collage(details["photos"])
-    if listing is None:
-        raise ValueError(
-            "The listing photo is unavailable. Try a search with a newer find."
-        )
     if photo_first:
-        heading, link, listing_text, _, _ = sections(row, details)
+        # Keep the known-good one-photo diagnostic independent of live settings.
+        details["photos"] = details["photos"][:1]
         async with Bot(token) as bot:
-            result = await bot.send_photo(
-                chat_id=chat_id,
-                photo=InputFile(listing, filename="vinted-photo-test.jpg"),
-                caption=f"{heading}\n\n{link}\n\n{listing_text}",
-                parse_mode="HTML",
-                show_caption_above_media=True,
-                read_timeout=8,
-                write_timeout=8,
-                connect_timeout=3,
-                pool_timeout=3,
+
+            async def ready():
+                pass
+
+            await vinted_native.send_initial(
+                bot, chat_id, row, details, ready, require_photo=True
             )
-            if not result.message_id or not result.photo:
-                raise TelegramError("Telegram did not confirm the photo message")
         return {"photo_count": 1, "gallery_state": "catalogue"}
-    reference = (
-        dashboard_store.get_media(row["reference_id"]) if row["reference_id"] else None
-    )
-    reference_image = (
-        await asyncio.to_thread(alert_images.normalize_available, [reference["image"]])
-        if reference
-        else None
-    )
-    if reference and not reference_image:
-        raise ValueError(
-            "The example photo could not be read. Replace it and try again."
-        )
+
+    # Exercise exactly the same native send and silent media edit as live alerts.
     async with Bot(token) as bot:
-        first = await bot.send_message(
-            chat_id,
-            fast_text(item, search),
-            parse_mode="HTML",
-            link_preview_options=LinkPreviewOptions(is_disabled=True),
+
+        async def ready():
+            pass
+
+        first = await vinted_native.send_initial(
+            bot, chat_id, row, details, ready, require_photo=True
         )
         row["telegram_message_id"] = first.message_id
-        data = rich_request(row, details, listing, reference_image)
-        data["chat_id"] = chat_id
-        await asyncio.sleep(1.1)
-        result = await bot.do_api_request(
-            "editMessageText",
-            api_kwargs=data,
-            read_timeout=8,
-            write_timeout=8,
-            connect_timeout=3,
-            pool_timeout=3,
+
+        async def paced_edit():
+            await asyncio.sleep(1.1)
+
+        complete = await vinted_native.enrich(
+            bot, chat_id, row, details, paced_edit, persist=False
         )
-        if (
-            not isinstance(result, dict)
-            or not result.get("message_id")
-            or result.get("message_id") != first.message_id
-            or not result.get("rich_message")
-        ):
-            raise TelegramError("Telegram did not confirm the rich message edit")
-    db.set_parameter("vinted_single_message_alerts", "1")
+        if not complete:
+            raise ValueError(
+                "Preview sent, but a comparison photo is unavailable. Live settings are unchanged."
+            )
+    vinted_native.enable()
     return {
         "photo_count": len(details["photos"]),
-        "gallery_state": gallery_details.get("gallery_state"),
+        "gallery_state": details.get("gallery_state"),
     }
