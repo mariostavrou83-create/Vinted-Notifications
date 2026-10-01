@@ -115,8 +115,16 @@ class BrowseClient:
                 timeout=(5, 15),
             )
             if response.status_code != 200:
+                reason = f"eBay token request returned HTTP {response.status_code}."
+                if response.status_code == 401:
+                    reason = (
+                        "eBay rejected the production keys. If the developer portal says "
+                        "Non Compliant or keyset disabled, complete Marketplace Account "
+                        "Deletion setup using the values on this page. Otherwise check "
+                        "the App ID and Cert ID belong to the same Production keyset."
+                    )
                 raise EbayError(
-                    "eBay authentication failed. Check production App ID and Cert ID.",
+                    reason,
                     300,
                     global_cooldown=True,
                 )
@@ -338,6 +346,10 @@ def record_snapshot(
             raw_id = str(raw.get("itemId") or raw.get("legacyItemId") or "")
             if not raw_id:
                 continue
+            from ebay_privacy import track_item
+
+            if not track_item(conn, raw, raw_id):
+                continue
             inserted = conn.execute(
                 "INSERT OR IGNORE INTO ebay_seen VALUES (?,?,?)",
                 (search["id"], raw_id, now),
@@ -414,6 +426,9 @@ def record_snapshot(
         )
         # Dates reject older listings; only IDs from the recent window need local storage.
         conn.execute("DELETE FROM ebay_seen WHERE first_seen<?", (now - 2 * MAX_AGE,))
+        conn.execute(
+            "DELETE FROM ebay_item_owners WHERE raw_id NOT IN (SELECT item_id FROM ebay_seen) AND item_id NOT IN (SELECT item_id FROM alert_outbox WHERE platform='ebay')"
+        )
         return created_count
 
 
