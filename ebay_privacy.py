@@ -114,7 +114,14 @@ def public_key(kid):
             )
             if response.status_code != 200:
                 raise VerificationUnavailable
-            pem = response.json()["key"]
+            details = response.json()
+            digest = details["digest"].upper()
+            if details["algorithm"].upper() != "ECDSA" or digest not in (
+                "SHA1",
+                "SHA256",
+            ):
+                raise VerificationUnavailable
+            pem = details["key"]
             pem = pem.replace(
                 "-----BEGIN PUBLIC KEY-----", "-----BEGIN PUBLIC KEY-----\n"
             ).replace("-----END PUBLIC KEY-----", "\n-----END PUBLIC KEY-----")
@@ -125,38 +132,42 @@ def public_key(kid):
             raise VerificationUnavailable from None
         if len(_keys) >= 16:
             _keys.clear()
-        _keys[kid] = (now + 3600, key)
-        return key
+        _keys[kid] = (now + 3600, (key, digest))
+        return key, digest
 
 
 def verify(body, header):
     if not header or len(header) > 4096:
-        raise ValueError
+        raise ValueError("missing_signature")
     try:
         signature = json.loads(base64.b64decode(header, validate=True))
         kid = signature["kid"]
         if not isinstance(kid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", kid):
-            raise ValueError
-        if (
-            signature.get("alg", "ecdsa").lower() != "ecdsa"
-            or signature.get("digest", "SHA256").upper() != "SHA256"
-        ):
-            raise ValueError
+            raise ValueError("unsupported_key_id")
+        if signature.get("alg", "ecdsa").lower() != "ecdsa" or signature.get(
+            "digest", "SHA256"
+        ).upper() not in ("SHA1", "SHA256"):
+            raise ValueError("unsupported_algorithm")
         signed = base64.b64decode(signature["signature"], validate=True)
         payload = json.loads(body)
         if not isinstance(payload, dict):
             raise TypeError
     except (KeyError, TypeError, AttributeError):
         raise ValueError from None
-    key = public_key(kid)
+    key, digest = public_key(kid)
+    # Trust the digest advertised by eBay's HTTPS public-key response, never
+    # let an untrusted header select a different verification algorithm.
+    if signature.get("digest", "SHA256").upper() != digest:
+        raise ValueError("digest_mismatch")
+    algorithm = hashes.SHA1() if digest == "SHA1" else hashes.SHA256()
     compact = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
     for candidate in (body, compact):
         try:
-            key.verify(signed, candidate, ec.ECDSA(hashes.SHA256()))
+            key.verify(signed, candidate, ec.ECDSA(algorithm))
             return payload
         except InvalidSignature:
             continue
-    raise ValueError
+    raise ValueError("signature_mismatch")
 
 
 def queue_redaction(conn, message_id):

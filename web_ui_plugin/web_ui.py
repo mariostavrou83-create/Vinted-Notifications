@@ -212,7 +212,16 @@ def create_app(test_config=None):
             )
             ebay_privacy.process(payload)
             return "", 204
-        except ValueError:
+        except ValueError as exc:
+            known = {
+                "missing_signature",
+                "unsupported_key_id",
+                "unsupported_algorithm",
+                "digest_mismatch",
+                "signature_mismatch",
+            }
+            reason = str(exc) if str(exc) in known else "malformed_notification"
+            app.logger.warning("eBay notification rejected: %s", reason)
             return {"error": "Invalid eBay notification or signature"}, 412
         except ebay_privacy.VerificationUnavailable:
             return {"error": "eBay verification temporarily unavailable"}, 503
