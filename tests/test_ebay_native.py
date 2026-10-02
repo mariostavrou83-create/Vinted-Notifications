@@ -159,6 +159,52 @@ class EbayNativeTests(EbayFixture, unittest.IsolatedAsyncioTestCase):
         self.assertIn("Open eBay listing", rich["html"])
         self.assertIn("Check the back pockets", rich["html"])
 
+    async def test_native_album_keeps_notes_as_text_and_tracks_both_for_deletion(self):
+        row = dict(self.outbox()[0])
+        self.bot.send_media_group = AsyncMock(
+            return_value=[
+                SimpleNamespace(message_id=99, photo=[1], media_group_id="album"),
+                SimpleNamespace(message_id=100, photo=[1], media_group_id="album"),
+            ]
+        )
+        result = await vinted_alerts.phone_layout_test(
+            self.bot,
+            "123",
+            row,
+            ebay_alerts.get_details(row),
+            mode="native_album",
+            after_send=ebay_alerts.track_preview,
+        )
+        self.assertIn("PHOTO ALBUM TEST sent", result)
+        self.bot.send_photo.assert_not_awaited()
+        self.bot.send_message.assert_not_awaited()
+        media = self.bot.send_media_group.call_args.kwargs["media"]
+        self.assertEqual(len(media), 2)
+        self.assertIn("Open eBay listing", media[0].caption)
+        self.assertIn("Check the back pockets", media[0].caption)
+        self.assertIn("15.00", media[0].caption)
+        self.assertIsNone(media[1].caption)
+        with closing(search_settings.connection()) as conn:
+            ids = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT message_id FROM ebay_preview_messages ORDER BY message_id"
+                )
+            ]
+        self.assertEqual(ids, [99, 100])
+
+    async def test_album_never_silently_truncates_long_reminders(self):
+        row = dict(self.outbox()[0])
+        details = dict(ebay_alerts.get_details(row), reminder="😀" * 600)
+        self.bot.send_media_group = AsyncMock()
+        with self.assertRaisesRegex(ValueError, "caption limit"):
+            await vinted_alerts.phone_layout_test(
+                self.bot, "123", row, details, mode="native_album"
+            )
+        self.bot.send_media_group.assert_not_awaited()
+        self.bot.send_photo.assert_not_awaited()
+        self.bot.send_message.assert_not_awaited()
+
     async def test_edit_retry_never_sends_a_second_notification(self):
         self.bot.edit_message_media.side_effect = NetworkError("offline")
         await self.send()

@@ -94,12 +94,16 @@ async def preview(query_id, *, phone_mode=None):
             search,
         )
     label = (
-        "ORIGINAL LAYOUT TEST · "
-        if phone_mode == "rich_first"
+        "PHOTO ALBUM TEST · "
+        if phone_mode == "native_album"
         else (
-            "SAME MESSAGE TEST · "
-            if phone_mode == "native_then_rich"
-            else "LAYOUT PREVIEW · "
+            "ORIGINAL LAYOUT TEST · "
+            if phone_mode == "rich_first"
+            else (
+                "SAME MESSAGE TEST · "
+                if phone_mode == "native_then_rich"
+                else "LAYOUT PREVIEW · "
+            )
         )
     )
     details["name"] = label + (search["query_name"] or "eBay")
@@ -117,7 +121,7 @@ async def preview(query_id, *, phone_mode=None):
     if not config["telegram_token"] or not config["chat_id"]:
         raise ValueError("Connect your eBay Telegram bot first.")
     async with Bot(config["telegram_token"]) as bot:
-        if phone_mode in ("rich_first", "native_then_rich"):
+        if phone_mode in ("rich_first", "native_then_rich", "native_album"):
             return await vinted_alerts.phone_layout_test(
                 bot,
                 config["chat_id"],
