@@ -101,7 +101,7 @@ def check_saved_search(search):
     if not config["client_id"] or not config["client_secret"]:
         raise ValueError("Save your eBay production keys in Connections first.")
     now = time.time()
-    wait = reserve_call(config, now)
+    wait = reserve_call(config, now, diagnostic=True)
     if wait:
         raise ValueError(
             f"The next shared API request slot is in {max(1, int(wait - now))} seconds. Try again then."

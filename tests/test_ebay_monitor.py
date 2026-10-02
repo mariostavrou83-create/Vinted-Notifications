@@ -263,6 +263,25 @@ class NewListingTests(EbayFixture, unittest.TestCase):
 
 
 class QuotaTests(EbayFixture, unittest.TestCase):
+    def test_owner_diagnostic_is_budgeted_throttled_and_respects_cooldown(self):
+        config = {"daily_budget": 5000}
+        self.assertIsNone(store.reserve_call(config, 1000))
+        self.assertIsNone(store.reserve_call(config, 1002, diagnostic=True))
+        self.assertEqual(store.reserve_call(config, 1003, diagnostic=True), 1032)
+        self.assertGreater(store.reserve_call(config, 1003), 1020)
+        with closing(search_settings.connection()) as conn, conn:
+            self.assertEqual(
+                conn.execute("SELECT SUM(calls) FROM ebay_call_buckets").fetchone()[0],
+                2,
+            )
+            conn.execute(
+                "INSERT INTO delivery_runtime VALUES ('ebay_api_cooldown',1100)"
+            )
+        self.assertEqual(store.reserve_call(config, 1040, diagnostic=True), 1100)
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE ebay_call_buckets SET calls=4500")
+        self.assertGreater(store.reserve_call(config, 1200, diagnostic=True), 86400)
+
     def test_rolling_budget_pacing_restart_and_429_cooldown(self):
         config = {"daily_budget": 100}
         self.assertIsNone(store.reserve_call(config, 1000))
