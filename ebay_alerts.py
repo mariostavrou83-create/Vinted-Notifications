@@ -62,7 +62,7 @@ def get_details(row):
     return json.loads(saved[0]) if saved else None
 
 
-async def preview(query_id):
+async def preview(query_id, *, phone_mode=None):
     from telegram import Bot
     from telegram.error import TelegramError
 
@@ -93,7 +93,16 @@ async def preview(query_id):
             },
             search,
         )
-    details["name"] = "LAYOUT PREVIEW · " + (search["query_name"] or "eBay")
+    label = (
+        "ORIGINAL LAYOUT TEST · "
+        if phone_mode == "rich_first"
+        else (
+            "SAME MESSAGE TEST · "
+            if phone_mode == "native_then_rich"
+            else "LAYOUT PREVIEW · "
+        )
+    )
+    details["name"] = label + (search["query_name"] or "eBay")
     details["photos"] = [
         p for p in details["photos"] if alert_images.safe_listing_photo(p)
     ]
@@ -108,6 +117,15 @@ async def preview(query_id):
     if not config["telegram_token"] or not config["chat_id"]:
         raise ValueError("Connect your eBay Telegram bot first.")
     async with Bot(config["telegram_token"]) as bot:
+        if phone_mode in ("rich_first", "native_then_rich"):
+            return await vinted_alerts.phone_layout_test(
+                bot,
+                config["chat_id"],
+                row,
+                details,
+                mode=phone_mode,
+                after_send=track_preview,
+            )
 
         async def ready():
             pass

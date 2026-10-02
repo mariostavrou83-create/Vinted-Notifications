@@ -358,6 +358,7 @@ class RichWorkerTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             reference.assert_not_called()
             self.assertEqual(len(collage.await_args.args[0]), 1)
         self.bot.send_message.assert_not_awaited()
+
         self.bot.do_api_request.assert_not_awaited()
         data = self.bot.send_photo.await_args.kwargs
         self.assertIn("STANDARD PHOTO TEST", data["caption"])
@@ -368,6 +369,83 @@ class RichWorkerTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(data["show_caption_above_media"])
         self.assertEqual(data["parse_mode"], "HTML")
         self.assertEqual(data["photo"].filename, "vinted-listing.jpg")
+
+    async def test_native_then_rich_preview_keeps_id_panels_and_live_settings(self):
+        self.batch(1, [110])
+        db.set_parameter("telegram_token", "123456:offline-test-token")
+        with closing(settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE alert_outbox SET photo_url='https://images1.vinted.net/a.jpg'"
+            )
+        before = db.get_parameter("vinted_single_message_alerts"), db.get_parameter(
+            "separate_photo_panels"
+        )
+        self.bot.send_photo.return_value = SimpleNamespace(message_id=42, photo=[1])
+        context = AsyncMock()
+        context.__aenter__.return_value = self.bot
+        with patch("telegram.Bot", return_value=context), patch.object(
+            alert_images, "listing_collage", new=AsyncMock(return_value=photo_bytes())
+        ), patch.object(
+            vinted_gallery,
+            "resolve",
+            side_effect=AssertionError("No gallery calls in phone test"),
+        ):
+            result = await vinted_alerts.preview_and_enable(
+                1, phone_mode="native_then_rich"
+            )
+        self.assertIn("SAME MESSAGE TEST accepted", result["phone_test"])
+        self.assertEqual(
+            before,
+            (
+                db.get_parameter("vinted_single_message_alerts"),
+                db.get_parameter("separate_photo_panels"),
+            ),
+        )
+        self.bot.send_photo.assert_awaited_once()
+        self.bot.send_message.assert_not_awaited()
+        request = self.bot.do_api_request.call_args.kwargs["api_kwargs"]
+        self.assertEqual(request["message_id"], 42)
+        self.assertEqual(len(request["rich_message"]["media"]), 2)
+        self.assertIn("Check &lt;label&gt;", request["rich_message"]["html"])
+
+    async def test_rejected_photo_conversion_keeps_only_original_photo(self):
+        self.batch(1, [110])
+        row = dict(outbox(110))
+        self.bot.send_photo.return_value = SimpleNamespace(message_id=42, photo=[1])
+        self.bot.do_api_request.side_effect = BadRequest(
+            "There is no text in the message to edit"
+        )
+        with patch.object(
+            alert_images, "listing_collage", new=AsyncMock(return_value=photo_bytes())
+        ):
+            result = await vinted_alerts.phone_layout_test(
+                self.bot,
+                "123",
+                row,
+                vinted_alerts.get_details(row),
+                mode="native_then_rich",
+            )
+        self.assertIn("Telegram refused", result)
+        self.bot.send_photo.assert_awaited_once()
+        self.bot.send_message.assert_not_awaited()
+        self.bot.do_api_request.assert_awaited_once()
+
+    async def test_original_layout_preview_includes_both_photos_in_initial_send(self):
+        self.batch(1, [110])
+        row = dict(outbox(110))
+        with patch.object(
+            alert_images, "listing_collage", new=AsyncMock(return_value=photo_bytes())
+        ):
+            result = await vinted_alerts.phone_layout_test(
+                self.bot, "123", row, vinted_alerts.get_details(row), mode="rich_first"
+            )
+        self.assertIn("ORIGINAL LAYOUT TEST sent", result)
+        self.bot.send_photo.assert_not_awaited()
+        self.bot.send_message.assert_not_awaited()
+        self.assertEqual(self.bot.do_api_request.call_args.args, ("sendRichMessage",))
+        request = self.bot.do_api_request.call_args.kwargs["api_kwargs"]
+        self.assertNotIn("message_id", request)
+        self.assertEqual(len(request["rich_message"]["media"]), 2)
 
 
 class WireRequest(BaseRequest):

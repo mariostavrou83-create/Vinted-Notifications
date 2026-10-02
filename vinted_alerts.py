@@ -219,7 +219,90 @@ async def enrich(bot, chat_id, row, details, before_edit, *, persist=True):
     )
 
 
-async def preview_and_enable(query_id, *, photo_first=False):
+async def phone_layout_test(bot, chat_id, row, details, *, mode, after_send=None):
+    """Compare native-first and original rich-first transport; never enable live mode."""
+    import asyncio
+
+    # Use already supplied photos. A phone transport test must not fetch galleries
+    # or rewrite the original listing snapshot.
+    listing = await alert_images.listing_collage(details.get("photos", [])[:4])
+    if listing is None:
+        raise ValueError("The listing photo is unavailable. Try a newer find.")
+    reference = (
+        dashboard_store.get_media(row["reference_id"]) if row["reference_id"] else None
+    )
+    reference_image = (
+        await asyncio.to_thread(alert_images.normalize_available, [reference["image"]])
+        if reference
+        else None
+    )
+    if row["reference_id"] and reference_image is None:
+        raise ValueError("The saved example photo is unavailable; no test was sent.")
+    data = rich_request(row, details, listing, reference_image)
+    data["chat_id"] = chat_id
+    timeouts = {
+        "read_timeout": 8,
+        "write_timeout": 8,
+        "connect_timeout": 3,
+        "pool_timeout": 3,
+    }
+    if mode == "rich_first":
+        data.pop("message_id")
+        result = await bot.do_api_request(
+            "sendRichMessage", api_kwargs=data, **timeouts
+        )
+        if (
+            not isinstance(result, dict)
+            or not result.get("message_id")
+            or not result.get("rich_message")
+        ):
+            raise TelegramError("Telegram did not confirm the initial rich message")
+        row["telegram_message_id"] = result["message_id"]
+        if after_send:
+            after_send(row)
+        return "ORIGINAL LAYOUT TEST sent with both photo panels in the first message. Check the expanded iPhone notification. Live alerts are unchanged."
+
+    first = await bot.send_photo(
+        chat_id=chat_id,
+        photo=InputFile(listing, filename="listing.jpg"),
+        caption=vinted_native.caption(row, details),
+        parse_mode="HTML",
+        show_caption_above_media=True,
+        **timeouts,
+    )
+    if not first.message_id or not first.photo:
+        raise TelegramError("Telegram did not confirm the initial photo")
+    row["telegram_message_id"] = first.message_id
+    if after_send and after_send(row) is False:
+        return "The listing was removed during the test. Its preview is being removed."
+    data["message_id"] = first.message_id
+    await asyncio.sleep(1.1)
+    if after_send and after_send(row) is False:
+        return "The listing was removed before the test edit. Its preview is being removed."
+    try:
+        result = await bot.do_api_request(
+            "editMessageText", api_kwargs=data, **timeouts
+        )
+        if (
+            not isinstance(result, dict)
+            or result.get("message_id") != first.message_id
+            or not result.get("rich_message")
+        ):
+            raise TelegramError("Telegram did not confirm the same-message rich edit")
+    except BadRequest as exc:
+        from logger import get_logger
+
+        get_logger(__name__).warning(
+            "iPhone native-to-rich test rejected: %s", str(exc)[:200]
+        )
+        return "SAME MESSAGE TEST photo sent, but Telegram refused the separate-panel edit. The original photo remains; no second message was sent. Live alerts are unchanged."
+    finally:
+        if after_send:
+            after_send(row)
+    return "SAME MESSAGE TEST accepted: Telegram received a standard photo first, then the separate panels and readable notes on the same message ID. Check its expanded iPhone notification. Live alerts are unchanged."
+
+
+async def preview_and_enable(query_id, *, photo_first=False, phone_mode=None):
     """Enable verified native photo delivery, or send a one-photo diagnostic."""
     import asyncio
     from types import SimpleNamespace
@@ -252,7 +335,15 @@ async def preview_and_enable(query_id, *, photo_first=False):
         brand_title=saved.get("brand"),
         raw_data={"photos": saved.get("photos", [])},
     )
-    label = "STANDARD PHOTO TEST · " if photo_first else "LAYOUT PREVIEW · "
+    label = (
+        "ORIGINAL LAYOUT TEST · "
+        if phone_mode == "rich_first"
+        else (
+            "SAME MESSAGE TEST · "
+            if phone_mode == "native_then_rich"
+            else "STANDARD PHOTO TEST · " if photo_first else "LAYOUT PREVIEW · "
+        )
+    )
     search["query_name"] = label + (search["query_name"] or "")
     details = snapshot(item, search)
     row["reference_id"] = search["reference_id"]
@@ -262,6 +353,16 @@ async def preview_and_enable(query_id, *, photo_first=False):
     )
     if not token or not chat_id:
         raise ValueError("Connect your Vinted Telegram bot first.")
+    if phone_mode in ("rich_first", "native_then_rich"):
+        async with Bot(token) as bot:
+            message = await phone_layout_test(
+                bot, chat_id, row, details, mode=phone_mode
+            )
+        return {
+            "photo_count": len(details["photos"]),
+            "gallery_state": "catalogue",
+            "phone_test": message,
+        }
     if photo_first:
         # Keep the known-good one-photo diagnostic independent of live settings.
         details["photos"] = details["photos"][:1]
