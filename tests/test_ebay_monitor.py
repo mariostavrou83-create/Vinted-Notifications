@@ -263,6 +263,25 @@ class NewListingTests(EbayFixture, unittest.TestCase):
 
 
 class QuotaTests(EbayFixture, unittest.TestCase):
+    def test_explicit_jeans_category_rejects_polo_and_unknown_category(self):
+        config = dict(store.DEFAULTS, category="11554")
+        polo = item(
+            123,
+            title="7 For All Mankind Men's Black Polo Shirt Size M",
+            categories=[{"categoryId": "185101"}, {"categoryId": "11484"}],
+        )
+        self.assertIsNone(monitor.parse_item(polo, config, 1020))
+        self.assertIsNone(monitor.parse_item(item(124), config, 1020))
+        jeans = item(
+            125,
+            title="7 For All Mankind Women's Jeans",
+            categories=[{"categoryId": "11554"}, {"categoryId": "15724"}],
+        )
+        self.assertIsNotNone(monitor.parse_item(jeans, config, 1020))
+        self.assertIsNotNone(
+            monitor.parse_item(jeans, dict(config, category="15724"), 1020)
+        )
+
     def test_owner_diagnostic_is_budgeted_throttled_and_respects_cooldown(self):
         config = {"daily_budget": 5000}
         self.assertIsNone(store.reserve_call(config, 1000))

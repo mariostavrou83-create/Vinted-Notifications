@@ -222,6 +222,16 @@ def parse_item(raw, config, now, *, fresh_only=True):
     ):
         return None
     public = raw.get("_dateSource") == "publicSearchMinute"
+    # Browse includes the listing's leaf and ancestor category IDs. Never let
+    # an unrelated result through an explicit saved category constraint.
+    if config["category"] and not public:
+        categories = {
+            str(category.get("categoryId"))
+            for category in (raw.get("categories") or [])
+            if isinstance(category, dict)
+        }
+        if config["category"] not in categories:
+            return None
     precision = 59 if public else 0
     if (
         created is None
