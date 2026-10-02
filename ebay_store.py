@@ -470,7 +470,7 @@ def call_spacing(config):
     return max(0.02, 86400 / (config["daily_budget"] * 0.9))
 
 
-def reserve_call(config, now):
+def reserve_call(config, now, *, diagnostic=False):
     with closing(connection()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
         if config.get("source") == "public":
@@ -508,9 +508,16 @@ def reserve_call(config, now):
         cooldown = conn.execute(
             "SELECT value FROM delivery_runtime WHERE key='ebay_api_cooldown'"
         ).fetchone()
-        wait_until = max(
-            (latest or 0) + call_spacing(config), cooldown[0] if cooldown else 0
-        )
+        # An explicit owner check must not starve behind continuous polling.
+        # Allow one diagnostic per 30 seconds inside the same daily budget;
+        # it moves the normal poller's next slot and respects API cooldowns.
+        spacing = 1 if diagnostic else call_spacing(config)
+        wait_until = max((latest or 0) + spacing, cooldown[0] if cooldown else 0)
+        if diagnostic:
+            last_check = conn.execute(
+                "SELECT value FROM delivery_runtime WHERE key='ebay_last_diagnostic'"
+            ).fetchone()
+            wait_until = max(wait_until, last_check[0] + 30 if last_check else 0)
         if count >= math.floor(config["daily_budget"] * 0.9):
             wait_until = max(wait_until, (oldest + 1) * 60 + 86400)
         if now < wait_until:
@@ -524,4 +531,9 @@ def reserve_call(config, now):
             "INSERT OR REPLACE INTO delivery_runtime VALUES ('ebay_last_call',?)",
             (now,),
         )
+        if diagnostic:
+            conn.execute(
+                "INSERT OR REPLACE INTO delivery_runtime VALUES ('ebay_last_diagnostic',?)",
+                (now,),
+            )
         return None
