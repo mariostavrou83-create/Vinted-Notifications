@@ -6,6 +6,7 @@ from contextlib import closing
 from types import SimpleNamespace
 
 import alert_images
+import photo_cards
 import vinted_alerts
 import vinted_native
 from search_settings import connection
@@ -107,6 +108,10 @@ async def preview(query_id, *, phone_mode=None):
         )
     )
     details["name"] = label + (search["query_name"] or "eBay")
+    if phone_mode == "working_photo":
+        details["name"] = "WORKING PHOTO ALERT TEST · " + (
+            search["query_name"] or "eBay"
+        )
     details["photos"] = [
         p for p in details["photos"] if alert_images.safe_listing_photo(p)
     ]
@@ -121,6 +126,19 @@ async def preview(query_id, *, phone_mode=None):
     if not config["telegram_token"] or not config["chat_id"]:
         raise ValueError("Connect your eBay Telegram bot first.")
     async with Bot(config["telegram_token"]) as bot:
+        if phone_mode == "working_photo":
+
+            async def ready():
+                pass
+
+            first = await photo_cards.send_initial(
+                bot, config["chat_id"], row, details, ready, require_photo=True
+            )
+            row["telegram_message_id"] = first.message_id
+            if not track_preview(row):
+                return "The listing was removed during preview delivery. Its preview is being removed."
+            photo_cards.enable()
+            return "WORKING PHOTO ALERT TEST sent. New Vinted and eBay alerts now use the same photo delivery, with readable notes and in-message Listing photos / Your examples buttons."
         if phone_mode in ("rich_first", "native_then_rich", "native_album"):
             return await vinted_alerts.phone_layout_test(
                 bot,

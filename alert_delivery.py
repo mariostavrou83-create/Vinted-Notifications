@@ -417,6 +417,17 @@ class VintedDeliveryWorker(EbayDeliveryWorker):
         from vinted_native import send_initial
 
         details = self.alert_module.get_details(row)
+        if details and details.get("photo_card"):
+            import photo_cards
+
+            async def reserve_photo_slot():
+                while delay := self.send_slot_delay():
+                    await asyncio.sleep(delay)
+                self.last_send_started = time.monotonic()
+
+            return await photo_cards.send_initial(
+                self.bot, self.chat_id, row, details, reserve_photo_slot
+            )
         if details and not details.get("native_photo"):
             from vinted_alerts import send_text
 
@@ -490,7 +501,13 @@ class VintedDeliveryWorker(EbayDeliveryWorker):
                         ).fetchone():
                             raise TelegramError("Listing removed before photo edit")
 
-            if details.get("native_photo"):
+            if details.get("photo_card"):
+                import photo_cards
+
+                complete = await photo_cards.enrich(
+                    self.bot, self.chat_id, row, details, edit_slot
+                )
+            elif details.get("native_photo"):
                 from vinted_native import enrich as native_enrich
 
                 complete = await native_enrich(

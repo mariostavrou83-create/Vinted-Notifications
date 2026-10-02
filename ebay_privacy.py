@@ -197,6 +197,22 @@ def purge(conn, digests, *, redact=False):
         f"SELECT raw_id,item_id FROM ebay_item_owners WHERE seller_hash='' OR seller_hash IN ({marks})",
         tuple(digests),
     ).fetchall()
+    if "telegram_photo_cards" in tables:
+        # Include in-flight photo sends and explicit previews before the outbox
+        # deletion cascades to their cached Telegram file IDs and note snapshots.
+        for (message_id,) in conn.execute(
+            f"""SELECT c.message_id FROM telegram_photo_cards c
+                LEFT JOIN ebay_item_owners o ON o.item_id=c.item_id
+                WHERE c.platform='ebay' AND
+                (o.item_id IS NULL OR o.seller_hash='' OR o.seller_hash IN ({marks}))""",
+            tuple(digests),
+        ).fetchall():
+            if redact:
+                queue_redaction(conn, message_id)
+            conn.execute(
+                "DELETE FROM telegram_photo_cards WHERE platform='ebay' AND message_id=?",
+                (message_id,),
+            )
     for raw_id, item_id in owned:
         if "ebay_preview_messages" in tables:
             if redact:

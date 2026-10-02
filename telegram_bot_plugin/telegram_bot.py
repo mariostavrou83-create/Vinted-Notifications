@@ -47,6 +47,13 @@ class LeRobot:
 
             # Only the configured chat may manage this private sourcing bot.
             self.app.add_handler(TypeHandler(Update, self.restrict_access), group=-1)
+            from telegram.ext import CallbackQueryHandler
+
+            from photo_cards import vinted_callback
+
+            self.app.add_handler(
+                CallbackQueryHandler(vinted_callback, pattern=r"^card:")
+            )
 
             # Telegram is notifications-only; old editing commands no longer mutate data.
             from telegram.ext import MessageHandler, filters
