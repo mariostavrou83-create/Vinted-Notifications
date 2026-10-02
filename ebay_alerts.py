@@ -1,0 +1,131 @@
+"""eBay snapshots for the shared native-photo, single-message renderer."""
+
+import asyncio
+import json
+from contextlib import closing
+from types import SimpleNamespace
+
+import alert_images
+import vinted_alerts
+from search_settings import connection
+
+
+def track_preview(row):
+    """Register preview delivery, including a deletion racing the Telegram call."""
+    from ebay_privacy import queue_redaction
+
+    with closing(connection()) as conn, conn:
+        if conn.execute(
+            "SELECT 1 FROM alert_outbox WHERE item_id=? AND platform='ebay'",
+            (row["item_id"],),
+        ).fetchone():
+            conn.execute(
+                "INSERT OR IGNORE INTO ebay_preview_messages VALUES (?,?)",
+                (row["telegram_message_id"], row["item_id"]),
+            )
+        else:
+            queue_redaction(conn, row["telegram_message_id"])
+            return False
+    return True
+
+
+def enabled():
+    return True
+
+
+def snapshot(item, search):
+    details = vinted_alerts.snapshot(
+        SimpleNamespace(
+            photo=item.get("photo_url"),
+            brand_title=item.get("brand"),
+            raw_data={"photos": item.get("photos", [])},
+        ),
+        search,
+    )
+    details.update(
+        platform="ebay",
+        native_photo=True,
+        single_message=True,
+        auction=item["auction"],
+        shipping=item["shipping"],
+        brand_label=item.get("brand_label", "Brand"),
+    )
+    return details
+
+
+def get_details(row):
+    with closing(connection()) as conn:
+        saved = conn.execute(
+            "SELECT payload FROM ebay_alert_details WHERE item_id=?", (row["item_id"],)
+        ).fetchone()
+    return json.loads(saved[0]) if saved else None
+
+
+async def preview(query_id):
+    from telegram import Bot
+    from telegram.error import TelegramError
+
+    from ebay_store import configuration
+    from search_settings import get_search
+    from vinted_native import enrich, send_initial
+
+    search = get_search(query_id)
+    if not search:
+        raise ValueError("Search not found.")
+    with closing(connection()) as conn:
+        recent = conn.execute(
+            "SELECT * FROM alert_outbox WHERE query_id=? AND platform='ebay' AND photo_url IS NOT NULL AND photo_url!='' ORDER BY found_at DESC LIMIT 1",
+            (query_id,),
+        ).fetchone()
+    if not recent:
+        raise ValueError(
+            "This search needs an eBay find with a listing photo before sending a layout preview. Use Check saved eBay search to check its filters."
+        )
+    row = dict(recent)
+    details = get_details(row)
+    if not details:
+        details = snapshot(
+            {
+                "photo_url": row["photo_url"],
+                "auction": "Current bid" in row.get("content", ""),
+                "shipping": None,
+            },
+            search,
+        )
+    details["name"] = "LAYOUT PREVIEW · " + (search["query_name"] or "eBay")
+    details["photos"] = [
+        p for p in details["photos"] if alert_images.safe_listing_photo(p)
+    ]
+    row["reference_id"] = search["reference_id"]
+    # Refresh the owner's guide/reminder for this explicit preview only.
+    current = snapshot(
+        {"auction": details.get("auction", False), "shipping": details.get("shipping")},
+        search,
+    )
+    details.update(guide=current["guide"], reminder=current["reminder"])
+    config = configuration()
+    if not config["telegram_token"] or not config["chat_id"]:
+        raise ValueError("Connect your eBay Telegram bot first.")
+    async with Bot(config["telegram_token"]) as bot:
+
+        async def ready():
+            pass
+
+        first = await send_initial(
+            bot, config["chat_id"], row, details, ready, require_photo=True
+        )
+        row["telegram_message_id"] = first.message_id
+        if not track_preview(row):
+            return "The listing was removed during preview delivery. Its preview is being removed."
+        await asyncio.sleep(1.1)
+        try:
+            complete = await enrich(
+                bot, config["chat_id"], row, details, ready, persist=False
+            )
+        except TelegramError:
+            return "Preview photo sent. The comparison edit could not finish; do not resend just to check delivery."
+        finally:
+            track_preview(row)
+    return "eBay layout preview sent as one photo message." + (
+        " A listing or reference image was unavailable." if not complete else ""
+    )

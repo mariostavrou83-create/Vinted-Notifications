@@ -68,7 +68,11 @@ def safe_listing_photo(url):
             and not parsed.username
             and not parsed.password
             and parsed.port in (None, 443)
-            and (host == "vinted.net" or host.endswith(".vinted.net"))
+            and (
+                host == "vinted.net"
+                or host.endswith(".vinted.net")
+                or host == "i.ebayimg.com"
+            )
         )
         return url if allowed else None
     except ValueError:
@@ -86,7 +90,7 @@ def photo_urls(item):
 
 
 def download_photo(url):
-    """Only the public Vinted image CDN, no redirects or unbounded downloads."""
+    """Only approved public listing image CDNs; bounded reads, no redirects."""
     if not safe_listing_photo(url):
         return None
     started = time.monotonic()
@@ -128,7 +132,7 @@ async def listing_collage(urls):
     from logger import get_logger
 
     get_logger(__name__).info(
-        "Vinted collage downloaded %s/%s photos",
+        "Listing collage downloaded %s/%s photos",
         sum(bool(raw) for raw in images),
         len(urls[:4]),
     )

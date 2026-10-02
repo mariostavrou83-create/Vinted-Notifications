@@ -84,7 +84,12 @@ def comparison_image(listing, reference, details):
     """Stack square photo panels, then complete guide/reminder text below them."""
     size, margin, line_height = alert_images.SIZE, 40, 48
     face = font(34)
-    panels = [("VINTED LISTING", listing)]
+    panels = [
+        (
+            "EBAY LISTING" if details.get("platform") == "ebay" else "VINTED LISTING",
+            listing,
+        )
+    ]
     if reference:
         panels.append(("YOUR EXAMPLES", reference))
     notes = []
@@ -179,7 +184,11 @@ async def send_initial(bot, chat_id, row, details, before_send, *, require_photo
 
 
 async def enrich(bot, chat_id, row, details, before_edit, *, persist=True):
-    photos = await vinted_gallery.resolve(row, details, persist=persist)
+    photos = (
+        details.get("photos", [])[:4]
+        if details.get("platform") == "ebay"
+        else await vinted_gallery.resolve(row, details, persist=persist)
+    )
     listing = (
         await initial_photo(dict(details, photos=photos))
         if len(photos) <= 1

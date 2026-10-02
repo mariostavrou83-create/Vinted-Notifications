@@ -104,6 +104,13 @@ def listing_date(label, now):
 
 
 def search_url(config):
+    if config.get("filter_mode") == "url":
+        from ebay_monitor import EbayError
+
+        raise EbayError(
+            "Imported search filters require Browse API mode. No broad fallback was used.",
+            300,
+        )
     params = {"_nkw": config["keywords"], "_sop": "10", "_ipg": str(PAGE_SIZE)}
     if config["category"]:
         params["_sacat"] = config["category"]

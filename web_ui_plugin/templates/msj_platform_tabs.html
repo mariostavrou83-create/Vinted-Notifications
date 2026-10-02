@@ -17,6 +17,17 @@
 <section id="panel-ebay" role="tabpanel" aria-labelledby="tab-ebay">
 <p class="platform-disabled" data-disabled-note="ebay" hidden>eBay is off for this search. You can prepare its filters before enabling it.</p>
 {% if ebay_connection.missing %}<p class="notice">eBay connection needs setting up. <a href="/connections" target="_blank" rel="noopener">Connect the new bot and eBay ↗</a></p>{% endif %}
+<label for="ebay_filter_mode">Set eBay filters using</label>
+<select id="ebay_filter_mode" name="ebay_filter_mode"><option value="manual" {{'selected' if row.ebay.filter_mode!='url'}}>Manual keywords and prices</option><option value="url" {{'selected' if row.ebay.filter_mode=='url'}}>Paste a filtered eBay search link</option></select>
+<div id="ebay-url-fields" {{'hidden' if row.ebay.filter_mode!='url'}}>
+<label for="ebay_search_url">eBay search link</label><textarea id="ebay_search_url" name="ebay_search_url" rows="4" maxlength="6000" placeholder="https://www.ebay.co.uk/sch/i.html?…">{{row.ebay.search_url}}</textarea>
+<small>Set your brand, sizes, category and price on eBay UK, then copy the full search-results URL from the address bar. Short/share links and shop pages are not supported. Only filters encoded in the link can be imported.</small>
+<button type="button" id="preview-ebay-link" class="secondary">Preview imported filters</button>
+<p id="ebay-import-feedback" role="status" class="muted"></p>
+<ul id="ebay-import-summary">{% for line in imported_summary %}<li>{{line}}</li>{% endfor %}</ul>
+<small>The link controls this eBay search. Unsupported filters block saving; nothing is silently dropped. Monitoring always uses newest first. Display order, pagination and recognised tracking parameters are ignored. Item-price limits exclude postage. Listings must ship to the UK and have GBP prices.</small>
+</div>
+<div id="ebay-manual-fields" {{'hidden' if row.ebay.filter_mode=='url'}}>
 <button type="button" id="copy-vinted" class="secondary">Copy keywords &amp; prices from Vinted</button>
 <p id="copy-feedback" role="status" class="muted"></p>
 <label for="ebay_keywords">eBay keywords</label><input id="ebay_keywords" name="ebay_keywords" maxlength="100" value="{{row.ebay.keywords}}" placeholder="e.g. Hollister fur gilet">
@@ -30,5 +41,7 @@
 <label for="ebay_category">eBay category ID <span>optional</span></label><input id="ebay_category" name="ebay_category" inputmode="numeric" maxlength="10" value="{{row.ebay.category}}" placeholder="Leave blank for all categories">
 <label class="checkbox"><input type="checkbox" name="ebay_uk_only" value="yes" {{'checked' if row.ebay.uk_only}}> Items located in the UK only</label>
 <small>Results must ship to the UK. Vinted brand, size and category IDs do not map to eBay; review your eBay keywords and category separately.</small>
-<p class="shared-note">New listings only. The first check is quiet. Changes to these filters start a fresh baseline without replaying old items.</p>
+</div>
+<p class="shared-note">New listings only. The first check is quiet. Changes to these filters start a fresh baseline without replaying old items. After saving, select this search in Connections → Your live eBay searches to start monitoring.</p>
+{% if row.id %}<div class="guide-section"><button type="button" class="secondary" id="check-saved-ebay" data-url="/search/{{row.id}}/check-ebay">Check saved eBay search</button><small>Uses one API call. Tests the saved filters, not unsaved changes. Sends no Telegram alerts.</small><div id="ebay-check-result" role="status"></div></div>{% endif %}
 </section></div>

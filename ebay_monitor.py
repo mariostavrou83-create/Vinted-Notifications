@@ -74,8 +74,12 @@ def search_params(config):
         "both": "FIXED_PRICE|AUCTION",
     }
     filters.append("buyingOptions:{" + buying[config["buying"]] + "}")
-    if config["condition"] != "any":
+    if config.get("condition_ids"):
+        filters.append("conditionIds:{" + "|".join(config["condition_ids"]) + "}")
+    elif config["condition"] != "any":
         filters.append("conditions:{" + config["condition"].upper() + "}")
+    if config.get("free_shipping"):
+        filters.append("maxDeliveryCost:0")
     params = {
         "q": config["keywords"],
         "sort": "newlyListed",
@@ -84,6 +88,13 @@ def search_params(config):
     }
     if config["category"]:
         params["category_ids"] = config["category"]
+    from ebay_search_link import aspect_filter
+
+    aspects = aspect_filter(config)
+    if aspects:
+        params["aspect_filter"] = aspects
+    if not config["keywords"]:
+        params.pop("q")
     return params
 
 
@@ -183,7 +194,10 @@ class BrowseClient:
                 else ""
             )
             if data.get("warnings"):
-                warning = "eBay returned a search warning; check category and filter compatibility."
+                raise EbayError(
+                    "eBay warned that this search may not apply exactly. No results processed; review its category and filters.",
+                    300,
+                )
             return items, warning
         except (requests.RequestException, ValueError, TypeError):
             raise EbayError("eBay search connection failed; will retry.") from None
@@ -241,6 +255,23 @@ def parse_item(raw, config, now):
     if config["max_price"] is not None and compare > config["max_price"]:
         return None
     title = str(raw.get("title", ""))[:500]
+    import alert_images
+
+    photos = [(raw.get("image") or {}).get("imageUrl")]
+    photos.extend(
+        p.get("imageUrl")
+        for p in (raw.get("additionalImages") or [])[:10]
+        if isinstance(p, dict)
+    )
+    photos = list(
+        dict.fromkeys(p for p in photos if alert_images.safe_listing_photo(p))
+    )[:4]
+    brand = raw.get("brand")
+    label = "Brand"
+    if not brand:
+        brands = config.get("aspects", {}).get("Brand", [])
+        if len(brands) == 1:
+            brand, label = brands[0], "Brand filter"
     return {
         "item_id": "ebay:" + item_id,
         "title": title,
@@ -248,6 +279,9 @@ def parse_item(raw, config, now):
         "shipping": shipping,
         "url": url,
         "photo_url": (raw.get("image") or {}).get("imageUrl"),
+        "photos": photos,
+        "brand": str(brand or "Not supplied")[:120],
+        "brand_label": label,
         "created": created,
         "auction": auction,
         "condition": str(raw.get("condition", "Not specified"))[:80],
@@ -378,11 +412,17 @@ def record_snapshot(
                     item["photo_url"],
                     search.get("reference_id"),
                     now,
-                    "pending" if search.get("reference_id") else "none",
+                    "pending",
                 ),
             ).rowcount
             created_count += inserted
             if inserted:
+                from ebay_alerts import snapshot
+
+                conn.execute(
+                    "INSERT INTO ebay_alert_details VALUES (?,?)",
+                    (item["item_id"], json.dumps(snapshot(item, search))),
+                )
                 conn.execute(
                     "INSERT INTO ebay_alert_timing VALUES (?,?,?,?,?)",
                     (
@@ -582,7 +622,7 @@ class Poller:
 
 
 async def run_delivery():
-    from alert_delivery import EbayDeliveryWorker
+    from alert_delivery import EbayPhotoDeliveryWorker
 
     while True:
         config = store.configuration()
@@ -591,7 +631,7 @@ async def run_delivery():
             continue
         try:
             async with Bot(config["telegram_token"]) as bot:
-                worker = EbayDeliveryWorker(
+                worker = EbayPhotoDeliveryWorker(
                     bot,
                     config["chat_id"],
                     bot_id=config["telegram_token"].split(":")[0],

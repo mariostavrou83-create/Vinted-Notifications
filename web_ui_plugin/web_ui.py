@@ -373,20 +373,82 @@ def create_app(test_config=None):
                 row["platform_mode"] = request.form.get(
                     "platform_mode", row["platform_mode"]
                 )
-                for key in ("keywords", "category", "buying", "condition"):
+                for key in (
+                    "keywords",
+                    "category",
+                    "buying",
+                    "condition",
+                    "filter_mode",
+                    "search_url",
+                ):
                     row["ebay"][key] = request.form.get("ebay_" + key, row["ebay"][key])
                 for key in ("min_price", "max_price"):
                     row["ebay"][key + "_input"] = request.form.get("ebay_" + key, "")
                 for key in ("uk_only", "include_shipping"):
                     row["ebay"][key] = request.form.get("ebay_" + key) == "yes"
+        from ebay_search_link import describe, parse_link
+
+        imported_summary = []
+        if row["ebay"].get("filter_mode") == "url":
+            try:
+                imported_summary = describe(parse_link(row["ebay"]["search_url"]))
+            except ValueError:
+                imported_summary = [
+                    "This link could not be imported. Check the filters before saving."
+                ]
         return render_template(
             "msj_edit.html",
+            imported_summary=imported_summary,
             row=row,
             prices=prices,
             folders=store.list_folders(),
             reference_photos=store.reference_photos(query_id),
             ebay_connection=ebay_store.connection_summary(),
         )
+
+    @app.post("/ebay/import-search")
+    def import_ebay_search():
+        from ebay_search_link import describe, parse_link
+
+        try:
+            config = parse_link(request.form.get("search_url", ""))
+            return {
+                "summary": describe(config),
+                "message": "Filters read successfully. Save search to apply them. Preview uses no eBay API calls.",
+            }
+        except ValueError as exc:
+            return {"error": str(exc)}, 400
+
+    @app.post("/search/<int:query_id>/check-ebay")
+    def check_saved_ebay_search(query_id):
+        from ebay_connections import check_saved_search
+
+        row = search_settings.get_search(query_id)
+        if not row:
+            abort(404)
+        try:
+            return check_saved_search(row)
+        except ValueError as exc:
+            return {"error": str(exc)}, 400
+
+    @app.post("/search/<int:query_id>/preview-ebay")
+    def preview_ebay_layout(query_id):
+        import asyncio
+
+        from telegram.error import TelegramError
+
+        import ebay_alerts
+
+        try:
+            flash(asyncio.run(ebay_alerts.preview(query_id)), "success")
+        except ValueError as exc:
+            flash(str(exc), "error")
+        except TelegramError:
+            flash(
+                "Telegram could not confirm this preview. Check your bot before retrying.",
+                "error",
+            )
+        return redirect(url_for("edit", query_id=query_id, platform="ebay"))
 
     @app.route("/connections", methods=["GET", "POST"])
     def connections():

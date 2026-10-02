@@ -17,6 +17,11 @@ MAX_LIVE_SEARCHES = 10
 MAX_DAILY_BUDGET = 10_000_000
 
 DEFAULTS = {
+    "filter_mode": "manual",
+    "search_url": "",
+    "aspects": {},
+    "condition_ids": [],
+    "free_shipping": False,
     "keywords": "",
     "min_price": None,
     "max_price": None,
@@ -62,6 +67,8 @@ def platform_details(query_id):
 
 
 def search_url(config):
+    if config.get("filter_mode") == "url":
+        return config["search_url"]
     params = {"_nkw": config["keywords"], "_sop": "10"}
     if config["buying"] == "fixed":
         params["LH_BIN"] = "1"
@@ -89,6 +96,22 @@ def parse_form(form, previous=None):
     mode = form.get("platform_mode")
     if mode not in ("vinted", "ebay", "both"):
         raise ValueError("Choose Vinted only, eBay only, or both.")
+    filter_mode = form.get(
+        "ebay_filter_mode", previous["ebay"].get("filter_mode", "manual")
+    )
+    if filter_mode == "url":
+        from ebay_search_link import parse_link
+
+        if configuration()["source"] != "browse":
+            raise ValueError(
+                "Search-link filters require Browse API mode in Connections."
+            )
+        config = parse_link(
+            form.get("ebay_search_url", previous["ebay"].get("search_url", ""))
+        )
+        return int(mode != "ebay"), int(mode != "vinted"), config
+    if filter_mode != "manual":
+        raise ValueError("Choose search-link or manual eBay filters.")
     from dashboard_store import parse_money
 
     config = dict(DEFAULTS)
@@ -125,7 +148,12 @@ def save_platforms(conn, query_id, vinted, ebay, config):
         (old["vinted_enabled"], old["ebay_enabled"]) if old else (1, 0)
     )
     encoded = json.dumps(config, sort_keys=True)
-    changed = not old or encoded != old["ebay_config"] or ebay != old_ebay
+    changed = (
+        not old
+        or encoded
+        != json.dumps(dict(DEFAULTS, **json.loads(old["ebay_config"])), sort_keys=True)
+        or ebay != old_ebay
+    )
     conn.execute(
         """INSERT INTO search_platforms(query_id,vinted_enabled,ebay_enabled,ebay_config,ebay_generation)
         VALUES (?,?,?,?,?) ON CONFLICT(query_id) DO UPDATE SET
