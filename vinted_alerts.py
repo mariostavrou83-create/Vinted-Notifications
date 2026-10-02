@@ -52,15 +52,24 @@ def snapshot(item, search):
 
 
 def sections(row, details):
+    ebay = details.get("platform") == "ebay"
+    marketplace = "eBay" if ebay else "Vinted"
     name = escape(details.get("name") or row["search_name"][:100])
-    heading = f"🔎 <b>#{row['query_id'] or '—'} · {name}</b>"
-    link = f'<a href="{escape(row["url"], quote=True)}">Open Vinted listing ↗</a>'
+    heading = f"🔎 <b>{'eBay · ' if ebay else ''}#{row['query_id'] or '—'} · {name}</b>"
+    link = (
+        f'<a href="{escape(row["url"], quote=True)}">Open {marketplace} listing ↗</a>'
+    )
     price = str(row["price"])
     price = "£" + price if row["currency"] == "GBP" else price + " " + row["currency"]
     listing = (
         f"<b>{escape(row['title'][:500])}</b>\n"
-        f"Price: <b>{escape(price)}</b>\nBrand: {escape(details['brand'])}"
+        f"{'Current bid' if ebay and details.get('auction') else 'Price'}: <b>{escape(price)}</b>\n{escape(details.get('brand_label', 'Brand'))}: {escape(details['brand'])}"
     )
+    if ebay:
+        shipping = details.get("shipping")
+        listing += "\nPostage: " + (
+            f"£{shipping / 100:.2f}" if shipping is not None else "check listing"
+        )
     guide = (
         "💷 <b>Your buying guide</b>\n" + details["guide"]
         if details.get("guide")

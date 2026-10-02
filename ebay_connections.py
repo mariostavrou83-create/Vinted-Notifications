@@ -2,6 +2,7 @@
 
 import time
 from contextlib import closing
+from datetime import datetime, timezone
 
 import requests
 
@@ -86,3 +87,79 @@ def test_connection(kind):
             + allowance
         )
     raise ValueError("Unknown connection check.")
+
+
+def check_saved_search(search):
+    """One budgeted API read, never a baseline reset or a Telegram send."""
+    from ebay_monitor import parse_item, timestamp
+    from ebay_store import active_searches
+    from search_settings import excluded_by
+
+    config = configuration()
+    if config["source"] != "browse":
+        raise ValueError("This check requires Browse API mode in Connections.")
+    if not config["client_id"] or not config["client_secret"]:
+        raise ValueError("Save your eBay production keys in Connections first.")
+    now = time.time()
+    wait = reserve_call(config, now)
+    if wait:
+        raise ValueError(
+            f"The next shared API request slot is in {max(1, int(wait - now))} seconds. Try again then."
+        )
+    try:
+        items, warning = BrowseClient(config).search(search["ebay"])
+    except EbayError as exc:
+        if exc.global_cooldown:
+            with closing(connection()) as conn, conn:
+                conn.execute(
+                    "INSERT INTO delivery_runtime VALUES ('ebay_api_cooldown',?) ON CONFLICT(key) DO UPDATE SET value=MAX(value,excluded.value)",
+                    (time.time() + exc.retry_after,),
+                )
+        raise ValueError(str(exc)) from None
+    now = time.time()
+    samples, eligible, dated = [], 0, 0
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        created = timestamp(raw.get("itemOriginDate")) or timestamp(
+            raw.get("itemCreationDate")
+        )
+        dated += int(created is not None)
+        item = parse_item(raw, search["ebay"], now)
+        if not item or excluded_by(item["title"], search["exclusions"]):
+            continue
+        eligible += 1
+        if len(samples) < 5:
+            samples.append(
+                {
+                    "title": item["title"],
+                    "price": f"£{item['price'] / 100:.2f}",
+                    "url": item["url"],
+                }
+            )
+    with closing(connection()) as conn:
+        delivery = dict(
+            conn.execute(
+                "SELECT status,COUNT(*) FROM alert_outbox WHERE query_id=? AND platform='ebay' GROUP BY status",
+                (search["id"],),
+            )
+        )
+    health = search["ebay_health"]
+    baseline = health.get("baseline_at")
+    return {
+        "active": search["id"] in {s["id"] for s in active_searches()},
+        "results": len(items),
+        "dated": dated,
+        "eligible": eligible,
+        "samples": samples,
+        "warning": warning,
+        "baseline": (
+            datetime.fromtimestamp(baseline, timezone.utc).strftime(
+                "%d %b %Y %H:%M:%S UTC"
+            )
+            if baseline
+            else "Not established yet"
+        ),
+        "delivery": delivery,
+        "message": "Saved filters checked using one API call. This does not send alerts or restart monitoring. Samples must also be newly discovered after the baseline to trigger a live alert.",
+    }

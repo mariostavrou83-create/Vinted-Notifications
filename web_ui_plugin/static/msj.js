@@ -95,7 +95,8 @@ if (platformMode) {
       const enabled = platformMode.value === 'both' || platformMode.value === platform;
       document.querySelector('#' + platform + '-enabled-label').textContent = enabled ? 'On' : 'Off';
       document.querySelector('[data-disabled-note=' + platform + ']').hidden = enabled;
-      document.querySelector(platform === 'vinted' ? '#query' : '#ebay_keywords').required = enabled;
+      document.querySelector(platform === 'vinted' ? '#query' : '#ebay_keywords').required = enabled && (platform === 'vinted' || document.querySelector('#ebay_filter_mode').value !== 'url');
+      if (platform === 'ebay') document.querySelector('#ebay_search_url').required = enabled && document.querySelector('#ebay_filter_mode').value === 'url';
     }
   }
   tabs.forEach(tab => {
@@ -118,6 +119,12 @@ if (platformMode) {
   const initial = new URLSearchParams(location.search).get('platform');
   showPlatform(['vinted','ebay'].includes(initial) ? initial : platformMode.value === 'ebay' ? 'ebay' : 'vinted');
   updatePlatforms();
+  const filterMode = document.querySelector('#ebay_filter_mode');
+  filterMode.addEventListener('change', () => {
+    document.querySelector('#ebay-url-fields').hidden = filterMode.value !== 'url';
+    document.querySelector('#ebay-manual-fields').hidden = filterMode.value === 'url';
+    updatePlatforms();
+  });
   document.querySelector('#copy-vinted').addEventListener('click', () => {
     const feedback = document.querySelector('#copy-feedback');
     try {
@@ -139,3 +146,44 @@ if (platformMode) {
     document.querySelector('#copy-feedback').textContent = 'Copied your buying-guide maximum to the eBay price limit.';
   });
 }
+
+async function ebayFormRequest(url, values) {
+  const body = new URLSearchParams({csrf: document.querySelector('input[name="csrf"]').value, ...values});
+  const response = await fetch(url, {method: 'POST', body, credentials: 'same-origin'});
+  if (response.redirected || !(response.headers.get('content-type') || '').includes('application/json')) throw Error('Your session expired. Reload the page and sign in again.');
+  const result = await response.json();
+  if (!response.ok || result.error) throw Error(result.error || 'The check could not finish. Try again.');
+  return result;
+}
+const previewEbay = document.querySelector('#preview-ebay-link');
+let ebayPreviewVersion = 0;
+document.querySelector('#ebay_search_url')?.addEventListener('input', () => {
+  ebayPreviewVersion++;
+  document.querySelector('#ebay-import-summary').replaceChildren();
+  document.querySelector('#ebay-import-feedback').textContent = 'Link changed. Preview again to review its filters.';
+});
+previewEbay?.addEventListener('click', async () => {
+  const version = ++ebayPreviewVersion;
+  const feedback = document.querySelector('#ebay-import-feedback'), summary = document.querySelector('#ebay-import-summary');
+  previewEbay.disabled = true; summary.replaceChildren(); feedback.textContent = 'Reading filters…';
+  try {
+    const result = await ebayFormRequest('/ebay/import-search', {search_url: document.querySelector('#ebay_search_url').value});
+    if (version !== ebayPreviewVersion) return;
+    result.summary.forEach(line => { const li = document.createElement('li'); li.textContent = line; summary.append(li); });
+    feedback.textContent = result.message;
+  } catch (error) { if (version === ebayPreviewVersion) feedback.textContent = error.message; }
+  finally { previewEbay.disabled = false; }
+});
+const checkEbay = document.querySelector('#check-saved-ebay');
+checkEbay?.addEventListener('click', async () => {
+  const output = document.querySelector('#ebay-check-result'); output.textContent = 'Checking saved filters…'; checkEbay.disabled = true;
+  try {
+    const result = await ebayFormRequest(checkEbay.dataset.url, {});
+    output.replaceChildren();
+    const lines = [result.message, `${result.active ? 'Live monitoring selected' : 'Standby — select this search in Connections to start monitoring'}. First-check baseline: ${result.baseline}.`, `${result.results} API results; ${result.dated} have listing dates. ${result.eligible} pass the saved price/exclusion/date rules within the last hour.`, `Delivery history: ${Object.entries(result.delivery).map(([status, count]) => `${count} ${status}`).join(', ') || 'no live alerts yet'}.`];
+    if (result.warning) lines.push(result.warning);
+    lines.forEach(line => { const p = document.createElement('p'); p.textContent = line; output.append(p); });
+    result.samples.forEach(item => { const p = document.createElement('p'), a = document.createElement('a'); a.textContent = `${item.title} — ${item.price}`; a.href = item.url; a.target = '_blank'; a.rel = 'noopener noreferrer'; p.append(a); output.append(p); });
+  } catch (error) { output.textContent = error.message; }
+  finally { checkEbay.disabled = false; }
+});

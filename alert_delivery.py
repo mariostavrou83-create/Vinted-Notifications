@@ -100,7 +100,6 @@ def finish(
         # A closure can arrive while Telegram is accepting an in-flight send.
         if (
             row.get("platform") == "ebay"
-            and not photo
             and failure is None
             and not conn.execute(
                 "SELECT 1 FROM alert_outbox WHERE item_id=?", (row["item_id"],)
@@ -108,7 +107,7 @@ def finish(
         ):
             from ebay_privacy import queue_redaction
 
-            queue_redaction(conn, message_id)
+            queue_redaction(conn, message_id or row.get("telegram_message_id"))
             return
         if cooldown:
             conn.execute(
@@ -398,19 +397,26 @@ class VintedDeliveryWorker(EbayDeliveryWorker):
 
     @property
     def disable_previews(self):
-        from vinted_alerts import enabled
+        return self.alert_module.enabled()
 
-        return enabled()
+    @property
+    def alert_module(self):
+        if self.platform == "ebay":
+            import ebay_alerts
+
+            return ebay_alerts
+        import vinted_alerts
+
+        return vinted_alerts
 
     def __init__(self, bot, chat_id):
         super().__init__(bot, chat_id)
         self.platform = "vinted"
 
     async def send_listing(self, row):
-        from vinted_alerts import get_details
         from vinted_native import send_initial
 
-        details = get_details(row)
+        details = self.alert_module.get_details(row)
         if not details or not details.get("native_photo"):
             return await super().send_listing(row)
 
@@ -428,12 +434,19 @@ class VintedDeliveryWorker(EbayDeliveryWorker):
             delay = self.send_slot_delay()
             with closing(connection()) as conn:
                 cooldown = conn.execute(
-                    "SELECT value FROM delivery_runtime WHERE key='cooldown_until'"
+                    "SELECT value FROM delivery_runtime WHERE key=?",
+                    (
+                        (
+                            "ebay_cooldown_until"
+                            if self.platform == "ebay"
+                            else "cooldown_until"
+                        ),
+                    ),
                 ).fetchone()
                 pending = conn.execute(
-                    """SELECT 1 FROM alert_outbox WHERE platform='vinted' AND status='pending'
+                    """SELECT 1 FROM alert_outbox WHERE platform=? AND status='pending'
                     AND next_attempt<=? AND leased_until<=? LIMIT 1""",
-                    (time.time(), time.time()),
+                    (self.platform, time.time(), time.time()),
                 ).fetchone()
             if cooldown:
                 delay = max(delay, cooldown[0] - time.time())
@@ -444,15 +457,11 @@ class VintedDeliveryWorker(EbayDeliveryWorker):
             return
 
     async def deliver(self, row, now=None):
-        from vinted_alerts import enabled
-
-        if not enabled():
+        if not self.alert_module.enabled():
             return await DeliveryWorker.deliver(self, row, now)
         if row["kind"] != "photo":
             return await DeliveryWorker.deliver(self, row, now)
-        from vinted_alerts import enrich, get_details
-
-        details = get_details(row)
+        details = self.alert_module.get_details(row)
         if details is None:
             # Historical in-flight alerts have no structured snapshot. Preserve
             # their original text rather than attaching a separate reply.
@@ -466,18 +475,30 @@ class VintedDeliveryWorker(EbayDeliveryWorker):
         try:
             # This task is detached by the dispatcher; downloads and uploads
             # cannot hold up the next listing's link.
+            async def edit_slot():
+                await self.photo_slot()
+                if self.platform == "ebay":
+                    with closing(connection()) as conn:
+                        if not conn.execute(
+                            "SELECT 1 FROM alert_outbox WHERE item_id=? AND lease_token=?",
+                            (row["item_id"], row["lease_token"]),
+                        ).fetchone():
+                            raise TelegramError("Listing removed before photo edit")
+
             if details.get("native_photo"):
                 from vinted_native import enrich as native_enrich
 
                 complete = await native_enrich(
-                    self.bot, self.chat_id, row, details, self.photo_slot
+                    self.bot, self.chat_id, row, details, edit_slot
                 )
             else:
+                from vinted_alerts import enrich
+
                 complete = await enrich(
                     self.bot, self.chat_id, row, details, self.photo_slot
                 )
             logger.info(
-                "Vinted collage edit accepted for item %s; message_id=%s",
+                "Listing collage edit accepted for item %s; message_id=%s",
                 row["item_id"],
                 row["telegram_message_id"],
             )
@@ -518,3 +539,12 @@ class VintedDeliveryWorker(EbayDeliveryWorker):
                 now=now,
             )
         return True
+
+
+class EbayPhotoDeliveryWorker(VintedDeliveryWorker):
+    """eBay uses the same photo-first, in-place comparison layout as Vinted."""
+
+    def __init__(self, bot, chat_id, bot_id=None):
+        super().__init__(bot, chat_id)
+        self.platform = "ebay"
+        self.bot_id = bot_id

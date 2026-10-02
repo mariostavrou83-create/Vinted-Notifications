@@ -198,6 +198,16 @@ def purge(conn, digests, *, redact=False):
         tuple(digests),
     ).fetchall()
     for raw_id, item_id in owned:
+        if "ebay_preview_messages" in tables:
+            if redact:
+                for preview in conn.execute(
+                    "SELECT message_id FROM ebay_preview_messages WHERE item_id=?",
+                    (item_id,),
+                ).fetchall():
+                    queue_redaction(conn, preview[0])
+            conn.execute(
+                "DELETE FROM ebay_preview_messages WHERE item_id=?", (item_id,)
+            )
         row = conn.execute(
             "SELECT telegram_message_id FROM alert_outbox WHERE item_id=? AND platform='ebay'",
             (item_id,),
@@ -222,6 +232,15 @@ def purge(conn, digests, *, redact=False):
     conn.execute(
         "DELETE FROM ebay_seen WHERE item_id NOT IN (SELECT raw_id FROM ebay_item_owners)"
     )
+    if "ebay_preview_messages" in tables:
+        for (message_id,) in conn.execute(
+            "SELECT message_id FROM ebay_preview_messages WHERE item_id NOT IN (SELECT item_id FROM ebay_item_owners)"
+        ).fetchall():
+            if redact:
+                queue_redaction(conn, message_id)
+            conn.execute(
+                "DELETE FROM ebay_preview_messages WHERE message_id=?", (message_id,)
+            )
 
 
 def process(payload):
@@ -274,13 +293,39 @@ async def redact_one(bot, chat_id):
     if not row:
         return False
     try:
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=row[0],
-            text="eBay listing removed following an account-closure request.",
-            reply_markup=None,
-            link_preview_options=LinkPreviewOptions(is_disabled=True),
-        )
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=row[0],
+                text="eBay listing removed following an account-closure request.",
+                reply_markup=None,
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
+            )
+        except BadRequest as exc:
+            if (
+                "no text" not in str(exc).lower()
+                and "not a text" not in str(exc).lower()
+            ):
+                raise
+            # Photo messages cannot become text messages. Replace the listing
+            # and example pixels as well as its caption, using the same message.
+            import io
+
+            from PIL import Image
+            from telegram import InputMediaPhoto
+
+            blank = io.BytesIO()
+            Image.new("RGB", (512, 512), "#eeeeee").save(blank, "JPEG")
+            await bot.edit_message_media(
+                chat_id=chat_id,
+                message_id=row[0],
+                media=InputMediaPhoto(
+                    media=blank.getvalue(),
+                    filename="removed.jpg",
+                    caption="eBay listing removed following an account-closure request.",
+                ),
+                reply_markup=None,
+            )
     except BadRequest as exc:
         if not any(
             s in str(exc).lower()

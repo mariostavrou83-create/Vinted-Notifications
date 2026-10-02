@@ -4,6 +4,11 @@ import secrets
 
 
 def migrate(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS ebay_preview_messages (
+        message_id INTEGER PRIMARY KEY, item_id TEXT NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS ebay_alert_details (
+        item_id TEXT PRIMARY KEY REFERENCES alert_outbox(item_id) ON DELETE CASCADE,
+        payload TEXT NOT NULL)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS ebay_item_owners (
         raw_id TEXT PRIMARY KEY, item_id TEXT NOT NULL, seller_hash TEXT NOT NULL)""")
     conn.execute(
