@@ -257,3 +257,33 @@ class LinkDashboardTests(EbayFixture, unittest.TestCase):
         )
         self.assertEqual(self.outbox(), [])
         self.assertFalse(search_settings.get_search(1)["ebay_health"])
+
+    def test_filter_check_shows_old_matching_jeans_without_alerting(self):
+        self.login()
+        self.enable(ebay_filter_mode="url", ebay_search_url=LINK)
+        with patch(
+            "ebay_connections.configuration",
+            return_value={
+                "source": "browse",
+                "client_id": "test",
+                "client_secret": "test",
+            },
+        ), patch("ebay_connections.reserve_call", return_value=0), patch(
+            "ebay_connections.BrowseClient"
+        ) as client:
+            client.return_value.search.return_value = (
+                [
+                    item(
+                        123,
+                        created=time.time() - 86400,
+                        title="7 For All Mankind Jeans",
+                        categories=[{"categoryId": "11554", "categoryName": "Jeans"}],
+                    )
+                ],
+                "",
+            )
+            response = self.client.post("/search/1/check-ebay", data={"csrf": "csrf"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["eligible"], 0)
+        self.assertEqual(response.json["samples"][0]["categories"], ["Jeans"])
+        self.assertEqual(self.outbox(), [])

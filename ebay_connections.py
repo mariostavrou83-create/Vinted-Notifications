@@ -125,16 +125,21 @@ def check_saved_search(search):
             raw.get("itemCreationDate")
         )
         dated += int(created is not None)
-        item = parse_item(raw, search["ebay"], now)
+        item = parse_item(raw, search["ebay"], now, fresh_only=False)
         if not item or excluded_by(item["title"], search["exclusions"]):
             continue
-        eligible += 1
+        eligible += int(parse_item(raw, search["ebay"], now) is not None)
         if len(samples) < 5:
             samples.append(
                 {
                     "title": item["title"],
                     "price": f"£{item['price'] / 100:.2f}",
                     "url": item["url"],
+                    "categories": [
+                        c.get("categoryName", c.get("categoryId", ""))
+                        for c in raw.get("categories", [])
+                        if isinstance(c, dict)
+                    ],
                 }
             )
     with closing(connection()) as conn:
@@ -161,5 +166,5 @@ def check_saved_search(search):
             else "Not established yet"
         ),
         "delivery": delivery,
-        "message": "Saved filters checked using one API call. This does not send alerts or restart monitoring. Samples must also be newly discovered after the baseline to trigger a live alert.",
+        "message": "Saved filters checked using one API call. Samples below show matching results, including older listings, so you can review the filters. Live alerts require a recent listing newly discovered after the baseline. This check sends no alerts.",
     }

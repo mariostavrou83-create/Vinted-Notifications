@@ -417,6 +417,11 @@ class VintedDeliveryWorker(EbayDeliveryWorker):
         from vinted_native import send_initial
 
         details = self.alert_module.get_details(row)
+        if details and not details.get("native_photo"):
+            from vinted_alerts import send_text
+
+            self.last_send_started = time.monotonic()
+            return await send_text(self.bot, self.chat_id, row, details)
         if not details or not details.get("native_photo"):
             return await super().send_listing(row)
 
@@ -494,9 +499,7 @@ class VintedDeliveryWorker(EbayDeliveryWorker):
             else:
                 from vinted_alerts import enrich
 
-                complete = await enrich(
-                    self.bot, self.chat_id, row, details, self.photo_slot
-                )
+                complete = await enrich(self.bot, self.chat_id, row, details, edit_slot)
             logger.info(
                 "Listing collage edit accepted for item %s; message_id=%s",
                 row["item_id"],

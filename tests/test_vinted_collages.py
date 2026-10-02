@@ -290,7 +290,7 @@ class RichWorkerTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             self.bot.send_message.await_args.kwargs["link_preview_options"].is_disabled
         )
 
-    async def test_preview_enables_native_delivery_only_after_confirmed_media_edit(
+    async def test_preview_enables_separate_panels_only_after_confirmed_edit(
         self,
     ):
         self.batch(1, [110])
@@ -309,19 +309,20 @@ class RichWorkerTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         with patch("telegram.Bot", return_value=context), patch.object(
             alert_images, "listing_collage", new=AsyncMock(return_value=photo_bytes())
         ):
-            self.bot.edit_message_media.side_effect = BadRequest("Invalid media")
+            self.bot.do_api_request.side_effect = BadRequest("Invalid media")
             with self.assertRaises(BadRequest):
                 await vinted_alerts.preview_and_enable(1)
             self.assertFalse(vinted_alerts.enabled())
             self.assertNotEqual(db.get_parameter("vinted_native_photo_alerts"), "1")
-            self.bot.edit_message_media.side_effect = None
+            self.bot.do_api_request.side_effect = None
             await vinted_alerts.preview_and_enable(1)
             self.assertTrue(vinted_alerts.enabled())
-            self.assertEqual(db.get_parameter("vinted_native_photo_alerts"), "1")
-        self.bot.send_message.assert_not_awaited()
-        self.bot.do_api_request.assert_not_awaited()
+            self.assertEqual(db.get_parameter("vinted_native_photo_alerts"), "0")
+            self.assertEqual(db.get_parameter("separate_photo_panels"), "1")
+        self.bot.send_photo.assert_not_awaited()
+        self.bot.edit_message_media.assert_not_awaited()
         self.assertEqual(
-            self.bot.edit_message_media.await_args.kwargs["message_id"], 42
+            self.bot.do_api_request.await_args.kwargs["api_kwargs"]["message_id"], 42
         )
 
     async def test_phone_preview_uses_native_photo_without_changing_live_mode(

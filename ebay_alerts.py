@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import alert_images
 import vinted_alerts
+import vinted_native
 from search_settings import connection
 
 
@@ -44,7 +45,7 @@ def snapshot(item, search):
     )
     details.update(
         platform="ebay",
-        native_photo=True,
+        native_photo=not vinted_native.separate_panels(),
         single_message=True,
         auction=item["auction"],
         shipping=item["shipping"],
@@ -67,7 +68,7 @@ async def preview(query_id):
 
     from ebay_store import configuration
     from search_settings import get_search
-    from vinted_native import enrich, send_initial
+    from vinted_alerts import enrich, send_text
 
     search = get_search(query_id)
     if not search:
@@ -111,9 +112,7 @@ async def preview(query_id):
         async def ready():
             pass
 
-        first = await send_initial(
-            bot, config["chat_id"], row, details, ready, require_photo=True
-        )
+        first = await send_text(bot, config["chat_id"], row, details)
         row["telegram_message_id"] = first.message_id
         if not track_preview(row):
             return "The listing was removed during preview delivery. Its preview is being removed."
@@ -123,9 +122,10 @@ async def preview(query_id):
                 bot, config["chat_id"], row, details, ready, persist=False
             )
         except TelegramError:
-            return "Preview photo sent. The comparison edit could not finish; do not resend just to check delivery."
+            return "Preview text sent. The photo-panel edit could not finish; check the bot before retrying."
         finally:
             track_preview(row)
-    return "eBay layout preview sent as one photo message." + (
-        " A listing or reference image was unavailable." if not complete else ""
+    return (
+        "eBay layout preview sent: separate listing and example panels, with readable notes in one message."
+        + (" A listing or reference image was unavailable." if not complete else "")
     )

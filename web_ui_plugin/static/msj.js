@@ -183,7 +183,7 @@ checkEbay?.addEventListener('click', async () => {
     const lines = [result.message, `${result.active ? 'Live monitoring selected' : 'Standby — select this search in Connections to start monitoring'}. First-check baseline: ${result.baseline}.`, `${result.results} API results; ${result.dated} have listing dates. ${result.eligible} pass the saved price/exclusion/date rules within the last hour.`, `Delivery history: ${Object.entries(result.delivery).map(([status, count]) => `${count} ${status}`).join(', ') || 'no live alerts yet'}.`];
     if (result.warning) lines.push(result.warning);
     lines.forEach(line => { const p = document.createElement('p'); p.textContent = line; output.append(p); });
-    result.samples.forEach(item => { const p = document.createElement('p'), a = document.createElement('a'); a.textContent = `${item.title} — ${item.price}`; a.href = item.url; a.target = '_blank'; a.rel = 'noopener noreferrer'; p.append(a); output.append(p); });
+    result.samples.forEach(item => { const p = document.createElement('p'), a = document.createElement('a'); a.textContent = `${item.title} — ${item.price}${item.categories?.length ? ` · ${item.categories.join(" / ")}` : ""}`; a.href = item.url; a.target = '_blank'; a.rel = 'noopener noreferrer'; p.append(a); output.append(p); });
   } catch (error) { output.textContent = error.message; }
   finally { checkEbay.disabled = false; }
 });
