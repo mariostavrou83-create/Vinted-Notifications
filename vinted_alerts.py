@@ -6,7 +6,7 @@ from html import escape
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from telegram import InputFile, LinkPreviewOptions
+from telegram import InputFile, InputMediaPhoto, LinkPreviewOptions
 from telegram.error import BadRequest, TelegramError
 
 import alert_images
@@ -246,6 +246,52 @@ async def phone_layout_test(bot, chat_id, row, details, *, mode, after_send=None
         "connect_timeout": 3,
         "pool_timeout": 3,
     }
+    if mode == "native_album":
+        import re
+        from html import unescape
+
+        # One grouped album with separate native photos and an ordinary caption.
+        # Never silently drop the owner's notes to fit Telegram's caption limit.
+        text = "\n\n".join(part for part in sections(row, details) if part)
+        plain = unescape(re.sub(r"<[^>]+>", "", text))
+        if len(plain.encode("utf-16-le")) // 2 > 1024:
+            raise ValueError(
+                "This album test needs a shorter title or notes to fit Telegram's photo caption limit. No test was sent."
+            )
+        if reference_image:
+            results = await bot.send_media_group(
+                chat_id=chat_id,
+                media=[
+                    InputMediaPhoto(
+                        listing, filename="listing.jpg", caption=text, parse_mode="HTML"
+                    ),
+                    InputMediaPhoto(reference_image, filename="examples.jpg"),
+                ],
+                **timeouts,
+            )
+        else:
+            results = [
+                await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=InputFile(listing, filename="listing.jpg"),
+                    caption=text,
+                    parse_mode="HTML",
+                    **timeouts,
+                )
+            ]
+        for sent in results:
+            if after_send:
+                after_send(dict(row, telegram_message_id=sent.message_id))
+        if len(results) != (2 if reference_image else 1) or any(
+            not sent.photo for sent in results
+        ):
+            raise TelegramError("Telegram did not confirm the album photos")
+        if reference_image and (
+            not results[0].media_group_id
+            or results[0].media_group_id != results[1].media_group_id
+        ):
+            raise TelegramError("Telegram did not confirm the grouped album")
+        return "PHOTO ALBUM TEST sent: separate listing and example collages, with readable caption notes. Check the expanded iPhone notification and album layout. Live alerts are unchanged."
     if mode == "rich_first":
         data.pop("message_id")
         result = await bot.do_api_request(
@@ -336,12 +382,16 @@ async def preview_and_enable(query_id, *, photo_first=False, phone_mode=None):
         raw_data={"photos": saved.get("photos", [])},
     )
     label = (
-        "ORIGINAL LAYOUT TEST · "
-        if phone_mode == "rich_first"
+        "PHOTO ALBUM TEST · "
+        if phone_mode == "native_album"
         else (
-            "SAME MESSAGE TEST · "
-            if phone_mode == "native_then_rich"
-            else "STANDARD PHOTO TEST · " if photo_first else "LAYOUT PREVIEW · "
+            "ORIGINAL LAYOUT TEST · "
+            if phone_mode == "rich_first"
+            else (
+                "SAME MESSAGE TEST · "
+                if phone_mode == "native_then_rich"
+                else "STANDARD PHOTO TEST · " if photo_first else "LAYOUT PREVIEW · "
+            )
         )
     )
     search["query_name"] = label + (search["query_name"] or "")
@@ -353,7 +403,7 @@ async def preview_and_enable(query_id, *, photo_first=False, phone_mode=None):
     )
     if not token or not chat_id:
         raise ValueError("Connect your Vinted Telegram bot first.")
-    if phone_mode in ("rich_first", "native_then_rich"):
+    if phone_mode in ("rich_first", "native_then_rich", "native_album"):
         async with Bot(token) as bot:
             message = await phone_layout_test(
                 bot, chat_id, row, details, mode=phone_mode
