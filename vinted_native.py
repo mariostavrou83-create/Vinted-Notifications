@@ -20,11 +20,20 @@ logger = get_logger(__name__)
 
 
 def enabled():
-    return db.get_parameter("vinted_native_photo_alerts") == "1"
+    return (
+        db.get_parameter("vinted_native_photo_alerts") == "1" and not separate_panels()
+    )
+
+
+def separate_panels():
+    return db.get_parameter("separate_photo_panels") != "0"
 
 
 def enable():
     with closing(connection()) as conn, conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO parameters VALUES ('separate_photo_panels','0')"
+        )
         conn.executemany(
             "INSERT INTO parameters(key,value) VALUES (?, '1') "
             "ON CONFLICT(key) DO UPDATE SET value='1'",

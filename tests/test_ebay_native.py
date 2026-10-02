@@ -1,6 +1,7 @@
 """One-message eBay photos, retries and account-closure redaction."""
 
 import io
+import json
 import unittest
 from contextlib import closing
 from types import SimpleNamespace
@@ -15,15 +16,19 @@ from test_vinted_native import NativeWireRequest
 
 import alert_delivery
 import alert_images
+import db
 import ebay_alerts
+import ebay_monitor
 import ebay_privacy
 import search_settings
+import vinted_alerts
 import vinted_native
 
 
 class EbayNativeTests(EbayFixture, unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         super().setUp()
+        vinted_native.enable()  # Retained legacy delivery mode.
         self.search = self.enable(reminder="Check the back pockets", max_buy="15")
         with closing(search_settings.connection()) as conn, conn:
             conn.execute(
@@ -90,6 +95,69 @@ class EbayNativeTests(EbayFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(details["photos"]), 2)
         self.assertIn("back pockets", details["reminder"])
         self.assertIn("15.00", details["guide"])
+
+    async def test_separate_panels_keep_collage_and_notes_in_one_message(self):
+        db.set_parameter("separate_photo_panels", "1")
+        details = ebay_alerts.snapshot(
+            ebay_monitor.parse_item(
+                item(
+                    123,
+                    additionalImages=[{"imageUrl": "https://i.ebayimg.com/second.jpg"}],
+                ),
+                self.search["ebay"],
+                1020,
+            ),
+            self.search,
+        )
+        self.assertFalse(details["native_photo"])
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE ebay_alert_details SET payload=?", (json.dumps(details),)
+            )
+        self.bot.do_api_request = AsyncMock(
+            return_value={"message_id": 99, "rich_message": {"blocks": []}}
+        )
+        with patch(
+            "vinted_gallery.resolve",
+            side_effect=AssertionError("eBay must not fetch Vinted"),
+        ):
+            await self.send()
+        self.bot.send_message.assert_awaited_once()
+        self.bot.send_photo.assert_not_awaited()
+        self.bot.edit_message_media.assert_not_awaited()
+        data = self.bot.do_api_request.call_args.kwargs["api_kwargs"]
+        self.assertEqual(data["message_id"], 99)
+        self.assertEqual(len(data["rich_message"]["media"]), 2)
+        html = data["rich_message"]["html"]
+        ordered = [
+            "Open eBay listing",
+            "Hollister fur gilet",
+            "id=listing",
+            "id=reference",
+            "Your buying guide",
+            "Your buying reminder",
+            "Check the back pockets",
+        ]
+        self.assertEqual(
+            [html.index(x) for x in ordered], sorted(html.index(x) for x in ordered)
+        )
+        alert_images.listing_collage.assert_awaited_with(details["photos"])
+
+    async def test_ebay_rich_wire_has_two_separate_image_uploads(self):
+        from test_vinted_collages import WireRequest
+
+        request = WireRequest()
+        bot = Bot("123456:offline-token", request=request, get_updates_request=request)
+        row = dict(self.outbox()[0], telegram_message_id=42)
+        data = vinted_alerts.rich_request(
+            row, ebay_alerts.get_details(row), photo_bytes(), photo_bytes()
+        )
+        data["chat_id"] = "123"
+        await bot.do_api_request("editMessageText", api_kwargs=data)
+        self.assertEqual(set(request.data.multipart_data), {"listing", "reference"})
+        rich = json.loads(request.data.json_parameters["rich_message"])
+        self.assertIn("Open eBay listing", rich["html"])
+        self.assertIn("Check the back pockets", rich["html"])
 
     async def test_edit_retry_never_sends_a_second_notification(self):
         self.bot.edit_message_media.side_effect = NetworkError("offline")

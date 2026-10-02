@@ -203,7 +203,7 @@ class BrowseClient:
             raise EbayError("eBay search connection failed; will retry.") from None
 
 
-def parse_item(raw, config, now):
+def parse_item(raw, config, now, *, fresh_only=True):
     """Return eligible data only. Unknown dates/prices never qualify as fresh bargains."""
     created = timestamp(raw.get("itemOriginDate")) or timestamp(
         raw.get("itemCreationDate")
@@ -223,7 +223,11 @@ def parse_item(raw, config, now):
         return None
     public = raw.get("_dateSource") == "publicSearchMinute"
     precision = 59 if public else 0
-    if created is None or created > now + 60 or created + precision < now - MAX_AGE:
+    if (
+        created is None
+        or created > now + 60
+        or (fresh_only and created + precision < now - MAX_AGE)
+    ):
         return None
     end = timestamp(raw.get("itemEndDate"))
     if end is not None and end <= now:

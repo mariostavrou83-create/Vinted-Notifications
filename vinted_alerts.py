@@ -6,7 +6,7 @@ from html import escape
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from telegram import InputFile
+from telegram import InputFile, LinkPreviewOptions
 from telegram.error import BadRequest, TelegramError
 
 import alert_images
@@ -109,12 +109,15 @@ def get_details(row):
 
 
 def rich_request(row, details, listing_image, reference_image):
+    marketplace = "eBay" if details.get("platform") == "ebay" else "Vinted"
     heading, _, listing, guide, reminder = sections(row, details)
     # A URL button sits directly below the search heading, above listing details.
     button = (
         '<tg-button-row align="left"><tg-button type="url" url="'
         + escape(row["url"], quote=True)
-        + '">Open Vinted listing ↗</tg-button></tg-button-row>'
+        + '">Open '
+        + marketplace
+        + " listing ↗</tg-button></tg-button-row>"
     )
     parts = [
         "<p>" + heading + "</p>",
@@ -123,7 +126,7 @@ def rich_request(row, details, listing_image, reference_image):
     ]
     media, files = [], {}
     for key, label, raw in (
-        ("listing", "Vinted listing", listing_image),
+        ("listing", marketplace + " listing", listing_image),
         ("reference", "Your examples", reference_image),
     ):
         if raw:
@@ -152,8 +155,25 @@ def rich_request(row, details, listing_image, reference_image):
     }
 
 
-async def enrich(bot, chat_id, row, details, before_edit):
-    photos = await vinted_gallery.resolve(row, details)
+async def send_text(bot, chat_id, row, details):
+    return await bot.send_message(
+        chat_id=chat_id,
+        text="\n\n".join(part for part in sections(row, details) if part),
+        parse_mode="HTML",
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+        read_timeout=8,
+        write_timeout=8,
+        connect_timeout=3,
+        pool_timeout=3,
+    )
+
+
+async def enrich(bot, chat_id, row, details, before_edit, *, persist=True):
+    photos = (
+        details.get("photos", [])[:4]
+        if details.get("platform") == "ebay"
+        else await vinted_gallery.resolve(row, details, persist=persist)
+    )
     listing = await alert_images.listing_collage(photos)
     reference = (
         dashboard_store.get_media(row["reference_id"]) if row["reference_id"] else None
@@ -194,7 +214,9 @@ async def enrich(bot, chat_id, row, details, before_edit):
     except BadRequest as exc:
         if "message is not modified" not in str(exc).lower():
             raise
-    return not missing_listing
+    return not missing_listing and (
+        not row["reference_id"] or reference_image is not None
+    )
 
 
 async def preview_and_enable(query_id, *, photo_first=False):
@@ -253,28 +275,32 @@ async def preview_and_enable(query_id, *, photo_first=False):
             )
         return {"photo_count": 1, "gallery_state": "catalogue"}
 
-    # Exercise exactly the same native send and silent media edit as live alerts.
+    # Separate image panels and actual text, all edited into the same message.
     async with Bot(token) as bot:
 
         async def ready():
             pass
 
-        first = await vinted_native.send_initial(
-            bot, chat_id, row, details, ready, require_photo=True
-        )
+        first = await send_text(bot, chat_id, row, details)
         row["telegram_message_id"] = first.message_id
 
         async def paced_edit():
             await asyncio.sleep(1.1)
 
-        complete = await vinted_native.enrich(
-            bot, chat_id, row, details, paced_edit, persist=False
-        )
+        complete = await enrich(bot, chat_id, row, details, paced_edit, persist=False)
         if not complete:
             raise ValueError(
                 "Preview sent, but a comparison photo is unavailable. Live settings are unchanged."
             )
-    vinted_native.enable()
+    with closing(connection()) as conn, conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO parameters VALUES (?,?)",
+            [
+                ("vinted_single_message_alerts", "1"),
+                ("vinted_native_photo_alerts", "0"),
+                ("separate_photo_panels", "1"),
+            ],
+        )
     return {
         "photo_count": len(details["photos"]),
         "gallery_state": details.get("gallery_state"),

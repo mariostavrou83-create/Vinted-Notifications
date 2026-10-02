@@ -554,7 +554,7 @@ def create_app(test_config=None):
                     if photo_first
                     else "Telegram accepted the photo-notification preview with "
                     + str(preview["photo_count"])
-                    + " listing photo(s). Photo-first notifications are now enabled for all new Vinted alerts."
+                    + " listing photo(s). Separate listing and example panels, with readable notes, are now enabled for new Vinted alerts."
                 ),
                 "success",
             )
