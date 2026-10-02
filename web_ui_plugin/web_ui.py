@@ -440,7 +440,14 @@ def create_app(test_config=None):
         import ebay_alerts
 
         try:
-            flash(asyncio.run(ebay_alerts.preview(query_id)), "success")
+            phone_mode = request.form.get("preview_mode")
+            if phone_mode in ("rich_first", "native_then_rich"):
+                message = asyncio.run(
+                    ebay_alerts.preview(query_id, phone_mode=phone_mode)
+                )
+            else:
+                message = asyncio.run(ebay_alerts.preview(query_id))
+            flash(message, "success")
         except ValueError as exc:
             flash(str(exc), "error")
         except TelegramError:
@@ -546,6 +553,13 @@ def create_app(test_config=None):
                 (time.time(),),
             )
         try:
+            phone_mode = request.form.get("preview_mode")
+            if phone_mode in ("rich_first", "native_then_rich"):
+                preview = asyncio.run(
+                    preview_and_enable(query_id, phone_mode=phone_mode)
+                )
+                flash(preview["phone_test"], "success")
+                return redirect(url_for("edit", query_id=query_id))
             photo_first = request.form.get("preview_mode") == "photo_first"
             preview = asyncio.run(preview_and_enable(query_id, photo_first=photo_first))
             flash(
