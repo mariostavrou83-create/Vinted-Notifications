@@ -645,6 +645,11 @@ async def run_delivery():
             continue
         try:
             async with Bot(config["telegram_token"]) as bot:
+                from photo_cards import poll_ebay_callbacks
+
+                callbacks = asyncio.create_task(
+                    poll_ebay_callbacks(bot, config["chat_id"])
+                )
                 worker = EbayPhotoDeliveryWorker(
                     bot,
                     config["chat_id"],
@@ -661,6 +666,8 @@ async def run_delivery():
                         if not await worker.tick():
                             await asyncio.sleep(0.05)
                 finally:
+                    callbacks.cancel()
+                    await asyncio.gather(callbacks, return_exceptions=True)
                     await worker.close()
         except Exception as exc:  # noqa: BLE001
             logger.warning(

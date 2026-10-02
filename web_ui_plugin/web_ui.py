@@ -441,7 +441,12 @@ def create_app(test_config=None):
 
         try:
             phone_mode = request.form.get("preview_mode")
-            if phone_mode in ("rich_first", "native_then_rich", "native_album"):
+            if phone_mode in (
+                "rich_first",
+                "native_then_rich",
+                "native_album",
+                "working_photo",
+            ):
                 message = asyncio.run(
                     ebay_alerts.preview(query_id, phone_mode=phone_mode)
                 )
@@ -554,7 +559,12 @@ def create_app(test_config=None):
             )
         try:
             phone_mode = request.form.get("preview_mode")
-            if phone_mode in ("rich_first", "native_then_rich", "native_album"):
+            if phone_mode in (
+                "rich_first",
+                "native_then_rich",
+                "native_album",
+                "working_photo",
+            ):
                 preview = asyncio.run(
                     preview_and_enable(query_id, phone_mode=phone_mode)
                 )

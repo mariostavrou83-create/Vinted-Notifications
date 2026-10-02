@@ -12,6 +12,7 @@ from telegram.error import BadRequest, TelegramError
 import alert_images
 import dashboard_store
 import db
+import photo_cards
 import vinted_gallery
 import vinted_native
 from search_settings import connection
@@ -43,6 +44,7 @@ def snapshot(item, search):
         "version": 1,
         "single_message": enabled(),
         "native_photo": enabled() and vinted_native.enabled(),
+        "photo_card": photo_cards.enabled(),
         "name": (search.get("query_name") or keyword or "Filtered search")[:100],
         "brand": (getattr(item, "brand_title", None) or "Not specified")[:120],
         "photos": alert_images.photo_urls(item),
@@ -396,6 +398,10 @@ async def preview_and_enable(query_id, *, photo_first=False, phone_mode=None):
     )
     search["query_name"] = label + (search["query_name"] or "")
     details = snapshot(item, search)
+    if phone_mode == "working_photo":
+        details["name"] = "WORKING PHOTO ALERT TEST · " + (
+            get_search(query_id)["query_name"] or ""
+        )
     row["reference_id"] = search["reference_id"]
     row["search_name"] = search["query_name"]
     token, chat_id = db.get_parameter("telegram_token"), db.get_parameter(
@@ -403,6 +409,21 @@ async def preview_and_enable(query_id, *, photo_first=False, phone_mode=None):
     )
     if not token or not chat_id:
         raise ValueError("Connect your Vinted Telegram bot first.")
+    if phone_mode == "working_photo":
+        async with Bot(token) as bot:
+
+            async def ready():
+                pass
+
+            await photo_cards.send_initial(
+                bot, chat_id, row, details, ready, require_photo=True
+            )
+        photo_cards.enable()
+        return {
+            "photo_count": len(details["photos"]),
+            "gallery_state": "catalogue",
+            "phone_test": "WORKING PHOTO ALERT TEST sent. New Vinted and eBay alerts now use the same photo delivery, with readable notes and in-message Listing photos / Your examples buttons.",
+        }
     if phone_mode in ("rich_first", "native_then_rich", "native_album"):
         async with Bot(token) as bot:
             message = await phone_layout_test(

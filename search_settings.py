@@ -11,7 +11,7 @@ from pathlib import Path
 
 import db
 
-SCHEMA_VERSION = "11"
+SCHEMA_VERSION = "12"
 
 
 def connection():
@@ -141,6 +141,16 @@ def ensure_schema():
             conn.execute("""CREATE TABLE IF NOT EXISTS vinted_alert_details (
                 item_id TEXT PRIMARY KEY REFERENCES alert_outbox(item_id) ON DELETE CASCADE,
                 payload TEXT NOT NULL)""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS telegram_photo_cards (
+                platform TEXT NOT NULL, message_id INTEGER NOT NULL,
+                item_id TEXT NOT NULL REFERENCES alert_outbox(item_id) ON DELETE CASCADE,
+                reference_id TEXT, details TEXT NOT NULL,
+                listing_file_id TEXT, example_file_id TEXT,
+                view TEXT NOT NULL DEFAULT 'listing',
+                PRIMARY KEY(platform,message_id))""")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_photo_cards_item ON telegram_photo_cards(item_id)"
+            )
             conn.execute("""INSERT OR IGNORE INTO parameters
                 VALUES ('vinted_single_message_alerts', '0')""")
             conn.execute(
