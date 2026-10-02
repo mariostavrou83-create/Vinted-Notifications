@@ -244,7 +244,13 @@ class LinkDashboardTests(EbayFixture, unittest.TestCase):
             "ebay_connections.BrowseClient"
         ) as client:
             client.return_value.search.return_value = (
-                [item(123, created=time.time() - 5)],
+                [
+                    item(
+                        123,
+                        created=time.time() - 5,
+                        categories=[{"categoryId": "11554"}],
+                    )
+                ],
                 "",
             )
             response = self.client.post("/search/1/check-ebay", data={"csrf": "csrf"})
