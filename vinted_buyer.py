@@ -319,7 +319,7 @@ class Client:
             self.headers()
             return
         raise BuyerError(
-            "Vinted did not supply the sign-in security token. No credentials were sent.",
+            "Vinted did not supply the security token. The buyer connection has not been verified.",
             reason="csrf",
             stage="homepage",
         )
@@ -327,8 +327,10 @@ class Client:
     def identity(self):
         data = self.request("GET", "/api/v2/users/current")
         user = data.get("user") or {}
-        if not str(user.get("id", "")).isdigit():
-            raise BuyerError("Vinted did not verify the buying account.")
+        if not isinstance(user, dict) or not str(user.get("id", "")).isdigit():
+            raise BuyerError(
+                "Vinted did not verify the buying account.", stage="identity"
+            )
         return (
             str(user["id"]),
             str(user.get("login") or user.get("username") or user["id"])[:100],
@@ -345,20 +347,53 @@ def save_connected(client):
     record_auth("connected", "identity", 200)
 
 
+def reserve_connection_attempt():
+    """Shared cooldown for owner-initiated password and existing-session linking."""
+    with closing(connection()) as conn, conn:
+        last = conn.execute(
+            "SELECT login_attempt FROM vinted_buyer WHERE id=1"
+        ).fetchone()[0]
+        if time.time() - last < 30:
+            raise BuyerError("Wait 30 seconds between connection attempts.")
+        conn.execute(
+            "UPDATE vinted_buyer SET login_attempt=?,pending=NULL,enabled=0 WHERE id=1",
+            (time.time(),),
+        )
+
+
+def link_session(access_token, refresh_token):
+    """Verify an owner's existing credentials; never import anti-bot cookies.
+
+    Connection makes only the normal homepage and account-verification requests.
+    No login, refresh, purchase, challenge solving or automatic retry is attempted.
+    Tokens are not persisted unless Vinted confirms the authenticated identity.
+    """
+    tokens = (access_token.strip(), refresh_token.strip())
+    if any(not re.fullmatch(r"[A-Za-z0-9._~+/=-]{16,8192}", v) for v in tokens):
+        raise BuyerError(
+            "Enter the two session token values from your own UK Vinted account, without cookie names or other text."
+        )
+    with exclusive():
+        reserve_connection_attempt()
+        client = Client(
+            {"cookies": dict(zip(("access_token_web", "refresh_token_web"), tokens))}
+        )
+        try:
+            client.homepage()
+            save_connected(client)
+            return "Vinted verified your existing session. Autobuy is off; review the account and set spending limits before enabling it."
+        except BuyerError as exc:
+            record_auth(exc.reason, exc.stage, exc.status)
+            raise
+        finally:
+            client.session.close()
+
+
 def start_login(email, password):
     if not email or not password or len(email) > 254 or len(password) > 1024:
         raise BuyerError("Enter your Vinted email and password in this form.")
     with exclusive():
-        with closing(connection()) as conn, conn:
-            last = conn.execute(
-                "SELECT login_attempt FROM vinted_buyer WHERE id=1"
-            ).fetchone()[0]
-            if time.time() - last < 30:
-                raise BuyerError("Wait 30 seconds between sign-in attempts.")
-            conn.execute(
-                "UPDATE vinted_buyer SET login_attempt=?,pending=NULL,enabled=0 WHERE id=1",
-                (time.time(),),
-            )
+        reserve_connection_attempt()
         client = Client()
         try:
             client.homepage()

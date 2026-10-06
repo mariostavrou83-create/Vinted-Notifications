@@ -514,6 +514,14 @@ def create_app(test_config=None):
                         ) from None
                 elif action == "buyer_check":
                     flash(vinted_buyer.check_signin(), "success")
+                elif action == "buyer_session":
+                    flash(
+                        vinted_buyer.link_session(
+                            request.form.get("buyer_access_token", ""),
+                            request.form.get("buyer_refresh_token", ""),
+                        ),
+                        "success",
+                    )
                 elif action == "buyer_login":
                     flash(
                         vinted_buyer.start_login(
