@@ -61,7 +61,7 @@ class LeRobot:
             from vinted_buying import callback as buy_callback
 
             self.app.add_handler(
-                CallbackQueryHandler(buy_callback, pattern=r"^buy:click$")
+                CallbackQueryHandler(buy_callback, pattern=r"^buy:(click|status)$")
             )
 
             # Telegram is notifications-only; old editing commands no longer mutate data.

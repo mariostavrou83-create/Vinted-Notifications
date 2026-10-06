@@ -2,19 +2,23 @@
 
 import asyncio
 import json
+import os
 import re
 import time
 from contextlib import closing
 from decimal import Decimal, InvalidOperation
 from urllib.parse import urlsplit
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton
 from telegram.error import TelegramError
 
 import db
 import vinted_budget
 import vinted_buyer as buyer
+from logger import get_logger
 from search_settings import connection
+
+logger = get_logger(__name__)
 
 
 def cents(value):
@@ -110,18 +114,24 @@ def checkout_prices(checkout, item_price, maximum):
     return total
 
 
+def ready(row):
+    config = buyer.settings()
+    if not config["connected"]:
+        raise buyer.BuyerError("Connect your Vinted buyer in Connections first.")
+    if not config["enabled"]:
+        raise buyer.BuyerError(
+            "Autobuy is off. Set a maximum total on this search, then enable Autobuy in Connections. No purchase was started."
+        )
+    return config, vinted_budget.payment_limit(row)
+
+
 def buy(row):
     item_id = str(row["item_id"])
     host = urlsplit(row["url"]).hostname
     if not item_id.isdigit() or host != "www.vinted.co.uk" or row["currency"] != "GBP":
         raise buyer.BuyerError("Autobuy currently supports UK Vinted listings in GBP.")
     with buyer.exclusive():
-        config = buyer.settings()
-        if not config["enabled"] or not config["connected"]:
-            raise buyer.BuyerError(
-                "Connect your Vinted buyer and enable Autobuy in Connections first."
-            )
-        maximum = vinted_budget.payment_limit(row)
+        config, maximum = ready(row)
         if not claim(row):
             return result(item_id)
         client = None
@@ -287,62 +297,177 @@ def buy(row):
         return result(item_id)
 
 
+def feedback_buttons(row, feedback=None):
+    if not feedback:
+        return [[InlineKeyboardButton("Autobuy", callback_data="buy:click")]]
+    state = feedback.get("state")
+    label = {
+        "setup_required": "Autobuy needs setup · see why",
+        "failed_before_payment": "Autobuy stopped · see why",
+        "paid": "Paid ✓ · details",
+        "needs_action": "Bank / payment confirmation needed",
+        "unknown": "Payment unconfirmed · check details",
+        "paying": "Payment submitted · check details",
+        "preparing": "Preparing purchase · details",
+        "payment_failed": "Payment failed · check details",
+    }.get(state, "Autobuy status · details")
+    buttons = [[InlineKeyboardButton(label, callback_data="buy:status")]]
+    if state in ("setup_required", "failed_before_payment"):
+        buttons.append(
+            [InlineKeyboardButton("Retry Autobuy", callback_data="buy:click")]
+        )
+        base = os.environ.get("DASHBOARD_URL", "").rstrip("/")
+        if not base and os.environ.get("RAILWAY_PUBLIC_DOMAIN"):
+            base = "https://" + os.environ["RAILWAY_PUBLIC_DOMAIN"]
+        parsed = urlsplit(base)
+        if parsed.scheme == "https" and parsed.hostname and not parsed.username:
+            setup = []
+            if str(row.get("query_id", "")).isdigit():
+                setup.append(
+                    InlineKeyboardButton(
+                        "Set search budget ↗",
+                        url=base + "/search/" + str(row["query_id"]),
+                    )
+                )
+            setup.append(
+                InlineKeyboardButton(
+                    "Buyer settings ↗", url=base + "/connections#vinted-buying"
+                )
+            )
+            buttons.append(setup)
+    elif feedback.get("checkout_id"):
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    "Open Vinted checkout ↗",
+                    url=buyer.BASE + "/checkout?purchase_id=" + feedback["checkout_id"],
+                )
+            ]
+        )
+    return buttons
+
+
+async def show_feedback(bot, query, row, details, card, outcome):
+    """Keep the result on this same alert; callback popups are only transient."""
+    import photo_cards
+
+    feedback = {
+        key: outcome.get(key) for key in ("state", "message", "checkout_id", "total")
+    }
+    details = dict(details, buy_feedback=feedback)
+    try:
+        with closing(connection()) as conn, conn:
+            conn.execute(
+                "UPDATE telegram_photo_cards SET details=? WHERE platform='vinted' AND message_id=? AND item_id=?",
+                (json.dumps(details), query.message.message_id, row["item_id"]),
+            )
+        # Picture and notes controls re-use these details, preserving buy status.
+        view = card.get("view", "listing")
+        note_page = int(view.split(":")[1]) if view.startswith("notes:") else None
+        await bot.edit_message_reply_markup(
+            chat_id=str(query.message.chat.id),
+            message_id=query.message.message_id,
+            reply_markup=photo_cards.markup(
+                row, details, view=view, note_page=note_page
+            ),
+            **photo_cards.TIMEOUTS,
+        )
+        photo_cards.control_health("vinted", "success")
+    except TelegramError as exc:
+        photo_cards.control_health(
+            "vinted", "error", "Could not display Autobuy status"
+        )
+        logger.warning(
+            "Autobuy result display failed item=%s error=%s",
+            row["item_id"],
+            type(exc).__name__,
+        )
+        # Never repeat a payment because its Telegram display failed.
+    logger.info(
+        "Autobuy status item=%s search=%s state=%s",
+        row["item_id"],
+        row.get("query_id"),
+        feedback["state"],
+    )
+
+
 async def callback(update, context):
     import photo_cards
 
     query = update.callback_query
     chat_id = str(db.get_parameter("telegram_chat_id") or "").strip()
-    # Payments are private-owner only, even if notification routing later moves
-    # into a group. A forwarded card cannot buy anything for another user.
     if (
         not query.message
         or str(query.message.chat.id) != chat_id
         or str(query.from_user.id) != chat_id
+        or not chat_id.isdigit()
         or int(chat_id) <= 0
     ):
         await photo_cards.answer(
             query, "Only your private Telegram account can use Autobuy.", alert=True
         )
         return
+    photo_cards.control_health("vinted", "click")
     saved = photo_cards.recover("vinted", query.message)
     if not saved:
         await photo_cards.answer(
-            query, "This saved alert is no longer available.", alert=True
+            query,
+            "This saved alert is no longer available. Open Recent Finds in your dashboard.",
+            alert=True,
         )
         return
-    row, details, _card = saved
-    await photo_cards.answer(query, "Preparing your Vinted checkout…")
+    row, details, card = saved
+    previous = result(row["item_id"])
+    if getattr(query, "data", "") == "buy:status":
+        feedback = (
+            previous
+            if previous and previous["state"] != "failed_before_payment"
+            else details.get("buy_feedback") or previous
+        )
+        message = (
+            feedback.get("message")
+            if feedback
+            else "Tap Autobuy to check this listing."
+        )
+        await photo_cards.answer(
+            query, (message or "Check your Vinted purchases.")[:190], alert=True
+        )
+        return
+    logger.info("Autobuy tap item=%s search=%s", row["item_id"], row.get("query_id"))
+    if previous and previous["state"] != "failed_before_payment":
+        await photo_cards.answer(query, previous["message"][:190], alert=True)
+        await show_feedback(context.bot, query, row, details, card, previous)
+        return
+    # Check local setup BEFORE answering the callback. Telegram must receive the
+    # reason as its first answer, not a second popup after an acknowledgement.
     try:
-        outcome = await asyncio.to_thread(buy, row)
+        ready(row)
     except buyer.BuyerError as exc:
         await photo_cards.answer(query, str(exc)[:190], alert=True)
-        return
-    if not outcome:
-        return
-    markup = photo_cards.markup(row, details).inline_keyboard
-    state = outcome["state"]
-    label = {
-        "paid": "Paid ✓",
-        "needs_action": "Finish payment in Vinted ↗",
-        "unknown": "Check payment in Vinted ↗",
-        "paying": "Check payment in Vinted ↗",
-        "preparing": "Purchase is being prepared",
-        "payment_failed": "Check failed payment in Vinted ↗",
-    }.get(state, "Autobuy stopped · details")
-    url = (
-        buyer.BASE + "/checkout?purchase_id=" + outcome["checkout_id"]
-        if outcome["checkout_id"]
-        else row["url"]
-    )
-    buttons = [list(r) for r in markup]
-    buttons[1] = [InlineKeyboardButton(label, url=url)]
-    try:
-        await context.bot.edit_message_reply_markup(
-            chat_id=chat_id,
-            message_id=query.message.message_id,
-            reply_markup=InlineKeyboardMarkup(buttons),
-            **photo_cards.TIMEOUTS,
+        await show_feedback(
+            context.bot,
+            query,
+            row,
+            details,
+            card,
+            {"state": "setup_required", "message": str(exc)},
         )
-        await photo_cards.answer(query, outcome["message"][:190], alert=True)
-    except TelegramError:
-        pass  # A Telegram failure never triggers another payment attempt.
+        return
+    await photo_cards.answer(query, "Preparing your Vinted checkout…")
+    async with photo_cards.lock("vinted", query.message.message_id):
+        try:
+            outcome = await asyncio.to_thread(buy, row)
+        except buyer.BuyerError as exc:
+            outcome = {"state": "setup_required", "message": str(exc)}
+        except Exception as exc:  # noqa: BLE001 -- never retry an uncertain purchase
+            logger.warning(
+                "Autobuy request failed item=%s error=%s",
+                row["item_id"],
+                type(exc).__name__,
+            )
+            outcome = result(row["item_id"]) or {
+                "state": "unknown",
+                "message": "The purchase result could not be confirmed. Check your Vinted purchases before trying again.",
+            }
+        if outcome:
+            await show_feedback(context.bot, query, row, details, card, outcome)
