@@ -1,0 +1,418 @@
+"""Private buyer sessions: encrypted at rest, never passwords, no challenge bypass."""
+
+import fcntl
+import json
+import os
+import re
+import time
+from contextlib import closing, contextmanager
+from pathlib import Path
+
+import requests
+from cryptography.fernet import Fernet, InvalidToken
+
+import db
+from search_settings import connection
+
+BASE = "https://www.vinted.co.uk"
+
+
+class BuyerError(ValueError):
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
+
+
+def migrate(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS vinted_buyer (
+        id INTEGER PRIMARY KEY CHECK(id=1), session BLOB, pending BLOB,
+        login_attempt REAL NOT NULL DEFAULT 0, verified_at REAL,
+        user_id TEXT, username TEXT, enabled INTEGER NOT NULL DEFAULT 0,
+        max_total INTEGER NOT NULL DEFAULT 0, max_extra INTEGER NOT NULL DEFAULT 0,
+        browser_info TEXT NOT NULL DEFAULT '{}')""")
+    conn.execute("INSERT OR IGNORE INTO vinted_buyer(id) VALUES (1)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS vinted_buy_attempts (
+        item_id TEXT PRIMARY KEY, state TEXT NOT NULL, checkout_id TEXT,
+        total INTEGER, message TEXT NOT NULL, updated REAL NOT NULL)""")
+
+
+@contextmanager
+def exclusive():
+    path = Path(db.DB_PATH).resolve().parent / "vinted-buyer.lock"
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise BuyerError(
+                "A buyer request is already running. Please wait for it to finish."
+            ) from None
+        yield
+    finally:
+        os.close(fd)
+
+
+def cipher():
+    path = Path(db.DB_PATH).resolve().parent / "vinted-buyer.key"
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(Fernet.generate_key())
+    return Fernet(path.read_bytes())
+
+
+def encrypt(data):
+    return cipher().encrypt(json.dumps(data).encode())
+
+
+def decrypt(data):
+    try:
+        return json.loads(cipher().decrypt(data)) if data else None
+    except (InvalidToken, ValueError, TypeError):
+        raise BuyerError(
+            "Reconnect the Vinted buyer account; its saved session is unavailable."
+        ) from None
+
+
+def settings():
+    with closing(connection()) as conn:
+        row = dict(conn.execute("SELECT * FROM vinted_buyer WHERE id=1").fetchone())
+    # No credential value is returned to a template or API caller.
+    row["connected"] = bool(row.pop("session") and row["verified_at"])
+    pending = decrypt(row.pop("pending"))
+    row["pending_code"] = bool(pending and pending.get("expires", 0) > time.time())
+    row.pop("browser_info")
+    return row
+
+
+class Client:
+    def __init__(self, saved=None):
+        self.session = requests.Session()
+        self.session.headers.update(
+            {
+                "User-Agent": "MSJ-Finder/1.0",
+                "Accept": "application/json",
+                "Accept-Language": "en-GB",
+                "Origin": BASE,
+                "Referer": BASE + "/",
+            }
+        )
+        self.csrf = ""
+        if saved:
+            self.csrf = saved.get("csrf", "")
+            for key, value in saved.get("cookies", {}).items():
+                self.session.cookies.set(
+                    key, value, domain="www.vinted.co.uk", secure=True
+                )
+            self.headers()
+
+    def headers(self):
+        if self.csrf:
+            self.session.headers["X-CSRF-Token"] = self.csrf
+        token = self.session.cookies.get_dict().get("access_token_web")
+        if token:
+            self.session.headers["Authorization"] = "Bearer " + token
+
+    def exported(self):
+        return {"csrf": self.csrf, "cookies": self.session.cookies.get_dict()}
+
+    def request(self, method, path, body=None, *, allow_challenge=False):
+        if not path.startswith(("/api/v2/", "/web/api/auth/")):
+            raise BuyerError("Unsupported Vinted request.")
+        try:
+            response = self.session.request(
+                method, BASE + path, json=body, timeout=(4, 12), allow_redirects=False
+            )
+        except requests.RequestException:
+            raise BuyerError(
+                "Vinted did not confirm this request. Check your account before retrying."
+            ) from None
+        if response.status_code == 403:
+            raise BuyerError(
+                "Vinted refused this server connection or requires verification. Autobuy cannot continue through that check."
+            )
+        if response.status_code == 429:
+            raise BuyerError("Vinted requested a cooldown. Wait before trying again.")
+        try:
+            data = response.json()
+        except ValueError:
+            raise BuyerError(
+                "Vinted returned a verification page or an unreadable response."
+            ) from None
+        if (
+            allow_challenge
+            and response.status_code == 401
+            and isinstance(data, dict)
+            and (data.get("payload") or {}).get("id")
+        ):
+            return {"challenge_id": str(data["payload"]["id"])}
+        if response.status_code not in (200, 201) or not isinstance(data, dict):
+            raise BuyerError(
+                f"Vinted did not accept this request (HTTP {response.status_code}).",
+                response.status_code,
+            )
+        for field, cookie in (
+            ("access_token", "access_token_web"),
+            ("refresh_token", "refresh_token_web"),
+        ):
+            if data.get(field):
+                self.session.cookies.set(
+                    cookie, data[field], domain="www.vinted.co.uk", secure=True
+                )
+        self.headers()
+        return data
+
+    def homepage(self):
+        try:
+            response = self.session.get(
+                BASE + "/", timeout=(4, 12), allow_redirects=False
+            )
+        except requests.RequestException:
+            raise BuyerError("Vinted sign-in could not be reached.") from None
+        if any(
+            term in response.text.lower()
+            for term in (
+                "verify you are human",
+                "captcha-delivery.com",
+                "geo.captcha-delivery.com",
+            )
+        ):
+            raise BuyerError(
+                "Vinted requires browser verification for this server. Its sign-in cannot continue here."
+            )
+        if response.status_code != 200:
+            raise BuyerError(
+                f"Vinted sign-in returned HTTP {response.status_code} from this server. No credentials were sent."
+            )
+        for pattern in (
+            r'"(?:CSRF_TOKEN|csrf_token|csrfToken)"\s*:\s*"([^"<>]+)"',
+            r'<meta\s+name="csrf-token"\s+content="([^"<>]+)"',
+        ):
+            match = re.search(pattern, response.text, re.IGNORECASE)
+            if match:
+                self.csrf = match[1]
+                self.headers()
+                return
+        raise BuyerError(
+            "Vinted did not supply the sign-in security token. No credentials were sent."
+        )
+
+    def identity(self):
+        data = self.request("GET", "/api/v2/users/current")
+        user = data.get("user") or {}
+        if not str(user.get("id", "")).isdigit():
+            raise BuyerError("Vinted did not verify the buying account.")
+        return (
+            str(user["id"]),
+            str(user.get("login") or user.get("username") or user["id"])[:100],
+        )
+
+
+def save_connected(client):
+    user_id, username = client.identity()
+    with closing(connection()) as conn, conn:
+        conn.execute(
+            "UPDATE vinted_buyer SET session=?,pending=NULL,verified_at=?,user_id=?,username=?,enabled=0 WHERE id=1",
+            (encrypt(client.exported()), time.time(), user_id, username),
+        )
+
+
+def start_login(email, password):
+    if not email or not password or len(email) > 254 or len(password) > 1024:
+        raise BuyerError("Enter your Vinted email and password in this form.")
+    with exclusive():
+        with closing(connection()) as conn, conn:
+            last = conn.execute(
+                "SELECT login_attempt FROM vinted_buyer WHERE id=1"
+            ).fetchone()[0]
+            if time.time() - last < 30:
+                raise BuyerError("Wait 30 seconds between sign-in attempts.")
+            conn.execute(
+                "UPDATE vinted_buyer SET login_attempt=?,pending=NULL,enabled=0 WHERE id=1",
+                (time.time(),),
+            )
+        client = Client()
+        try:
+            client.homepage()
+            result = client.request(
+                "POST",
+                "/web/api/auth/oauth",
+                {
+                    "client_id": "web",
+                    "scope": "user",
+                    "grant_type": "password",
+                    "username": email,
+                    "password": password,
+                },
+                allow_challenge=True,
+            )
+            if result.get("challenge_id"):
+                pending = dict(
+                    client.exported(),
+                    challenge_id=result["challenge_id"],
+                    expires=time.time() + 600,
+                )
+                with closing(connection()) as conn, conn:
+                    conn.execute(
+                        "UPDATE vinted_buyer SET pending=? WHERE id=1",
+                        (encrypt(pending),),
+                    )
+                return "Vinted sent a sign-in code. Enter it in the verification box below."
+            client.homepage()
+            save_connected(client)
+            return "Vinted buyer connected. Choose your spending limits before enabling Autobuy."
+        finally:
+            client.session.close()
+
+
+def check_signin():
+    with exclusive():
+        client = Client()
+        try:
+            client.homepage()
+            return "Vinted sign-in is reachable. You can now connect your buyer account below."
+        finally:
+            client.session.close()
+
+
+def verify_code(code):
+    if not re.fullmatch(r"[0-9A-Za-z-]{4,12}", code):
+        raise BuyerError("Enter the sign-in code from Vinted.")
+    with exclusive():
+        with closing(connection()) as conn:
+            pending = decrypt(
+                conn.execute("SELECT pending FROM vinted_buyer WHERE id=1").fetchone()[
+                    0
+                ]
+            )
+        if not pending or pending["expires"] < time.time():
+            raise BuyerError("The sign-in attempt expired. Start again.")
+        client = Client(pending)
+        try:
+            client.request(
+                "POST",
+                "/web/api/auth/oauth",
+                {
+                    "client_id": "web",
+                    "scope": "user",
+                    "grant_type": "password",
+                    "password_type": "two_factor_challenge_code",
+                    "control_code": pending["challenge_id"],
+                    "verification_code": code,
+                    "is_trusted_device": False,
+                },
+            )
+            client.homepage()
+            save_connected(client)
+            return "Vinted buyer connected. Choose your spending limits before enabling Autobuy."
+        finally:
+            client.session.close()
+
+
+def connected_client():
+    with closing(connection()) as conn:
+        row = conn.execute(
+            "SELECT session,user_id FROM vinted_buyer WHERE id=1"
+        ).fetchone()
+    saved = decrypt(row[0])
+    if not saved:
+        raise BuyerError("Connect your Vinted buyer account in Connections first.")
+    client = Client(saved)
+    try:
+        try:
+            user_id, _ = client.identity()
+        except BuyerError as exc:
+            refresh = saved.get("cookies", {}).get("refresh_token_web")
+            if exc.status != 401 or not refresh:
+                raise
+            client.request(
+                "POST",
+                "/web/api/auth/oauth",
+                {
+                    "client_id": "web",
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh,
+                },
+            )
+            client.homepage()
+            user_id, _ = client.identity()
+        if user_id != row[1]:
+            raise BuyerError(
+                "The connected Vinted account changed. Reconnect it before buying."
+            )
+        with closing(connection()) as conn, conn:
+            conn.execute(
+                "UPDATE vinted_buyer SET session=?,verified_at=? WHERE id=1",
+                (encrypt(client.exported()), time.time()),
+            )
+        return client
+    except BuyerError:
+        client.session.close()
+        raise
+
+
+def save_limits(form):
+    from decimal import Decimal, InvalidOperation
+
+    try:
+        values = [
+            Decimal(form.get(k, "")) for k in ("buyer_max_total", "buyer_max_extra")
+        ]
+        if (
+            any(
+                not v.is_finite() or v < 0 or v.as_tuple().exponent < -2 for v in values
+            )
+            or not 1 <= values[0] <= 1000
+            or values[1] > values[0]
+        ):
+            raise ValueError
+        total, extra = [int(v * 100) for v in values]
+        info = json.loads(form.get("buyer_browser_info", "{}"))
+        if not isinstance(info, dict):
+            raise TypeError
+        browser_info = {
+            key: info[key]
+            for key in (
+                "color_depth",
+                "java_enabled",
+                "language",
+                "screen_height",
+                "screen_width",
+                "timezone_offset",
+            )
+        }
+        if not all(
+            isinstance(browser_info[k], int) and 0 < browser_info[k] <= 20000
+            for k in ("screen_height", "screen_width", "color_depth")
+        ):
+            raise ValueError
+        if (
+            not isinstance(browser_info["java_enabled"], bool)
+            or not isinstance(browser_info["language"], str)
+            or len(browser_info["language"]) > 35
+            or not isinstance(browser_info["timezone_offset"], int)
+            or abs(browser_info["timezone_offset"]) > 900
+        ):
+            raise ValueError
+    except (InvalidOperation, ValueError, TypeError, KeyError):
+        raise BuyerError(
+            "Enter a total limit from £1 to £1,000 and a smaller fees/postage limit. Reload this page if your device details are missing."
+        ) from None
+    enabled = form.get("buyer_enabled") == "yes"
+    if enabled and not settings()["connected"]:
+        raise BuyerError("Connect your Vinted buyer account first.")
+    with closing(connection()) as conn, conn:
+        conn.execute(
+            "UPDATE vinted_buyer SET max_total=?,max_extra=?,browser_info=?,enabled=? WHERE id=1",
+            (total, extra, json.dumps(browser_info), enabled),
+        )
+
+
+def disconnect():
+    with exclusive(), closing(connection()) as conn, conn:
+        conn.execute(
+            "UPDATE vinted_buyer SET session=NULL,pending=NULL,verified_at=NULL,user_id=NULL,username=NULL,enabled=0 WHERE id=1"
+        )

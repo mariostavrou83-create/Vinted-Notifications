@@ -107,7 +107,7 @@ class PhotoCardTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent["photo"].input_file_content, photo_bytes())
         self.assertEqual(
             [b.text for r in sent["reply_markup"].inline_keyboard for b in r],
-            ["Open Vinted listing ↗", "Listing photos", "Your examples"],
+            ["Open Vinted listing ↗", "Autobuy", "Listing photos", "Your examples"],
         )
         self.download.assert_awaited_once_with(self.details["photos"])
         self.assertEqual(outbox(110)["photo_status"], "sent")

@@ -196,6 +196,8 @@ def markup(row, details, *, view="listing", note_page=None):
     buttons = [
         [InlineKeyboardButton("Open " + marketplace + " listing ↗", url=row["url"])]
     ]
+    if marketplace == "Vinted":
+        buttons.append([InlineKeyboardButton("Autobuy", callback_data="buy:click")])
     if row.get("reference_id"):
         buttons.append(
             [
@@ -491,9 +493,37 @@ async def handle_callback(bot, query, platform, chat_id):
                         if row["reference_id"]
                         else None
                     )
+                    if not reference and row.get("query_id"):
+                        # Before retained-card storage was introduced, an edited
+                        # search could have its old example removed by cleanup.
+                        # Use that search's current saved examples if available.
+                        from search_settings import get_search
+
+                        current = get_search(row["query_id"])
+                        reference_id = current.get("reference_id") if current else None
+                        reference = (
+                            dashboard_store.get_media(reference_id)
+                            if reference_id
+                            else None
+                        )
+                        if reference:
+                            row["reference_id"] = reference_id
+                            with closing(connection()) as conn, conn:
+                                conn.execute(
+                                    "UPDATE telegram_photo_cards SET reference_id=?,example_file_id=NULL WHERE platform=? AND message_id=?",
+                                    (reference_id, platform, message.message_id),
+                                )
                     # Uploads are already normalized and collaged when saved.
                     media = reference["image"] if reference else None
                 else:
+                    if platform == "ebay" and not details.get("photos"):
+                        from ebay_images import resolve
+
+                        await resolve(row, details)
+                    elif not details.get("photos") and alert_images.safe_listing_photo(
+                        row.get("photo_url")
+                    ):
+                        details["photos"] = [row["photo_url"]]
                     media = await listing_photo(details)
             if media is None:
                 control_health(
