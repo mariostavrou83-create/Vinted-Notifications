@@ -467,6 +467,8 @@ def create_app(test_config=None):
 
     @app.route("/connections", methods=["GET", "POST"])
     def connections():
+        import vinted_buyer
+
         if request.method == "POST":
             try:
                 action = request.form.get("action", "save")
@@ -510,6 +512,32 @@ def create_app(test_config=None):
                         raise ValueError(
                             "Telegram could not confirm the photo test. Check the test message before retrying."
                         ) from None
+                elif action == "buyer_check":
+                    flash(vinted_buyer.check_signin(), "success")
+                elif action == "buyer_login":
+                    flash(
+                        vinted_buyer.start_login(
+                            request.form.get("buyer_email", "").strip(),
+                            request.form.get("buyer_password", ""),
+                        ),
+                        "success",
+                    )
+                elif action == "buyer_verify":
+                    flash(
+                        vinted_buyer.verify_code(
+                            request.form.get("buyer_code", "").strip()
+                        ),
+                        "success",
+                    )
+                elif action == "buyer_limits":
+                    vinted_buyer.save_limits(request.form)
+                    flash(
+                        "Buyer limits saved. Autobuy purchases only when you tap its button.",
+                        "success",
+                    )
+                elif action == "buyer_disconnect":
+                    vinted_buyer.disconnect()
+                    flash("Vinted buyer disconnected. Autobuy is off.", "success")
                 else:
                     from ebay_connections import test_connection
 
@@ -523,6 +551,8 @@ def create_app(test_config=None):
             resources=resource_controls.summary(),
             deletion=ebay_privacy.setup_values(),
             photo_controls=__import__("photo_cards").health_summary(),
+            buyer=vinted_buyer.settings(),
+            buying=__import__("vinted_buying").history(),
         )
 
     @app.route("/folders", methods=["GET", "POST"])

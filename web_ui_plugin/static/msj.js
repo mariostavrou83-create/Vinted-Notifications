@@ -201,3 +201,16 @@ function updateKeywordSummary() {
 }
 keywordInput?.addEventListener('input', updateKeywordSummary);
 updateKeywordSummary();
+
+// Payment authentication uses the device details supplied by the account owner.
+const buyerSettings = document.querySelector('[data-buyer-settings]');
+if (buyerSettings) buyerSettings.addEventListener('submit', () => {
+  buyerSettings.querySelector('[data-buyer-browser]').value = JSON.stringify({
+    color_depth: screen.colorDepth,
+    java_enabled: false,
+    language: navigator.language,
+    screen_height: screen.height,
+    screen_width: screen.width,
+    timezone_offset: new Date().getTimezoneOffset()
+  });
+});
