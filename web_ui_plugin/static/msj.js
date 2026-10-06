@@ -187,3 +187,17 @@ checkEbay?.addEventListener('click', async () => {
   } catch (error) { output.textContent = error.message; }
   finally { checkEbay.disabled = false; }
 });
+
+const keywordInput = document.querySelector('#vinted_keywords');
+function updateKeywordSummary() {
+  if (!keywordInput) return;
+  const values = keywordInput.value.split(/[,\n\r]+/).map(s => s.trim().replace(/\s+/g, ' ')).filter(Boolean);
+  const words = [...new Map(values.map(word => [word.toLocaleLowerCase(), word])).values()];
+  const output = document.querySelector('#vinted-keyword-summary');
+  output.textContent = words.length
+    ? `${words.length} Vinted searches in one entry: ${words.join(' OR ')}. One alert per item.`
+    : 'One Vinted search using your saved link.';
+  keywordInput.setCustomValidity(words.length > 20 ? 'Use up to 20 keyword alternatives.' : '');
+}
+keywordInput?.addEventListener('input', updateKeywordSummary);
+updateKeywordSummary();

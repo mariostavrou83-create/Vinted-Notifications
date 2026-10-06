@@ -36,11 +36,16 @@ def save_rate(value):
 
 
 def summary():
-    active = len(search_settings.active_queries())
+    import vinted_keywords
+
+    searches = search_settings.active_queries()
+    active = len(searches)
+    checks = len(vinted_keywords.expand(searches))
     rate = request_rate()
     target = max(1, float(db.get_parameter("query_refresh_delay") or 15))
     return {
         "active": active,
+        "checks": checks,
         "rate": rate,
-        "cycle": round(max(target, active / rate if rate else 0), 1),
+        "cycle": round(max(target, checks / rate if rate else 0), 1),
     }

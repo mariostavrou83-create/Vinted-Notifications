@@ -1,9 +1,11 @@
 """Native photo alerts with readable captions and in-message example switching."""
 
 import asyncio
+import hashlib
 import json
 import re
 import sqlite3
+import time
 from contextlib import closing
 from html import escape, unescape
 from weakref import WeakValueDictionary
@@ -14,7 +16,7 @@ from telegram import (
     InputFile,
     InputMediaPhoto,
 )
-from telegram.error import BadRequest, TelegramError
+from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
 
 import alert_images
 import dashboard_store
@@ -30,6 +32,106 @@ TIMEOUTS = {
     "pool_timeout": 3,
 }
 _locks = WeakValueDictionary()
+
+
+def control_health(platform, event, error=""):
+    if event not in ("poll", "click", "success", "error"):
+        raise ValueError("Unknown control event")
+    with closing(connection()) as conn, conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO telegram_control_health(platform) VALUES (?)",
+            (platform,),
+        )
+        if event != "error":
+            conn.execute(
+                f"UPDATE telegram_control_health SET last_{event}=? WHERE platform=?",
+                (time.time(), platform),
+            )
+        if event in ("success", "error"):
+            conn.execute(
+                "UPDATE telegram_control_health SET error=? WHERE platform=?",
+                (error, platform),
+            )
+
+
+def cache_key(bot, platform):
+    # Telegram file IDs belong to one bot. Rotating a token invalidates its cache.
+    return hashlib.sha256(
+        (platform + ":" + str(getattr(bot, "token", "offline"))).encode()
+    ).hexdigest()
+
+
+def cached_example(bot, platform, reference_id):
+    with closing(connection()) as conn:
+        row = conn.execute(
+            "SELECT file_id FROM telegram_example_cache WHERE bot_key=? AND reference_id=?",
+            (cache_key(bot, platform), reference_id),
+        ).fetchone()
+    return row[0] if row else None
+
+
+def cache_example(bot, platform, reference_id, file_id):
+    if not reference_id:
+        return
+    with closing(connection()) as conn, conn:
+        if file_id:
+            conn.execute(
+                """INSERT INTO telegram_example_cache SELECT ?,id,? FROM dashboard_media WHERE id=?
+                ON CONFLICT(bot_key,reference_id) DO UPDATE SET file_id=excluded.file_id""",
+                (cache_key(bot, platform), file_id, reference_id),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM telegram_example_cache WHERE bot_key=? AND reference_id=?",
+                (cache_key(bot, platform), reference_id),
+            )
+
+
+async def answer(query, text=None, *, alert=False):
+    """A delayed/expired callback acknowledgement must not cancel a valid edit."""
+    try:
+        await asyncio.wait_for(query.answer(text, show_alert=alert, cache_time=0), 2)
+    except (TelegramError, TimeoutError):
+        pass
+
+
+def recover(platform, message):
+    saved = load(platform, message.message_id)
+    if saved:
+        return saved
+    with closing(connection()) as conn:
+        row = conn.execute(
+            "SELECT * FROM alert_outbox WHERE platform=? AND telegram_message_id=?",
+            (platform, message.message_id),
+        ).fetchone()
+    if row:
+        import ebay_alerts
+        import vinted_alerts
+
+        details = (ebay_alerts if platform == "ebay" else vinted_alerts).get_details(
+            dict(row)
+        )
+        if details:
+            record(dict(row), details, message)
+            return load(platform, message.message_id)
+    return None
+
+
+async def edit_with_retry(bot, kwargs):
+    # Editing the same message is idempotent; never re-send the notification.
+    for attempt in range(2):
+        try:
+            return await bot.edit_message_media(**kwargs)
+        except RetryAfter as exc:
+            delay = exc.retry_after
+            delay = delay.total_seconds() if hasattr(delay, "total_seconds") else delay
+            if attempt or delay > 4:
+                raise
+            await asyncio.sleep(delay + 0.1)
+        except NetworkError:
+            if attempt:
+                raise
+            await asyncio.sleep(0.25)
 
 
 def enabled():
@@ -226,6 +328,14 @@ async def listing_photo(details):
 
 
 async def send_initial(bot, chat_id, row, details, before_send, *, require_photo=False):
+    if details.get("platform") == "ebay":
+        from ebay_images import resolve
+
+        await resolve(row, details)
+    elif not details.get("photos") and alert_images.safe_listing_photo(
+        row.get("photo_url")
+    ):
+        details["photos"] = [row["photo_url"]]
     raw = await listing_photo(details)
     if raw is None and require_photo:
         raise ValueError("The listing photo is unavailable. Try a newer find.")
@@ -282,6 +392,10 @@ async def enrich(bot, chat_id, row, details, before_edit):
             return True
         if saved[2]["listing_file_id"] or saved[2]["view"] != "listing":
             return True
+        if platform == "ebay" and not details.get("photos"):
+            from ebay_images import resolve
+
+            await resolve(row, details)
         raw = await listing_photo(details)
         if raw is None:
             return False
@@ -310,22 +424,28 @@ async def enrich(bot, chat_id, row, details, before_edit):
 async def handle_callback(bot, query, platform, chat_id):
     message = query.message
     if not message or str(message.chat.id) != str(chat_id):
-        await query.answer("This is a private notification bot.", show_alert=True)
+        await answer(query, "This is a private notification bot.", alert=True)
         return
     data = query.data or ""
     if not re.fullmatch(r"card:(listing|examples|notes:[0-9]{1,2})", data):
-        await query.answer()
+        await answer(query)
         return
+    control_health(platform, "click")
+    # Acknowledge before taking a message lock or touching the image. Separate
+    # messages may proceed concurrently, while taps on one message stay ordered.
+    await answer(query)
     async with lock(platform, message.message_id):
-        saved = load(platform, message.message_id)
+        saved = recover(platform, message)
         if not saved:
-            await query.answer(
-                "This saved alert is no longer available.", show_alert=True
+            await answer(
+                query,
+                "This saved alert is no longer available. Open Recent Finds in your dashboard.",
+                alert=True,
             )
             return
-        await query.answer()
         row, details, card = saved
         view = data[5:]
+        started = time.monotonic()
         try:
             if view.startswith("notes:"):
                 index = int(view.split(":")[1])
@@ -358,9 +478,12 @@ async def handle_callback(bot, query, platform, chat_id):
                         link_preview_options=LinkPreviewOptions(is_disabled=True),
                     )
                 after_edit(platform, message.message_id, view=view)
+                control_health(platform, "success")
                 return
             file_key = "example_file_id" if view == "examples" else "listing_file_id"
             media = card[file_key]
+            if view == "examples" and not media:
+                media = cached_example(bot, platform, row.get("reference_id"))
             if not media:
                 if view == "examples":
                     reference = (
@@ -368,20 +491,29 @@ async def handle_callback(bot, query, platform, chat_id):
                         if row["reference_id"]
                         else None
                     )
-                    media = (
-                        await asyncio.to_thread(
-                            alert_images.normalize_available, [reference["image"]]
-                        )
-                        if reference
-                        else None
-                    )
+                    # Uploads are already normalized and collaged when saved.
+                    media = reference["image"] if reference else None
                 else:
                     media = await listing_photo(details)
             if media is None:
+                control_health(
+                    platform,
+                    "error",
+                    (
+                        "Example image unavailable"
+                        if view == "examples"
+                        else "Listing image unavailable"
+                    ),
+                )
+                await answer(
+                    query,
+                    "The saved image is unavailable. Check this search’s photos in your dashboard.",
+                    alert=True,
+                )
                 return
             if load(platform, message.message_id) is None:
                 return
-            result = await bot.edit_message_media(
+            kwargs = dict(
                 chat_id=chat_id,
                 message_id=message.message_id,
                 media=InputMediaPhoto(
@@ -394,15 +526,55 @@ async def handle_callback(bot, query, platform, chat_id):
                 reply_markup=markup(row, details, view=view),
                 **TIMEOUTS,
             )
+            try:
+                result = await edit_with_retry(bot, kwargs)
+            except BadRequest as exc:
+                # Cached file IDs can become invalid. Recover from our stored
+                # JPEG once; never share file IDs between the two Telegram bots.
+                if (
+                    not isinstance(media, str)
+                    or view != "examples"
+                    or not any(
+                        term in str(exc).lower()
+                        for term in ("file", "identifier", "media")
+                    )
+                ):
+                    raise
+                cache_example(bot, platform, row.get("reference_id"), None)
+                reference = dashboard_store.get_media(row.get("reference_id"))
+                if not reference:
+                    raise
+                kwargs["media"] = InputMediaPhoto(
+                    reference["image"],
+                    filename="examples.jpg",
+                    caption=captions(row, details)[0],
+                    parse_mode="HTML",
+                    show_caption_above_media=True,
+                )
+                result = await edit_with_retry(bot, kwargs)
             after_edit(
                 platform,
                 message.message_id,
                 view=view,
                 file_id=result.photo[-1].file_id,
             )
+            if view == "examples":
+                cache_example(
+                    bot, platform, row.get("reference_id"), result.photo[-1].file_id
+                )
+            control_health(platform, "success")
+            logger.info(
+                "%s photo control accepted; message_id=%s view=%s elapsed=%.3fs",
+                platform,
+                message.message_id,
+                view,
+                time.monotonic() - started,
+            )
         except BadRequest as exc:
             if "message is not modified" not in str(exc).lower():
                 raise
+            after_edit(platform, message.message_id, view=view)
+            control_health(platform, "success")
         finally:
             # An API timeout may still have applied the edit. Re-queue removal
             # if account deletion raced either a successful or uncertain edit.
@@ -414,20 +586,37 @@ async def handle_callback(bot, query, platform, chat_id):
 
 
 async def vinted_callback(update, context):
+    await dispatch_callback(
+        context.bot,
+        update.callback_query,
+        "vinted",
+        db.get_parameter("telegram_chat_id"),
+    )
+
+
+async def dispatch_callback(bot, query, platform, chat_id):
     try:
-        await handle_callback(
-            context.bot,
-            update.callback_query,
-            "vinted",
-            db.get_parameter("telegram_chat_id"),
+        await handle_callback(bot, query, platform, chat_id)
+    except Exception as exc:  # noqa: BLE001 -- isolate a failed image from the listener
+        control_health(platform, "error", type(exc).__name__)
+        logger.warning("%s photo control failed: %s", platform, type(exc).__name__)
+        await answer(
+            query,
+            "Telegram could not update the picture. Please tap the button again.",
+            alert=True,
         )
-    except TelegramError:
-        logger.warning("Could not update Vinted photo controls")
 
 
 async def poll_ebay_callbacks(bot, chat_id):
     """Long-poll Telegram only; consumes no eBay Browse API calls."""
     offset = None
+    tasks = set()
+    semaphore = asyncio.Semaphore(6)
+
+    async def dispatch(query):
+        async with semaphore:
+            await dispatch_callback(bot, query, "ebay", chat_id)
+
     while True:
         try:
             updates = await bot.get_updates(
@@ -436,15 +625,109 @@ async def poll_ebay_callbacks(bot, chat_id):
                 read_timeout=35,
                 allowed_updates=["callback_query"],
             )
+            control_health("ebay", "poll")
             for update in updates:
                 offset = update.update_id + 1
                 if update.callback_query:
-                    try:
-                        await handle_callback(
-                            bot, update.callback_query, "ebay", chat_id
-                        )
-                    except TelegramError:
-                        logger.warning("Could not update eBay photo controls")
+                    if len(tasks) >= 32:
+                        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                    task = asyncio.create_task(dispatch(update.callback_query))
+                    tasks.add(task)
+                    task.add_done_callback(tasks.discard)
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
         except TelegramError:
+            control_health("ebay", "error", "Telegram connection will retry")
             logger.warning("eBay photo-control connection will retry")
             await asyncio.sleep(5)
+
+
+def health_summary():
+    from datetime import datetime, timezone
+
+    with closing(connection()) as conn:
+        rows = {
+            r["platform"]: dict(r)
+            for r in conn.execute("SELECT * FROM telegram_control_health")
+        }
+    result = []
+    for platform in ("vinted", "ebay"):
+        row = rows.get(platform, {})
+        value = row.get("last_success")
+        result.append(
+            {
+                "platform": platform,
+                "name": "Vinted" if platform == "vinted" else "eBay",
+                "last_success": (
+                    datetime.fromtimestamp(value, timezone.utc).strftime(
+                        "%d %b %H:%M:%S UTC"
+                    )
+                    if value
+                    else "Not checked yet"
+                ),
+                "error": row.get("error", ""),
+            }
+        )
+    return result
+
+
+async def test_controls(platform):
+    """Exercise real Telegram media edits on one labelled, owner-requested test."""
+    from types import SimpleNamespace
+
+    from telegram import Bot
+
+    import vinted_alerts
+
+    with closing(connection()) as conn:
+        saved = conn.execute(
+            "SELECT * FROM alert_outbox WHERE platform=? AND reference_id IS NOT NULL ORDER BY found_at DESC LIMIT 1",
+            (platform,),
+        ).fetchone()
+    if not saved:
+        raise ValueError("A recent alert with example photos is needed for this test.")
+    row = dict(saved)
+    if platform == "ebay":
+        import ebay_alerts
+        from ebay_store import configuration
+
+        config = configuration()
+        token, chat_id = config["telegram_token"], config["chat_id"]
+        details = ebay_alerts.get_details(row)
+    else:
+        token, chat_id = db.get_parameter("telegram_token"), db.get_parameter(
+            "telegram_chat_id"
+        )
+        details = vinted_alerts.get_details(row)
+    if not details or not token or not chat_id:
+        raise ValueError("The saved alert or Telegram connection is unavailable.")
+    details = dict(
+        details, name="PHOTO & BUTTON TEST · " + details.get("name", platform)
+    )
+
+    async def ready(*args, **kwargs):
+        pass
+
+    async with Bot(token) as bot:
+        first = await send_initial(
+            bot, chat_id, row, details, ready, require_photo=True
+        )
+        row["telegram_message_id"] = first.message_id
+        if platform == "ebay" and not ebay_alerts.track_preview(row):
+            raise ValueError("This listing was removed during the test.")
+        query = SimpleNamespace(message=first, answer=ready, data="card:examples")
+        for view in ("examples", "listing"):
+            await asyncio.sleep(1.1)
+            query.data = "card:" + view
+            await handle_callback(bot, query, platform, chat_id)
+            saved = load(platform, first.message_id)
+            field = "example_file_id" if view == "examples" else "listing_file_id"
+            if not saved or saved[2]["view"] != view or not saved[2][field]:
+                raise ValueError(
+                    "The test photo was sent but Telegram did not confirm both picture buttons."
+                )
+    return f"{platform.title()} PHOTO & BUTTON TEST sent. Telegram confirmed the initial listing photo, your saved examples, and switching back in the same message. Hold the new notification on your iPhone to check its preview."

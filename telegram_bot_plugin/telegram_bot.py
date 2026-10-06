@@ -39,7 +39,11 @@ class LeRobot:
 
             self.bot = Bot(db.get_parameter("telegram_token"))
             self.app = (
-                ApplicationBuilder().token(db.get_parameter("telegram_token")).build()
+                ApplicationBuilder()
+                .token(db.get_parameter("telegram_token"))
+                .concurrent_updates(8)
+                .connection_pool_size(24)
+                .build()
             )
 
             # Create the item queue to send to telegram
@@ -67,12 +71,16 @@ class LeRobot:
             # Every second we check for new posts to send to telegram
             job_queue.run_once(self.check_telegram_queue, when=1)
 
-            self.app.run_polling()
+            # Telegram remembers allowed_updates across deployments. Explicitly
+            # subscribe to callbacks, including when the previous bot was commands-only.
+            self.app.run_polling(
+                allowed_updates=["message", "callback_query"], timeout=25
+            )
         except Exception:
             logger.exception("Error initializing bot")
 
     async def restrict_access(self, update, context):
-        expected = str(db.get_parameter("telegram_chat_id") or "")
+        expected = str(db.get_parameter("telegram_chat_id") or "").strip()
         if not update.effective_chat or str(update.effective_chat.id) != expected:
             raise ApplicationHandlerStop
 

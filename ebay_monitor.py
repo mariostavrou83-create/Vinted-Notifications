@@ -269,17 +269,9 @@ def parse_item(raw, config, now, *, fresh_only=True):
     if config["max_price"] is not None and compare > config["max_price"]:
         return None
     title = str(raw.get("title", ""))[:500]
-    import alert_images
+    from ebay_images import extract
 
-    photos = [(raw.get("image") or {}).get("imageUrl")]
-    photos.extend(
-        p.get("imageUrl")
-        for p in (raw.get("additionalImages") or [])[:10]
-        if isinstance(p, dict)
-    )
-    photos = list(
-        dict.fromkeys(p for p in photos if alert_images.safe_listing_photo(p))
-    )[:4]
+    photos = extract(raw)
     brand = raw.get("brand")
     label = "Brand"
     if not brand:
@@ -292,7 +284,7 @@ def parse_item(raw, config, now, *, fresh_only=True):
         "price": price,
         "shipping": shipping,
         "url": url,
-        "photo_url": (raw.get("image") or {}).get("imageUrl"),
+        "photo_url": photos[0] if photos else None,
         "photos": photos,
         "brand": str(brand or "Not supplied")[:120],
         "brand_label": label,
