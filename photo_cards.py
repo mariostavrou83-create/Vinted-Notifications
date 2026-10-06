@@ -197,7 +197,9 @@ def markup(row, details, *, view="listing", note_page=None):
         [InlineKeyboardButton("Open " + marketplace + " listing ↗", url=row["url"])]
     ]
     if marketplace == "Vinted":
-        buttons.append([InlineKeyboardButton("Autobuy", callback_data="buy:click")])
+        from vinted_buying import feedback_buttons
+
+        buttons.extend(feedback_buttons(row, details.get("buy_feedback")))
     if row.get("reference_id"):
         buttons.append(
             [
