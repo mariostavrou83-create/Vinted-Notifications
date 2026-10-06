@@ -35,6 +35,7 @@ AUTH_REASONS = {
     "session_refresh": "Vinted requested renewal of the saved buyer session.",
     "signin_redirect": "Vinted redirected this session to sign-in. Reconnect your buyer account.",
     "redirect": "Vinted redirected this account request instead of confirming it. The bot stopped without following the redirect.",
+    "home_redirect": "Vinted redirected this request to its homepage instead of confirming the account.",
     "network": "Vinted did not confirm this request. Check your account before retrying.",
     "http_error": "Vinted did not accept this request.",
     "not_confirmed": "Vinted has not confirmed the buyer connection.",
@@ -147,7 +148,12 @@ def redirect_reason(response):
         return None
     headers = getattr(response, "headers", {})
     location = headers.get("Location", "")
-    if not isinstance(location, str) or len(location) > 4096:
+    if (
+        not isinstance(location, str)
+        or not location
+        or len(location) > 4096
+        or any(ord(char) <= 32 for char in location)
+    ):
         return "redirect"
     try:
         target = urlsplit(urljoin(BASE, location))
@@ -163,6 +169,8 @@ def redirect_reason(response):
             return "redirect"
         if target.path.rstrip("/") == "/web/api/auth/refresh":
             return "session_refresh"
+        if target.path == "/" or not target.path:
+            return "home_redirect"
         if target.path.rstrip("/") in (
             "/member/login",
             "/login",
@@ -298,6 +306,33 @@ class Client:
     def exported(self):
         return {"csrf": self.csrf, "cookies": self.session.cookies.get_dict()}
 
+    def update_tokens(self, response, data):
+        """Keep one current token per name after a normal refresh-cookie rotation."""
+        returned = getattr(response, "cookies", None)
+        returned = (
+            returned.get_dict()
+            if isinstance(returned, requests.cookies.RequestsCookieJar)
+            else {}
+        )
+        for field, cookie in (
+            ("access_token", "access_token_web"),
+            ("refresh_token", "refresh_token_web"),
+        ):
+            value = data.get(field) or returned.get(cookie)
+            if not isinstance(value, str) or not re.fullmatch(
+                r"[A-Za-z0-9._~+/=-]{16,8192}", value
+            ):
+                continue
+            # requests can retain both the imported host cookie and a new
+            # domain cookie. Sending both lets the old token shadow the new one.
+            for saved in list(self.session.cookies):
+                if saved.name == cookie:
+                    self.session.cookies.clear(saved.domain, saved.path, saved.name)
+            self.session.cookies.set(
+                cookie, value, domain="www.vinted.co.uk", secure=True
+            )
+        self.headers()
+
     def request(self, method, path, body=None, *, allow_challenge=False):
         if not path.startswith(("/api/v2/", "/web/api/auth/")):
             raise BuyerError("Unsupported Vinted request.")
@@ -330,15 +365,7 @@ class Client:
             return {"challenge_id": str(data["payload"]["id"])}
         if response.status_code not in (200, 201) or not isinstance(data, dict):
             raise response_error(response, data, stage)
-        for field, cookie in (
-            ("access_token", "access_token_web"),
-            ("refresh_token", "refresh_token_web"),
-        ):
-            if data.get(field):
-                self.session.cookies.set(
-                    cookie, data[field], domain="www.vinted.co.uk", secure=True
-                )
-        self.headers()
+        self.update_tokens(response, data)
         return data
 
     def homepage(self):
@@ -346,12 +373,24 @@ class Client:
             response = self.session.get(
                 BASE + "/", timeout=(4, 12), allow_redirects=False
             )
+            if (
+                not security_challenge(response)
+                and redirect_reason(response) == "home_redirect"
+            ):
+                # Follow a single canonical homepage redirect on the same HTTPS
+                # origin. Never follow authentication, challenge or other hosts.
+                response = self.session.get(
+                    urljoin(BASE, response.headers["Location"]),
+                    timeout=(4, 12),
+                    allow_redirects=False,
+                )
         except requests.RequestException:
             raise BuyerError(
                 AUTH_REASONS["network"], reason="network", stage="homepage"
             ) from None
         if security_challenge(response) or response.status_code != 200:
             raise response_error(response, None, "homepage")
+        self.update_tokens(response, {})
         token = csrf_from_html(response.text)
         if token:
             self.csrf = token
@@ -584,6 +623,14 @@ def connected_client():
                     "refresh_token": refresh,
                 },
             )
+            with closing(connection()) as conn, conn:
+                # Refresh tokens may rotate. Preserve the replacement even if
+                # a later homepage request fails; identity still must be checked
+                # before any checkout, and enabled/budgets are never expanded.
+                conn.execute(
+                    "UPDATE vinted_buyer SET session=? WHERE id=1",
+                    (encrypt(client.exported()),),
+                )
             client.homepage()
             user_id, _ = client.identity()
         if user_id != row[1]:
