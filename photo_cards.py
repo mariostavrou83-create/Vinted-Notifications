@@ -128,6 +128,8 @@ async def edit_with_retry(bot, kwargs):
             if attempt or delay > 4:
                 raise
             await asyncio.sleep(delay + 0.1)
+        except BadRequest:
+            raise  # Invalid media must be rebuilt, not retried unchanged.
         except NetworkError:
             if attempt:
                 raise
@@ -295,6 +297,9 @@ def load(platform, message_id):
 def record(row, details, result):
     platform = details.get("platform", "vinted")
     file_id = result.photo[-1].file_id if getattr(result, "photo", None) else None
+    details = dict(details)
+    if file_id:
+        details["rendered_listing_photos"] = details.get("photos", [])[:4]
     try:
         with closing(connection()) as conn, conn:
             if not conn.execute(
@@ -327,7 +332,7 @@ def record(row, details, result):
     return True
 
 
-def after_edit(platform, message_id, *, view, file_id=None):
+def after_edit(platform, message_id, *, view, file_id=None, listing_photos=None):
     with closing(connection()) as conn, conn:
         if not conn.execute(
             "SELECT 1 FROM telegram_photo_cards WHERE platform=? AND message_id=?",
@@ -347,6 +352,17 @@ def after_edit(platform, message_id, *, view, file_id=None):
             conn.execute(
                 f"UPDATE telegram_photo_cards SET {column}=? WHERE platform=? AND message_id=?",
                 (file_id, platform, message_id),
+            )
+        if listing_photos is not None:
+            saved = conn.execute(
+                "SELECT details FROM telegram_photo_cards WHERE platform=? AND message_id=?",
+                (platform, message_id),
+            ).fetchone()
+            details = json.loads(saved[0])
+            details["rendered_listing_photos"] = listing_photos[:4]
+            conn.execute(
+                "UPDATE telegram_photo_cards SET details=? WHERE platform=? AND message_id=?",
+                (json.dumps(details), platform, message_id),
             )
 
 
@@ -451,7 +467,16 @@ async def enrich(bot, chat_id, row, details, before_edit):
                 "UPDATE telegram_photo_cards SET details=? WHERE platform=? AND message_id=?",
                 (json.dumps(details), platform, message_id),
             )
-        if card["listing_file_id"] or card["view"] != "listing":
+        photos = details.get("photos", [])[:4]
+        needs_photo = not card["listing_file_id"] or photos != details.get(
+            "rendered_listing_photos", photos
+        )
+        raw = (
+            await listing_photo(details)
+            if needs_photo and card["view"] == "listing"
+            else None
+        )
+        if raw is None:
             caption, note_pages = captions(row, details)
             view = card["view"]
             note_page = int(view.split(":")[1]) if view.startswith("notes:") else None
@@ -490,29 +515,44 @@ async def enrich(bot, chat_id, row, details, before_edit):
             finally:
                 # Requeue redaction if a deletion raced an uncertain Telegram edit.
                 after_edit(platform, message_id, view=view)
-            return True
-        raw = await listing_photo(details)
-        if raw is None:
-            return False
+            # Even if an image download fails, finish the readable description
+            # instead of leaving "loading" on the text/photo fallback forever.
+            return not needs_photo or card["view"] != "listing"
         await before_edit()
         if load(platform, message_id) is None:
             return True
-        result = await bot.edit_message_media(
-            chat_id=chat_id,
-            message_id=message_id,
-            media=InputMediaPhoto(
-                raw,
-                filename="listing.jpg",
-                caption=captions(row, details)[0],
-                parse_mode="HTML",
-                show_caption_above_media=True,
-            ),
-            reply_markup=markup(row, details),
-            **TIMEOUTS,
-        )
-        after_edit(
-            platform, message_id, view="listing", file_id=result.photo[-1].file_id
-        )
+        try:
+            result = await bot.edit_message_media(
+                chat_id=chat_id,
+                message_id=message_id,
+                media=InputMediaPhoto(
+                    raw,
+                    filename="listing.jpg",
+                    caption=captions(row, details)[0],
+                    parse_mode="HTML",
+                    show_caption_above_media=True,
+                ),
+                reply_markup=markup(row, details),
+                **TIMEOUTS,
+            )
+        except BadRequest as exc:
+            if "message is not modified" not in str(exc).lower():
+                raise
+            after_edit(platform, message_id, view="listing", listing_photos=photos)
+        else:
+            after_edit(
+                platform,
+                message_id,
+                view="listing",
+                file_id=result.photo[-1].file_id,
+                listing_photos=photos,
+            )
+        finally:
+            if platform == "ebay" and load(platform, message_id) is None:
+                from ebay_privacy import queue_redaction
+
+                with closing(connection()) as conn, conn:
+                    queue_redaction(conn, message_id)
         return True
 
 
@@ -574,6 +614,10 @@ async def handle_callback(bot, query, platform, chat_id):
                 return
             file_key = "example_file_id" if view == "examples" else "listing_file_id"
             media = card[file_key]
+            if view == "listing" and details.get("photos", [])[:4] != details.get(
+                "rendered_listing_photos", details.get("photos", [])[:4]
+            ):
+                media = None
             if view == "examples" and not media:
                 media = cached_example(bot, platform, row.get("reference_id"))
             if not media:
@@ -651,22 +695,21 @@ async def handle_callback(bot, query, platform, chat_id):
             except BadRequest as exc:
                 # Cached file IDs can become invalid. Recover from our stored
                 # JPEG once; never share file IDs between the two Telegram bots.
-                if (
-                    not isinstance(media, str)
-                    or view != "examples"
-                    or not any(
-                        term in str(exc).lower()
-                        for term in ("file", "identifier", "media")
-                    )
+                if not isinstance(media, str) or not any(
+                    term in str(exc).lower() for term in ("file", "identifier", "media")
                 ):
                     raise
-                cache_example(bot, platform, row.get("reference_id"), None)
-                reference = dashboard_store.get_media(row.get("reference_id"))
-                if not reference:
+                if view == "examples":
+                    cache_example(bot, platform, row.get("reference_id"), None)
+                    reference = dashboard_store.get_media(row.get("reference_id"))
+                    replacement = reference["image"] if reference else None
+                else:
+                    replacement = await listing_photo(details)
+                if not replacement:
                     raise
                 kwargs["media"] = InputMediaPhoto(
-                    reference["image"],
-                    filename="examples.jpg",
+                    replacement,
+                    filename=view + ".jpg",
                     caption=captions(row, details)[0],
                     parse_mode="HTML",
                     show_caption_above_media=True,
@@ -677,6 +720,7 @@ async def handle_callback(bot, query, platform, chat_id):
                 message.message_id,
                 view=view,
                 file_id=result.photo[-1].file_id,
+                listing_photos=details.get("photos", []) if view == "listing" else None,
             )
             if view == "examples":
                 cache_example(
@@ -693,7 +737,12 @@ async def handle_callback(bot, query, platform, chat_id):
         except BadRequest as exc:
             if "message is not modified" not in str(exc).lower():
                 raise
-            after_edit(platform, message.message_id, view=view)
+            after_edit(
+                platform,
+                message.message_id,
+                view=view,
+                listing_photos=details.get("photos", []) if view == "listing" else None,
+            )
             control_health(platform, "success")
         finally:
             # An API timeout may still have applied the edit. Re-queue removal
@@ -839,6 +888,8 @@ async def test_controls(platform):
         row["telegram_message_id"] = first.message_id
         if platform == "ebay" and not ebay_alerts.track_preview(row):
             raise ValueError("This listing was removed during the test.")
+        await asyncio.sleep(1.1)
+        await enrich(bot, chat_id, row, details, ready)
         query = SimpleNamespace(message=first, answer=ready, data="card:examples")
         for view in ("examples", "listing"):
             await asyncio.sleep(1.1)

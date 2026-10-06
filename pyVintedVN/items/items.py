@@ -90,10 +90,31 @@ class Items:
         # Parse the response
         items = response.json()
         items = items["items"]
+        if not isinstance(items, list):
+            raise TypeError("Vinted returned an unreadable catalogue.")
 
         # Return either Item objects or raw JSON data
         if not json:
-            return [Item(_item, locale) for _item in items]
+            parsed = []
+            for raw in items:
+                try:
+                    candidate = Item(raw, locale)
+                    if not str(candidate.id).isdigit() or not isinstance(
+                        candidate.title, str
+                    ):
+                        raise ValueError("Invalid listing fields")
+                    parsed.append(candidate)
+                except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+                    # One incomplete listing must not discard other new results.
+                    continue
+            if items and not parsed:
+                raise ValueError("Vinted returned no readable catalogue items.")
+            if len(parsed) != len(items):
+                _logger.warning(
+                    "Skipped %s unreadable Vinted catalogue items",
+                    len(items) - len(parsed),
+                )
+            return parsed
         else:
             return items
 

@@ -16,6 +16,7 @@ from test_search_controls import DatabaseFixture
 import alert_delivery
 import alert_images
 import dashboard_store
+import db
 import ebay_alerts
 import ebay_privacy
 import photo_cards
@@ -138,6 +139,133 @@ class PhotoCardTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         )
         self.bot.send_photo.assert_awaited_once()
         self.bot.send_message.assert_not_awaited()
+
+    async def test_new_gallery_photos_replace_initial_collage_in_same_message(self):
+        await photo_cards.send_initial(
+            self.bot, "123", self.row, self.details, AsyncMock()
+        )
+        expanded = self.details["photos"] + [
+            "https://images1.vinted.net/c.jpg",
+            "https://images1.vinted.net/d.jpg",
+        ]
+        with patch(
+            "vinted_gallery.fetch_listing",
+            return_value={
+                "photos": expanded,
+                "description": "Full description",
+                "state": "ready",
+            },
+        ):
+            await photo_cards.enrich(
+                self.bot,
+                "123",
+                dict(self.row, telegram_message_id=42),
+                self.details,
+                AsyncMock(),
+            )
+        self.bot.edit_message_media.assert_awaited_once()
+        self.assertEqual(self.download.call_args.args[0], expanded)
+        saved = photo_cards.load("vinted", 42)
+        self.assertEqual(saved[1]["rendered_listing_photos"], expanded)
+        self.assertEqual(self.bot.edit_message_media.call_args.kwargs["message_id"], 42)
+        self.bot.send_photo.assert_awaited_once()
+
+    async def test_gallery_loading_preserves_example_view_and_refreshes_listing_on_tap(
+        self,
+    ):
+        await photo_cards.send_initial(
+            self.bot, "123", self.row, self.details, AsyncMock()
+        )
+        await photo_cards.handle_callback(self.bot, query(), "vinted", "123")
+        self.bot.edit_message_media.reset_mock()
+        expanded = self.details["photos"] + ["https://images1.vinted.net/c.jpg"]
+        with patch(
+            "vinted_gallery.fetch_listing",
+            return_value={
+                "photos": expanded,
+                "description": "Full description",
+                "state": "ready",
+            },
+        ):
+            await photo_cards.enrich(
+                self.bot,
+                "123",
+                dict(self.row, telegram_message_id=42),
+                self.details,
+                AsyncMock(),
+            )
+        self.bot.edit_message_media.assert_not_awaited()
+        self.assertEqual(photo_cards.load("vinted", 42)[2]["view"], "examples")
+        await photo_cards.handle_callback(
+            self.bot, query("card:listing"), "vinted", "123"
+        )
+        self.assertEqual(self.download.call_args.args[0], expanded)
+        self.assertEqual(
+            photo_cards.load("vinted", 42)[1]["rendered_listing_photos"], expanded
+        )
+
+    async def test_missing_photo_still_finishes_description_without_second_notification(
+        self,
+    ):
+        self.download.return_value = None
+        await photo_cards.send_initial(
+            self.bot, "123", self.row, self.details, AsyncMock()
+        )
+        complete = await photo_cards.enrich(
+            self.bot,
+            "123",
+            dict(self.row, telegram_message_id=42),
+            self.details,
+            AsyncMock(),
+        )
+        self.assertFalse(complete)
+        self.assertIn(
+            "Soft cotton", self.bot.edit_message_text.call_args.kwargs["text"]
+        )
+        self.assertNotIn(
+            "Loading from", self.bot.edit_message_text.call_args.kwargs["text"]
+        )
+        self.bot.send_message.assert_awaited_once()
+        self.bot.send_photo.assert_not_awaited()
+
+    async def test_working_photo_preview_uses_live_description_enrichment(self):
+        db.set_parameter("telegram_token", "123456:offline-token")
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE alert_outbox SET photo_url=? WHERE item_id='110'",
+                (self.details["photos"][0],),
+            )
+        manager = AsyncMock()
+        manager.__aenter__.return_value = self.bot
+        with patch("telegram.Bot", return_value=manager), patch(
+            "asyncio.sleep", new=AsyncMock()
+        ):
+            await vinted_alerts.preview_and_enable(1, phone_mode="working_photo")
+        self.bot.send_photo.assert_awaited_once()
+        self.assertIn(
+            "Soft cotton", self.bot.edit_message_caption.call_args.kwargs["caption"]
+        )
+        self.bot.send_message.assert_not_awaited()
+
+    async def test_expired_listing_file_is_reuploaded_once_without_resending_alert(
+        self,
+    ):
+        await self.send()
+        self.bot.edit_message_media.side_effect = [
+            BadRequest("Wrong file identifier"),
+            message(file_id="fresh-listing"),
+        ]
+        await photo_cards.dispatch_callback(
+            self.bot, query("card:listing"), "vinted", "123"
+        )
+        self.assertEqual(self.bot.edit_message_media.await_count, 2)
+        self.assertNotIsInstance(
+            self.bot.edit_message_media.call_args.kwargs["media"].media, str
+        )
+        self.assertEqual(
+            photo_cards.load("vinted", 42)[2]["listing_file_id"], "fresh-listing"
+        )
+        self.bot.send_photo.assert_awaited_once()
 
     async def test_failed_description_edit_retries_cached_text_without_losing_buy_status(
         self,
@@ -356,6 +484,42 @@ class EbayPhotoCardTests(EbayFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             photo_cards.load("ebay", 42)[0]["item_id"], self.row["item_id"]
         )
+
+    async def test_ebay_working_preview_loads_description_and_tracks_same_photo(self):
+        import ebay_store
+
+        manager = AsyncMock()
+        manager.__aenter__.return_value = self.bot
+        config = dict(
+            ebay_store.configuration(),
+            telegram_token="123456:offline-token",
+            chat_id="123",
+        )
+        with patch("telegram.Bot", return_value=manager), patch(
+            "ebay_store.configuration", return_value=config
+        ), patch(
+            "ebay_images.fetch_details",
+            return_value={
+                "description": "Complete eBay description",
+                "photos": self.details["photos"],
+            },
+        ), patch(
+            "asyncio.sleep", new=AsyncMock()
+        ):
+            await ebay_alerts.preview(1, phone_mode="working_photo")
+        self.bot.send_photo.assert_awaited_once()
+        self.assertIn(
+            "Complete eBay description",
+            self.bot.edit_message_caption.call_args.kwargs["caption"],
+        )
+        self.bot.send_message.assert_not_awaited()
+        with closing(search_settings.connection()) as conn:
+            self.assertEqual(
+                conn.execute("SELECT message_id FROM ebay_preview_messages").fetchone()[
+                    0
+                ],
+                42,
+            )
 
     async def test_deletion_cascades_cached_photos_and_disables_controls(self):
         await photo_cards.send_initial(

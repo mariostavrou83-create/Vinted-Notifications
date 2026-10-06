@@ -522,6 +522,8 @@ def create_app(test_config=None):
                         ) from None
                 elif action == "buyer_check":
                     flash(vinted_buyer.check_signin(), "success")
+                elif action == "buyer_recheck":
+                    flash(vinted_buyer.check_saved_connection(), "success")
                 elif action == "buyer_session":
                     flash(
                         vinted_buyer.link_session(
@@ -759,5 +761,5 @@ def web_ui_process():
         host="0.0.0.0",
         port=8000,
         threads=4,
-        max_request_body_size=9 * 1024 * 1024,
+        max_request_body_size=33 * 1024 * 1024,
     )

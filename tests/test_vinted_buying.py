@@ -370,6 +370,97 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         self.assertNotIn("password-secret", str(error.exception))
         client.session.close()
 
+    def test_redirects_are_classified_without_following_or_leaking_destinations(self):
+        client = buyer.Client()
+        cases = [
+            ("/web/api/auth/refresh?secret=private", "session_refresh"),
+            ("/member/login?secret=private", "signin_redirect"),
+            (
+                "https://geo.captcha-delivery.com/captcha?secret=private",
+                "security_challenge",
+            ),
+            ("https://evil.test/web/api/auth/refresh", "redirect"),
+            ("https://www.vinted.co.uk@evil.test/", "redirect"),
+            ("https://www.vinted.co.uk:443/web/api/auth/refresh", "redirect"),
+        ]
+        for location, reason in cases:
+            response = Mock(
+                status_code=307,
+                headers={"Location": location},
+                text="",
+                json=Mock(side_effect=ValueError),
+            )
+            with patch.object(
+                client.session, "request", return_value=response
+            ) as request, self.assertRaises(buyer.BuyerError) as error:
+                client.request("GET", "/api/v2/users/current")
+            self.assertEqual(error.exception.reason, reason)
+            self.assertNotIn("private", str(error.exception))
+            self.assertNotIn("evil", str(error.exception))
+            self.assertFalse(request.call_args.kwargs["allow_redirects"])
+            request.assert_called_once()
+        client.session.close()
+
+    def test_only_explicit_session_expiry_refreshes_once_and_updates_diagnostics(self):
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE vinted_buyer SET session=?",
+                (
+                    buyer.encrypt(
+                        {
+                            "cookies": {
+                                "access_token_web": "access",
+                                "refresh_token_web": "refresh",
+                            }
+                        }
+                    ),
+                ),
+            )
+        for reason, status, refresh_expected in [
+            ("credentials", 401, True),
+            ("session_refresh", 307, True),
+            ("security_challenge", 401, False),
+            ("security_challenge", 403, False),
+            ("redirect", 307, False),
+            ("forbidden", 403, False),
+        ]:
+            client = Mock()
+            client.identity.side_effect = [
+                buyer.BuyerError(
+                    buyer.AUTH_REASONS[reason], status, reason=reason, stage="identity"
+                ),
+                ("99", "owner"),
+            ]
+            client.exported.return_value = {
+                "cookies": {
+                    "access_token_web": "access",
+                    "refresh_token_web": "refresh",
+                }
+            }
+            with patch.object(buyer, "Client", return_value=client):
+                if refresh_expected:
+                    self.assertIs(buyer.connected_client(), client)
+                    client.request.assert_called_once()
+                    self.assertEqual(
+                        client.request.call_args.args[2]["grant_type"], "refresh_token"
+                    )
+                    self.assertEqual(buyer.settings()["access"]["http_status"], 200)
+                else:
+                    with self.assertRaises(buyer.BuyerError):
+                        buyer.connected_client()
+                    client.request.assert_not_called()
+                    self.assertEqual(buyer.settings()["access"]["http_status"], status)
+                    client.session.close.assert_called_once()
+
+    def test_saved_connection_check_never_prepares_checkout_or_changes_permission(self):
+        with patch.object(buyer, "connected_client", return_value=self.client) as check:
+            self.assertIn("No checkout or payment", buyer.check_saved_connection())
+            self.assertTrue(buyer.settings()["enabled"])
+            self.client.request.assert_not_called()
+            with self.assertRaisesRegex(buyer.BuyerError, "30 seconds"):
+                buyer.check_saved_connection()
+            check.assert_called_once()
+
     def test_failure_diagnostics_distinguish_explicit_challenge_from_bare_403(self):
         cases = (
             (

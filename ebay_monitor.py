@@ -56,8 +56,13 @@ def timestamp(value):
 
 def money(value):
     try:
-        number = Decimal(value["value"])
-        if value.get("currency") != "GBP" or not number.is_finite() or number < 0:
+        number = Decimal(str(value["value"]))
+        if (
+            value.get("currency") != "GBP"
+            or not number.is_finite()
+            or not 0 <= number <= 1000000
+            or number.as_tuple().exponent < -2
+        ):
             return None
         return int(number * 100)
     except (KeyError, TypeError, InvalidOperation, ValueError, OverflowError):
@@ -205,6 +210,8 @@ class BrowseClient:
 
 def parse_item(raw, config, now, *, fresh_only=True):
     """Return eligible data only. Unknown dates/prices never qualify as fresh bargains."""
+    if not isinstance(raw, dict):
+        return None
     created = timestamp(raw.get("itemOriginDate")) or timestamp(
         raw.get("itemCreationDate")
     )
@@ -213,7 +220,12 @@ def parse_item(raw, config, now, *, fresh_only=True):
         parts = str(raw["itemId"]).split("|")
         item_id = parts[1] if len(parts) == 3 else ""
     url = raw.get("itemWebUrl", "")
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+        if parsed.username or parsed.password or parsed.port not in (None, 443):
+            return None
+    except (TypeError, ValueError, AttributeError):
+        return None
     if (
         not item_id.isdigit()
         or parsed.scheme != "https"
@@ -225,9 +237,12 @@ def parse_item(raw, config, now, *, fresh_only=True):
     # Browse includes the listing's leaf and ancestor category IDs. Never let
     # an unrelated result through an explicit saved category constraint.
     if config["category"] and not public:
+        categories_raw = raw.get("categories") or []
+        if not isinstance(categories_raw, list):
+            return None
         categories = {
             str(category.get("categoryId"))
-            for category in (raw.get("categories") or [])
+            for category in categories_raw
             if isinstance(category, dict)
         }
         if config["category"] not in categories:
@@ -242,7 +257,9 @@ def parse_item(raw, config, now, *, fresh_only=True):
     end = timestamp(raw.get("itemEndDate"))
     if end is not None and end <= now:
         return None
-    options = raw.get("buyingOptions", [])
+    options = raw.get("buyingOptions") or []
+    if not isinstance(options, list):
+        return None
     auction = config["buying"] == "auction" or "FIXED_PRICE" not in options
     if config["buying"] == "fixed" and "FIXED_PRICE" not in options:
         return None
@@ -254,8 +271,11 @@ def parse_item(raw, config, now, *, fresh_only=True):
         price = money(raw.get("price"))
     if price is None:
         return None
+    shipping_options = raw.get("shippingOptions") or []
     shipping_values = [
-        money(option.get("shippingCost")) for option in raw.get("shippingOptions", [])
+        money(option.get("shippingCost"))
+        for option in (shipping_options if isinstance(shipping_options, list) else [])
+        if isinstance(option, dict)
     ]
     shipping_values = [cost for cost in shipping_values if cost is not None]
     shipping = min(shipping_values) if shipping_values else None

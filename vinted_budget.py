@@ -81,7 +81,11 @@ def money(value):
         return None
     try:
         amount = Decimal(str(value.get("amount", value.get("value"))))
-        if not amount.is_finite() or amount < 0 or amount.as_tuple().exponent < -2:
+        if (
+            not amount.is_finite()
+            or not 0 <= amount <= 1000000
+            or amount.as_tuple().exponent < -2
+        ):
             return None
         return int(amount * 100)
     except (InvalidOperation, ValueError, TypeError):

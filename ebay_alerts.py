@@ -138,6 +138,8 @@ async def preview(query_id, *, phone_mode=None):
             row["telegram_message_id"] = first.message_id
             if not track_preview(row):
                 return "The listing was removed during preview delivery. Its preview is being removed."
+            await asyncio.sleep(1.1)
+            await photo_cards.enrich(bot, config["chat_id"], row, details, ready)
             photo_cards.enable()
             return "WORKING PHOTO ALERT TEST sent. New Vinted and eBay alerts now use the same photo delivery, with readable notes and in-message Listing photos / Your examples buttons."
         if phone_mode in ("rich_first", "native_then_rich", "native_album"):
