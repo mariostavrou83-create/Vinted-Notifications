@@ -245,7 +245,7 @@ class RichWorkerTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             "#1 · Fur &amp; cuffs",
             "Open Vinted listing",
             "Hollister fur jacket",
-            "Price:",
+            "Item:",
             "Brand:",
             "id=listing",
             "id=reference",

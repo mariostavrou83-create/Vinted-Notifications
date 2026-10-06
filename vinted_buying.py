@@ -9,8 +9,8 @@ from contextlib import closing
 from decimal import Decimal, InvalidOperation
 from urllib.parse import urlsplit
 
-from telegram import InlineKeyboardButton
-from telegram.error import TelegramError
+from telegram import InlineKeyboardButton, LinkPreviewOptions
+from telegram.error import BadRequest, TelegramError
 
 import db
 import vinted_budget
@@ -94,7 +94,8 @@ def checkout_prices(checkout, item_price, maximum):
         )
     if total > maximum:
         raise buyer.BuyerError(
-            f"Autobuy stopped: checkout is £{total/100:.2f}; this search's maximum total is £{maximum/100:.2f}."
+            f"Over budget: £{total/100:.2f} including fees and delivery; this search's maximum total is £{maximum/100:.2f}. No payment was sent.",
+            reason="total_over_budget",
         )
     if checkout.get("errors") or not checkout.get("checksum"):
         raise buyer.BuyerError(
@@ -117,10 +118,13 @@ def checkout_prices(checkout, item_price, maximum):
 def ready(row):
     config = buyer.settings()
     if not config["connected"]:
-        raise buyer.BuyerError("Connect your Vinted buyer in Connections first.")
+        raise buyer.BuyerError(
+            "Connect your Vinted buyer in Connections first.", reason="not_connected"
+        )
     if not config["enabled"]:
         raise buyer.BuyerError(
-            "Autobuy is off. Set a maximum total on this search, then enable Autobuy in Connections. No purchase was started."
+            "Autobuy is off. Set a maximum total on this search, then enable Autobuy in Connections. No purchase was started.",
+            reason="disabled",
         )
     return config, vinted_budget.payment_limit(row)
 
@@ -136,17 +140,28 @@ def buy(row):
             return result(item_id)
         client = None
         payment_started = False
+        phase = "checking your buyer account"
+        reason = None
         try:
             client = buyer.connected_client()
+            phase = "checking the listing"
             data = client.request("GET", f"/api/v2/items/{item_id}")
             item = data.get("item") or {}
-            if (
-                str(item.get("id")) != item_id
-                or item.get("is_closed")
-                or item.get("is_sold")
-                or item.get("is_reserved")
+            if not isinstance(item, dict) or str(item.get("id")) != item_id:
+                raise buyer.BuyerError(
+                    "Vinted did not return this listing. Its availability could not be verified. No payment was sent.",
+                    reason="item_unavailable",
+                )
+            for flag, label, code in (
+                ("is_sold", "already sold", "item_sold"),
+                ("is_reserved", "reserved", "item_reserved"),
+                ("is_closed", "closed or removed", "item_closed"),
             ):
-                raise buyer.BuyerError("This Vinted item is unavailable or reserved.")
+                if item.get(flag):
+                    raise buyer.BuyerError(
+                        f"This item is {label} on Vinted. No payment was sent.",
+                        reason=code,
+                    )
             price = item.get("price")
             if not isinstance(price, dict):
                 price = {"amount": price, "currency_code": item.get("currency")}
@@ -156,11 +171,13 @@ def buy(row):
             )
             if current_price > alert_price:
                 raise buyer.BuyerError(
-                    "Autobuy stopped: the item price increased after your alert."
+                    f"Item price increased from £{alert_price/100:.2f} to £{current_price/100:.2f} after your alert. No payment was sent.",
+                    reason="price_increased",
                 )
             if current_price > maximum:
                 raise buyer.BuyerError(
-                    "Autobuy stopped: the item alone exceeds this search's maximum total."
+                    f"Over budget: the item alone is £{current_price/100:.2f}; search #{row['query_id']} has a £{maximum/100:.2f} limit including fees and delivery. No payment was sent.",
+                    reason="item_over_budget",
                 )
             seller = str(
                 (item.get("user") or {}).get("id") or item.get("user_id") or ""
@@ -169,6 +186,7 @@ def buy(row):
                 raise buyer.BuyerError(
                     "The seller could not be verified for this purchase."
                 )
+            phase = "preparing the purchase"
             conversation = client.request(
                 "POST",
                 "/api/v2/conversations",
@@ -182,6 +200,7 @@ def buy(row):
                 raise buyer.BuyerError(
                     "Vinted did not prepare a purchase for this item."
                 )
+            phase = "building the checkout"
             built = client.request(
                 "POST",
                 "/api/v2/purchases/checkout/build",
@@ -197,6 +216,7 @@ def buy(row):
                 "Checking the final price and your saved delivery choice",
                 checkout_id=purchase_id,
             )
+            phase = "loading delivery and payment choices"
             updated = client.request(
                 "PUT",
                 f"/api/v2/purchases/{purchase_id}/checkout",
@@ -215,6 +235,7 @@ def buy(row):
                 raise buyer.BuyerError(
                     "Vinted returned a different checkout. No payment was sent."
                 )
+            phase = "checking the final total and delivery choice"
             # Read the current controls again immediately before payment.
             config = buyer.settings()
             if not config["enabled"] or not config["connected"]:
@@ -238,6 +259,7 @@ def buy(row):
                 total=total,
             )
             payment_started = True
+            phase = "submitting payment"
             paid = client.request(
                 "POST",
                 f"/api/v2/purchases/{purchase_id}/checkout/payment",
@@ -272,35 +294,58 @@ def buy(row):
                     "Payment result is unconfirmed. Check your Vinted purchases before doing anything else.",
                 )
         except buyer.BuyerError as exc:
+            reason = exc.reason
+            message = str(exc)
+            if reason in buyer.AUTH_REASONS:
+                http = f" (HTTP {exc.status})" if isinstance(exc.status, int) else ""
+                message = f"Autobuy stopped while {phase}{http}: {message}"
+            if not payment_started and "No payment" not in message:
+                message += " No payment was sent."
+            logger.info(
+                "Autobuy stopped item=%s search=%s phase=%s reason=%s http=%s",
+                item_id,
+                row.get("query_id"),
+                phase,
+                reason,
+                exc.status,
+            )
             record(
                 item_id,
                 "unknown" if payment_started else "failed_before_payment",
                 (
                     "Payment result is unconfirmed. Check Vinted before retrying."
                     if payment_started
-                    else str(exc)
+                    else message
                 ),
             )
-        except Exception:  # noqa: BLE001 -- unknown payment outcomes must never retry
+        except Exception as exc:  # noqa: BLE001 -- preserve uncertain payments
+            reason = "unexpected_error"
+            logger.warning(
+                "Autobuy error item=%s phase=%s error=%s",
+                item_id,
+                phase,
+                type(exc).__name__,
+            )
             record(
                 item_id,
                 "unknown" if payment_started else "failed_before_payment",
                 (
                     "Payment result is unconfirmed. Check Vinted before retrying."
                     if payment_started
-                    else "Vinted returned an unsupported checkout. No payment was sent."
+                    else f"Unexpected checkout error while {phase}. No payment was sent."
                 ),
             )
         finally:
             if client:
                 client.session.close()
-        return result(item_id)
+        return dict(result(item_id), reason=reason)
 
 
 def feedback_buttons(row, feedback=None):
     if not feedback:
         return [[InlineKeyboardButton("Autobuy", callback_data="buy:click")]]
     state = feedback.get("state")
+    reason = feedback.get("reason")
     label = {
         "setup_required": "Autobuy needs setup · see why",
         "failed_before_payment": "Autobuy stopped · see why",
@@ -311,8 +356,32 @@ def feedback_buttons(row, feedback=None):
         "preparing": "Preparing purchase · details",
         "payment_failed": "Payment failed · check details",
     }.get(state, "Autobuy status · details")
-    buttons = [[InlineKeyboardButton(label, callback_data="buy:status")]]
     if state in ("setup_required", "failed_before_payment"):
+        label = {
+            "budget_missing": f"No total budget on search #{row.get('query_id')} · details",
+            "disabled": "Autobuy is off · details",
+            "not_connected": "Buyer not connected · details",
+            "search_inactive": "Search is inactive · details",
+            "item_sold": "Already sold · details",
+            "item_reserved": "Item reserved · details",
+            "item_closed": "Listing closed · details",
+            "item_unavailable": "Listing unavailable · details",
+            "price_increased": "Item price increased · details",
+            "total_over_budget": "Over budget with fees & delivery · details",
+            "item_over_budget": "Item exceeds total budget · details",
+            "unreadable": "Vinted response unreadable · details",
+            "network": "Vinted connection error · details",
+            "security_challenge": "Vinted security check required · details",
+            "rate_limited": "Vinted cooldown required · details",
+            "credentials": "Vinted session expired · details",
+            "unexpected_error": "Checkout error · details",
+        }.get(reason, label)
+    buttons = [[InlineKeyboardButton(label, callback_data="buy:status")]]
+    if state in ("setup_required", "failed_before_payment") and reason not in (
+        "item_sold",
+        "item_closed",
+        "security_challenge",
+    ):
         buttons.append(
             [InlineKeyboardButton("Retry Autobuy", callback_data="buy:click")]
         )
@@ -325,7 +394,7 @@ def feedback_buttons(row, feedback=None):
             if str(row.get("query_id", "")).isdigit():
                 setup.append(
                     InlineKeyboardButton(
-                        "Set search budget ↗",
+                        f"Search #{row['query_id']} budget ↗",
                         url=base + "/search/" + str(row["query_id"]),
                     )
                 )
@@ -351,8 +420,13 @@ async def show_feedback(bot, query, row, details, card, outcome):
     """Keep the result on this same alert; callback popups are only transient."""
     import photo_cards
 
+    saved = photo_cards.load("vinted", query.message.message_id)
+    if not saved:
+        return
+    row, details, card = saved
     feedback = {
-        key: outcome.get(key) for key in ("state", "message", "checkout_id", "total")
+        key: outcome.get(key)
+        for key in ("state", "message", "checkout_id", "total", "reason")
     }
     details = dict(details, buy_feedback=feedback)
     try:
@@ -364,14 +438,37 @@ async def show_feedback(bot, query, row, details, card, outcome):
         # Picture and notes controls re-use these details, preserving buy status.
         view = card.get("view", "listing")
         note_page = int(view.split(":")[1]) if view.startswith("notes:") else None
-        await bot.edit_message_reply_markup(
+        caption, note_pages = photo_cards.captions(row, details)
+        if note_page is not None and note_pages:
+            note_page = min(note_page, len(note_pages) - 1)
+            view = f"notes:{note_page}"
+            caption = photo_cards.notes_caption(details, note_page, note_pages)
+        elif note_page is not None:
+            note_page, view = None, "listing"
+        kwargs = dict(
             chat_id=str(query.message.chat.id),
             message_id=query.message.message_id,
+            parse_mode="HTML",
             reply_markup=photo_cards.markup(
                 row, details, view=view, note_page=note_page
             ),
             **photo_cards.TIMEOUTS,
         )
+        try:
+            if card.get("listing_file_id") or card.get("example_file_id"):
+                await bot.edit_message_caption(
+                    **kwargs, caption=caption, show_caption_above_media=True
+                )
+            else:
+                await bot.edit_message_text(
+                    **kwargs,
+                    text=caption,
+                    link_preview_options=LinkPreviewOptions(is_disabled=True),
+                )
+        except BadRequest as exc:
+            if "message is not modified" not in str(exc).lower():
+                raise
+        photo_cards.after_edit("vinted", query.message.message_id, view=view)
         photo_cards.control_health("vinted", "success")
     except TelegramError as exc:
         photo_cards.control_health(
@@ -436,7 +533,8 @@ async def callback(update, context):
     logger.info("Autobuy tap item=%s search=%s", row["item_id"], row.get("query_id"))
     if previous and previous["state"] != "failed_before_payment":
         await photo_cards.answer(query, previous["message"][:190], alert=True)
-        await show_feedback(context.bot, query, row, details, card, previous)
+        async with photo_cards.lock("vinted", query.message.message_id):
+            await show_feedback(context.bot, query, row, details, card, previous)
         return
     # Check local setup BEFORE answering the callback. Telegram must receive the
     # reason as its first answer, not a second popup after an acknowledgement.
@@ -444,21 +542,26 @@ async def callback(update, context):
         ready(row)
     except buyer.BuyerError as exc:
         await photo_cards.answer(query, str(exc)[:190], alert=True)
-        await show_feedback(
-            context.bot,
-            query,
-            row,
-            details,
-            card,
-            {"state": "setup_required", "message": str(exc)},
-        )
+        async with photo_cards.lock("vinted", query.message.message_id):
+            await show_feedback(
+                context.bot,
+                query,
+                row,
+                details,
+                card,
+                {"state": "setup_required", "message": str(exc), "reason": exc.reason},
+            )
         return
     await photo_cards.answer(query, "Preparing your Vinted checkout…")
     async with photo_cards.lock("vinted", query.message.message_id):
         try:
             outcome = await asyncio.to_thread(buy, row)
         except buyer.BuyerError as exc:
-            outcome = {"state": "setup_required", "message": str(exc)}
+            outcome = {
+                "state": "setup_required",
+                "message": str(exc),
+                "reason": exc.reason,
+            }
         except Exception as exc:  # noqa: BLE001 -- never retry an uncertain purchase
             logger.warning(
                 "Autobuy request failed item=%s error=%s",

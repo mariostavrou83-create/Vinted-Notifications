@@ -167,28 +167,56 @@ def pages(value, limit=850):
     return result + [part]
 
 
+def buy_status_text(details):
+    from vinted_native import short
+
+    feedback = details.get("buy_feedback") or {}
+    if details.get("platform") == "ebay" or not feedback.get("message"):
+        return ""
+    return "<b>Autobuy result</b>\n" + escape(short(feedback["message"], 360))
+
+
 def captions(row, details):
+    status = buy_status_text(details)
+    reserved = units(plain(status)) + 2 if status else 0
+    text, note_pages = _captions(row, details, 1024 - reserved)
+    return text + ("\n\n" + status if status else ""), note_pages
+
+
+def notes_caption(details, index, note_pages):
+    status = buy_status_text(details)
+    return (
+        f"<b>Description, guide and reminder · {index + 1}/{len(note_pages)}</b>\n\n"
+        + escape(note_pages[index])
+        + ("\n\n" + status if status else "")
+    )
+
+
+def _captions(row, details, limit):
     from vinted_alerts import sections
     from vinted_native import short
 
     parts = sections(row, details)
     full = "\n\n".join(p for p in parts if p)
     notes = "\n\n".join(plain(p) for p in parts[3:] if p)
-    if units(plain(full)) <= 1024:
+    if units(plain(full)) <= limit:
         return full, []
     # Preserve all notes via the Full notes pages if the normal caption is too long.
-    row = dict(row, title=short(row["title"], 150), price=short(row["price"], 30))
+    row = dict(row, title=short(row["title"], 120), price=short(row["price"], 30))
     details = dict(
         details,
-        name=short(details.get("name") or row["search_name"], 80),
-        brand=short(details.get("brand") or "Not specified", 60),
+        name=short(details.get("name") or row["search_name"], 60),
+        brand=short(details.get("brand") or "Not specified", 40),
     )
     base = "\n\n".join(sections(row, details)[:3])
-    if units(plain(base)) + units(notes) + 2 <= 1024:
+    if units(plain(base)) + units(notes) + 2 <= limit:
         return base + ("\n\n" + escape(notes) if notes else ""), []
-    suffix = "\n\nTap Full notes below for the complete guide and reminder."
-    available = max(0, 1024 - units(plain(base)) - units(suffix) - 2)
-    return base + "\n\n" + escape(short(notes, available)) + suffix, pages(notes)
+    suffix = "\n\nTap Full notes for the description, guide and reminder."
+    available = max(0, limit - units(plain(base)) - units(suffix) - 2)
+    return (
+        base + "\n\n" + (escape(short(notes, available)) if available else "") + suffix,
+        pages(notes, limit=min(850, limit - 80)),
+    )
 
 
 def markup(row, details, *, view="listing", note_page=None):
@@ -387,19 +415,82 @@ async def send_initial(bot, chat_id, row, details, before_send, *, require_photo
 
 
 async def enrich(bot, chat_id, row, details, before_edit):
-    """Normally a no-op: the initial request already contains the full collage."""
+    """Fetch description after the native-photo notification, then edit in place."""
     platform = details.get("platform", "vinted")
     message_id = row["telegram_message_id"]
+    saved = load(platform, message_id)
+    if not saved:
+        return True
+    details = dict(saved[1])
+    if not details.get("description_checked"):
+        if platform == "ebay":
+            from ebay_images import resolve
+        else:
+            from vinted_gallery import resolve
+        await resolve(row, details, include_description=True)
     async with lock(platform, message_id):
         saved = load(platform, message_id)
         if not saved:
             return True
-        if saved[2]["listing_file_id"] or saved[2]["view"] != "listing":
-            return True
-        if platform == "ebay" and not details.get("photos"):
-            from ebay_images import resolve
+        row, current, card = saved
+        # A photo toggle or an Autobuy result may have changed this card while
+        # its description loaded. Merge only listing fields into the fresh card.
+        for key in (
+            "description",
+            "description_checked",
+            "description_state",
+            "photos",
+            "gallery_checked",
+            "gallery_state",
+        ):
+            if key in details:
+                current[key] = details[key]
+        details = current
+        with closing(connection()) as conn, conn:
+            conn.execute(
+                "UPDATE telegram_photo_cards SET details=? WHERE platform=? AND message_id=?",
+                (json.dumps(details), platform, message_id),
+            )
+        if card["listing_file_id"] or card["view"] != "listing":
+            caption, note_pages = captions(row, details)
+            view = card["view"]
+            note_page = int(view.split(":")[1]) if view.startswith("notes:") else None
+            if note_page is not None and note_pages:
+                note_page = min(note_page, len(note_pages) - 1)
+                view = f"notes:{note_page}"
+                caption = notes_caption(details, note_page, note_pages)
+            elif note_page is not None:
+                note_page, view = None, "listing"
+            await before_edit()
+            if load(platform, message_id) is None:
+                return True
+            kwargs = dict(
+                chat_id=chat_id,
+                message_id=message_id,
+                parse_mode="HTML",
+                reply_markup=markup(row, details, view=view, note_page=note_page),
+                **TIMEOUTS,
+            )
+            try:
+                if card["listing_file_id"] or card["example_file_id"]:
+                    await bot.edit_message_caption(
+                        **kwargs, caption=caption, show_caption_above_media=True
+                    )
+                else:
+                    from telegram import LinkPreviewOptions
 
-            await resolve(row, details)
+                    await bot.edit_message_text(
+                        **kwargs,
+                        text=caption,
+                        link_preview_options=LinkPreviewOptions(is_disabled=True),
+                    )
+            except BadRequest as exc:
+                if "message is not modified" not in str(exc).lower():
+                    raise
+            finally:
+                # Requeue redaction if a deletion raced an uncertain Telegram edit.
+                after_edit(platform, message_id, view=view)
+            return True
         raw = await listing_photo(details)
         if raw is None:
             return False
@@ -456,10 +547,7 @@ async def handle_callback(bot, query, platform, chat_id):
                 note_pages = captions(row, details)[1]
                 if index >= len(note_pages):
                     return
-                text = (
-                    f"<b>Buying guide and reminder · {index + 1}/{len(note_pages)}</b>\n\n"
-                    + escape(note_pages[index])
-                )
+                text = notes_caption(details, index, note_pages)
                 if load(platform, message.message_id) is None:
                     return
                 kwargs = dict(

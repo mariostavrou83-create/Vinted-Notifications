@@ -43,9 +43,10 @@ class Estimates(unittest.TestCase):
     def test_missing_invalid_fee_is_explicit_estimate_never_zero(self):
         for total in (None, "NaN", "1.00", "16.451"):
             result = budget.estimate(item(total=total), {"vinted_max_total": 2000})
-            self.assertEqual(result["total"], 1995)
+            self.assertEqual(result["total"], 1865)
             self.assertTrue(result["buyer_protection_estimated"])
-            self.assertIn("est. protection", budget.alert_lines(result))
+            self.assertIn("Est. total", budget.alert_lines(result))
+            self.assertNotIn("\n", budget.alert_lines(result))
         raw = item()
         raw.raw_data["total_item_price"]["currency_code"] = "EUR"
         self.assertTrue(
@@ -73,6 +74,14 @@ class Estimates(unittest.TestCase):
             )
             self.assertEqual(result["total"], expected)
             self.assertEqual(result["within_budget"], expected <= 2000)
+
+    def test_default_postage_is_220_and_unbudgeted_alerts_can_show_a_total(self):
+        result = budget.estimate(item(price="9", total="10"), {}, display=True)
+        self.assertEqual(result["total"], 1220)
+        self.assertEqual(result["postage_estimate"], 220)
+        self.assertIsNone(result["max_total"])
+        self.assertIsNone(budget.estimate(item(price="9", total="10"), {}))
+        self.assertEqual(budget.parse_form({"vinted_max_total": "15"}, {}), (1500, 220))
 
 
 class BudgetIntegration(DatabaseFixture, unittest.TestCase):
@@ -183,14 +192,14 @@ class BudgetIntegration(DatabaseFixture, unittest.TestCase):
         details = vinted_alerts.get_details(row)
         details.update(guide="Guide " * 400, reminder="Reminder " * 400)
         caption, pages = photo_cards.captions(row, details)
-        self.assertIn("Estimated total: <b>£19.95</b>", caption)
-        self.assertIn("Search budget: <b>£20.00 total</b>", caption)
+        self.assertIn(
+            "Item: <b>£15</b> · Est. total: <b>£19.95</b> (fees + delivery)", caption
+        )
+        self.assertNotIn("Search budget:", caption)
         self.assertLessEqual(photo_cards.units(photo_cards.plain(caption)), 1024)
         self.assertTrue(pages)
         ebay_details = dict(copy.deepcopy(details), platform="ebay", shipping=350)
-        self.assertNotIn(
-            "Estimated total", vinted_alerts.sections(row, ebay_details)[2]
-        )
+        self.assertNotIn("Est. total", vinted_alerts.sections(row, ebay_details)[2])
 
 
 class BudgetDashboard(DatabaseFixture, unittest.TestCase):

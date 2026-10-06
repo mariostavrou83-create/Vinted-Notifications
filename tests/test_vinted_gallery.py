@@ -15,6 +15,18 @@ def photo(token, size="f800"):
 
 
 class ParserTests(unittest.TestCase):
+    def test_description_stays_inside_listing_and_structured_data_matches_id(self):
+        html = '<div data-testid="item-description"><span>Soft cotton</span><br>Small mark &amp; wear</div><p>Unrelated recommendation</p>'
+        result = gallery.parse_listing(html, "https://www.vinted.co.uk/items/123")
+        self.assertEqual(result["description"], "Soft cotton\nSmall mark & wear")
+        html = """<script type="application/ld+json">[{"@type":"Product","url":"https://www.vinted.co.uk/items/999","description":"Wrong item"},{"@type":"Product","url":"https://www.vinted.co.uk/items/123-coat","description":"<p>Right coat</p>"}]</script>"""
+        self.assertEqual(
+            gallery.parse_listing(html, "https://www.vinted.co.uk/items/123")[
+                "description"
+            ],
+            "Right coat",
+        )
+
     def test_gallery_uses_only_numbered_listing_images_not_recommendations(self):
         html = f'<img src="{photo("seller-avatar")}">'
         for index in (3, 1, 2, 4, 5):
@@ -85,6 +97,26 @@ class FetchTests(DatabaseFixture, unittest.TestCase):
 
 
 class ResolveTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_description_is_fetched_once_and_saved_with_gallery(self):
+        self.batch(1, [110])
+        row = outbox(110)
+        details = vinted_alerts.get_details(row)
+        with patch.object(
+            gallery,
+            "fetch_listing",
+            return_value={
+                "photos": [],
+                "description": "Sleeve has a small mark",
+                "state": "ready",
+            },
+        ) as fetch:
+            await gallery.resolve(row, details, include_description=True)
+            await gallery.resolve(
+                row, vinted_alerts.get_details(row), include_description=True
+            )
+        fetch.assert_called_once()
+        self.assertEqual(details["description"], "Sleeve has a small mark")
+
     async def test_full_gallery_is_cached_and_fast_alert_content_unchanged(self):
         self.batch(1, [110])
         row = outbox(110)

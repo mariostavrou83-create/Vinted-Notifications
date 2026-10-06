@@ -270,6 +270,7 @@ def parse_item(raw, config, now, *, fresh_only=True):
         return None
     title = str(raw.get("title", ""))[:500]
     from ebay_images import extract
+    from listing_text import clean_description
 
     photos = extract(raw)
     brand = raw.get("brand")
@@ -286,6 +287,8 @@ def parse_item(raw, config, now, *, fresh_only=True):
         "url": url,
         "photo_url": photos[0] if photos else None,
         "photos": photos,
+        "description": clean_description(raw.get("description"), html=True)
+        or clean_description(raw.get("shortDescription"), html=True),
         "brand": str(brand or "Not supplied")[:120],
         "brand_label": label,
         "created": created,

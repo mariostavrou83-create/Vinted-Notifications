@@ -1,5 +1,6 @@
 """Autobuy taps report blockers and outcomes on the existing Telegram alert."""
 
+import json
 import unittest
 from contextlib import closing
 from types import SimpleNamespace
@@ -46,7 +47,9 @@ class FeedbackTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         )
         photo_cards.record(self.row, self.details, self.query.message)
         self.bot = SimpleNamespace(
-            edit_message_reply_markup=AsyncMock(), send_message=AsyncMock()
+            edit_message_caption=AsyncMock(),
+            edit_message_text=AsyncMock(),
+            send_message=AsyncMock(),
         )
         self.context = SimpleNamespace(bot=self.bot)
         env = patch.dict(
@@ -61,7 +64,7 @@ class FeedbackTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
     def buttons(self):
         return [
             b
-            for row in self.bot.edit_message_reply_markup.call_args.kwargs[
+            for row in self.bot.edit_message_caption.call_args.kwargs[
                 "reply_markup"
             ].inline_keyboard
             for b in row
@@ -89,6 +92,9 @@ class FeedbackTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("buy:status", [b.callback_data for b in buttons])
         self.assertIn("buy:click", [b.callback_data for b in buttons])
+        self.assertIn(
+            "Autobuy is off", self.bot.edit_message_caption.call_args.kwargs["caption"]
+        )
         self.bot.send_message.assert_not_awaited()
         self.assertIsNone(buying.result("110"))
         row, details, _ = photo_cards.load("vinted", 42)
@@ -105,7 +111,7 @@ class FeedbackTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
     async def test_expired_popup_does_not_hide_the_persistent_reason(self):
         self.query.answer.side_effect = BadRequest("Query is too old")
         await self.tap()
-        self.bot.edit_message_reply_markup.assert_awaited_once()
+        self.bot.edit_message_caption.assert_awaited_once()
         self.assertIn(
             "Autobuy is off",
             photo_cards.load("vinted", 42)[1]["buy_feedback"]["message"],
@@ -117,7 +123,7 @@ class FeedbackTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         with patch.object(buying, "buy") as buy:
             await self.tap()
         buy.assert_not_called()
-        self.assertIn("search #1", self.query.answer.call_args.args[0])
+        self.assertIn("Search #1", self.query.answer.call_args.args[0])
 
     async def test_checkout_failure_uses_persistent_status_not_a_second_answer(self):
         self.enable()
@@ -160,7 +166,7 @@ class FeedbackTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_telegram_edit_failure_does_not_repeat_or_lose_purchase_result(self):
         self.enable()
-        self.bot.edit_message_reply_markup.side_effect = NetworkError("offline")
+        self.bot.edit_message_caption.side_effect = NetworkError("offline")
         outcome = {"state": "unknown", "message": "Check Vinted before retrying."}
         with patch.object(buying, "buy", return_value=outcome) as buy:
             await self.tap()
@@ -175,4 +181,88 @@ class FeedbackTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.query.from_user.id = 999
         await self.tap()
         self.assertIn("Only your private", self.query.answer.call_args.args[0])
-        self.bot.edit_message_reply_markup.assert_not_awaited()
+        self.bot.edit_message_caption.assert_not_awaited()
+
+    async def test_repeated_identical_status_is_success_not_a_telegram_error(self):
+        self.bot.edit_message_caption.side_effect = BadRequest(
+            "Message is not modified"
+        )
+        await self.tap()
+        with closing(search_settings.connection()) as conn:
+            row = conn.execute(
+                "SELECT error FROM telegram_control_health WHERE platform='vinted'"
+            ).fetchone()
+        self.assertEqual(row[0], "")
+
+    async def test_specific_reason_survives_photo_switching_and_long_note_pages(self):
+        self.enable()
+        long_details = dict(
+            self.details,
+            name="🧥" * 100,
+            brand="🧥" * 120,
+            guide="Buy under the total budget",
+            reminder="🧵&lt;label&gt; " * 160,
+            budget={
+                "max_total": 1500,
+                "total": 1680,
+                "buyer_protection": 130,
+                "buyer_protection_estimated": True,
+                "postage_estimate": 350,
+            },
+        )
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE telegram_photo_cards SET details=?", (json.dumps(long_details),)
+            )
+        outcome = {
+            "state": "failed_before_payment",
+            "reason": "total_over_budget",
+            "message": "Over budget: £16.80 including fees and delivery; maximum £15.00. No payment was sent.",
+        }
+        with patch.object(buying, "buy", return_value=outcome):
+            await self.tap()
+        row, details, _ = photo_cards.load("vinted", 42)
+        row["title"] = "😀" * 500
+        caption, notes = photo_cards.captions(row, details)
+        self.assertIn(outcome["message"], caption)
+        self.assertLessEqual(photo_cards.units(photo_cards.plain(caption)), 1024)
+        self.assertIn(
+            "Over budget with fees & delivery · details",
+            [b.text for b in self.buttons()],
+        )
+        for index in range(len(notes)):
+            text = photo_cards.notes_caption(details, index, notes)
+            self.assertIn(outcome["message"], text)
+            self.assertLessEqual(photo_cards.units(photo_cards.plain(text)), 1024)
+        expected = "\n\n".join(
+            photo_cards.plain(p) for p in vinted_alerts.sections(row, details)[3:] if p
+        )
+        self.assertEqual("".join(notes), expected)
+
+    async def test_sold_message_removes_retry_and_does_not_resend_photo(self):
+        self.enable()
+        outcome = {
+            "state": "failed_before_payment",
+            "reason": "item_sold",
+            "message": "This item is already sold on Vinted. No payment was sent.",
+        }
+        with patch.object(buying, "buy", return_value=outcome):
+            await self.tap()
+        self.assertIn(
+            "already sold", self.bot.edit_message_caption.call_args.kwargs["caption"]
+        )
+        self.assertNotIn("buy:click", [b.callback_data for b in self.buttons()])
+        self.assertEqual(
+            self.bot.edit_message_caption.call_args.kwargs["message_id"], 42
+        )
+        self.bot.send_message.assert_not_awaited()
+
+    async def test_text_only_legacy_alert_gets_reason_in_same_message(self):
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE telegram_photo_cards SET listing_file_id=NULL")
+        await self.tap()
+        self.bot.edit_message_caption.assert_not_awaited()
+        self.assertIn(
+            "Autobuy is off", self.bot.edit_message_text.call_args.kwargs["text"]
+        )
+        self.assertEqual(self.bot.edit_message_text.call_args.kwargs["message_id"], 42)

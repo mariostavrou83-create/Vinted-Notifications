@@ -16,6 +16,7 @@ import photo_cards
 import vinted_budget
 import vinted_gallery
 import vinted_native
+from listing_text import clean_description
 from search_settings import connection
 
 
@@ -51,7 +52,11 @@ def snapshot(item, search):
         "photos": alert_images.photo_urls(item),
         "guide": "\n".join(guide),
         "reminder": escape((search.get("reminder") or "")[:800]),
-        "budget": vinted_budget.estimate(item, search),
+        "budget": vinted_budget.estimate(item, search, display=True),
+        "description": clean_description(
+            (getattr(item, "raw_data", None) or {}).get("description")
+        ),
+        "description_pending": True,
     }
 
 
@@ -65,17 +70,29 @@ def sections(row, details):
     )
     price = str(row["price"])
     price = "£" + price if row["currency"] == "GBP" else price + " " + row["currency"]
+    price_line = f"{'Current bid' if ebay and details.get('auction') else 'Item'}: <b>{escape(price)}</b>"
+    if not ebay:
+        price_line += vinted_budget.alert_lines(details.get("budget"))
     listing = (
-        f"<b>{escape(row['title'][:500])}</b>\n"
-        f"{'Current bid' if ebay and details.get('auction') else 'Price'}: <b>{escape(price)}</b>\n{escape(details.get('brand_label', 'Brand'))}: {escape(details['brand'])}"
+        f"<b>{escape(row['title'][:500])}</b>\n{price_line}"
+        f"\n{escape(details.get('brand_label', 'Brand'))}: {escape(details['brand'])}"
     )
     if ebay:
         shipping = details.get("shipping")
         listing += "\nPostage: " + (
             f"£{shipping / 100:.2f}" if shipping is not None else "check listing"
         )
-    else:
-        listing += vinted_budget.alert_lines(details.get("budget"))
+    description = details.get("description")
+    seller_text = "📄 <b>Seller description</b>\n" + (
+        escape(description)
+        if description
+        else (
+            "Unavailable from " + marketplace + " · open the listing to read it."
+            if details.get("description_checked")
+            or not details.get("description_pending")
+            else "Loading from " + marketplace + "…"
+        )
+    )
     guide = (
         "💷 <b>Your buying guide</b>\n" + details["guide"]
         if details.get("guide")
@@ -86,7 +103,7 @@ def sections(row, details):
         if details.get("reminder")
         else ""
     )
-    return heading, link, listing, guide, reminder
+    return heading, link, listing, seller_text, guide, reminder
 
 
 def fast_text(item, search, details=None):
@@ -116,7 +133,7 @@ def get_details(row):
 
 def rich_request(row, details, listing_image, reference_image):
     marketplace = "eBay" if details.get("platform") == "ebay" else "Vinted"
-    heading, _, listing, guide, reminder = sections(row, details)
+    heading, _, listing, description, guide, reminder = sections(row, details)
     # A URL button sits directly below the search heading, above listing details.
     button = (
         '<tg-button-row align="left"><tg-button type="url" url="'
@@ -145,7 +162,7 @@ def rich_request(row, details, listing_image, reference_image):
             files[key] = InputFile(raw, filename=key + ".jpg")
     parts.extend(
         "<p>" + section.replace("\n", "<br>") + "</p>"
-        for section in (guide, reminder)
+        for section in (description, guide, reminder)
         if section
     )
     return {

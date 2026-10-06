@@ -58,7 +58,7 @@ def caption(row, details):
         name=short(details.get("name") or row["search_name"], 100),
         brand=short(details.get("brand") or "Not specified", 120),
     )
-    heading, link, listing, _, _ = sections(row, details)
+    heading, link, listing, *_ = sections(row, details)
     return f"{heading}\n\n{link}\n\n{listing}"
 
 

@@ -13,6 +13,7 @@ import ebay_monitor
 import ebay_store
 import photo_cards
 import search_settings
+from listing_text import clean_description
 
 
 class EbayImageTests(EbayFixture, unittest.IsolatedAsyncioTestCase):
@@ -57,7 +58,8 @@ class EbayImageTests(EbayFixture, unittest.IsolatedAsyncioTestCase):
             json=lambda: {"legacyItemId": "123", "image": {"imageUrl": photo}},
         )
         client = Mock(
-            token="offline", session=SimpleNamespace(get=Mock(return_value=api))
+            token="offline",
+            session=SimpleNamespace(get=Mock(return_value=api), close=Mock()),
         )
         telegram = bot()
         with patch("ebay_store.configuration", return_value=self.config), patch(
@@ -86,6 +88,42 @@ class EbayImageTests(EbayFixture, unittest.IsolatedAsyncioTestCase):
                 [self.row["photo_url"]],
             )
         fetch.assert_not_called()
+
+    async def test_description_reuses_photo_detail_call_and_sanitizes_seller_html(self):
+        photo = "https://i.ebayimg.com/full.jpg"
+        api = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "legacyItemId": "123",
+                "image": {"imageUrl": photo},
+                "description": "<style>hidden</style><p>Cotton &amp; wool</p><p>Small cuff mark.</p><script>private-code</script>",
+            },
+        )
+        client = Mock(
+            token="offline",
+            session=SimpleNamespace(get=Mock(return_value=api), close=Mock()),
+        )
+        with patch("ebay_store.configuration", return_value=self.config), patch(
+            "ebay_monitor.BrowseClient", return_value=client
+        ):
+            await ebay_images.resolve(self.row, self.details)
+            await ebay_images.resolve(self.row, self.details, include_description=True)
+        client.session.get.assert_called_once()
+        self.assertEqual(
+            self.details["description"], "Cotton & wool\n\nSmall cuff mark."
+        )
+        self.assertNotIn("private", self.details["description"])
+        self.assertNotIn("hidden", self.details["description"])
+        self.assertEqual(
+            ebay_alerts.get_details(self.row)["description"],
+            self.details["description"],
+        )
+
+    def test_seller_description_is_bounded_and_plain_text_is_not_interpreted(self):
+        self.assertEqual(
+            clean_description("Size <small> & tags"), "Size <small> & tags"
+        )
+        self.assertIn("Description shortened", clean_description("x" * 7000))
 
     async def test_deletion_during_recovery_does_not_restore_item_data(self):
         def deletion(row):

@@ -68,6 +68,16 @@ class PhotoCardTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             "https://images1.vinted.net/a.jpg",
             "https://images1.vinted.net/b.jpg",
         ]
+        description = patch(
+            "vinted_gallery.fetch_listing",
+            return_value={
+                "photos": [],
+                "description": "Soft cotton with a small mark on one cuff.",
+                "state": "ready",
+            },
+        )
+        description.start()
+        self.addCleanup(description.stop)
         with closing(search_settings.connection()) as conn, conn:
             conn.execute(
                 "UPDATE vinted_alert_details SET payload=? WHERE item_id='110'",
@@ -111,6 +121,52 @@ class PhotoCardTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         )
         self.download.assert_awaited_once_with(self.details["photos"])
         self.assertEqual(outbox(110)["photo_status"], "sent")
+
+    async def test_description_edits_original_photo_caption_and_survives_examples(self):
+        await self.send()
+        self.assertIn(
+            "Soft cotton with a small mark",
+            self.bot.edit_message_caption.call_args.kwargs["caption"],
+        )
+        self.assertEqual(
+            self.bot.edit_message_caption.call_args.kwargs["message_id"], 42
+        )
+        await photo_cards.handle_callback(self.bot, query(), "vinted", "123")
+        self.assertIn(
+            "Soft cotton with a small mark",
+            self.bot.edit_message_media.call_args.kwargs["media"].caption,
+        )
+        self.bot.send_photo.assert_awaited_once()
+        self.bot.send_message.assert_not_awaited()
+
+    async def test_failed_description_edit_retries_cached_text_without_losing_buy_status(
+        self,
+    ):
+        await photo_cards.send_initial(
+            self.bot, "123", self.row, self.details, AsyncMock()
+        )
+        row = dict(self.row, telegram_message_id=42)
+        with closing(search_settings.connection()) as conn, conn:
+            details = photo_cards.load("vinted", 42)[1]
+            details["buy_feedback"] = {
+                "state": "unknown",
+                "message": "Payment unconfirmed. Check Vinted before retrying.",
+            }
+            conn.execute(
+                "UPDATE telegram_photo_cards SET details=?", (json.dumps(details),)
+            )
+        self.bot.edit_message_caption.side_effect = [NetworkError("offline"), None]
+        with self.assertRaises(NetworkError):
+            await photo_cards.enrich(self.bot, "123", row, self.details, AsyncMock())
+        self.assertTrue(
+            await photo_cards.enrich(self.bot, "123", row, self.details, AsyncMock())
+        )
+        self.assertEqual(self.bot.edit_message_caption.await_count, 2)
+        text = self.bot.edit_message_caption.call_args.kwargs["caption"]
+        self.assertIn("Soft cotton", text)
+        self.assertIn("Payment unconfirmed", text)
+        self.bot.send_photo.assert_awaited_once()
+        self.bot.send_message.assert_not_awaited()
 
     async def test_examples_then_listing_change_only_same_message_and_reuse_files(self):
         await self.send()

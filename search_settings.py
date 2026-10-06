@@ -197,7 +197,7 @@ def get_search(query_id):
             COALESCE(d.revision, 0) AS revision,
             g.max_buy, g.resale_low, g.resale_high, COALESCE(g.must_have,'') AS must_have,
             g.folder_id, f.name AS folder_name, b.max_total AS vinted_max_total,
-            COALESCE(b.postage_estimate,350) AS vinted_postage_estimate
+            COALESCE(b.postage_estimate,220) AS vinted_postage_estimate
             FROM queries q LEFT JOIN search_preferences p ON p.query_id=q.id
             LEFT JOIN search_dashboard d ON d.query_id=q.id
             LEFT JOIN search_buying_guide g ON g.query_id=q.id
