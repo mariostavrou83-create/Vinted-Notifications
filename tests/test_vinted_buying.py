@@ -46,6 +46,19 @@ def checkout(total="19.00"):
 
 
 class BuyingTests(DatabaseFixture, unittest.TestCase):
+    def test_signin_token_parses_json_escaped_bootstrap_and_meta_attributes(self):
+        token = "01234567-89ab-cdef-0123-456789abcdef"
+        value = '{"CSRF_TOKEN":"' + token + '"}'
+        for html in (
+            value,
+            json.dumps(value),
+            json.dumps(json.dumps(value)),
+            f'<meta name="csrf-token" content="{token}">',
+            f'<meta content="{token}" name="csrf-token">',
+        ):
+            self.assertEqual(buyer.csrf_from_html(html), token)
+        self.assertIsNone(buyer.csrf_from_html('"CSRF_TOKEN":"bad\\nheader"'))
+
     def setUp(self):
         super().setUp()
         self.row = {

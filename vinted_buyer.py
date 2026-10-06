@@ -17,6 +17,22 @@ from search_settings import connection
 BASE = "https://www.vinted.co.uk"
 
 
+def csrf_from_html(html):
+    # Next.js serializes the bootstrap object inside a quoted script string.
+    # Normalize its quote escaping without evaluating any page JavaScript.
+    for _ in range(3):
+        html = html.replace('\\"', '"')
+    for pattern in (
+        r'"(?:CSRF_TOKEN|csrf_token|csrfToken)"\s*:\s*"([A-Za-z0-9._~+/=-]{16,1024})"',
+        r'<meta\s+name="csrf-token"\s+content="([A-Za-z0-9._~+/=-]{16,1024})"',
+        r'<meta\s+content="([A-Za-z0-9._~+/=-]{16,1024})"\s+name="csrf-token"',
+    ):
+        match = re.search(pattern, html, re.IGNORECASE)
+        if match:
+            return match[1]
+    return None
+
+
 class BuyerError(ValueError):
     def __init__(self, message, status=None):
         super().__init__(message)
@@ -187,15 +203,11 @@ class Client:
             raise BuyerError(
                 f"Vinted sign-in returned HTTP {response.status_code} from this server. No credentials were sent."
             )
-        for pattern in (
-            r'"(?:CSRF_TOKEN|csrf_token|csrfToken)"\s*:\s*"([^"<>]+)"',
-            r'<meta\s+name="csrf-token"\s+content="([^"<>]+)"',
-        ):
-            match = re.search(pattern, response.text, re.IGNORECASE)
-            if match:
-                self.csrf = match[1]
-                self.headers()
-                return
+        token = csrf_from_html(response.text)
+        if token:
+            self.csrf = token
+            self.headers()
+            return
         raise BuyerError(
             "Vinted did not supply the sign-in security token. No credentials were sent."
         )
