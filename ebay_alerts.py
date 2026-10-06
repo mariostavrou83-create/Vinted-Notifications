@@ -76,7 +76,7 @@ async def preview(query_id, *, phone_mode=None):
         raise ValueError("Search not found.")
     with closing(connection()) as conn:
         recent = conn.execute(
-            "SELECT * FROM alert_outbox WHERE query_id=? AND platform='ebay' AND photo_url IS NOT NULL AND photo_url!='' ORDER BY found_at DESC LIMIT 1",
+            "SELECT * FROM alert_outbox WHERE query_id=? AND platform='ebay' ORDER BY found_at DESC LIMIT 1",
             (query_id,),
         ).fetchone()
     if not recent:

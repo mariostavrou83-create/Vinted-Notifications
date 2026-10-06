@@ -7,7 +7,7 @@ from contextlib import closing
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from telegram.error import NetworkError
+from telegram.error import BadRequest, NetworkError
 from test_dashboard import photo_bytes
 from test_ebay_monitor import EbayFixture, item
 from test_finds_delivery import outbox
@@ -138,6 +138,76 @@ class PhotoCardTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         await photo_cards.handle_callback(self.bot, q, "vinted", "123")
         self.bot.edit_message_media.assert_not_awaited()
         self.assertTrue(q.answer.call_args.kwargs["show_alert"])
+
+    async def test_expired_callback_acknowledgement_does_not_prevent_photo_edit(self):
+        await self.send()
+        q = query()
+        q.answer.side_effect = BadRequest("Query is too old")
+        await photo_cards.dispatch_callback(self.bot, q, "vinted", "123")
+        self.bot.edit_message_media.assert_awaited_once()
+
+    async def test_example_file_cache_is_reused_between_alerts_but_never_bots(self):
+        await self.send()
+        await photo_cards.handle_callback(self.bot, query(), "vinted", "123")
+        self.assertEqual(
+            photo_cards.cached_example(self.bot, "vinted", self.row["reference_id"]),
+            "example-photo",
+        )
+        other = SimpleNamespace(token="different-bot")
+        self.assertIsNone(
+            photo_cards.cached_example(other, "vinted", self.row["reference_id"])
+        )
+        self.assertIsNone(
+            photo_cards.cached_example(self.bot, "ebay", self.row["reference_id"])
+        )
+        photo_cards.record(self.row, self.details, message(number=43))
+        q = query()
+        q.message.message_id = 43
+        with patch.object(
+            dashboard_store,
+            "get_media",
+            side_effect=AssertionError("cached examples must not reupload"),
+        ):
+            await photo_cards.handle_callback(self.bot, q, "vinted", "123")
+        self.assertEqual(
+            self.bot.edit_message_media.call_args.kwargs["media"].media, "example-photo"
+        )
+
+    async def test_lost_message_bookkeeping_recovers_existing_saved_alert(self):
+        await self.send()
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("DELETE FROM telegram_photo_cards")
+        q = query()
+        q.message.photo = [SimpleNamespace(file_id="listing-photo")]
+        await photo_cards.dispatch_callback(self.bot, q, "vinted", "123")
+        self.bot.edit_message_media.assert_awaited_once()
+        self.assertIsNotNone(photo_cards.load("vinted", 42))
+
+    async def test_invalid_cached_file_id_recovers_from_saved_image(self):
+        await self.send()
+        photo_cards.cache_example(
+            self.bot, "vinted", self.row["reference_id"], "expired-file"
+        )
+        self.bot.edit_message_media.side_effect = [
+            BadRequest("Wrong file identifier"),
+            message(file_id="fresh-file"),
+        ]
+        await photo_cards.dispatch_callback(self.bot, query(), "vinted", "123")
+        self.assertEqual(self.bot.edit_message_media.await_count, 2)
+        self.assertEqual(
+            photo_cards.cached_example(self.bot, "vinted", self.row["reference_id"]),
+            "fresh-file",
+        )
+
+    async def test_one_corrupt_image_does_not_kill_callback_listener(self):
+        await self.send()
+        self.bot.edit_message_media.side_effect = ValueError("bad image")
+        q = query()
+        await photo_cards.dispatch_callback(self.bot, q, "vinted", "123")
+        self.assertIn("tap the button again", q.answer.call_args.args[0])
+        self.bot.edit_message_media.side_effect = None
+        await photo_cards.dispatch_callback(self.bot, query(), "vinted", "123")
+        self.assertEqual(photo_cards.load("vinted", 42)[2]["view"], "examples")
 
     async def test_long_emoji_notes_fit_caption_and_all_pages_preserve_every_character(
         self,

@@ -470,7 +470,7 @@ def call_spacing(config):
     return max(0.02, 86400 / (config["daily_budget"] * 0.9))
 
 
-def reserve_call(config, now, *, diagnostic=False):
+def reserve_call(config, now, *, diagnostic=False, media=False):
     with closing(connection()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
         if config.get("source") == "public":
@@ -511,7 +511,14 @@ def reserve_call(config, now, *, diagnostic=False):
         # An explicit owner check must not starve behind continuous polling.
         # Allow one diagnostic per 30 seconds inside the same daily budget;
         # it moves the normal poller's next slot and respects API cooldowns.
-        spacing = 1 if diagnostic else call_spacing(config)
+        # Missing photos are rare item lookups, charged to the same allowance.
+        # They may follow discovery immediately, but still respect cooldowns.
+        spacing = 0 if media else 1 if diagnostic else call_spacing(config)
+        if media:
+            last_media = conn.execute(
+                "SELECT value FROM delivery_runtime WHERE key='ebay_last_media'"
+            ).fetchone()
+            latest = max(latest, last_media[0] + 1 if last_media else 0)
         wait_until = max((latest or 0) + spacing, cooldown[0] if cooldown else 0)
         if diagnostic:
             last_check = conn.execute(
@@ -534,6 +541,11 @@ def reserve_call(config, now, *, diagnostic=False):
         if diagnostic:
             conn.execute(
                 "INSERT OR REPLACE INTO delivery_runtime VALUES ('ebay_last_diagnostic',?)",
+                (now,),
+            )
+        if media:
+            conn.execute(
+                "INSERT OR REPLACE INTO delivery_runtime VALUES ('ebay_last_media',?)",
                 (now,),
             )
         return None

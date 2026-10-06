@@ -518,7 +518,8 @@ class VintedDeliveryWorker(EbayDeliveryWorker):
 
                 complete = await enrich(self.bot, self.chat_id, row, details, edit_slot)
             logger.info(
-                "Listing collage edit accepted for item %s; message_id=%s",
+                "Listing photo %s for item %s; message_id=%s",
+                "ready" if complete else "unavailable; retry pending",
                 row["item_id"],
                 row["telegram_message_id"],
             )

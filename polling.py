@@ -9,6 +9,7 @@ from email.utils import parsedate_to_datetime
 import db
 import resource_controls
 import search_settings
+import vinted_keywords
 from logger import get_logger
 
 logger = get_logger(__name__)
@@ -113,7 +114,7 @@ class Poller:
     def tick(self):
         now = time.monotonic()
         if now >= self.config_checked:
-            self.queries = {q[0]: q for q in search_settings.active_queries()}
+            self.queries = vinted_keywords.expand(search_settings.active_queries())
             self.target = max(1.0, float(db.get_parameter("query_refresh_delay") or 15))
             self.count = int(db.get_parameter("items_per_query") or 96)
             self.request_rate = resource_controls.request_rate()
@@ -156,6 +157,10 @@ class Poller:
             del self.pending[query_id]
             if query_id not in queries:
                 continue
+            scheduled = queries[query_id]
+            parent_id = scheduled[0]
+            search_url = getattr(future, "search_url", scheduled[1])
+            variant_id = scheduled[4] if len(scheduled) > 4 else None
             error = ""
             try:
                 items = future.result()
@@ -180,8 +185,9 @@ class Poller:
                 self.queue.put(
                     (
                         [item for item in items if item.is_new_item()],
-                        query_id,
-                        getattr(future, "search_url", queries[query_id][1]),
+                        parent_id,
+                        search_url,
+                        variant_id,
                     )
                 )
                 self.failures[query_id] = 0
@@ -198,8 +204,10 @@ class Poller:
                 self.intervals.append(actual_interval)
             self.durations.append(duration)
             search_settings.record_health(
-                query_id, wall_start, duration, actual_interval, error
+                parent_id, wall_start, duration, actual_interval, error
             )
+            if variant_id:
+                vinted_keywords.health(variant_id, wall_start, actual_interval, error)
             delay = (
                 target
                 if not error

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import db
 
-SCHEMA_VERSION = "12"
+SCHEMA_VERSION = "13"
 
 
 def connection():
@@ -151,6 +151,20 @@ def ensure_schema():
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_photo_cards_item ON telegram_photo_cards(item_id)"
             )
+            conn.execute("""CREATE TABLE IF NOT EXISTS telegram_example_cache (
+                bot_key TEXT NOT NULL, reference_id TEXT NOT NULL
+                    REFERENCES dashboard_media(id) ON DELETE CASCADE,
+                file_id TEXT NOT NULL,
+                PRIMARY KEY(bot_key,reference_id))""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS telegram_control_health (
+                platform TEXT PRIMARY KEY, last_poll REAL, last_click REAL,
+                last_success REAL, error TEXT NOT NULL DEFAULT '')""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS ebay_photo_lookups (
+                item_id TEXT PRIMARY KEY REFERENCES alert_outbox(item_id) ON DELETE CASCADE,
+                attempted REAL NOT NULL)""")
+            from vinted_keywords import migrate
+
+            migrate(conn)
             conn.execute("""INSERT OR IGNORE INTO parameters
                 VALUES ('vinted_single_message_alerts', '0')""")
             conn.execute(
@@ -188,6 +202,10 @@ def get_search(query_id):
         return None
     result = dict(row)
     result["exclusions"] = json.loads(result["exclusions"])
+    from vinted_keywords import rows
+
+    result["vinted_variants"] = rows(query_id)
+    result["vinted_keywords"] = [r["keyword"] for r in result["vinted_variants"]]
     from ebay_store import platform_details
 
     result.update(platform_details(query_id))

@@ -12,7 +12,13 @@
 <section id="panel-vinted" role="tabpanel" aria-labelledby="tab-vinted">
 <p class="platform-disabled" data-disabled-note="vinted" hidden>Vinted is off for this search. Saved filters are kept for later.</p>
 <label for="query">Vinted search link</label><textarea id="query" name="query" rows="3" maxlength="6000" placeholder="https://www.vinted.co.uk/catalog?…">{{row.query}}</textarea>
-<small>Choose your filters on Vinted, then paste the search results link here. A new or changed link starts with a quiet first check.</small>
+<small>Choose brand, category, sizes, condition and price on Vinted, then paste the results link here. Leave Vinted’s search box empty when using keyword alternatives below.</small>
+<label for="vinted_keywords">Keyword alternatives <span>optional</span></label>
+<textarea id="vinted_keywords" name="vinted_keywords" rows="3" maxlength="2000" placeholder="fur, sherpa, lined">{{row.vinted_keywords|default([])|join('\n')}}</textarea>
+<small>Separate alternatives with commas or new lines. “fur, sherpa, lined” runs three Vinted searches under this one entry. Multiword searches such as “fur trim” stay together. These replace any search text in the link; all its other filters stay in place. Leave blank to use the link as it is. Up to 20 alternatives.</small>
+<p id="vinted-keyword-summary" class="shared-note" aria-live="polite"></p>
+{% if row.vinted_variants %}<details><summary>Saved keyword searches ({{row.vinted_variants|length}})</summary><ul>{% for variant in row.vinted_variants %}<li><a href="{{variant.url}}" target="_blank" rel="noopener">{{variant.keyword}} ↗</a> · {% if variant.error %}{{variant.error}}{% elif variant.primed %}Checking{% else %}Waiting for quiet first check{% endif %}</li>{% endfor %}</ul></details>{% endif %}
+<small>Each new keyword starts with a quiet first check. All alternatives share your photos and notes; a matching item alerts once. More alternatives mean more underlying checks.</small>
 </section>
 <section id="panel-ebay" role="tabpanel" aria-labelledby="tab-ebay">
 <p class="platform-disabled" data-disabled-note="ebay" hidden>eBay is off for this search. You can prepare its filters before enabling it.</p>

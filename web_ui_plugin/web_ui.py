@@ -331,6 +331,8 @@ def create_app(test_config=None):
                 "query": "",
                 "reminder": "",
                 "exclusions": [],
+                "vinted_keywords": [],
+                "vinted_variants": [],
                 "reference_id": None,
                 "revision": 0,
                 "max_buy": None,
@@ -369,6 +371,7 @@ def create_app(test_config=None):
                 ):
                     row[key] = request.form.get(key, "")
                 row["exclusions"] = request.form.get("exclusions", "").splitlines()
+                row["vinted_keywords"] = [request.form.get("vinted_keywords", "")]
                 prices = {key: request.form.get(key, "") for key in prices}
                 row["platform_mode"] = request.form.get(
                     "platform_mode", row["platform_mode"]
@@ -485,6 +488,28 @@ def create_app(test_config=None):
                         "Vinted checking mode saved. It applies automatically to all searches.",
                         "success",
                     )
+                elif action in ("test_vinted_photos", "test_ebay_photos"):
+                    import asyncio
+
+                    from telegram.error import TelegramError
+
+                    import photo_cards
+
+                    try:
+                        flash(
+                            asyncio.run(
+                                photo_cards.test_controls(
+                                    "vinted"
+                                    if action == "test_vinted_photos"
+                                    else "ebay"
+                                )
+                            ),
+                            "success",
+                        )
+                    except TelegramError:
+                        raise ValueError(
+                            "Telegram could not confirm the photo test. Check the test message before retrying."
+                        ) from None
                 else:
                     from ebay_connections import test_connection
 
@@ -497,6 +522,7 @@ def create_app(test_config=None):
             info=ebay_store.connection_summary(),
             resources=resource_controls.summary(),
             deletion=ebay_privacy.setup_values(),
+            photo_controls=__import__("photo_cards").health_summary(),
         )
 
     @app.route("/folders", methods=["GET", "POST"])

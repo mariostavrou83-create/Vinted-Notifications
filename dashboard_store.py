@@ -90,6 +90,16 @@ def save_search(query_id, form, photo=None, *, photos=None):
     vinted, ebay, ebay_config = ebay_store.parse_form(form, previous)
     raw_url = form.get("query", "").strip()
     url = normalize_url(raw_url) if raw_url or vinted else ""
+    import vinted_keywords
+
+    previous_keywords = [r["keyword"] for r in vinted_keywords.rows(query_id)]
+    keywords = vinted_keywords.parse(
+        form.get("vinted_keywords", "\n".join(previous_keywords))
+    )
+    if keywords and not url:
+        raise ValueError("Add a Vinted filter link before adding Vinted keywords.")
+    if keywords:
+        url = vinted_keywords.with_keyword(url)
     exclusions = json.dumps(
         parse_exclusions(form.get("exclusions", "")), ensure_ascii=False
     )
@@ -127,11 +137,17 @@ def save_search(query_id, form, photo=None, *, photos=None):
             # Preserve byte-for-byte URLs when their meaning is unchanged.
             if old["query"] and normalize_url(old["query"]) == url:
                 url = old["query"]
-        duplicate = conn.execute(
+        duplicates = conn.execute(
             "SELECT id FROM queries WHERE query=? AND id!=?", (url, query_id or -1)
-        ).fetchone()
-        if url and duplicate:
-            raise ValueError(f"This link is already saved as search #{duplicate[0]}.")
+        ).fetchall()
+        for duplicate in duplicates:
+            other = [r["keyword"] for r in vinted_keywords.rows(duplicate[0], conn)]
+            if url and {w.casefold() for w in other} == {
+                w.casefold() for w in keywords
+            }:
+                raise ValueError(
+                    f"This link and keywords are already saved as search #{duplicate[0]}."
+                )
         if query_id is None:
             query_id = conn.execute(
                 "INSERT INTO queries(query,query_name) VALUES (?,?)", (url, name)
@@ -158,8 +174,14 @@ def save_search(query_id, form, photo=None, *, photos=None):
         conn.execute(
             """UPDATE search_dashboard SET revision=revision+1,
             rebaseline=CASE WHEN ? THEN 1 ELSE rebaseline END WHERE query_id=?""",
-            (bool(old and old["query"] != url), query_id),
+            (
+                bool(
+                    old and (old["query"] != url or previous_keywords and not keywords)
+                ),
+                query_id,
+            ),
         )
+        vinted_keywords.save(conn, query_id, url, keywords)
         ebay_store.save_platforms(conn, query_id, vinted, ebay, ebay_config)
         if photos is not None:
             _save_reference_photos(conn, query_id, form, photos)
@@ -193,6 +215,8 @@ def _store_media(conn, photo):
         """DELETE FROM dashboard_media WHERE created<? AND id NOT IN
                 (SELECT reference_id FROM search_dashboard WHERE reference_id IS NOT NULL)
                 AND id NOT IN (SELECT media_id FROM search_reference_photos)
+                AND id NOT IN (SELECT reference_id FROM telegram_photo_cards
+                    WHERE reference_id IS NOT NULL)
                 AND id NOT IN (SELECT reference_id FROM alert_outbox WHERE reference_id IS NOT NULL
                     AND photo_status='pending')""",
         (time.time() - 86400,),
@@ -295,6 +319,13 @@ def list_searches(archived=False):
 
     for row in rows:
         row.update(platform_details(row["id"]))
+    import vinted_keywords
+
+    with closing(connection()) as conn:
+        for row in rows:
+            row["vinted_keywords"] = [
+                r["keyword"] for r in vinted_keywords.rows(row["id"], conn)
+            ]
     return rows
 
 

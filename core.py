@@ -310,12 +310,22 @@ def clear_item_queue(items_queue, new_items_queue):
         batch = items_queue.get()
         data, query_id = batch[:2]
         search = search_settings.get_search(query_id)
+        import vinted_keywords
+
+        variant_id = batch[3] if len(batch) > 3 else None
+        variant = (
+            vinted_keywords.current(variant_id, query_id, batch[2])
+            if variant_id
+            else None
+        )
         if (
             search is None
             or not search.get("vinted_enabled", True)
             or search.get("paused")
             or search.get("archived")
-            or (len(batch) > 2 and batch[2] != search["query"])
+            or (variant_id and variant is None)
+            or (not variant_id and search.get("vinted_keywords"))
+            or (not variant_id and len(batch) > 2 and batch[2] != search["query"])
         ):
             return True  # Deleted while the HTTP request was in flight.
         banwords_str = db.get_parameter("banwords")
@@ -323,10 +333,20 @@ def clear_item_queue(items_queue, new_items_queue):
         # Read the watermark once, before the loop. It doubles as the "has this query
         # ever produced anything?" flag, and the updates made below would otherwise
         # cut a first-run priming pass short right after the first item.
-        last_query_timestamp = db.get_last_timestamp(query_id)
-        is_first_run = last_query_timestamp is None or search.get("rebaseline", False)
-        listing_floor = search_settings.listing_cutoff(
-            query_id, [item.id for item in data], time()
+        last_query_timestamp = (
+            variant["last_item"] if variant else db.get_last_timestamp(query_id)
+        )
+        is_first_run = (
+            not variant["primed"]
+            if variant
+            else last_query_timestamp is None or search.get("rebaseline", False)
+        )
+        listing_floor = (
+            vinted_keywords.cutoff(variant, [item.id for item in data], time())
+            if variant
+            else search_settings.listing_cutoff(
+                query_id, [item.id for item in data], time()
+            )
         )
         if is_first_run:
             logger.info(
@@ -432,7 +452,11 @@ def clear_item_queue(items_queue, new_items_queue):
         search_settings.remember_listing_frontier(
             query_id, [item.id for item in data], time()
         )
-        if watermark is not None and watermark != last_query_timestamp:
+        if variant:
+            vinted_keywords.finish(
+                variant, [item.id for item in data], watermark, time()
+            )
+        elif watermark is not None and watermark != last_query_timestamp:
             db.update_last_timestamp(query_id, watermark)
         if is_first_run:
             # An empty successful first page is still a completed baseline.

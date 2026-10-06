@@ -81,8 +81,10 @@ def telegram_bot_process(queue):
         # Import LeRobot
         from telegram_bot_plugin.telegram_bot import LeRobot
 
-        # The bot will run with app.run_polling() which is already in the module
-        asyncio.run(LeRobot(queue))
+        # LeRobot owns Application.run_polling(), a synchronous lifecycle method.
+        # Give this child its own loop instead of passing a non-coroutine to run().
+        asyncio.set_event_loop(asyncio.new_event_loop())
+        LeRobot(queue)
     except (KeyboardInterrupt, SystemExit):
         logger.info("Telegram bot process stopped")
     except Exception:
