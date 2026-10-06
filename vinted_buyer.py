@@ -562,21 +562,11 @@ def connected_client():
 
 
 def save_limits(form):
-    from decimal import Decimal, InvalidOperation
-
+    if "buyer_max_total" in form or "buyer_max_extra" in form:
+        raise BuyerError(
+            "Budgets are now set on each search. Reload Connections before enabling Autobuy."
+        )
     try:
-        values = [
-            Decimal(form.get(k, "")) for k in ("buyer_max_total", "buyer_max_extra")
-        ]
-        if (
-            any(
-                not v.is_finite() or v < 0 or v.as_tuple().exponent < -2 for v in values
-            )
-            or not 1 <= values[0] <= 1000
-            or values[1] > values[0]
-        ):
-            raise ValueError
-        total, extra = [int(v * 100) for v in values]
         info = json.loads(form.get("buyer_browser_info", "{}"))
         if not isinstance(info, dict):
             raise TypeError
@@ -604,17 +594,17 @@ def save_limits(form):
             or abs(browser_info["timezone_offset"]) > 900
         ):
             raise ValueError
-    except (InvalidOperation, ValueError, TypeError, KeyError):
+    except (ValueError, TypeError, KeyError):
         raise BuyerError(
-            "Enter a total limit from £1 to £1,000 and a smaller fees/postage limit. Reload this page if your device details are missing."
+            "Reload this page to capture your device details, then save the buyer settings again."
         ) from None
     enabled = form.get("buyer_enabled") == "yes"
     if enabled and not settings()["connected"]:
         raise BuyerError("Connect your Vinted buyer account first.")
     with closing(connection()) as conn, conn:
         conn.execute(
-            "UPDATE vinted_buyer SET max_total=?,max_extra=?,browser_info=?,enabled=? WHERE id=1",
-            (total, extra, json.dumps(browser_info), enabled),
+            "UPDATE vinted_buyer SET browser_info=?,enabled=? WHERE id=1",
+            (json.dumps(browser_info), enabled),
         )
 
 

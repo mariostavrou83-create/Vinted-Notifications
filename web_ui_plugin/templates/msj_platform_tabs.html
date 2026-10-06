@@ -12,7 +12,16 @@
 <section id="panel-vinted" role="tabpanel" aria-labelledby="tab-vinted">
 <p class="platform-disabled" data-disabled-note="vinted" hidden>Vinted is off for this search. Saved filters are kept for later.</p>
 <label for="query">Vinted search link</label><textarea id="query" name="query" rows="3" maxlength="6000" placeholder="https://www.vinted.co.uk/catalog?…">{{row.query}}</textarea>
-<small>Choose brand, category, sizes, condition and price on Vinted, then paste the results link here. Leave Vinted’s search box empty when using keyword alternatives below.</small>
+<small>Choose brand, category, sizes and condition on Vinted, then paste the results link here. Leave its search box empty when using keyword alternatives below. Set your complete budget here instead of filtering by price on Vinted.</small>
+<label for="vinted_max_total">Maximum total including fees &amp; postage (£)</label>
+<input id="vinted_max_total" name="vinted_max_total" type="number" min="1" max="1000" step="0.01" inputmode="decimal" value="{{prices.vinted_max_total}}" placeholder="e.g. 20.00">
+<small>One budget for this search and all its keywords. Alerts must fit the estimated total. Autobuy checks Vinted’s actual complete checkout total and stops if it is over this budget. A saved budget replaces both price limits in the pasted link.</small>
+<details class="guide-section"><summary>Postage estimate for alerts</summary>
+<label for="vinted_postage_estimate">Estimated postage (£)</label>
+<input id="vinted_postage_estimate" name="vinted_postage_estimate" type="number" min="0" max="100" step="0.01" inputmode="decimal" value="{{prices.vinted_postage_estimate}}">
+<small>Starts at £3.50 as a planning estimate; change it for the items you buy. This is not a Vinted delivery quote. Alerts use Vinted’s buyer-protection-inclusive price when supplied; otherwise they estimate protection at 5% of the item price + £0.70. Estimated totals can be above or below the eventual checkout, so a borderline listing may be included or missed. Payment always uses the actual total.</small>
+</details>
+<small>Leave the maximum blank to keep URL price filtering. Autobuy requires a maximum total on this search.</small>
 <label for="vinted_keywords">Keyword alternatives <span>optional</span></label>
 <textarea id="vinted_keywords" name="vinted_keywords" rows="3" maxlength="2000" placeholder="fur, sherpa, lined">{{row.vinted_keywords|default([])|join('\n')}}</textarea>
 <small>Separate alternatives with commas or new lines. “fur, sherpa, lined” runs three Vinted searches under this one entry. Multiword searches such as “fur trim” stay together. These replace any search text in the link; all its other filters stay in place. Leave blank to use the link as it is. Up to 20 alternatives.</small>

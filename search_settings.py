@@ -11,7 +11,7 @@ from pathlib import Path
 
 import db
 
-SCHEMA_VERSION = "15"
+SCHEMA_VERSION = "16"
 
 
 def connection():
@@ -168,6 +168,9 @@ def ensure_schema():
             from vinted_buyer import migrate as migrate_buyer
 
             migrate_buyer(conn)
+            from vinted_budget import migrate as migrate_budgets
+
+            migrate_budgets(conn)
             conn.execute("""INSERT OR IGNORE INTO parameters
                 VALUES ('vinted_single_message_alerts', '0')""")
             conn.execute(
@@ -193,11 +196,13 @@ def get_search(query_id):
             COALESCE(d.rebaseline, 0) AS rebaseline, d.reference_id,
             COALESCE(d.revision, 0) AS revision,
             g.max_buy, g.resale_low, g.resale_high, COALESCE(g.must_have,'') AS must_have,
-            g.folder_id, f.name AS folder_name
+            g.folder_id, f.name AS folder_name, b.max_total AS vinted_max_total,
+            COALESCE(b.postage_estimate,350) AS vinted_postage_estimate
             FROM queries q LEFT JOIN search_preferences p ON p.query_id=q.id
             LEFT JOIN search_dashboard d ON d.query_id=q.id
             LEFT JOIN search_buying_guide g ON g.query_id=q.id
             LEFT JOIN search_folders f ON f.id=g.folder_id
+            LEFT JOIN vinted_search_budgets b ON b.query_id=q.id
             WHERE q.id=?""",
             (query_id,),
         ).fetchone()

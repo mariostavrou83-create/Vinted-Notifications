@@ -90,6 +90,18 @@ def save_search(query_id, form, photo=None, *, photos=None):
     vinted, ebay, ebay_config = ebay_store.parse_form(form, previous)
     raw_url = form.get("query", "").strip()
     url = normalize_url(raw_url) if raw_url or vinted else ""
+    import vinted_budget
+
+    with closing(connection()) as conn:
+        saved_budget = conn.execute(
+            "SELECT max_total AS vinted_max_total, postage_estimate AS vinted_postage_estimate FROM vinted_search_budgets WHERE query_id=?",
+            (query_id,),
+        ).fetchone()
+    saved_budget = dict(saved_budget) if saved_budget else {}
+    maximum, postage = vinted_budget.parse_form(form, saved_budget)
+    if maximum is not None and not url:
+        raise ValueError("Add a Vinted filter link before setting a Vinted budget.")
+    url = vinted_budget.search_url(url, maximum, saved_budget.get("vinted_max_total"))
     import vinted_keywords
 
     previous_keywords = [r["keyword"] for r in vinted_keywords.rows(query_id)]
@@ -182,6 +194,11 @@ def save_search(query_id, form, photo=None, *, photos=None):
             ),
         )
         vinted_keywords.save(conn, query_id, url, keywords)
+        conn.execute(
+            """INSERT INTO vinted_search_budgets VALUES (?,?,?) ON CONFLICT(query_id)
+            DO UPDATE SET max_total=excluded.max_total, postage_estimate=excluded.postage_estimate""",
+            (query_id, maximum, postage),
+        )
         ebay_store.save_platforms(conn, query_id, vinted, ebay, ebay_config)
         if photos is not None:
             _save_reference_photos(conn, query_id, form, photos)
@@ -305,12 +322,13 @@ def list_searches(archived=False):
             COALESCE(p.reminder,'') reminder, COALESCE(p.exclusions,'[]') exclusions,
             COALESCE(d.paused,0) paused, COALESCE(d.archived,0) archived, d.reference_id,
             COALESCE(d.revision,0) revision, h.last_success, h.actual_interval, h.failures,
-            g.folder_id, f.name folder_name, g.max_buy
+            g.folder_id, f.name folder_name, g.max_buy, b.max_total vinted_max_total
             FROM queries q LEFT JOIN search_preferences p ON p.query_id=q.id
             LEFT JOIN search_dashboard d ON d.query_id=q.id
             LEFT JOIN search_health h ON h.query_id=q.id
             LEFT JOIN search_buying_guide g ON g.query_id=q.id
             LEFT JOIN search_folders f ON f.id=g.folder_id
+            LEFT JOIN vinted_search_budgets b ON b.query_id=q.id
             WHERE COALESCE(d.archived,0)=? ORDER BY q.id DESC""",
                 (int(archived),),
             )

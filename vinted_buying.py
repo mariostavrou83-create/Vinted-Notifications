@@ -12,6 +12,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 
 import db
+import vinted_budget
 import vinted_buyer as buyer
 from search_settings import connection
 
@@ -74,7 +75,7 @@ def claim(row):
     return True
 
 
-def checkout_prices(checkout, item_price, config):
+def checkout_prices(checkout, item_price, maximum):
     components = checkout.get("components") or {}
     summary = (
         components.get("order_summary_v2") or components.get("order_summary") or {}
@@ -83,13 +84,13 @@ def checkout_prices(checkout, item_price, config):
     # can omit delivery and buyer protection, so neither is a payment fallback.
     total_part = summary.get("total") or {}
     total = cents(total_part.get("price") if isinstance(total_part, dict) else None)
-    if (
-        total < item_price
-        or total > config["max_total"]
-        or total - item_price > config["max_extra"]
-    ):
+    if total < item_price:
         raise buyer.BuyerError(
-            "Autobuy stopped: the complete checkout exceeds your total or fees/postage limit."
+            "Autobuy stopped: Vinted's checkout total could not be verified."
+        )
+    if total > maximum:
+        raise buyer.BuyerError(
+            f"Autobuy stopped: checkout is £{total/100:.2f}; this search's maximum total is £{maximum/100:.2f}."
         )
     if checkout.get("errors") or not checkout.get("checksum"):
         raise buyer.BuyerError(
@@ -116,10 +117,11 @@ def buy(row):
         raise buyer.BuyerError("Autobuy currently supports UK Vinted listings in GBP.")
     with buyer.exclusive():
         config = buyer.settings()
-        if not config["enabled"] or not config["connected"] or config["max_total"] <= 0:
+        if not config["enabled"] or not config["connected"]:
             raise buyer.BuyerError(
-                "Connect your Vinted buyer and enable spending limits in Connections first."
+                "Connect your Vinted buyer and enable Autobuy in Connections first."
             )
+        maximum = vinted_budget.payment_limit(row)
         if not claim(row):
             return result(item_id)
         client = None
@@ -145,6 +147,10 @@ def buy(row):
             if current_price > alert_price:
                 raise buyer.BuyerError(
                     "Autobuy stopped: the item price increased after your alert."
+                )
+            if current_price > maximum:
+                raise buyer.BuyerError(
+                    "Autobuy stopped: the item alone exceeds this search's maximum total."
                 )
             seller = str(
                 (item.get("user") or {}).get("id") or item.get("user_id") or ""
@@ -201,9 +207,10 @@ def buy(row):
                 )
             # Read the current controls again immediately before payment.
             config = buyer.settings()
-            if not config["enabled"]:
+            if not config["enabled"] or not config["connected"]:
                 raise buyer.BuyerError("Autobuy was disabled before payment.")
-            total = checkout_prices(checkout, current_price, config)
+            maximum = vinted_budget.payment_limit(row)
+            total = checkout_prices(checkout, current_price, maximum)
             with closing(connection()) as conn:
                 info = json.loads(
                     conn.execute(

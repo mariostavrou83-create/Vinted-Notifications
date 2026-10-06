@@ -63,6 +63,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         super().setUp()
         self.row = {
             "item_id": "123",
+            "query_id": 1,
             "url": "https://www.vinted.co.uk/items/123",
             "price": "15.00",
             "currency": "GBP",
@@ -75,6 +76,8 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                     json.dumps(DEVICE),
                 ),
             )
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("INSERT INTO vinted_search_budgets VALUES (1,2000,350)")
         self.item = {
             "item": {
                 "id": 123,
@@ -120,6 +123,72 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(len(self.payments()), 1)
         self.assertEqual(self.payments()[0].args[2]["checksum"], "verified-checksum")
         self.assertEqual(buying.result("123")["total"], 1900)
+
+    def test_exact_search_budget_is_allowed_regardless_of_old_global_caps(self):
+        self.final = checkout("20.00")
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_buyer SET max_total=100,max_extra=0")
+        self.assertEqual(self.run_buy()["state"], "paid")
+        self.assertEqual(len(self.payments()), 1)
+
+    def test_missing_budget_or_inactive_search_cannot_prepare_checkout(self):
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("DELETE FROM vinted_search_budgets")
+        with self.assertRaisesRegex(buyer.BuyerError, "maximum total"):
+            self.run_buy()
+        self.client.request.assert_not_called()
+        self.row["query_id"] = None
+        with self.assertRaisesRegex(buyer.BuyerError, "no longer active"):
+            self.run_buy()
+        self.client.request.assert_not_called()
+
+    def test_current_budget_rechecked_after_checkout_and_before_any_payment(self):
+        response = self.client.request.side_effect
+
+        def lower_budget(method, path, body=None):
+            data = response(method, path, body)
+            if method == "PUT":
+                with closing(search_settings.connection()) as conn, conn:
+                    conn.execute(
+                        "UPDATE vinted_search_budgets SET max_total=1800 WHERE query_id=1"
+                    )
+            return data
+
+        self.client.request.side_effect = lower_budget
+        outcome = self.run_buy()
+        self.assertEqual(outcome["state"], "failed_before_payment")
+        self.assertIn("£18.00", outcome["message"])
+        self.assertEqual(self.payments(), [])
+
+    def test_deleted_or_paused_search_during_checkout_cannot_pay(self):
+        response = self.client.request.side_effect
+        for mutation in (
+            "INSERT OR REPLACE INTO search_dashboard(query_id,paused) VALUES (1,1)",
+            "DELETE FROM queries WHERE id=1",
+        ):
+            with self.subTest(mutation=mutation):
+                with closing(search_settings.connection()) as conn, conn:
+                    conn.execute("DELETE FROM search_dashboard WHERE query_id=1")
+
+                def change_search(method, path, body=None, mutation=mutation):
+                    data = response(method, path, body)
+                    if method == "PUT":
+                        with closing(search_settings.connection()) as conn, conn:
+                            conn.execute(mutation)
+                    return data
+
+                self.client.request.side_effect = change_search
+                self.assertEqual(self.run_buy()["state"], "failed_before_payment")
+                self.assertEqual(self.payments(), [])
+
+    def test_new_buyer_settings_need_no_global_caps_and_dont_buy(self):
+        buyer.save_limits(
+            {"buyer_enabled": "yes", "buyer_browser_info": json.dumps(DEVICE)}
+        )
+        self.assertTrue(buyer.settings()["enabled"])
+        self.client.request.assert_not_called()
+        with self.assertRaises(buyer.BuyerError):
+            buyer.save_limits({"buyer_enabled": "yes", "buyer_browser_info": "{}"})
 
     def test_payment_timeout_remains_unknown_across_repeated_taps(self):
         self.payment = buyer.BuyerError("Connection timeout")
