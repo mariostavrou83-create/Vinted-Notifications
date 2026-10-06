@@ -28,6 +28,9 @@ telegram_process = None
 rss_process = None
 ebay_worker_process = None
 scrape_process = None
+item_extractor_process = None
+dispatcher_process = None
+web_ui_process_instance = None
 current_query_refresh_delay = None
 
 
@@ -128,8 +131,31 @@ def check_refresh_delay(items_queue):
         logger.exception("Error updating refresh delay")
 
 
-def monitor_processes(items_queue, telegram_queue, rss_queue):
+def monitor_processes(items_queue, telegram_queue, rss_queue, new_items_queue=None):
     global telegram_process, rss_process, ebay_worker_process
+    global scrape_process, item_extractor_process, dispatcher_process, web_ui_process_instance
+
+    if new_items_queue is not None:
+        from process_watchdog import ensure_running
+
+        scrape_process = ensure_running(
+            scrape_process, scraper_process, (items_queue,), name="vinted-poller"
+        )
+        item_extractor_process = ensure_running(
+            item_extractor_process,
+            item_extractor,
+            (items_queue, new_items_queue),
+            name="item-extractor",
+        )
+        dispatcher_process = ensure_running(
+            dispatcher_process,
+            dispatcher_function,
+            (new_items_queue, rss_queue, telegram_queue),
+            name="dispatcher",
+        )
+        web_ui_process_instance = ensure_running(
+            web_ui_process_instance, web_ui_process, name="dashboard"
+        )
 
     if ebay_worker_process is None or not ebay_worker_process.is_alive():
         from ebay_monitor import ebay_process
@@ -230,10 +256,12 @@ if __name__ == "__main__":
     plugin_checker()
 
     # Create a shared queue
-    items_queue = multiprocessing.Queue()
-    new_items_queue = multiprocessing.Queue()
-    rss_queue = multiprocessing.Queue()
-    telegram_queue = multiprocessing.Queue()
+    # Apply backpressure if extraction slows; never accumulate an unlimited
+    # number of complete catalogue responses as more searches are added.
+    items_queue = multiprocessing.Queue(maxsize=64)
+    new_items_queue = multiprocessing.Queue(maxsize=128)
+    rss_queue = multiprocessing.Queue(maxsize=128)
+    telegram_queue = multiprocessing.Queue(maxsize=128)
 
     # 1. Create and start the scrape process
     # This process will scrape items and put them in the items_queue
@@ -269,7 +297,7 @@ if __name__ == "__main__":
         monitor_processes,
         "interval",
         seconds=5,
-        args=[items_queue, telegram_queue, rss_queue],
+        args=[items_queue, telegram_queue, rss_queue, new_items_queue],
         name="process_monitor",
     )
     monitor_scheduler.start()
@@ -280,17 +308,9 @@ if __name__ == "__main__":
     web_ui_process_instance.start()
 
     try:
-        # Wait for processes to finish (which they won't unless interrupted)
-        scrape_process.join()
-        item_extractor_process.join()
-        dispatcher_process.join()
-        web_ui_process_instance.join()
-
-        # plugins
-        if telegram_process:
-            telegram_process.join()
-        if rss_process:
-            rss_process.join()
+        # Workers can be replaced by the watchdog; do not join obsolete handles.
+        while True:
+            time.sleep(5)
     except KeyboardInterrupt:
         # Handle Ctrl+C gracefully
         logger.info("Main process interrupted")

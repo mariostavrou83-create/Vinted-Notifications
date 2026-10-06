@@ -436,9 +436,12 @@ async def preview_and_enable(query_id, *, photo_first=False, phone_mode=None):
             async def ready():
                 pass
 
-            await photo_cards.send_initial(
+            first = await photo_cards.send_initial(
                 bot, chat_id, row, details, ready, require_photo=True
             )
+            row["telegram_message_id"] = first.message_id
+            await asyncio.sleep(1.1)
+            await photo_cards.enrich(bot, chat_id, row, details, ready)
         photo_cards.enable()
         return {
             "photo_count": len(details["photos"]),

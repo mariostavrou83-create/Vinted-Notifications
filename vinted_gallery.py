@@ -221,11 +221,14 @@ async def resolve(row, details, *, persist=True, include_description=False):
     ):
         return details.get("photos", [])
     existing = distinct_photos(details.get("photos", []))
-    if include_description and not details.get("description"):
+    if include_description and (
+        not details.get("description")
+        or (len(existing) < 4 and not details.get("gallery_checked"))
+    ):
         data = await asyncio.to_thread(fetch_listing, row["url"])
         photos, state = distinct_photos(data["photos"] + existing), data["state"]
         details.update(
-            description=data["description"],
+            description=data["description"] or details.get("description", ""),
             description_checked=True,
             description_state=state,
         )

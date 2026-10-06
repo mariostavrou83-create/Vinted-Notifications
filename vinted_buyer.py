@@ -8,7 +8,7 @@ import re
 import time
 from contextlib import closing, contextmanager
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import requests
 from cryptography.fernet import Fernet, InvalidToken
@@ -32,6 +32,9 @@ AUTH_REASONS = {
     "forbidden": "Vinted refused the request (HTTP 403), without a recognised reason. This does not establish whether your password is correct.",
     "rate_limited": "Vinted requested a cooldown. Wait before trying again.",
     "unreadable": "Vinted returned a response the bot could not read.",
+    "session_refresh": "Vinted requested renewal of the saved buyer session.",
+    "signin_redirect": "Vinted redirected this session to sign-in. Reconnect your buyer account.",
+    "redirect": "Vinted redirected this account request instead of confirming it. The bot stopped without following the redirect.",
     "network": "Vinted did not confirm this request. Check your account before retrying.",
     "http_error": "Vinted did not accept this request.",
     "not_confirmed": "Vinted has not confirmed the buyer connection.",
@@ -106,8 +109,11 @@ def response_error(response, data, stage):
             data.get(key) for key in ("error", "error_code", "code", "message_code")
         ]
     codes = {value.lower() for value in values if isinstance(value, str)}
-    if security_challenge(response, data):
+    redirect = redirect_reason(response)
+    if security_challenge(response, data) or redirect == "security_challenge":
         reason = "security_challenge"
+    elif redirect:
+        reason = redirect
     elif status == 429:
         reason = "rate_limited"
     elif codes & {"invalid_csrf_token", "csrf_token_invalid", "csrf_error"}:
@@ -133,6 +139,39 @@ def response_error(response, data, stage):
     else:
         reason = "http_error"
     return BuyerError(AUTH_REASONS[reason], status, reason=reason, stage=stage)
+
+
+def redirect_reason(response):
+    """Classify the official redirect without exposing its URL or following it."""
+    if response.status_code not in (301, 302, 303, 307, 308):
+        return None
+    headers = getattr(response, "headers", {})
+    location = headers.get("Location", "")
+    if not isinstance(location, str) or len(location) > 4096:
+        return "redirect"
+    try:
+        target = urlsplit(urljoin(BASE, location))
+        host = target.hostname or ""
+        if host == "captcha-delivery.com" or host.endswith(".captcha-delivery.com"):
+            return "security_challenge"
+        if (
+            target.scheme != "https"
+            or target.netloc != "www.vinted.co.uk"
+            or target.username
+            or target.password
+        ):
+            return "redirect"
+        if target.path.rstrip("/") == "/web/api/auth/refresh":
+            return "session_refresh"
+        if target.path.rstrip("/") in (
+            "/member/login",
+            "/login",
+            "/web/api/auth/login",
+        ):
+            return "signin_redirect"
+    except ValueError:
+        pass
+    return "redirect"
 
 
 def record_auth(reason, stage="sign_in", status=None):
@@ -533,7 +572,8 @@ def connected_client():
             user_id, _ = client.identity()
         except BuyerError as exc:
             refresh = saved.get("cookies", {}).get("refresh_token_web")
-            if exc.status != 401 or not refresh:
+            expired = exc.status == 401 and exc.reason == "credentials"
+            if not (expired or exc.reason == "session_refresh") or not refresh:
                 raise
             client.request(
                 "POST",
@@ -555,10 +595,33 @@ def connected_client():
                 "UPDATE vinted_buyer SET session=?,verified_at=? WHERE id=1",
                 (encrypt(client.exported()), time.time()),
             )
+        record_auth("connected", "identity", 200)
         return client
-    except BuyerError:
+    except BuyerError as exc:
+        record_auth(exc.reason, exc.stage, exc.status)
         client.session.close()
         raise
+
+
+def check_saved_connection():
+    """Owner-requested identity check; never creates a checkout or payment."""
+    with exclusive():
+        with closing(connection()) as conn, conn:
+            last = conn.execute(
+                "SELECT last_probe FROM vinted_buyer_access WHERE id=1"
+            ).fetchone()[0]
+            if time.time() - last < 30:
+                raise BuyerError(
+                    "Wait 30 seconds before checking this connection again."
+                )
+            conn.execute(
+                "UPDATE vinted_buyer_access SET last_probe=? WHERE id=1", (time.time(),)
+            )
+        client = connected_client()
+        client.session.close()
+    return (
+        "Vinted verified your saved buyer session. No checkout or payment was created."
+    )
 
 
 def save_limits(form):

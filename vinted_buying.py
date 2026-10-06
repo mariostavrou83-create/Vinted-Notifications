@@ -29,7 +29,11 @@ def cents(value):
         raise buyer.BuyerError("Autobuy stopped: Vinted did not confirm a GBP price.")
     try:
         amount = Decimal(str(value.get("amount", value.get("value"))))
-        if not amount.is_finite() or amount < 0 or amount.as_tuple().exponent < -2:
+        if (
+            not amount.is_finite()
+            or not 0 <= amount <= 1000000
+            or amount.as_tuple().exponent < -2
+        ):
             raise ValueError
         return int(amount * 100)
     except (InvalidOperation, ValueError, TypeError):
@@ -92,6 +96,15 @@ def checkout_prices(checkout, item_price, maximum):
         raise buyer.BuyerError(
             "Autobuy stopped: Vinted's checkout total could not be verified."
         )
+    subtotal_part = summary.get("subtotal") or {}
+    subtotal = cents(
+        subtotal_part.get("price") if isinstance(subtotal_part, dict) else None
+    )
+    if subtotal > item_price:
+        raise buyer.BuyerError(
+            f"The item price changed during checkout to £{subtotal/100:.2f}. No payment was sent.",
+            reason="price_increased",
+        )
     if total > maximum:
         raise buyer.BuyerError(
             f"Over budget: £{total/100:.2f} including fees and delivery; this search's maximum total is £{maximum/100:.2f}. No payment was sent.",
@@ -110,7 +123,12 @@ def checkout_prices(checkout, item_price, maximum):
     options = components.get("shipping_pickup_options") or {}
     # Use the account's existing delivery choice only. Never invent a pickup
     # point, pick a different address, or purchase an optional add-on.
-    if not shipping or not options.get("selected_pickup_option"):
+    if (
+        not shipping
+        or shipping.get("errors")
+        or options.get("errors")
+        or not options.get("selected_pickup_option")
+    ):
         raise buyer.BuyerError("Choose and save your delivery option in Vinted first.")
     return total
 

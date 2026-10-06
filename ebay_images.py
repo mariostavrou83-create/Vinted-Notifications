@@ -22,6 +22,8 @@ def extract(raw):
     primary = url(raw.get("image"))
     extras = raw.get("additionalImages") or []
     thumbnails = raw.get("thumbnailImages") or []
+    extras = extras if isinstance(extras, list) else []
+    thumbnails = thumbnails if isinstance(thumbnails, list) else []
     candidates = [primary] + [url(p) for p in extras[:20]]
     photos = list(
         dict.fromkeys(p for p in candidates if alert_images.safe_listing_photo(p))
