@@ -2,12 +2,14 @@
 <h2>Vinted buyer &amp; Autobuy</h2>
 <p>Tap <b>Autobuy</b> on a Vinted alert to buy and pay using your saved Vinted delivery and payment choices. It only runs when you tap; finding a listing never purchases it automatically.</p>
 <p>Connection: <b>{{buyer.username if buyer.connected else 'Not connected'}}</b> · Autobuy <b>{{'on' if buyer.enabled else 'off'}}</b>.</p>
+{% if buyer.access.message %}<div class="guide-section" role="status"><b>Last connection result</b><p>{{buyer.access.message}}</p><small>{{buyer.access.stage}}{% if buyer.access.http_status %} · HTTP {{buyer.access.http_status}}{% endif %}</small></div>{% endif %}
 {% if not buyer.connected %}
-<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="buyer_check">Check Vinted sign-in access</button></form>
+<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="buyer_check">Diagnose Vinted sign-in access</button><p><small>Checks the sign-in connection once without sending your email or password. This does not sign in or buy anything.</small></p></form>
 <form method="post" autocomplete="on"><input type="hidden" name="csrf" value="{{csrf}}">
 <label for="buyer_email">Vinted email</label><input id="buyer_email" name="buyer_email" type="email" autocomplete="username" maxlength="254" required>
 <label for="buyer_password">Vinted password</label><input id="buyer_password" name="buyer_password" type="password" autocomplete="current-password" maxlength="1024" required>
 <p><small>These sign-in details are sent to Vinted by your private bot. Your password is never saved. The returned account session is encrypted. Use Vinted email/password sign-in; a Google or Apple sign-in cannot be completed in this form.</small></p>
+<p><small>If you normally use Google, use Vinted's “Forgotten your password?” option with the same email to create a Vinted password. Never enter your Google password here.</small></p>
 <button class="primary" name="action" value="buyer_login">Connect Vinted buyer</button></form>
 {% endif %}
 {% if buyer.pending_code %}<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><label for="buyer_code">Vinted verification code</label><input id="buyer_code" name="buyer_code" autocomplete="one-time-code" maxlength="12" required><button class="primary" name="action" value="buyer_verify">Verify buyer account</button></form>{% endif %}

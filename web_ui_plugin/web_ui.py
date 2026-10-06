@@ -545,6 +545,9 @@ def create_app(test_config=None):
                 return redirect(url_for("connections"))
             except ValueError as exc:
                 flash(str(exc), "error")
+                if action.startswith("buyer_"):
+                    # Refreshing an error page must never resubmit credentials.
+                    return redirect(url_for("connections"), code=303)
         return render_template(
             "msj_connections.html",
             info=ebay_store.connection_summary(),

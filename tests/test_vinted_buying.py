@@ -269,6 +269,110 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         self.assertNotIn("password-secret", str(error.exception))
         client.session.close()
 
+    def test_failure_diagnostics_distinguish_explicit_challenge_from_bare_403(self):
+        cases = (
+            (
+                {
+                    "url": "https://geo.captcha-delivery.com/captcha/?secret=private-token"
+                },
+                "security_challenge",
+            ),
+            ({"error": "invalid_csrf_token"}, "csrf"),
+            ({"error": "account_blocked"}, "account_restricted"),
+            ({"error": "unrecognised", "password": "private-password"}, "forbidden"),
+        )
+        for data, expected in cases:
+            with self.subTest(reason=expected):
+                response = Mock(status_code=403, text="", json=Mock(return_value=data))
+                client = buyer.Client()
+                with patch.object(
+                    client.session, "request", return_value=response
+                ) as request, self.assertRaises(buyer.BuyerError) as error:
+                    client.request("POST", "/web/api/auth/oauth", {})
+                self.assertEqual(error.exception.reason, expected)
+                self.assertEqual(error.exception.status, 403)
+                self.assertEqual(error.exception.stage, "sign_in")
+                self.assertNotIn("private", str(error.exception))
+                request.assert_called_once()
+                client.session.close()
+
+    def test_diagnosis_uses_one_empty_request_and_persists_challenge_without_secrets(
+        self,
+    ):
+        response = Mock(
+            status_code=403,
+            text="",
+            json=Mock(
+                return_value={
+                    "url": "https://geo.captcha-delivery.com/captcha/?secret=do-not-store",
+                }
+            ),
+        )
+        with patch.object(buyer.Client, "homepage"), patch.object(
+            requests.Session, "request", return_value=response
+        ) as request, self.assertRaises(buyer.BuyerError):
+            buyer.check_signin()
+        self.assertEqual(request.call_count, 1)
+        sent = request.call_args.kwargs["json"]
+        self.assertEqual(sent["username"], "")
+        self.assertEqual(sent["password"], "")
+        access = buyer.settings()["access"]
+        self.assertEqual(access["stage"], "Vinted sign-in endpoint")
+        self.assertEqual(access["http_status"], 403)
+        self.assertIn("security check", access["message"])
+        self.assertNotIn(b"do-not-store", Path(db.DB_PATH).read_bytes())
+        with patch.object(buyer.Client, "homepage") as homepage, self.assertRaises(
+            buyer.BuyerError
+        ):
+            buyer.check_signin()
+        homepage.assert_not_called()
+
+    def test_homepage_success_never_reports_buyer_connected(self):
+        for code in (400, 401, 422):
+            with closing(search_settings.connection()) as conn, conn:
+                conn.execute("UPDATE vinted_buyer_access SET last_probe=0")
+            with patch.object(buyer.Client, "homepage"), patch.object(
+                buyer.Client,
+                "request",
+                side_effect=buyer.BuyerError(
+                    "Validation failed", code, reason="http_error", stage="sign_in"
+                ),
+            ):
+                message = buyer.check_signin()
+            self.assertIn("have not been tested", message)
+        self.assertNotIn("connected", buyer.settings()["access"]["message"])
+
+    def test_signin_failure_is_persistent_and_never_logs_credentials(self):
+        with patch.object(buyer.Client, "homepage"), patch.object(
+            buyer.Client,
+            "request",
+            side_effect=buyer.BuyerError(
+                "Refused", 403, reason="forbidden", stage="sign_in"
+            ),
+        ), self.assertLogs("vinted_buyer", level="INFO") as logs, self.assertRaises(
+            buyer.BuyerError
+        ):
+            buyer.start_login("owner@example.test", "private-password")
+        self.assertIn("reason=forbidden", " ".join(logs.output))
+        self.assertNotIn("private-password", " ".join(logs.output))
+        self.assertNotIn("owner@example.test", " ".join(logs.output))
+        self.assertFalse(buyer.settings()["enabled"])
+        self.assertEqual(buyer.settings()["access"]["http_status"], 403)
+
+    def test_malformed_verification_payload_stops_without_crashing_or_retrying(self):
+        client = buyer.Client()
+        response = Mock(
+            status_code=401,
+            text="",
+            json=Mock(return_value={"payload": ["unexpected"]}),
+        )
+        with patch.object(
+            client.session, "request", return_value=response
+        ) as request, self.assertRaises(buyer.BuyerError):
+            client.request("POST", "/web/api/auth/oauth", {}, allow_challenge=True)
+        request.assert_called_once()
+        client.session.close()
+
 
 class BuyerDashboardTests(DatabaseFixture, unittest.TestCase):
     owner = test_dashboard.DashboardTests.owner
@@ -303,5 +407,8 @@ class BuyerDashboardTests(DatabaseFixture, unittest.TestCase):
                 },
             )
         login.assert_called_once_with("owner@example.test", "private-password")
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["Location"], "/connections")
+        response = self.client.get("/connections")
         self.assertNotIn(b"private-password", response.data)
         self.assertIn(b"Vinted requires verification", response.data)
