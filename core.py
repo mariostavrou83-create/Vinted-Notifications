@@ -388,6 +388,13 @@ def clear_item_queue(items_queue, new_items_queue):
                 )
                 continue
 
+            import vinted_budget
+
+            budget = vinted_budget.estimate(item, search)
+            if budget and not budget["within_budget"]:
+                filtered_ids.append(item.id)
+                continue
+
             # The watermark is only meaningful when the API actually supplied a
             # listing time. Otherwise raw_timestamp is merely when we saw the item,
             # and comparing it against the watermark would discard every new item.
@@ -505,7 +512,9 @@ def format_alert(item, search, message_template, details=None):
 
     from vinted_alerts import enabled, fast_text
 
-    if details["single_message"] if details is not None else enabled():
+    if (details["single_message"] if details is not None else enabled()) or search.get(
+        "vinted_max_total"
+    ) is not None:
         return fast_text(item, search, details)
     keyword = parse_qs(urlparse(search["query"]).query).get("search_text", [""])[0]
     name = search["query_name"] or keyword or "Filtered search"

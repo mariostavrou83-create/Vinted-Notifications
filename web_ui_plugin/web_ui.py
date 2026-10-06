@@ -338,6 +338,8 @@ def create_app(test_config=None):
                 "max_buy": None,
                 "resale_low": None,
                 "resale_high": None,
+                "vinted_max_total": None,
+                "vinted_postage_estimate": 350,
                 "must_have": "",
                 "folder_id": None,
             }
@@ -346,7 +348,13 @@ def create_app(test_config=None):
             row.update(ebay_store.platform_details(None))
         prices = {
             key: "" if row[key] is None else f"{row[key]/100:.2f}"
-            for key in ("max_buy", "resale_low", "resale_high")
+            for key in (
+                "max_buy",
+                "resale_low",
+                "resale_high",
+                "vinted_max_total",
+                "vinted_postage_estimate",
+            )
         }
         if request.method == "POST":
             try:
@@ -540,7 +548,7 @@ def create_app(test_config=None):
                 elif action == "buyer_limits":
                     vinted_buyer.save_limits(request.form)
                     flash(
-                        "Buyer limits saved. Autobuy purchases only when you tap its button.",
+                        "Buyer settings saved. Autobuy uses each search's maximum total and purchases only when you tap its button.",
                         "success",
                     )
                 elif action == "buyer_disconnect":

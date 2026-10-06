@@ -31,13 +31,13 @@
 {% if buyer.pending_code %}<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><label for="buyer_code">Vinted verification code</label><input id="buyer_code" name="buyer_code" autocomplete="one-time-code" maxlength="12" required><button class="primary" name="action" value="buyer_verify">Verify buyer account</button></form>{% endif %}
 {% if buyer.connected %}
 <form method="post" data-buyer-settings><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="buyer_browser_info" data-buyer-browser value="">
-<label for="buyer_max_total">Maximum complete checkout (£)</label><input id="buyer_max_total" name="buyer_max_total" type="number" min="1" max="1000" step="0.01" value="{{'%.2f' % (buyer.max_total/100) if buyer.max_total else ''}}" required><small>Includes the item, delivery and Vinted fees. The item price must also be no higher than the price in your alert.</small>
-<label for="buyer_max_extra">Maximum delivery and fees combined (£)</label><input id="buyer_max_extra" name="buyer_max_extra" type="number" min="0" max="1000" step="0.01" value="{{'%.2f' % (buyer.max_extra/100) if buyer.max_extra else ''}}" required>
-<label class="checkbox"><input type="checkbox" name="buyer_enabled" value="yes" {{'checked' if buyer.enabled}}> Enable payment when I tap Autobuy, within these limits</label>
+<p><b>Your spending limit is set on each search.</b> Open a search and set “Maximum total including fees &amp; postage”. Different searches can have different budgets. A search without a budget cannot use Autobuy. <a href="/">Edit your searches →</a></p>
+<p><small>The actual checkout total must fit that search’s current budget, including the item, delivery and Vinted fees. The item price must also be no higher than the price in your alert. Paused, archived or deleted searches cannot buy.</small></p>
+<label class="checkbox"><input type="checkbox" name="buyer_enabled" value="yes" {{'checked' if buyer.enabled}}> Enable payment when I tap Autobuy, within that search’s total budget</label>
 <p><small>Set your address, delivery choice and payment method in Vinted first. A bank may still require confirmation. If the final total or delivery choice cannot be verified, the bot stops before paying. An uncertain payment is never automatically retried.</small></p>
-<button class="primary" name="action" value="buyer_limits">Save buyer limits</button></form>
+<button class="primary" name="action" value="buyer_limits">Save buyer settings</button></form>
 <form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="buyer_disconnect">Disconnect Vinted buyer</button></form>
 {% endif %}
-<p><small>Buyer sign-in and checkout still need verification with your account. If Vinted asks this server to complete a security check, the connection stops. Nothing is charged by connecting or saving these settings.</small></p>
+<p><small>Live checkout still needs verification with your account. If Vinted asks this server to complete a security check, the connection stops. Nothing is charged by connecting or saving these settings.</small></p>
 {% if buying %}<h3>Recent purchase attempts</h3>{% for attempt in buying %}<div class="guide-section"><b>{{attempt.title or ('Item '+attempt.item_id)}}</b><p>{{attempt.message}}</p>{% if attempt.url %}<a href="{{attempt.url}}" target="_blank" rel="noopener noreferrer">Open Vinted listing ↗</a>{% endif %}</div>{% endfor %}{% endif %}
 </section>

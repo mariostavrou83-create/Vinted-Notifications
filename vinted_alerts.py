@@ -13,6 +13,7 @@ import alert_images
 import dashboard_store
 import db
 import photo_cards
+import vinted_budget
 import vinted_gallery
 import vinted_native
 from search_settings import connection
@@ -28,7 +29,7 @@ def enabled():
 def snapshot(item, search):
     keyword = parse_qs(urlparse(search["query"]).query).get("search_text", [""])[0]
     guide = []
-    if search.get("max_buy") is not None:
+    if search.get("max_buy") is not None and search.get("vinted_max_total") is None:
         guide.append(f"Buy up to <b>£{search['max_buy']/100:.2f}</b>")
     low, high = search.get("resale_low"), search.get("resale_high")
     if low is not None or high is not None:
@@ -50,6 +51,7 @@ def snapshot(item, search):
         "photos": alert_images.photo_urls(item),
         "guide": "\n".join(guide),
         "reminder": escape((search.get("reminder") or "")[:800]),
+        "budget": vinted_budget.estimate(item, search),
     }
 
 
@@ -72,6 +74,8 @@ def sections(row, details):
         listing += "\nPostage: " + (
             f"£{shipping / 100:.2f}" if shipping is not None else "check listing"
         )
+    else:
+        listing += vinted_budget.alert_lines(details.get("budget"))
     guide = (
         "💷 <b>Your buying guide</b>\n" + details["guide"]
         if details.get("guide")
