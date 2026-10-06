@@ -339,7 +339,7 @@ def create_app(test_config=None):
                 "resale_low": None,
                 "resale_high": None,
                 "vinted_max_total": None,
-                "vinted_postage_estimate": 350,
+                "vinted_postage_estimate": 220,
                 "must_have": "",
                 "folder_id": None,
             }

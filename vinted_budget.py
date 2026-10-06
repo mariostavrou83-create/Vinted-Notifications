@@ -3,7 +3,7 @@
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
-DEFAULT_POSTAGE = 350  # An editable planning estimate, never a shipping quote.
+DEFAULT_POSTAGE = 220  # An editable planning estimate, never a shipping quote.
 
 
 def migrate(conn):
@@ -13,7 +13,7 @@ def migrate(conn):
     conn.execute("""CREATE TABLE IF NOT EXISTS vinted_search_budgets (
         query_id INTEGER PRIMARY KEY REFERENCES queries(id) ON DELETE CASCADE,
         max_total INTEGER CHECK(max_total BETWEEN 100 AND 100000),
-        postage_estimate INTEGER NOT NULL DEFAULT 350
+        postage_estimate INTEGER NOT NULL DEFAULT 220
             CHECK(postage_estimate BETWEEN 0 AND 10000))""")
     if not exists:
         # Switching from global caps to search budgets needs the owner's new
@@ -46,7 +46,7 @@ def parse_form(form, previous):
     raw = form.get("vinted_max_total", "").strip()
     maximum = parse_amount(raw, 1, 1000, "Vinted maximum total") if raw else None
     postage = parse_amount(
-        form.get("vinted_postage_estimate", "3.50"), 0, 100, "Estimated postage"
+        form.get("vinted_postage_estimate", "2.20"), 0, 100, "Estimated postage"
     )
     if maximum is not None and postage >= maximum:
         raise ValueError("Estimated postage must be below your Vinted maximum total.")
@@ -88,11 +88,16 @@ def money(value):
         return None
 
 
-def estimate(item, search):
+def estimate(item, search, *, display=False):
     maximum = search.get("vinted_max_total")
-    if maximum is None:
+    if maximum is None and not display:
         return None
-    price = money({"amount": item.price, "currency_code": item.currency})
+    price = money(
+        {
+            "amount": getattr(item, "price", None),
+            "currency_code": getattr(item, "currency", None),
+        }
+    )
     if price is None:
         return {"max_total": maximum, "total": None, "within_budget": False}
     raw = getattr(item, "raw_data", None) or {}
@@ -119,25 +124,16 @@ def estimate(item, search):
         "buyer_protection_estimated": not supplied_fee,
         "postage_estimate": postage,
         "total": total,
-        "within_budget": total <= maximum,
+        "within_budget": maximum is None or total <= maximum,
     }
 
 
 def alert_lines(budget):
     if not budget:
         return ""
-    maximum = f"Search budget: <b>£{budget['max_total']/100:.2f} total</b>"
     if budget.get("total") is None:
-        return "\nTotal unavailable · checkout must confirm\n" + maximum
-    fee_label = (
-        "est. protection" if budget["buyer_protection_estimated"] else "protection"
-    )
-    return (
-        f"\nEstimated total: <b>£{budget['total']/100:.2f}</b>"
-        f"\nIncludes £{budget['buyer_protection']/100:.2f} {fee_label}"
-        f" + £{budget['postage_estimate']/100:.2f} est. postage"
-        f"\n{maximum}"
-    )
+        return " · Total unavailable"
+    return f" · Est. total: <b>£{budget['total']/100:.2f}</b> (fees + delivery)"
 
 
 def payment_limit(row):
@@ -151,10 +147,14 @@ def payment_limit(row):
         or search.get("archived")
         or not search.get("vinted_enabled", True)
     ):
-        raise BuyerError("Autobuy stopped: this Vinted search is no longer active.")
+        raise BuyerError(
+            "Autobuy stopped: this Vinted search is no longer active.",
+            reason="search_inactive",
+        )
     maximum = search.get("vinted_max_total")
     if maximum is None or not 100 <= maximum <= 100000:
         raise BuyerError(
-            f"Set a Vinted maximum total on search #{search['id']} before using Autobuy."
+            f"Search #{search['id']} has no maximum total saved. Set its budget including fees and delivery. The price filter in a Vinted URL is only the item price.",
+            reason="budget_missing",
         )
     return maximum

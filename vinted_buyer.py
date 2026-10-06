@@ -31,12 +31,12 @@ AUTH_REASONS = {
     "account_restricted": "Vinted reports an account restriction. Check the account on Vinted before trying to connect it.",
     "forbidden": "Vinted refused the request (HTTP 403), without a recognised reason. This does not establish whether your password is correct.",
     "rate_limited": "Vinted requested a cooldown. Wait before trying again.",
-    "unreadable": "Vinted returned an unreadable response. The account connection has not been verified.",
+    "unreadable": "Vinted returned a response the bot could not read.",
     "network": "Vinted did not confirm this request. Check your account before retrying.",
     "http_error": "Vinted did not accept this request.",
     "not_confirmed": "Vinted has not confirmed the buyer connection.",
     "endpoint_reached": "The sign-in endpoint accepted the connection and rejected the empty diagnostic request. Your account and password have not been tested.",
-    "connected": "Vinted verified the buyer account. Autobuy remains off until enabled with spending limits.",
+    "connected": "Vinted verified the buyer account.",
     "verification_code": "Vinted sent a sign-in code. Enter it in the verification box below.",
 }
 

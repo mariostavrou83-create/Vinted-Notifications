@@ -251,6 +251,38 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
             self.assertEqual(self.run_buy()["state"], "failed_before_payment")
         self.assertEqual(self.payments(), [])
 
+    def test_sold_reserved_and_closed_report_the_actual_reason(self):
+        original = copy.deepcopy(self.item)
+        for flag, reason, message in (
+            ("is_sold", "item_sold", "already sold"),
+            ("is_reserved", "item_reserved", "reserved"),
+            ("is_closed", "item_closed", "closed or removed"),
+        ):
+            self.item = {"item": dict(original["item"], **{flag: True})}
+            result = self.run_buy()
+            self.assertEqual(result["reason"], reason)
+            self.assertIn(message, result["message"])
+        self.assertEqual(self.payments(), [])
+
+    def test_unreadable_response_reports_phase_and_http_without_secrets(self):
+        self.client.request.side_effect = buyer.BuyerError(
+            buyer.AUTH_REASONS["unreadable"], 404, reason="unreadable"
+        )
+        result = self.run_buy()
+        self.assertEqual(result["state"], "failed_before_payment")
+        self.assertIn("checking the listing (HTTP 404)", result["message"])
+        self.assertIn("No payment was sent", result["message"])
+        self.assertNotIn("account connection has not been verified", result["message"])
+        self.assertEqual(self.payments(), [])
+
+    def test_over_budget_lists_total_with_fees_and_cap(self):
+        self.final = checkout("22.20")
+        result = self.run_buy()
+        self.assertEqual(result["reason"], "total_over_budget")
+        self.assertIn("£22.20 including fees and delivery", result["message"])
+        self.assertIn("£20.00", result["message"])
+        self.assertEqual(self.payments(), [])
+
     def test_autobuy_off_does_not_make_vinted_requests(self):
         with closing(search_settings.connection()) as conn, conn:
             conn.execute("UPDATE vinted_buyer SET enabled=0")

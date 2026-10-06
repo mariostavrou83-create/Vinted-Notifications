@@ -51,6 +51,7 @@ def snapshot(item, search):
         auction=item["auction"],
         shipping=item["shipping"],
         brand_label=item.get("brand_label", "Brand"),
+        description=item.get("description", ""),
     )
     return details
 
