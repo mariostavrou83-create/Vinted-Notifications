@@ -69,23 +69,33 @@ def test_connection(kind):
             )
         if not config["client_id"] or not config["client_secret"]:
             raise ValueError("Save your production eBay App ID and Cert ID first.")
-        wait = reserve_call(config, time.time())
+        wait = reserve_call(config, time.time(), diagnostic=True)
         if wait:
             raise ValueError(
                 f"The next eBay request slot is in {max(1, int(wait - time.time()))} seconds. Try again then."
             )
+        client = None
         try:
             client = BrowseClient(config)
             client.search(dict(DEFAULTS, keywords="hollister"))
-        except EbayError as exc:
-            raise ValueError(str(exc)) from None
-        from ebay_quota import check_allowance
+            from ebay_quota import check_allowance
 
-        allowance = check_allowance(client, config)
-        return (
-            "eBay production search succeeded. No listing alerts were sent by this check. "
-            + allowance
-        )
+            allowance = check_allowance(client, config)
+            return (
+                "eBay production search succeeded. No listing alerts were sent by this check. "
+                + allowance
+            )
+        except EbayError as exc:
+            if exc.global_cooldown:
+                with closing(connection()) as conn, conn:
+                    conn.execute(
+                        "INSERT INTO delivery_runtime VALUES ('ebay_api_cooldown',?) ON CONFLICT(key) DO UPDATE SET value=MAX(value,excluded.value)",
+                        (time.time() + exc.retry_after,),
+                    )
+            raise ValueError(str(exc)) from None
+        finally:
+            if client:
+                client.session.close()
     raise ValueError("Unknown connection check.")
 
 

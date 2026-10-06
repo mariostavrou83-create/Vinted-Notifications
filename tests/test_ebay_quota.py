@@ -207,6 +207,44 @@ class QuotaTests(EbayFixture, unittest.TestCase):
             call.kwargs["headers"]["Authorization"], "Bearer private-token"
         )
         self.assertEqual(self.outbox(), [])
+        self.client.session.close.assert_called_once()
+
+    def test_access_check_gets_budgeted_diagnostic_slot_during_continuous_polling(self):
+        self.client.session.get.return_value.json.return_value = response_payload()
+        self.assertIsNone(ebay_store.reserve_call(self.config, 1000))
+        with patch.object(
+            ebay_connections.time, "time", return_value=1002
+        ), patch.object(ebay_connections, "BrowseClient", return_value=self.client):
+            self.assertIn(
+                "production search succeeded", ebay_connections.test_connection("ebay")
+            )
+            with self.assertRaisesRegex(ValueError, "request slot"):
+                ebay_connections.test_connection("ebay")
+        self.client.search.assert_called_once()
+        with closing(connection()) as conn:
+            self.assertEqual(
+                conn.execute("SELECT SUM(calls) FROM ebay_call_buckets").fetchone()[0],
+                2,
+            )
+        self.assertGreater(ebay_store.reserve_call(self.config, 1003), 1003)
+
+    def test_failed_diagnostic_closes_session_and_keeps_shared_api_cooldown(self):
+        self.client.search.side_effect = ebay_connections.EbayError(
+            "eBay asked for a cooldown", retry_after=120, global_cooldown=True
+        )
+        with patch.object(
+            ebay_connections.time, "time", return_value=1000
+        ), patch.object(
+            ebay_connections, "BrowseClient", return_value=self.client
+        ), self.assertRaisesRegex(
+            ValueError, "cooldown"
+        ):
+            ebay_connections.test_connection("ebay")
+        self.client.session.close.assert_called_once()
+        self.client.session.get.assert_not_called()
+        self.assertEqual(
+            ebay_store.reserve_call(self.config, 1040, diagnostic=True), 1120
+        )
 
 
 class QuotaDashboardTests(EbayFixture, unittest.TestCase):

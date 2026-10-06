@@ -374,6 +374,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         client = buyer.Client()
         cases = [
             ("/web/api/auth/refresh?secret=private", "session_refresh"),
+            ("/?secret=private", "home_redirect"),
             ("/member/login?secret=private", "signin_redirect"),
             (
                 "https://geo.captcha-delivery.com/captcha?secret=private",
@@ -382,6 +383,8 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
             ("https://evil.test/web/api/auth/refresh", "redirect"),
             ("https://www.vinted.co.uk@evil.test/", "redirect"),
             ("https://www.vinted.co.uk:443/web/api/auth/refresh", "redirect"),
+            ("", "redirect"),
+            ("/\r\nInjected: private", "redirect"),
         ]
         for location, reason in cases:
             response = Mock(
@@ -400,6 +403,153 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
             self.assertFalse(request.call_args.kwargs["allow_redirects"])
             request.assert_called_once()
         client.session.close()
+
+    def test_refresh_replaces_host_and_domain_tokens_without_duplicates(self):
+        old = "old-test-token-0123456789"
+        new_access = "new-access-token-0123456789"
+        new_refresh = "new-refresh-token-0123456789"
+        client = buyer.Client(
+            {"cookies": {"access_token_web": old, "refresh_token_web": old}}
+        )
+        returned = requests.cookies.RequestsCookieJar()
+        for name, value in (
+            ("access_token_web", new_access),
+            ("refresh_token_web", new_refresh),
+        ):
+            returned.set(name, value, domain=".vinted.co.uk", secure=True)
+            client.session.cookies.set(name, value, domain=".vinted.co.uk", secure=True)
+        response = Mock(
+            status_code=200, text="", cookies=returned, json=Mock(return_value={})
+        )
+        with patch.object(client.session, "request", return_value=response):
+            client.request("POST", "/web/api/auth/oauth", {})
+        self.assertEqual(
+            client.exported()["cookies"],
+            {"access_token_web": new_access, "refresh_token_web": new_refresh},
+        )
+        self.assertEqual(len(list(client.session.cookies)), 2)
+        self.assertEqual(
+            client.session.headers["Authorization"], "Bearer " + new_access
+        )
+        prepared = client.session.prepare_request(
+            requests.Request("GET", buyer.BASE + "/api/v2/users/current")
+        )
+        self.assertNotIn(old, prepared.headers["Cookie"])
+        self.assertEqual(prepared.headers["Cookie"].count("access_token_web="), 1)
+        client.session.close()
+
+    def test_json_refresh_tokens_are_validated_before_header_update(self):
+        old = "old-test-token-0123456789"
+        client = buyer.Client({"cookies": {"access_token_web": old}})
+        for invalid in (
+            "short",
+            "bad\r\nheader-value",
+            {"secret": "invalid"},
+            "x" * 8193,
+        ):
+            client.update_tokens(Mock(), {"access_token": invalid})
+            self.assertEqual(client.session.headers["Authorization"], "Bearer " + old)
+        new = "new-test-token-0123456789"
+        client.update_tokens(Mock(), {"access_token": new})
+        self.assertEqual(client.session.headers["Authorization"], "Bearer " + new)
+        client.session.close()
+
+    def test_homepage_follows_one_same_origin_canonical_redirect(self):
+        client = buyer.Client()
+        redirect = Mock(
+            status_code=307, headers={"Location": "/?locale=en-GB"}, text=""
+        )
+        final = Mock(status_code=200, text='{"CSRF_TOKEN":"test-csrf-0123456789"}')
+        with patch.object(client.session, "get", side_effect=[redirect, final]) as get:
+            client.homepage()
+        self.assertEqual(client.csrf, "test-csrf-0123456789")
+        self.assertEqual(get.call_count, 2)
+        self.assertEqual(get.call_args.args[0], buyer.BASE + "/?locale=en-GB")
+        self.assertTrue(
+            all(not c.kwargs["allow_redirects"] for c in get.call_args_list)
+        )
+        client.session.close()
+
+    def test_homepage_never_follows_challenges_external_hosts_or_redirect_loops(self):
+        client = buyer.Client()
+        for location, text, reason in (
+            ("https://evil.test/", "", "redirect"),
+            ("//www.vinted.co.uk@evil.test/", "", "redirect"),
+            ("/web/api/auth/refresh", "", "session_refresh"),
+            ("/member/login", "", "signin_redirect"),
+            ("/", "<html>Verify you are human</html>", "security_challenge"),
+            ("", "", "redirect"),
+        ):
+            response = Mock(status_code=307, headers={"Location": location}, text=text)
+            with patch.object(
+                client.session, "get", return_value=response
+            ) as get, self.assertRaises(buyer.BuyerError) as error:
+                client.homepage()
+            self.assertEqual(error.exception.reason, reason)
+            get.assert_called_once()
+        loop = Mock(status_code=307, headers={"Location": "/"}, text="")
+        with patch.object(
+            client.session, "get", return_value=loop
+        ) as get, self.assertRaises(buyer.BuyerError) as error:
+            client.homepage()
+        self.assertEqual(get.call_count, 2)
+        self.assertEqual(error.exception.reason, "home_redirect")
+        client.session.close()
+
+    def test_rotated_tokens_survive_later_failure_without_changing_permissions(self):
+        old_session = {
+            "cookies": {
+                "access_token_web": "old-access-token-0123456789",
+                "refresh_token_web": "old-refresh-token-0123456789",
+            }
+        }
+        rotated = {
+            "cookies": {
+                "access_token_web": "new-access-token-0123456789",
+                "refresh_token_web": "new-refresh-token-0123456789",
+            }
+        }
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE vinted_buyer SET session=?", (buyer.encrypt(old_session),)
+            )
+            before = conn.execute(
+                "SELECT verified_at,user_id,username,enabled,max_total,max_extra FROM vinted_buyer"
+            ).fetchone()
+            budgets = conn.execute("SELECT * FROM vinted_search_budgets").fetchall()
+        client = Mock()
+        client.identity.side_effect = buyer.BuyerError(
+            buyer.AUTH_REASONS["session_refresh"],
+            307,
+            reason="session_refresh",
+            stage="identity",
+        )
+        client.exported.return_value = rotated
+        client.homepage.side_effect = buyer.BuyerError(
+            buyer.AUTH_REASONS["redirect"], 307, reason="redirect", stage="homepage"
+        )
+        with patch.object(buyer, "Client", return_value=client), self.assertLogs(
+            "vinted_buyer", level="INFO"
+        ) as logs, self.assertRaises(buyer.BuyerError):
+            buyer.connected_client()
+        with closing(search_settings.connection()) as conn:
+            saved = conn.execute("SELECT session FROM vinted_buyer").fetchone()[0]
+            after = conn.execute(
+                "SELECT verified_at,user_id,username,enabled,max_total,max_extra FROM vinted_buyer"
+            ).fetchone()
+            self.assertEqual(
+                budgets, conn.execute("SELECT * FROM vinted_search_budgets").fetchall()
+            )
+        self.assertEqual(buyer.decrypt(saved), rotated)
+        self.assertEqual(before, after)
+        client.request.assert_called_once()
+        self.assertEqual(client.request.call_args.args[1], "/web/api/auth/oauth")
+        client.identity.assert_called_once()
+        client.session.close.assert_called_once()
+        self.assertEqual(buyer.settings()["access"]["http_status"], 307)
+        for value in rotated["cookies"].values():
+            self.assertNotIn(value, " ".join(logs.output))
+            self.assertNotIn(value.encode(), Path(db.DB_PATH).read_bytes())
 
     def test_only_explicit_session_expiry_refreshes_once_and_updates_diagnostics(self):
         with closing(search_settings.connection()) as conn, conn:
