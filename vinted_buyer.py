@@ -2,11 +2,13 @@
 
 import fcntl
 import json
+import logging
 import os
 import re
 import time
 from contextlib import closing, contextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import requests
 from cryptography.fernet import Fernet, InvalidToken
@@ -15,6 +17,28 @@ import db
 from search_settings import connection
 
 BASE = "https://www.vinted.co.uk"
+logger = logging.getLogger(__name__)
+AUTH_STAGES = {
+    "homepage": "Vinted homepage",
+    "sign_in": "Vinted sign-in endpoint",
+    "identity": "Vinted account verification",
+    "request": "Vinted request",
+}
+AUTH_REASONS = {
+    "security_challenge": "Vinted requires a security check for this connection. The bot cannot complete that check; sign-in and Autobuy have stopped.",
+    "csrf": "Vinted rejected the sign-in security token. Your password has not been confirmed.",
+    "credentials": "Vinted did not accept the sign-in credentials or the session has expired.",
+    "account_restricted": "Vinted reports an account restriction. Check the account on Vinted before trying to connect it.",
+    "forbidden": "Vinted refused the request (HTTP 403), without a recognised reason. This does not establish whether your password is correct.",
+    "rate_limited": "Vinted requested a cooldown. Wait before trying again.",
+    "unreadable": "Vinted returned an unreadable response. The account connection has not been verified.",
+    "network": "Vinted did not confirm this request. Check your account before retrying.",
+    "http_error": "Vinted did not accept this request.",
+    "not_confirmed": "Vinted has not confirmed the buyer connection.",
+    "endpoint_reached": "The sign-in endpoint accepted the connection and rejected the empty diagnostic request. Your account and password have not been tested.",
+    "connected": "Vinted verified the buyer account. Autobuy remains off until enabled with spending limits.",
+    "verification_code": "Vinted sent a sign-in code. Enter it in the verification box below.",
+}
 
 
 def csrf_from_html(html):
@@ -34,9 +58,96 @@ def csrf_from_html(html):
 
 
 class BuyerError(ValueError):
-    def __init__(self, message, status=None):
+    def __init__(
+        self, message, status=None, *, reason="not_confirmed", stage="request"
+    ):
         super().__init__(message)
         self.status = status
+        self.reason = reason
+        self.stage = stage
+
+
+def security_challenge(response, data=None):
+    """Classify explicit challenge signals without storing challenge URLs or cookies."""
+    if isinstance(data, dict):
+        for key in ("url", "captcha_url", "challenge_url"):
+            value = data.get(key)
+            if not isinstance(value, str):
+                continue
+            try:
+                host = urlsplit(value).hostname or ""
+            except ValueError:
+                continue
+            if host == "captcha-delivery.com" or host.endswith(".captcha-delivery.com"):
+                return True
+        if data.get("error") in ("captcha_required", "verification_required"):
+            return True
+    text = getattr(response, "text", "")
+    if not isinstance(text, str):
+        return False
+    # Only inspect HTML for these phrases; never interpret credential values in JSON.
+    text = text[:65536].lower()
+    return ("<html" in text or "<script" in text) and any(
+        term in text
+        for term in (
+            "verify you are human",
+            "captcha-delivery.com",
+            "checking your browser",
+        )
+    )
+
+
+def response_error(response, data, stage):
+    """Map a Vinted failure to fixed, non-secret diagnostics. Never echo its body."""
+    status = response.status_code
+    values = []
+    if isinstance(data, dict):
+        values = [
+            data.get(key) for key in ("error", "error_code", "code", "message_code")
+        ]
+    codes = {value.lower() for value in values if isinstance(value, str)}
+    if security_challenge(response, data):
+        reason = "security_challenge"
+    elif status == 429:
+        reason = "rate_limited"
+    elif codes & {"invalid_csrf_token", "csrf_token_invalid", "csrf_error"}:
+        reason = "csrf"
+    elif codes & {"user_blocked", "account_blocked", "account_restricted"}:
+        reason = "account_restricted"
+    elif (
+        codes
+        & {
+            "invalid_grant",
+            "invalid_credentials",
+            "invalid_password",
+            "invalid_username",
+            "invalid_token",
+        }
+        or status == 401
+    ):
+        reason = "credentials"
+    elif status == 403:
+        reason = "forbidden"
+    elif data is None:
+        reason = "unreadable"
+    else:
+        reason = "http_error"
+    return BuyerError(AUTH_REASONS[reason], status, reason=reason, stage=stage)
+
+
+def record_auth(reason, stage="sign_in", status=None):
+    # Only fixed labels and numeric HTTP status are persisted or logged.
+    reason = reason if reason in AUTH_REASONS else "not_confirmed"
+    stage = stage if stage in AUTH_STAGES else "request"
+    status = status if isinstance(status, int) and 100 <= status <= 599 else None
+    with closing(connection()) as conn, conn:
+        conn.execute(
+            "UPDATE vinted_buyer_access SET checked=?,reason=?,stage=?,http_status=? WHERE id=1",
+            (time.time(), reason, stage, status),
+        )
+    logger.info(
+        "Vinted buyer access: stage=%s reason=%s http=%s", stage, reason, status
+    )
 
 
 def migrate(conn):
@@ -50,6 +161,10 @@ def migrate(conn):
     conn.execute("""CREATE TABLE IF NOT EXISTS vinted_buy_attempts (
         item_id TEXT PRIMARY KEY, state TEXT NOT NULL, checkout_id TEXT,
         total INTEGER, message TEXT NOT NULL, updated REAL NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS vinted_buyer_access (
+        id INTEGER PRIMARY KEY CHECK(id=1), last_probe REAL NOT NULL DEFAULT 0,
+        checked REAL, reason TEXT, stage TEXT, http_status INTEGER)""")
+    conn.execute("INSERT OR IGNORE INTO vinted_buyer_access(id) VALUES (1)")
 
 
 @contextmanager
@@ -96,11 +211,20 @@ def decrypt(data):
 def settings():
     with closing(connection()) as conn:
         row = dict(conn.execute("SELECT * FROM vinted_buyer WHERE id=1").fetchone())
+        access = dict(
+            conn.execute("SELECT * FROM vinted_buyer_access WHERE id=1").fetchone()
+        )
     # No credential value is returned to a template or API caller.
     row["connected"] = bool(row.pop("session") and row["verified_at"])
     pending = decrypt(row.pop("pending"))
     row["pending_code"] = bool(pending and pending.get("expires", 0) > time.time())
     row.pop("browser_info")
+    row["access"] = {
+        "message": AUTH_REASONS.get(access["reason"], ""),
+        "stage": AUTH_STAGES.get(access["stage"], ""),
+        "http_status": access["http_status"],
+        "checked": access["checked"],
+    }
     return row
 
 
@@ -138,38 +262,35 @@ class Client:
     def request(self, method, path, body=None, *, allow_challenge=False):
         if not path.startswith(("/api/v2/", "/web/api/auth/")):
             raise BuyerError("Unsupported Vinted request.")
+        stage = (
+            "sign_in"
+            if path.startswith("/web/api/auth/")
+            else "identity" if path == "/api/v2/users/current" else "request"
+        )
         try:
             response = self.session.request(
                 method, BASE + path, json=body, timeout=(4, 12), allow_redirects=False
             )
         except requests.RequestException:
             raise BuyerError(
-                "Vinted did not confirm this request. Check your account before retrying."
+                AUTH_REASONS["network"], reason="network", stage=stage
             ) from None
-        if response.status_code == 403:
-            raise BuyerError(
-                "Vinted refused this server connection or requires verification. Autobuy cannot continue through that check."
-            )
-        if response.status_code == 429:
-            raise BuyerError("Vinted requested a cooldown. Wait before trying again.")
         try:
             data = response.json()
         except ValueError:
-            raise BuyerError(
-                "Vinted returned a verification page or an unreadable response."
-            ) from None
+            data = None
+        if security_challenge(response, data):
+            raise response_error(response, data, stage)
         if (
             allow_challenge
             and response.status_code == 401
             and isinstance(data, dict)
-            and (data.get("payload") or {}).get("id")
+            and isinstance(data.get("payload"), dict)
+            and data["payload"].get("id")
         ):
             return {"challenge_id": str(data["payload"]["id"])}
         if response.status_code not in (200, 201) or not isinstance(data, dict):
-            raise BuyerError(
-                f"Vinted did not accept this request (HTTP {response.status_code}).",
-                response.status_code,
-            )
+            raise response_error(response, data, stage)
         for field, cookie in (
             ("access_token", "access_token_web"),
             ("refresh_token", "refresh_token_web"),
@@ -187,29 +308,20 @@ class Client:
                 BASE + "/", timeout=(4, 12), allow_redirects=False
             )
         except requests.RequestException:
-            raise BuyerError("Vinted sign-in could not be reached.") from None
-        if any(
-            term in response.text.lower()
-            for term in (
-                "verify you are human",
-                "captcha-delivery.com",
-                "geo.captcha-delivery.com",
-            )
-        ):
             raise BuyerError(
-                "Vinted requires browser verification for this server. Its sign-in cannot continue here."
-            )
-        if response.status_code != 200:
-            raise BuyerError(
-                f"Vinted sign-in returned HTTP {response.status_code} from this server. No credentials were sent."
-            )
+                AUTH_REASONS["network"], reason="network", stage="homepage"
+            ) from None
+        if security_challenge(response) or response.status_code != 200:
+            raise response_error(response, None, "homepage")
         token = csrf_from_html(response.text)
         if token:
             self.csrf = token
             self.headers()
             return
         raise BuyerError(
-            "Vinted did not supply the sign-in security token. No credentials were sent."
+            "Vinted did not supply the sign-in security token. No credentials were sent.",
+            reason="csrf",
+            stage="homepage",
         )
 
     def identity(self):
@@ -230,6 +342,7 @@ def save_connected(client):
             "UPDATE vinted_buyer SET session=?,pending=NULL,verified_at=?,user_id=?,username=?,enabled=0 WHERE id=1",
             (encrypt(client.exported()), time.time(), user_id, username),
         )
+    record_auth("connected", "identity", 200)
 
 
 def start_login(email, password):
@@ -272,20 +385,64 @@ def start_login(email, password):
                         "UPDATE vinted_buyer SET pending=? WHERE id=1",
                         (encrypt(pending),),
                     )
+                record_auth("verification_code", "sign_in", 401)
                 return "Vinted sent a sign-in code. Enter it in the verification box below."
             client.homepage()
             save_connected(client)
             return "Vinted buyer connected. Choose your spending limits before enabling Autobuy."
+        except BuyerError as exc:
+            record_auth(exc.reason, exc.stage, exc.status)
+            raise
         finally:
             client.session.close()
 
 
 def check_signin():
     with exclusive():
+        with closing(connection()) as conn, conn:
+            last = conn.execute(
+                "SELECT last_probe FROM vinted_buyer_access WHERE id=1"
+            ).fetchone()[0]
+            if time.time() - last < 300:
+                raise BuyerError(
+                    "The last connection diagnosis is shown below. Wait five minutes before running it again."
+                )
+            conn.execute(
+                "UPDATE vinted_buyer_access SET last_probe=? WHERE id=1", (time.time(),)
+            )
         client = Client()
         try:
             client.homepage()
-            return "Vinted sign-in is reachable. You can now connect your buyer account below."
+            # A homepage GET cannot establish whether the authentication endpoint
+            # accepts this server. Submit one empty request: no account identifier,
+            # password, saved buyer session, payment, or alternate network route.
+            try:
+                client.request(
+                    "POST",
+                    "/web/api/auth/oauth",
+                    {
+                        "client_id": "web",
+                        "scope": "user",
+                        "grant_type": "password",
+                        "username": "",
+                        "password": "",
+                    },
+                )
+            except BuyerError as exc:
+                if exc.status in (400, 401, 422) and exc.reason in (
+                    "credentials",
+                    "http_error",
+                ):
+                    record_auth("endpoint_reached", "sign_in", exc.status)
+                    return AUTH_REASONS["endpoint_reached"]
+                raise
+            record_auth("not_confirmed")
+            raise BuyerError(
+                "The diagnostic returned an unexpected response. No buyer account was connected."
+            )
+        except BuyerError as exc:
+            record_auth(exc.reason, exc.stage, exc.status)
+            raise
         finally:
             client.session.close()
 
@@ -320,6 +477,9 @@ def verify_code(code):
             client.homepage()
             save_connected(client)
             return "Vinted buyer connected. Choose your spending limits before enabling Autobuy."
+        except BuyerError as exc:
+            record_auth(exc.reason, exc.stage, exc.status)
+            raise
         finally:
             client.session.close()
 
