@@ -374,6 +374,120 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         client.session.close()
 
 
+class SessionLinkTests(DatabaseFixture, unittest.TestCase):
+    access = "test-access-token-0123456789"
+    refresh = "test-refresh-token-0123456789"
+
+    def homepage(self):
+        return Mock(
+            status_code=200,
+            text='{"CSRF_TOKEN":"test-csrf-0123456789"}',
+        )
+
+    def test_existing_session_is_verified_without_login_or_payment(self):
+        identity = Mock(
+            status_code=200,
+            text="",
+            json=Mock(return_value={"user": {"id": 99, "login": "owner"}}),
+        )
+        with patch.object(
+            requests.Session, "request", side_effect=[self.homepage(), identity]
+        ) as request, patch.object(requests.Session, "close") as close:
+            message = buyer.link_session(self.access, self.refresh)
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(
+            [(c.args[0], c.args[1]) for c in request.call_args_list],
+            [
+                ("GET", buyer.BASE + "/"),
+                ("GET", buyer.BASE + "/api/v2/users/current"),
+            ],
+        )
+        for call in request.call_args_list:
+            self.assertFalse(call.kwargs["allow_redirects"])
+        close.assert_called_once()
+        self.assertIn("Autobuy is off", message)
+        settings = buyer.settings()
+        self.assertTrue(settings["connected"])
+        self.assertEqual(settings["username"], "owner")
+        self.assertFalse(settings["enabled"])
+        with closing(search_settings.connection()) as conn:
+            saved = conn.execute("SELECT session FROM vinted_buyer").fetchone()[0]
+        cookies = buyer.decrypt(saved)["cookies"]
+        self.assertEqual(cookies["access_token_web"], self.access)
+        self.assertEqual(cookies["refresh_token_web"], self.refresh)
+        for token in (self.access, self.refresh):
+            self.assertNotIn(token, json.dumps(settings))
+            self.assertNotIn(token.encode(), Path(db.DB_PATH).read_bytes())
+        with patch.object(requests.Session, "request") as request, self.assertRaises(
+            buyer.BuyerError
+        ):
+            buyer.start_login("owner@example.test", "private-password")
+        request.assert_not_called()
+
+    def test_session_input_rejects_cookie_headers_and_control_characters(self):
+        for value in (
+            "",
+            "short",
+            "a" * 8193,
+            "access_token_web=" + self.access + "; datadome=not-accepted",
+            self.access + "\r\nInjected: header",
+            "<script>not-a-token</script>",
+        ):
+            with self.subTest(value_length=len(value)), patch.object(
+                requests.Session, "request"
+            ) as request, self.assertRaises(buyer.BuyerError) as error:
+                buyer.link_session(value, self.refresh)
+            request.assert_not_called()
+            self.assertNotIn(self.access, str(error.exception))
+        self.assertFalse(buyer.settings()["connected"])
+
+    def test_refused_session_stops_without_refresh_retry_or_saving_tokens(self):
+        for status, data, reason in (
+            (
+                403,
+                {"url": "https://geo.captcha-delivery.com/captcha/"},
+                "security_challenge",
+            ),
+            (401, {"error": "invalid_token"}, "credentials"),
+            (429, {}, "rate_limited"),
+            (200, {"user": None}, "not_confirmed"),
+            (200, {"user": ["invalid"]}, "not_confirmed"),
+        ):
+            with self.subTest(status=status, reason=reason):
+                with closing(search_settings.connection()) as conn, conn:
+                    conn.execute("UPDATE vinted_buyer SET login_attempt=0")
+                identity = Mock(
+                    status_code=status, text="", json=Mock(return_value=data)
+                )
+                with patch.object(
+                    requests.Session,
+                    "request",
+                    side_effect=[self.homepage(), identity],
+                ) as request, self.assertLogs(
+                    "vinted_buyer", level="INFO"
+                ) as logs, self.assertRaises(
+                    buyer.BuyerError
+                ) as error:
+                    buyer.link_session(self.access, self.refresh)
+                self.assertEqual(error.exception.reason, reason)
+                self.assertEqual(request.call_count, 2)
+                self.assertFalse(buyer.settings()["connected"])
+                self.assertFalse(buyer.settings()["enabled"])
+                for token in (self.access, self.refresh):
+                    self.assertNotIn(token, " ".join(logs.output))
+                    self.assertNotIn(token.encode(), Path(db.DB_PATH).read_bytes())
+
+    def test_homepage_challenge_stops_before_account_request(self):
+        response = Mock(status_code=403, text="<html>Verify you are human</html>")
+        with patch.object(
+            requests.Session, "request", return_value=response
+        ) as request, self.assertRaises(buyer.BuyerError) as error:
+            buyer.link_session(self.access, self.refresh)
+        self.assertEqual(error.exception.reason, "security_challenge")
+        request.assert_called_once()
+        self.assertFalse(buyer.settings()["connected"])
+
+
 class BuyerDashboardTests(DatabaseFixture, unittest.TestCase):
     owner = test_dashboard.DashboardTests.owner
 
@@ -412,3 +526,37 @@ class BuyerDashboardTests(DatabaseFixture, unittest.TestCase):
         response = self.client.get("/connections")
         self.assertNotIn(b"private-password", response.data)
         self.assertIn(b"Vinted requires verification", response.data)
+
+    def test_session_link_is_owner_csrf_protected_and_never_repopulates_secrets(self):
+        data = {
+            "csrf": "offline-csrf",
+            "action": "buyer_session",
+            "buyer_access_token": "access-secret-never-show",
+            "buyer_refresh_token": "refresh-secret-never-show",
+        }
+        with patch.object(buyer, "link_session") as link:
+            self.assertEqual(
+                self.client.post("/connections", data=data).status_code, 400
+            )
+            link.assert_not_called()
+        self.owner()
+        with patch.object(buyer, "link_session") as link:
+            invalid = dict(data, csrf="invalid")
+            self.assertEqual(
+                self.client.post("/connections", data=invalid).status_code, 400
+            )
+            link.assert_not_called()
+        with patch.object(
+            buyer, "link_session", side_effect=buyer.BuyerError("Connection refused")
+        ) as link:
+            response = self.client.post("/connections", data=data)
+        link.assert_called_once_with(
+            data["buyer_access_token"], data["buyer_refresh_token"]
+        )
+        self.assertEqual(response.status_code, 303)
+        response = self.client.get(response.headers["Location"])
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertIn(b"Connection refused", response.data)
+        self.assertIn(b"Verify and link existing session", response.data)
+        for field in ("buyer_access_token", "buyer_refresh_token"):
+            self.assertNotIn(data[field].encode(), response.data)
