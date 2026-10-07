@@ -1,6 +1,7 @@
 """Read identity-scoped seller data from server-rendered listing scripts.
 
-Schema references (reviewed 7 October 2026; no live retrieval established):
+Schema references reviewed 7 October 2026; a current UK listing page also
+confirmed the anchored Flight description plugin on that date:
 https://github.com/teddy-vltn/vinted-discord-bot/blob/main/src/api/fetchItemDetail.js
 (Unlicense) reads descriptions from the rendered payload after detail API removal.
 https://github.com/ScrapeUnblocker/vinted-scraper/blob/main/src/scrapeunblocker_vinted/parsing.py
@@ -20,6 +21,7 @@ matches are excluded. Unsupported Flight record types fail closed.
 
 import json
 import re
+from collections import deque
 from html.parser import HTMLParser
 from itertools import islice
 from urllib.parse import unquote, urlparse
@@ -305,17 +307,26 @@ def parse_page_data(html, item_id):
     parser = _Scripts()
     parser.feed(html)
     roots, rows = _records(parser.scripts)
-    pending = [(root, 0) for root in reversed(roots)]
+    # Give each Flight record a turn before descending into a large bootstrap
+    # record. Current pages put the listing after thousands of translation and
+    # configuration values; depth-first traversal exhausts the bound first.
+    pending = deque((root, 0) for root in roots)
     result = _empty()
     visited = 0
     while pending and visited < MAX_NODES:
-        value, depth = pending.pop()
+        value, depth = pending.popleft()
         visited += 1
         if depth > MAX_DEPTH:
             continue
         remaining = max(0, MAX_NODES - visited - len(pending))
         if isinstance(value, list):
-            pending.extend((child, depth + 1) for child in reversed(value[:remaining]))
+            pending.extend(
+                (child, depth + 1)
+                for child in islice(
+                    (child for child in value if isinstance(child, (dict, list))),
+                    remaining,
+                )
+            )
             continue
         if not isinstance(value, dict):
             continue
@@ -372,6 +383,9 @@ def parse_page_data(html, item_id):
         # descendants (which can contain recommendations or seller profiles).
         pending.extend(
             (child, depth + 1)
-            for child in reversed(list(islice(value.values(), remaining)))
+            for child in islice(
+                (child for child in value.values() if isinstance(child, (dict, list))),
+                remaining,
+            )
         )
     return result

@@ -7,6 +7,7 @@ import os
 import re
 import time
 from contextlib import closing, contextmanager
+from copy import copy
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
@@ -104,32 +105,60 @@ def security_challenge(response, data=None):
 def response_error(response, data, stage):
     """Map a Vinted failure to fixed, non-secret diagnostics. Never echo its body."""
     status = response.status_code
-    values = []
-    if isinstance(data, dict):
-        values = [
-            data.get(key) for key in ("error", "error_code", "code", "message_code")
-        ]
+    values, messages, fields, shape = [], [], set(), set()
+    pending, inspected = [(data, 0)], 0
+    # Gateways and newer web endpoints can wrap errors in an object. Inspect
+    # only fixed error/container keys, with a bound; never log arbitrary keys,
+    # values, token fields or the response text.
+    while pending and inspected < 40:
+        inspected += 1
+        value, depth = pending.pop()
+        if depth > 4:
+            continue
+        if isinstance(value, list):
+            pending.extend((entry, depth + 1) for entry in value[:20])
+        elif isinstance(value, dict):
+            for key in (
+                "code",
+                "error",
+                "error_code",
+                "errorCode",
+                "message_code",
+                "messageCode",
+            ):
+                if key in value:
+                    shape.add(key)
+                    values.append(value[key])
+            for key in (
+                "message",
+                "message_code",
+                "messageCode",
+                "error",
+                "error_description",
+                "errorDescription",
+                "detail",
+                "title",
+                "reason",
+                "value",
+            ):
+                if key in value:
+                    shape.add(key)
+                    messages.append(value[key])
+            if isinstance(value.get("field"), str):
+                fields.add(value["field"])
+            for key in ("error", "errors", "data", "payload", "response", "details"):
+                child = value.get(key)
+                if isinstance(child, (list, dict)):
+                    shape.add(key)
+                    pending.append((child, depth + 1))
+            errors = value.get("errors")
+            if isinstance(errors, dict):
+                fields.update(key for key in errors if isinstance(key, str))
+                messages.extend(v for v in errors.values() if isinstance(v, str))
     codes = {value.lower() for value in values if isinstance(value, str)}
-    numeric_code = data.get("code") if isinstance(data, dict) else None
-    if type(numeric_code) is not int or not 0 <= numeric_code <= 1000:
-        numeric_code = None
-    fields = set()
-    messages = []
-    if isinstance(data, dict):
-        messages = [data.get(key) for key in ("message", "message_code", "error")]
-        errors = data.get("errors")
-        if isinstance(errors, dict):
-            fields.update(key for key in errors if isinstance(key, str))
-            for value in errors.values():
-                if isinstance(value, str):
-                    messages.append(value)
-        elif isinstance(errors, list):
-            for error in errors[:20]:
-                if isinstance(error, dict):
-                    field = error.get("field")
-                    if isinstance(field, str):
-                        fields.add(field)
-                    messages.extend(error.get(key) for key in ("value", "message"))
+    numeric_code = next(
+        (value for value in values if type(value) is int and 0 <= value <= 1000), None
+    )
     fields.intersection_update(
         {
             "refresh_token",
@@ -150,7 +179,8 @@ def response_error(response, data, stage):
     redirect = redirect_reason(response)
     logger.info(
         "Vinted response: stage=%s http=%s redirect=%s body=%s "
-        "api_code=%s fields=%s csrf_hint=%s refresh_hint=%s required_hint=%s",
+        "api_code=%s fields=%s csrf_hint=%s refresh_hint=%s required_hint=%s "
+        "invalid_hint=%s expired_hint=%s shape=%s",
         stage,
         status,
         redirect_target(response),
@@ -162,8 +192,15 @@ def response_error(response, data, stage):
         or "refresh_token" in hints
         or "refresh token" in hints,
         any(word in hints for word in ("required", "missing", "blank")),
+        "invalid" in hints,
+        "expired" in hints,
+        ",".join(sorted(shape)) or "other",
     )
-    if security_challenge(response, data) or redirect == "security_challenge":
+    if (
+        security_challenge(response, data)
+        or redirect == "security_challenge"
+        or codes & {"captcha_required", "verification_required"}
+    ):
         reason = "security_challenge"
     elif redirect:
         reason = redirect
@@ -375,12 +412,68 @@ class Client:
         )
         self.csrf = ""
         if saved:
-            self.csrf = saved.get("csrf", "")
-            for key, value in saved.get("cookies", {}).items():
-                self.session.cookies.set(
-                    key, value, domain="www.vinted.co.uk", secure=True
+            try:
+                self.csrf = saved.get("csrf", "")
+                self.restore_cookies(saved)
+                self.headers()
+            except (AttributeError, TypeError, ValueError):
+                self.session.close()
+                raise BuyerError(
+                    "Reconnect the Vinted buyer account; its saved session is unavailable."
+                ) from None
+
+    def restore_cookies(self, saved):
+        records = saved.get("cookie_records")
+        if records is None:
+            records = [
+                {
+                    "name": name,
+                    "value": value,
+                    "domain": "www.vinted.co.uk",
+                    "secure": True,
+                }
+                for name, value in saved.get("cookies", {}).items()
+            ]
+        if not isinstance(records, list) or len(records) > 200:
+            raise ValueError("Invalid cookie records")
+        for record in records:
+            if not isinstance(record, dict):
+                raise TypeError("Invalid cookie record")
+            name, value = record.get("name"), record.get("value")
+            domain, path = record.get("domain"), record.get("path", "/")
+            secure, expires = record.get("secure", True), record.get("expires")
+            if (
+                not isinstance(name, str)
+                or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,256}", name)
+                or not isinstance(value, str)
+                or len(value) > 16384
+                or any(ord(char) < 32 or ord(char) > 126 for char in value)
+                or domain not in ("www.vinted.co.uk", "vinted.co.uk", ".vinted.co.uk")
+                or not isinstance(path, str)
+                or not path.startswith("/")
+                or len(path) > 2048
+                or any(ord(char) <= 32 or ord(char) > 126 for char in path)
+                or type(secure) is not bool
+                or (
+                    expires is not None
+                    and (type(expires) is not int or not 0 <= expires <= 253402300799)
                 )
-            self.headers()
+            ):
+                raise ValueError("Invalid cookie metadata")
+            cookie = requests.cookies.create_cookie(
+                name, value, domain=domain, path=path, secure=secure, expires=expires
+            )
+            for flag in (
+                "domain_specified",
+                "domain_initial_dot",
+                "path_specified",
+                "discard",
+            ):
+                if flag in record:
+                    if type(record[flag]) is not bool:
+                        raise ValueError("Invalid cookie flag")
+                    setattr(cookie, flag, record[flag])
+            self.session.cookies.set_cookie(cookie)
 
     def headers(self):
         # The current Vinted web client authenticates with its session cookies.
@@ -397,24 +490,60 @@ class Client:
             self.session.headers.pop("X-Anon-Id", None)
 
     def exported(self):
-        return {"csrf": self.csrf, "cookies": self.session.cookies.get_dict()}
+        return {
+            "csrf": self.csrf,
+            # Retain the legacy view for old callers; restoration uses the full
+            # records so domain/path/expiry survive encryption and restarts.
+            "cookies": self.session.cookies.get_dict(),
+            "cookie_records": [
+                {
+                    key: getattr(cookie, key)
+                    for key in (
+                        "name",
+                        "value",
+                        "domain",
+                        "path",
+                        "secure",
+                        "expires",
+                        "domain_specified",
+                        "domain_initial_dot",
+                        "path_specified",
+                        "discard",
+                    )
+                }
+                for cookie in self.session.cookies
+            ],
+        }
 
     def update_tokens(self, response, data):
         """Keep one current token per name after a normal refresh-cookie rotation."""
         returned = getattr(response, "cookies", None)
         returned = (
-            returned.get_dict()
+            list(returned)
             if isinstance(returned, requests.cookies.RequestsCookieJar)
-            else {}
+            else []
         )
         access_updated = False
         for field, cookie in (
             ("access_token", "access_token_web"),
             ("refresh_token", "refresh_token_web"),
         ):
-            value = data.get(field) or returned.get(cookie)
+            candidates = [entry for entry in returned if entry.name == cookie]
+            # For cookie authentication Set-Cookie is authoritative. An OAuth
+            # body can contain a different credential; never overwrite the web
+            # cookie with that body value or discard its received scope.
+            if len(candidates) > 1:
+                raise BuyerError(AUTH_REASONS["unreadable"], reason="unreadable")
+            received = candidates[0] if candidates else None
+            value = received.value if received is not None else data.get(field)
             if not isinstance(value, str) or not re.fullmatch(
                 r"[A-Za-z0-9._~+/=-]{16,8192}", value
+            ):
+                continue
+            if received is not None and (
+                received.domain
+                not in ("", "www.vinted.co.uk", "vinted.co.uk", ".vinted.co.uk")
+                or (received.expires is not None and received.expires <= time.time())
             ):
                 continue
             # requests can retain both the imported host cookie and a new
@@ -422,13 +551,35 @@ class Client:
             for saved in list(self.session.cookies):
                 if saved.name == cookie:
                     self.session.cookies.clear(saved.domain, saved.path, saved.name)
-            self.session.cookies.set(
-                cookie, value, domain="www.vinted.co.uk", secure=True
-            )
+            if received is not None and received.domain:
+                self.session.cookies.set_cookie(copy(received))
+            else:
+                self.session.cookies.set(
+                    cookie, value, domain="www.vinted.co.uk", secure=True
+                )
             if cookie == "access_token_web":
                 access_updated = True
         self.headers()
         return access_updated
+
+    def refresh_security_token(self):
+        """Read the current public bootstrap before renewing an expired session.
+
+        The frontend security token changes with web releases. Expired account
+        cookies can redirect the homepage into authentication, so read its public
+        bootstrap in a separate ordinary session and keep our buyer cookies.
+        """
+        public = Client()
+        try:
+            public.homepage()
+            previous = self.csrf
+            self.csrf = public.csrf
+            self.headers()
+            logger.info(
+                "Vinted renewal bootstrap: csrf_changed=%s", previous != self.csrf
+            )
+        finally:
+            public.session.close()
 
     def request(self, method, path, body=None, *, allow_challenge=False):
         if not path.startswith(("/api/v2/", "/web/api/auth/")):
@@ -773,6 +924,7 @@ def connected_client():
                 raise
             # Match Vinted's current web refresh: cookies, CSRF and an empty
             # POST. One renewal only, with no redirect following or checkout.
+            client.refresh_security_token()
             client.request("POST", "/web/api/auth/refresh")
             with closing(connection()) as conn, conn:
                 # Refresh tokens may rotate. Preserve the replacement even if

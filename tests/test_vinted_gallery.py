@@ -170,7 +170,7 @@ class FetchTests(DatabaseFixture, unittest.TestCase):
         redirect.headers["Location"] = "/items/123-current-slug"
         ready = self.response('<div data-testid="item-description">Seller notes</div>')
         with patch.object(
-            gallery.requests, "get", side_effect=[redirect, ready]
+            gallery.requests.Session, "get", side_effect=[redirect, ready]
         ) as get:
             result = gallery.fetch_listing(
                 "https://www.vinted.co.uk/items/123-old-slug"
@@ -199,7 +199,9 @@ class FetchTests(DatabaseFixture, unittest.TestCase):
         ):
             redirect = self.response("", 307)
             redirect.headers["Location"] = location
-            with patch.object(gallery.requests, "get", return_value=redirect) as get:
+            with patch.object(
+                gallery.requests.Session, "get", return_value=redirect
+            ) as get:
                 result = gallery.fetch_listing("https://www.vinted.co.uk/items/123")
             self.assertEqual(result["state"], "http_307")
             get.assert_called_once()
@@ -209,7 +211,9 @@ class FetchTests(DatabaseFixture, unittest.TestCase):
         first.headers["Location"] = "/items/123-first"
         second = self.response("", 302)
         second.headers["Location"] = "/items/123-second"
-        with patch.object(gallery.requests, "get", side_effect=[first, second]) as get:
+        with patch.object(
+            gallery.requests.Session, "get", side_effect=[first, second]
+        ) as get:
             result = gallery.fetch_listing("https://www.vinted.co.uk/items/123")
         self.assertEqual(result["state"], "http_302")
         self.assertEqual(get.call_count, 2)
@@ -220,7 +224,7 @@ class FetchTests(DatabaseFixture, unittest.TestCase):
             for i in range(1, 5)
         )
         with patch.object(
-            gallery.requests, "get", return_value=self.response(html)
+            gallery.requests.Session, "get", return_value=self.response(html)
         ) as get:
             photos, state = gallery.fetch_gallery(
                 "https://www.vinted.co.uk/items/123-coat"
@@ -230,46 +234,47 @@ class FetchTests(DatabaseFixture, unittest.TestCase):
         self.assertFalse(get.call_args.kwargs["allow_redirects"])
         self.assertEqual(get.call_args.kwargs["timeout"], (2, 4))
 
-    def test_saved_buyer_session_is_used_for_read_only_html_without_refresh(self):
-        saved = {"cookies": {"access_token_web": "test-access-token-0123456789"}}
+    def test_public_listing_read_never_uses_saved_buyer_credentials(self):
+        saved = {"cookies": {"access_token_web": "expired-private-token-0123456789"}}
         with closing(connection()) as conn, conn:
             conn.execute(
                 "UPDATE vinted_buyer SET session=? WHERE id=1", (buyer.encrypt(saved),)
             )
-        client = MagicMock()
-        client.session.get.return_value = self.response(
+        response = self.response(
             '<div data-testid="item-description">Seller text</div>'
         )
-        with patch.object(buyer, "Client", return_value=client) as construct:
+        with patch.object(buyer, "Client") as construct, patch.object(
+            gallery.requests.Session, "get", return_value=response
+        ) as get:
             result = gallery.fetch_listing("https://www.vinted.co.uk/items/123")
-        construct.assert_called_once_with(saved)
-        client.request.assert_not_called()
-        client.session.close.assert_called_once()
-        self.assertFalse(client.session.get.call_args.kwargs["allow_redirects"])
-        self.assertEqual(
-            client.session.get.call_args.args[0], "https://www.vinted.co.uk/items/123"
-        )
+        construct.assert_not_called()
+        self.assertFalse(get.call_args.kwargs["allow_redirects"])
         self.assertEqual(result["description"], "Seller text")
 
-    def test_saved_session_is_reused_for_canonical_redirect_without_refresh(self):
-        saved = {"cookies": {"access_token_web": "test-access-token-0123456789"}}
-        with closing(connection()) as conn, conn:
-            conn.execute(
-                "UPDATE vinted_buyer SET session=? WHERE id=1", (buyer.encrypt(saved),)
-            )
+    def test_public_canonical_read_reuses_only_its_own_cookies(self):
         first = self.response("", 301)
         first.headers["Location"] = "/items/123-correct-slug"
-        client = MagicMock()
-        client.session.get.side_effect = [
-            first,
-            self.response('<div data-testid="item-description">Seller text</div>'),
-        ]
-        with patch.object(buyer, "Client", return_value=client) as construct:
+        captured = []
+
+        def request(session, url, **kwargs):
+            captured.append((session, dict(session.cookies)))
+            if len(captured) == 1:
+                session.cookies.set(
+                    "anon_id", "ordinary-public-id", domain="www.vinted.co.uk"
+                )
+                return first
+            return self.response(
+                '<div data-testid="item-description">Seller text</div>'
+            )
+
+        with patch.object(
+            gallery.requests.Session, "get", autospec=True, side_effect=request
+        ), patch.object(gallery.requests.Session, "close") as close:
             result = gallery.fetch_listing("https://www.vinted.co.uk/items/123")
-        construct.assert_called_once_with(saved)
-        self.assertEqual(client.session.get.call_count, 2)
-        client.request.assert_not_called()
-        client.session.close.assert_called_once()
+        self.assertIs(captured[0][0], captured[1][0])
+        self.assertEqual(captured[0][1], {})
+        self.assertEqual(captured[1][1], {"anon_id": "ordinary-public-id"})
+        close.assert_called_once()
         self.assertEqual(result["description"], "Seller text")
 
     def test_server_retry_after_survives_in_shared_cooldown_and_result(self):
@@ -281,7 +286,7 @@ class FetchTests(DatabaseFixture, unittest.TestCase):
             limited = self.response("", 429)
             limited.headers["Retry-After"] = header
             with patch.object(gallery.time, "time", return_value=1000), patch.object(
-                gallery.requests, "get", return_value=limited
+                gallery.requests.Session, "get", return_value=limited
             ) as get:
                 result = gallery.fetch_listing("https://www.vinted.co.uk/items/123")
                 deferred = gallery.fetch_listing("https://www.vinted.co.uk/items/456")
@@ -303,7 +308,9 @@ class FetchTests(DatabaseFixture, unittest.TestCase):
             (429, "", "access_limited"),
         ):
             with patch.object(
-                gallery.requests, "get", return_value=self.response(body, status)
+                gallery.requests.Session,
+                "get",
+                return_value=self.response(body, status),
             ) as get, patch.object(gallery, "_pause") as pause:
                 self.assertEqual(
                     gallery.fetch_gallery("https://www.vinted.co.uk/items/123")[1],
@@ -316,9 +323,11 @@ class FetchTests(DatabaseFixture, unittest.TestCase):
         response = self.response("")
         response.status_code = 403
         response.iter_content.return_value = iter([b"x" * 8192] * 8 + [b"unused"])
-        with patch.object(gallery.requests, "get", return_value=response), patch.object(
-            gallery, "_pause"
-        ), self.assertLogs("vinted_gallery", level="INFO") as logs:
+        with patch.object(
+            gallery.requests.Session, "get", return_value=response
+        ), patch.object(gallery, "_pause"), self.assertLogs(
+            "vinted_gallery", level="INFO"
+        ) as logs:
             result = gallery.fetch_listing("https://www.vinted.co.uk/items/123")
         self.assertEqual(result["state"], "access_limited")
         self.assertEqual(next(response.iter_content.return_value), b"unused")

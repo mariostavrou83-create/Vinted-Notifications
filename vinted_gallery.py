@@ -266,27 +266,22 @@ def canonical_redirect(url, location):
 
 @contextmanager
 def listing_response(url):
-    """Reuse the owner's saved session for one read, without renewing or buying.
+    """Read a public listing independently of the private buyer connection.
 
-    Public clients send a normal Vinted session cookie on item-page reads. Keep
-    our encrypted connection inside the server. One verified redirect to the
-    same UK item can canonicalise its slug. No renewal, checkout, challenge
-    solving or cross-origin redirect happens in this read-only path.
+    An expired buyer cookie can redirect an otherwise public listing into
+    authentication. Keep these public reads in their own ordinary HTTP session.
+    Follow only one same-item canonical redirect; stop on every access refusal.
     """
-    import vinted_buyer as buyer
-
-    with closing(connection()) as conn:
-        saved = conn.execute("SELECT session FROM vinted_buyer WHERE id=1").fetchone()
-    client = None
-    if saved and saved[0]:
-        try:
-            client = buyer.Client(buyer.decrypt(saved[0]))
-        except (buyer.BuyerError, OSError):
-            logger.info("Vinted listing detail: saved_session_unavailable")
-    get = client.session.get if client else requests.get
-    try:
+    with requests.Session() as session:
+        session.headers.update(
+            {
+                "User-Agent": "MSJ-Finder/1.0",
+                "Accept-Language": "en-GB",
+                "Locale": "en-GB",
+            }
+        )
         for attempt in range(2):
-            with get(
+            with session.get(
                 url,
                 headers={"Accept": "text/html,application/xhtml+xml"},
                 stream=True,
@@ -304,9 +299,6 @@ def listing_response(url):
                     continue
                 yield response
                 return
-    finally:
-        if client:
-            client.session.close()
 
 
 def fetch_listing(url):
@@ -429,6 +421,10 @@ async def resolve(row, details, *, persist=True, include_description=False):
                 (json.dumps(details, ensure_ascii=False), row["item_id"]),
             )
     logger.info(
-        "Vinted gallery item=%s photos=%s source=%s", row["item_id"], len(photos), state
+        "Vinted gallery item=%s photos=%s source=%s description_chars=%s",
+        row["item_id"],
+        len(photos),
+        state,
+        len(details.get("description", "")),
     )
     return photos
