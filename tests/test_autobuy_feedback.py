@@ -183,6 +183,32 @@ class FeedbackTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertIn("Only your private", self.query.answer.call_args.args[0])
         self.bot.edit_message_caption.assert_not_awaited()
 
+    async def test_status_rechecks_existing_payment_and_updates_same_alert_without_buying(
+        self,
+    ):
+        buying.claim(self.row)
+        buying.record(
+            "110", "unknown", "Check Vinted", checkout_id="checkout-123", total=1884
+        )
+        self.query.data = "buy:status"
+        outcome = {
+            "state": "paid",
+            "message": "Paid £18.84",
+            "checkout_id": "checkout-123",
+            "total": 1884,
+        }
+        with patch.object(
+            buying, "check_payment", return_value=outcome
+        ) as check, patch.object(buying, "buy") as buy:
+            await self.tap()
+        check.assert_called_once_with("110")
+        buy.assert_not_called()
+        self.assertEqual(
+            photo_cards.load("vinted", 42)[1]["buy_feedback"]["state"], "paid"
+        )
+        self.assertNotIn("buy:click", [b.callback_data for b in self.buttons()])
+        self.bot.send_message.assert_not_awaited()
+
     async def test_repeated_identical_status_is_success_not_a_telegram_error(self):
         self.bot.edit_message_caption.side_effect = BadRequest(
             "Message is not modified"
