@@ -46,6 +46,23 @@ def checkout(total="19.00"):
 
 
 class BuyingTests(DatabaseFixture, unittest.TestCase):
+    def test_error_field_diagnostics_never_echo_values_or_unknown_fields(self):
+        response = Mock(status_code=400, headers={}, text="")
+        data = {
+            "code": 20,
+            "message": "csrf private-account-value",
+            "errors": [
+                {"field": "refresh_token", "value": "Required private-token-value"},
+                {"field": "private-field-value", "value": "private-password-value"},
+            ],
+        }
+        with self.assertLogs("vinted_buyer", level="INFO") as logs:
+            buyer.response_error(response, data, "sign_in")
+        text = " ".join(logs.output)
+        self.assertIn("api_code=20 fields=refresh_token", text)
+        self.assertIn("csrf_hint=True refresh_hint=True required_hint=True", text)
+        self.assertNotIn("private", text)
+
     def test_web_transport_uses_owned_cookies_csrf_and_locale_without_bearer(self):
         csrf = "saved-csrf-token-0123456789"
         access = "saved-access-token-0123456789"

@@ -13,6 +13,60 @@ from search_settings import connection, ensure_schema
 
 
 class StartupDiagnosisTests(DatabaseFixture, unittest.TestCase):
+    def test_bootstrap_probe_is_opt_in_once_and_stops_for_refusals(self):
+        for index, (status, reason, expected) in enumerate(
+            (
+                (400, "http_error", True),
+                (401, "credentials", True),
+                (403, "forbidden", False),
+                (429, "rate_limited", False),
+                (400, "security_challenge", False),
+            )
+        ):
+            error = vinted_buyer.BuyerError("private", status, reason=reason)
+            with patch.dict(
+                os.environ,
+                {
+                    "MSJ_BUYER_CHECK_ON_START": f"bootstrap-{index}",
+                    "MSJ_BUYER_BOOTSTRAP_CHECK_ON_START": "1",
+                },
+            ), patch("vinted_buyer.settings", return_value={"connected": True}), patch(
+                "vinted_buyer.check_saved_connection", side_effect=error
+            ), patch(
+                "vinted_connection_check.diagnose_bootstrap"
+            ) as probe:
+                vinted_connection_check.run_once()
+                vinted_connection_check.run_once()
+            self.assertEqual(probe.call_count, int(expected))
+
+    def test_bootstrap_read_closes_client_without_changing_saved_permissions(self):
+        saved = {"csrf": "private-old-csrf", "cookies": {"access_token_web": "private"}}
+        with closing(connection()) as conn, conn:
+            conn.execute(
+                "UPDATE vinted_buyer SET session=?,user_id='99',verified_at=100,enabled=1",
+                (vinted_buyer.encrypt(saved),),
+            )
+            before = tuple(conn.execute("SELECT * FROM vinted_buyer").fetchone())
+        client = Mock(csrf=saved["csrf"])
+        client.homepage.side_effect = lambda: setattr(
+            client, "csrf", "private-new-csrf"
+        )
+        client.identity.return_value = ("99", "private-owner")
+        with patch("vinted_buyer.Client", return_value=client), self.assertLogs(
+            "vinted_connection_check", level="INFO"
+        ) as logs:
+            vinted_connection_check.diagnose_bootstrap()
+        client.homepage.assert_called_once()
+        client.identity.assert_called_once()
+        client.request.assert_not_called()
+        client.session.close.assert_called_once()
+        self.assertIn("matched_account=True", " ".join(logs.output))
+        self.assertNotIn("private", " ".join(logs.output))
+        with closing(connection()) as conn:
+            self.assertEqual(
+                before, tuple(conn.execute("SELECT * FROM vinted_buyer").fetchone())
+            )
+
     def test_production_version_16_upgrades_and_preserves_attempt_history(self):
         with closing(connection()) as conn, conn:
             conn.execute("DROP TABLE vinted_buy_attempts")
