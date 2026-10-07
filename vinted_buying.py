@@ -307,7 +307,15 @@ def ready(row):
 def verified_listing(client, row, config, maximum):
     """Read the current item and apply the same listing gates for every caller."""
     item_id = str(row["item_id"])
-    data = client.request("GET", f"/api/v2/items/{item_id}")
+    try:
+        data = client.request("GET", f"/api/v2/items/{item_id}")
+    except buyer.BuyerError as exc:
+        if exc.status != 404 or exc.reason not in ("unreadable", "http_error"):
+            raise
+        # The former item-detail route returns 404 on the current UK site.
+        # Read the same canonical listing's first-party server-rendered item;
+        # access refusals and security challenges never use another route.
+        data = client.listing_page(row["url"], item_id)
     item = data.get("item") or {}
     if not isinstance(item, dict) or str(item.get("id")) != item_id:
         raise buyer.BuyerError(
@@ -318,11 +326,17 @@ def verified_listing(client, row, config, maximum):
         ("is_sold", "already sold", "item_sold"),
         ("is_reserved", "reserved", "item_reserved"),
         ("is_closed", "closed or removed", "item_closed"),
+        ("is_hidden", "hidden or removed", "item_closed"),
     ):
         if item.get(flag):
             raise buyer.BuyerError(
                 f"This item is {label} on Vinted. No payment was sent.", reason=code
             )
+    if "can_buy" in item and item["can_buy"] is not True:
+        raise buyer.BuyerError(
+            "Vinted does not currently allow this account to buy this item. No payment was sent.",
+            reason="item_unavailable",
+        )
     price = item.get("price")
     if not isinstance(price, dict):
         price = {"amount": price, "currency_code": item.get("currency")}

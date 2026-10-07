@@ -688,6 +688,144 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(self.payments()[0].args[2]["checksum"], "verified-checksum")
         self.assertEqual(buying.result("123")["total"], 1900)
 
+    def test_removed_item_api_uses_current_page_and_still_pays_only_once(self):
+        original = self.client.request.side_effect
+
+        def response(method, path, body=None):
+            if path == "/api/v2/items/123":
+                raise buyer.BuyerError(
+                    buyer.AUTH_REASONS["unreadable"], 404, reason="unreadable"
+                )
+            return original(method, path, body)
+
+        self.client.request.side_effect = response
+        self.client.listing_page.return_value = {
+            "item": {
+                "id": "123",
+                "user_id": "100",
+                "price": {"amount": "15.00", "currency_code": "GBP"},
+                "can_buy": True,
+                "is_reserved": False,
+                "is_hidden": False,
+            }
+        }
+        self.assertEqual(self.run_buy()["state"], "paid")
+        self.assertEqual(self.run_buy()["state"], "paid")
+        self.client.listing_page.assert_called_once_with(self.row["url"], "123")
+        self.assertEqual(len(self.payments()), 1)
+
+    def test_item_access_refusals_never_switch_to_the_listing_page(self):
+        for status, reason in (
+            (401, "credentials"),
+            (403, "security_challenge"),
+            (429, "rate_limited"),
+            (307, "session_refresh"),
+            (404, "security_challenge"),
+        ):
+            with self.subTest(status=status, reason=reason):
+                self.client.reset_mock()
+                self.client.request.side_effect = buyer.BuyerError(
+                    "Vinted refused this request.", status, reason=reason
+                )
+                self.assertEqual(self.run_buy()["state"], "failed_before_payment")
+                self.client.listing_page.assert_not_called()
+                self.assertEqual(self.payments(), [])
+
+    def test_current_page_disallowed_item_stops_before_conversation_or_payment(self):
+        for change, reason in (
+            ({"can_buy": False}, "item_unavailable"),
+            ({"is_reserved": True}, "item_reserved"),
+            ({"is_hidden": True}, "item_closed"),
+        ):
+            with self.subTest(change=change):
+                self.client.reset_mock()
+                self.client.request.side_effect = buyer.BuyerError(
+                    "Item API no longer available.", 404, reason="http_error"
+                )
+                self.client.listing_page.return_value = {
+                    "item": {
+                        "id": "123",
+                        "user_id": "100",
+                        "price": {"amount": "15.00", "currency_code": "GBP"},
+                        "can_buy": True,
+                        "is_reserved": False,
+                        "is_hidden": False,
+                        **change,
+                    }
+                }
+                outcome = self.run_buy()
+                self.assertEqual(outcome["state"], "failed_before_payment")
+                self.assertIn("No payment was sent", outcome["message"])
+                self.client.request.assert_called_once_with("GET", "/api/v2/items/123")
+                self.assertEqual(self.payments(), [])
+
+    def test_buyer_listing_transport_uses_scoped_page_and_one_canonical_redirect(self):
+        from test_vinted_page_data import next_data, purchase_item
+
+        page = Mock(
+            status_code=200,
+            text=next_data(purchase_item(seller_id="100")),
+            headers={},
+            cookies=requests.cookies.RequestsCookieJar(),
+        )
+        redirect = Mock(
+            status_code=301, text="", headers={"Location": "/items/123-canonical"}
+        )
+        client = buyer.Client(
+            {"cookies": {"access_token_web": "fictional-access-token-0123456789"}}
+        )
+        try:
+            with patch.object(
+                client.session, "get", side_effect=[redirect, page]
+            ) as get:
+                data = client.listing_page(self.row["url"], "123")
+            self.assertEqual(data["item"]["user_id"], "100")
+            self.assertEqual(
+                [c.args[0] for c in get.call_args_list],
+                [buyer.BASE + "/items/123", buyer.BASE + "/items/123-canonical"],
+            )
+            self.assertTrue(
+                all(c.kwargs["allow_redirects"] is False for c in get.call_args_list)
+            )
+            self.assertTrue(
+                all(
+                    c.kwargs["headers"] == {"Accept": "text/html"}
+                    for c in get.call_args_list
+                )
+            )
+        finally:
+            client.session.close()
+
+    def test_buyer_listing_transport_refuses_foreign_redirects_challenges_and_wrong_items(
+        self,
+    ):
+        from test_vinted_page_data import next_data, purchase_item
+
+        client = buyer.Client()
+        try:
+            for status, text, headers in (
+                (302, "", {"Location": "https://foreign.example/items/123"}),
+                (302, "", {"Location": "/items/999-other"}),
+                (302, "", {"Location": "/member/login"}),
+                (403, "<html>Verify you are human</html>", {}),
+                (404, "<html>Not found</html>", {}),
+                (200, next_data(purchase_item(id="999")), {}),
+            ):
+                with self.subTest(status=status, headers=headers):
+                    response = Mock(status_code=status, text=text, headers=headers)
+                    with patch.object(
+                        client.session, "get", return_value=response
+                    ) as get, self.assertRaises(buyer.BuyerError):
+                        client.listing_page(self.row["url"], "123")
+                    get.assert_called_once()
+            with patch.object(client.session, "get") as get, self.assertRaises(
+                buyer.BuyerError
+            ):
+                client.listing_page("https://www.vinted.co.uk/items/999", "123")
+            get.assert_not_called()
+        finally:
+            client.session.close()
+
     def test_listing_preflight_reads_saved_alert_without_changing_purchase_state(self):
         self.batch(1, [123])
         buying.claim(self.row)
@@ -1118,6 +1256,9 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
 
     def test_unreadable_response_reports_phase_and_http_without_secrets(self):
         self.client.request.side_effect = buyer.BuyerError(
+            buyer.AUTH_REASONS["unreadable"], 404, reason="unreadable"
+        )
+        self.client.listing_page.side_effect = buyer.BuyerError(
             buyer.AUTH_REASONS["unreadable"], 404, reason="unreadable"
         )
         result = self.run_buy()
