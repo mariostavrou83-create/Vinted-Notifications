@@ -140,6 +140,120 @@ class PhotoCardTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.bot.send_photo.assert_awaited_once()
         self.bot.send_message.assert_not_awaited()
 
+    async def test_shared_cooldown_deferrals_do_not_exhaust_description_fetches(self):
+        with patch("vinted_gallery.time.time", return_value=1002), patch(
+            "vinted_gallery.fetch_listing",
+            return_value={
+                "photos": [],
+                "description": "",
+                "state": "cooldown",
+                "retry_after": 1202,
+            },
+        ):
+            await self.send()
+        for now in (1203, 1404):
+            with patch("vinted_gallery.time.time", return_value=now), patch(
+                "vinted_gallery.fetch_listing",
+                return_value={
+                    "photos": [],
+                    "description": "",
+                    "state": "cooldown",
+                    "retry_after": now + 200,
+                },
+            ):
+                await self.worker.tick(now=now)
+                if self.worker.photo_task:
+                    await self.worker.photo_task
+            self.assertEqual(outbox(110)["photo_status"], "pending")
+            self.assertEqual(photo_cards.load("vinted", 42)[1]["listing_attempts"], 0)
+        with patch("vinted_gallery.time.time", return_value=1605):
+            await self.worker.tick(now=1605)
+            if self.worker.photo_task:
+                await self.worker.photo_task
+        self.assertEqual(outbox(110)["photo_status"], "sent")
+        saved = photo_cards.load("vinted", 42)[1]
+        self.assertEqual(saved["listing_attempts"], 1)
+        self.assertIn("Soft cotton", saved["description"])
+        self.bot.send_photo.assert_awaited_once()
+        self.bot.send_message.assert_not_awaited()
+
+    async def test_description_retry_is_scheduled_and_preserves_examples_and_one_alert(
+        self,
+    ):
+        with patch("vinted_gallery.time.time", return_value=1002), patch(
+            "vinted_gallery.fetch_listing",
+            return_value={"photos": [], "description": "", "state": "access_limited"},
+        ) as fetch:
+            await self.send()
+            fetch.assert_called_once()
+        pending = outbox(110)
+        self.assertEqual(pending["status"], "sent")
+        self.assertEqual(pending["photo_status"], "pending")
+        self.assertGreaterEqual(pending["photo_next_attempt"], 1302)
+        await photo_cards.handle_callback(self.bot, query(), "vinted", "123")
+        self.bot.edit_message_media.reset_mock()
+        with patch("vinted_gallery.time.time", return_value=1303):
+            await self.worker.tick(now=1303)
+            if self.worker.photo_task:
+                await self.worker.photo_task
+        self.assertEqual(outbox(110)["photo_status"], "sent")
+        saved = photo_cards.load("vinted", 42)
+        self.assertEqual(saved[2]["view"], "examples")
+        self.assertIn("Soft cotton", saved[1]["description"])
+        self.bot.edit_message_media.assert_not_awaited()
+        self.bot.send_photo.assert_awaited_once()
+        self.bot.send_message.assert_not_awaited()
+
+    async def test_many_cooldowns_do_not_exhaust_telegram_edit_retry(self):
+        with patch("vinted_gallery.time.time", return_value=1002), patch(
+            "vinted_gallery.fetch_listing",
+            return_value={
+                "photos": [],
+                "description": "",
+                "state": "cooldown",
+                "retry_after": 1012,
+            },
+        ):
+            await self.send()
+        for now in (1013, 1024, 1035, 1046, 1057, 1068):
+            with patch("vinted_gallery.time.time", return_value=now), patch(
+                "vinted_gallery.fetch_listing",
+                return_value={
+                    "photos": [],
+                    "description": "",
+                    "state": "cooldown",
+                    "retry_after": now + 10,
+                },
+            ):
+                await self.worker.tick(now=now)
+                if self.worker.photo_task:
+                    await self.worker.photo_task
+        self.bot.edit_message_caption.side_effect = [NetworkError("offline"), None]
+        for now in (1079, 1082):
+            with patch("vinted_gallery.time.time", return_value=now):
+                await self.worker.tick(now=now)
+                if self.worker.photo_task:
+                    await self.worker.photo_task
+            self.assertEqual(
+                outbox(110)["photo_status"], "pending" if now == 1079 else "sent"
+            )
+        self.assertEqual(photo_cards.load("vinted", 42)[1]["telegram_edit_failures"], 0)
+        self.bot.send_photo.assert_awaited_once()
+        self.bot.send_message.assert_not_awaited()
+
+    async def test_failed_image_downloads_have_a_separate_three_attempt_cap(self):
+        self.download.return_value = None
+        await self.send()
+        for now in (1013, 1024):
+            await self.worker.tick(now=now)
+            if self.worker.photo_task:
+                await self.worker.photo_task
+        self.assertEqual(outbox(110)["photo_status"], "failed")
+        self.assertEqual(photo_cards.load("vinted", 42)[1]["listing_image_failures"], 3)
+        self.assertEqual(self.download.await_count, 4)  # Initial send plus three edits.
+        self.bot.send_message.assert_awaited_once()
+        self.bot.send_photo.assert_not_awaited()
+
     async def test_new_gallery_photos_replace_initial_collage_in_same_message(self):
         await photo_cards.send_initial(
             self.bot, "123", self.row, self.details, AsyncMock()

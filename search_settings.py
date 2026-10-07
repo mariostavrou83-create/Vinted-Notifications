@@ -11,12 +11,11 @@ from pathlib import Path
 
 import db
 
-SCHEMA_VERSION = "16"
+SCHEMA_VERSION = "17"
 
 
 def connection():
-    conn = sqlite3.connect(db.DB_PATH, timeout=15)
-    conn.execute("PRAGMA foreign_keys=ON")
+    conn = db.get_db_connection()
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -28,6 +27,12 @@ def ensure_schema():
     integrity check aborts startup; an existing deployment can be rolled back.
     """
     with closing(connection()) as conn:
+        # Configure before child processes start, even when no schema upgrade
+        # is needed. WAL lets pollers/dashboard reads continue while another
+        # worker commits a short write; keep SQLite's FULL durability setting.
+        journal = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        if journal.lower() != "wal":
+            raise RuntimeError("Database does not support concurrent WAL reads")
         version = conn.execute(
             "SELECT value FROM parameters WHERE key='msj_search_schema'"
         ).fetchone()

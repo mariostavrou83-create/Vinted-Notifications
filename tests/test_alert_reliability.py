@@ -8,7 +8,7 @@ from pathlib import Path
 from queue import Queue
 from time import monotonic, time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +30,12 @@ def functions(path, names, namespace):
 
 class AlertTests(unittest.TestCase):
     def setUp(self):
+        # This extracted-core fixture has an in-memory database double. Keep
+        # alert feature settings inside that fixture rather than accidentally
+        # reading the default on-disk production path during snapshot creation.
+        settings_patch = patch("db.get_parameter", return_value=None)
+        settings_patch.start()
+        self.addCleanup(settings_patch.stop)
         self.seen = set()
         self.watermark = None
 

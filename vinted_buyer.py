@@ -111,6 +111,13 @@ def response_error(response, data, stage):
         ]
     codes = {value.lower() for value in values if isinstance(value, str)}
     redirect = redirect_reason(response)
+    logger.info(
+        "Vinted response: stage=%s http=%s redirect=%s body=%s",
+        stage,
+        status,
+        redirect_target(response),
+        "json" if isinstance(data, dict) else "other",
+    )
     if security_challenge(response, data) or redirect == "security_challenge":
         reason = "security_challenge"
     elif redirect:
@@ -140,6 +147,33 @@ def response_error(response, data, stage):
     else:
         reason = "http_error"
     return BuyerError(AUTH_REASONS[reason], status, reason=reason, stage=stage)
+
+
+def redirect_target(response):
+    """Fixed labels only: no response paths, queries, userinfo or tokens in logs."""
+    reason = redirect_reason(response)
+    if reason is None:
+        return "none"
+    if reason != "redirect":
+        return reason
+    location = getattr(response, "headers", {}).get("Location", "")
+    if not isinstance(location, str) or not location or len(location) > 4096:
+        return "missing_or_invalid"
+    if any(ord(char) <= 32 for char in location):
+        return "missing_or_invalid"
+    try:
+        target = urlsplit(urljoin(BASE, location))
+        if target.username or target.password:
+            return "userinfo"
+        if target.scheme != "https":
+            return "non_https"
+        if target.netloc == "www.vinted.co.uk":
+            return "same_origin_other_path"
+        if target.netloc == "vinted.co.uk":
+            return "uk_apex"
+        return "other_origin"
+    except ValueError:
+        return "missing_or_invalid"
 
 
 def redirect_reason(response):
@@ -208,6 +242,9 @@ def migrate(conn):
     conn.execute("""CREATE TABLE IF NOT EXISTS vinted_buy_attempts (
         item_id TEXT PRIMARY KEY, state TEXT NOT NULL, checkout_id TEXT,
         total INTEGER, message TEXT NOT NULL, updated REAL NOT NULL)""")
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(vinted_buy_attempts)")}
+    if "action_url" not in columns:
+        conn.execute("ALTER TABLE vinted_buy_attempts ADD COLUMN action_url TEXT")
     conn.execute("""CREATE TABLE IF NOT EXISTS vinted_buyer_access (
         id INTEGER PRIMARY KEY CHECK(id=1), last_probe REAL NOT NULL DEFAULT 0,
         checked REAL, reason TEXT, stage TEXT, http_status INTEGER)""")
@@ -314,6 +351,7 @@ class Client:
             if isinstance(returned, requests.cookies.RequestsCookieJar)
             else {}
         )
+        access_updated = False
         for field, cookie in (
             ("access_token", "access_token_web"),
             ("refresh_token", "refresh_token_web"),
@@ -331,7 +369,10 @@ class Client:
             self.session.cookies.set(
                 cookie, value, domain="www.vinted.co.uk", secure=True
             )
+            if cookie == "access_token_web":
+                access_updated = True
         self.headers()
+        return access_updated
 
     def request(self, method, path, body=None, *, allow_challenge=False):
         if not path.startswith(("/api/v2/", "/web/api/auth/")):
@@ -365,7 +406,22 @@ class Client:
             return {"challenge_id": str(data["payload"]["id"])}
         if response.status_code not in (200, 201) or not isinstance(data, dict):
             raise response_error(response, data, stage)
-        self.update_tokens(response, data)
+        if any(data.get(k) for k in ("error", "error_code")):
+            # Vinted can return a business/authentication error inside HTTP 200.
+            # Never adopt token fields from an explicit error response or let a
+            # nominal status turn that response into an accepted checkout.
+            raise response_error(response, data, stage)
+        access_updated = self.update_tokens(response, data)
+        if path == "/web/api/auth/refresh" or (
+            path == "/web/api/auth/oauth"
+            and isinstance(body, dict)
+            and body.get("grant_type") == "refresh_token"
+        ):
+            # HTTP 200 can still contain an OAuth error or no usable token.
+            # Never treat the imported stale cookie as proof of renewal.
+            if any(data.get(k) for k in ("error", "error_code")) or not access_updated:
+                raise response_error(response, data, stage)
+            logger.info("Vinted session renewal: usable_access_token=True")
         return data
 
     def homepage(self):
@@ -614,15 +670,23 @@ def connected_client():
             expired = exc.status == 401 and exc.reason == "credentials"
             if not (expired or exc.reason == "session_refresh") or not refresh:
                 raise
-            client.request(
-                "POST",
-                "/web/api/auth/oauth",
-                {
-                    "client_id": "web",
-                    "grant_type": "refresh_token",
-                    "refresh_token": refresh,
-                },
-            )
+            if exc.reason == "session_refresh":
+                # The same-origin redirect explicitly identifies the web
+                # renewal endpoint. Make one normal POST, without replaying
+                # the account GET or following its redirect destination.
+                client.request(
+                    "POST", "/web/api/auth/refresh", {"refresh_token": refresh}
+                )
+            else:
+                client.request(
+                    "POST",
+                    "/web/api/auth/oauth",
+                    {
+                        "client_id": "web",
+                        "grant_type": "refresh_token",
+                        "refresh_token": refresh,
+                    },
+                )
             with closing(connection()) as conn, conn:
                 # Refresh tokens may rotate. Preserve the replacement even if
                 # a later homepage request fails; identity still must be checked

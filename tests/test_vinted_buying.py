@@ -208,6 +208,131 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(self.run_buy()["state"], "paying")
         self.client.request.assert_not_called()
 
+    def test_abandoned_preparing_recovers_only_after_acquiring_the_buyer_lock(self):
+        buying.claim(self.row)
+        buying.record("123", "preparing", "Old interrupted checkout", checkout_id="old")
+        self.assertFalse(buying.claim(self.row))
+        with buyer.exclusive(), self.assertRaisesRegex(
+            buyer.BuyerError, "already running"
+        ):
+            self.run_buy()
+        self.assertEqual(buying.result("123")["state"], "preparing")
+        self.client.request.assert_not_called()
+        self.assertEqual(self.run_buy()["state"], "paid")
+        self.assertEqual(buying.result("123")["checkout_id"], "checkout-123")
+        self.assertEqual(len(self.payments()), 1)
+        self.assertEqual(self.run_buy()["state"], "paid")
+        self.assertEqual(len(self.payments()), 1)
+
+    def test_preparing_callback_can_reach_locked_recovery(self):
+        import asyncio
+
+        import photo_cards
+
+        buying.claim(self.row)
+        buttons = [
+            b
+            for row in buying.feedback_buttons(self.row, buying.result("123"))
+            for b in row
+        ]
+        self.assertIn("buy:click", [b.callback_data for b in buttons])
+        query = SimpleNamespace(
+            data="buy:click",
+            message=SimpleNamespace(message_id=42, chat=SimpleNamespace(id=123)),
+            from_user=SimpleNamespace(id=123),
+        )
+        outcome = {"state": "paid", "message": "Confirmed"}
+        with patch.object(
+            photo_cards, "recover", return_value=(self.row, {}, {})
+        ), patch.object(photo_cards, "answer", new=AsyncMock()), patch.object(
+            buying, "show_feedback", new=AsyncMock()
+        ), patch.object(
+            buying, "buy", return_value=outcome
+        ) as buy:
+            asyncio.run(
+                buying.callback(
+                    SimpleNamespace(callback_query=query), SimpleNamespace(bot=Mock())
+                )
+            )
+        buy.assert_called_once_with(self.row)
+
+    def test_failed_unknown_and_action_payment_states_never_recover_preparing(self):
+        buying.claim(self.row)
+        for state in ("paying", "unknown", "needs_action", "paid", "payment_failed"):
+            with self.subTest(state=state):
+                buying.record("123", state, "Check Vinted")
+                self.assertFalse(buying.claim(self.row, recover_preparing=True))
+                self.assertEqual(self.run_buy()["state"], state)
+        self.client.request.assert_not_called()
+
+    def test_bank_action_link_is_shown_and_never_resubmits_payment(self):
+        action_url = (
+            "https://bank.example.test/confirm?challenge=private-payment-reference"
+        )
+        self.payment = {
+            "payment": {"status": "pending"},
+            "action": {"parameters": {"url": action_url}},
+        }
+        outcome = self.run_buy()
+        self.assertEqual(outcome["state"], "needs_action")
+        self.assertEqual(outcome["action_url"], action_url)
+        self.assertIn("confirmation button", outcome["message"])
+        buttons = [b for row in buying.feedback_buttons(self.row, outcome) for b in row]
+        self.assertEqual([b.url for b in buttons if b.url], [action_url])
+        self.assertNotIn("buy:click", [b.callback_data for b in buttons])
+        self.assertEqual(self.run_buy()["action_url"], action_url)
+        self.assertEqual(len(self.payments()), 1)
+
+    def test_unsafe_or_malformed_bank_action_urls_use_the_vinted_fallback(self):
+        for value in (
+            "http://bank.example.test/confirm",
+            "javascript:alert(1)",
+            "https://private-reference@bank.example.test/confirm",
+            "https://bank.example.test:8443/confirm",
+            "https://bank.example.test:invalid/confirm",
+            "https://bank.example.test/\r\nprivate-reference",
+            "https://bank.example.test/" + "x" * 4096,
+            [],
+            None,
+        ):
+            with self.subTest(value=value):
+                feedback = {
+                    "state": "needs_action",
+                    "action_url": value,
+                    "checkout_id": "checkout-123",
+                }
+                self.assertIsNone(
+                    buying.payment_action_url(
+                        {"action": {"parameters": {"url": value}}}
+                    )
+                )
+                buttons = [
+                    b
+                    for row in buying.feedback_buttons(self.row, feedback)
+                    for b in row
+                ]
+                self.assertEqual(
+                    [b.url for b in buttons if b.url],
+                    [buyer.BASE + "/checkout?purchase_id=checkout-123"],
+                )
+
+    def test_existing_attempt_schema_migrates_bank_actions_idempotently(self):
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("ALTER TABLE vinted_buy_attempts DROP COLUMN action_url")
+            conn.execute(
+                "INSERT INTO vinted_buy_attempts VALUES ('old','unknown','old-checkout',1900,'Check Vinted',1)"
+            )
+            buyer.migrate(conn)
+            buyer.migrate(conn)
+            saved = dict(
+                conn.execute(
+                    "SELECT * FROM vinted_buy_attempts WHERE item_id='old'"
+                ).fetchone()
+            )
+        self.assertEqual(saved["state"], "unknown")
+        self.assertEqual(saved["checkout_id"], "old-checkout")
+        self.assertIsNone(saved["action_url"])
+
     def test_final_total_fees_currency_and_missing_fields_all_fail_closed(self):
         bad = []
         for amount in ("30.00", "21.00", "NaN", "-1", "1.001"):
@@ -232,6 +357,45 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         value = checkout()
         value.pop("checksum")
         bad.append(value)
+        for value in bad:
+            with self.subTest(checkout=value):
+                self.final = value
+                self.assertEqual(self.run_buy()["state"], "failed_before_payment")
+        self.assertEqual(self.payments(), [])
+
+    def test_component_errors_and_invalid_checksum_cannot_submit_payment(self):
+        bad = []
+        for key in (
+            "order_summary_v2",
+            "additional_service",
+            "shipping_address",
+            "payment_method",
+            "shipping_pickup_details",
+            "shipping_pickup_options",
+        ):
+            value = checkout()
+            value["components"].setdefault(key, {})["errors"] = ["Needs attention"]
+            bad.append(value)
+        for checksum in (
+            True,
+            ["invalid"],
+            {"invalid": "checksum"},
+            "bad\nchecksum",
+            "x" * 8193,
+        ):
+            value = checkout()
+            value["checksum"] = checksum
+            bad.append(value)
+        for key in (
+            "shipping_address",
+            "payment_method",
+            "shipping_pickup_details",
+            "shipping_pickup_options",
+            "order_summary_v2",
+        ):
+            value = checkout()
+            value["components"][key] = ["unexpected"]
+            bad.append(value)
         for value in bad:
             with self.subTest(checkout=value):
                 self.final = value
@@ -331,6 +495,160 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                 self.assertNotIn("do not display", str(error.exception))
                 request.assert_called_once()
         client.session.close()
+
+    def test_nominal_refresh_success_requires_a_usable_access_token(self):
+        client = buyer.Client(
+            {"cookies": {"access_token_web": "old-access-token-0123456789"}}
+        )
+        for data in (
+            {},
+            {"access_token": "bad\r\nvalue"},
+            {"error": "invalid_grant"},
+            {"error": "invalid_grant", "access_token": "new-access-token-0123456789"},
+        ):
+            response = Mock(
+                status_code=200, json=Mock(return_value=data), text="", headers={}
+            )
+            with patch.object(
+                client.session, "request", return_value=response
+            ), self.assertRaises(buyer.BuyerError):
+                client.request(
+                    "POST", "/web/api/auth/oauth", {"grant_type": "refresh_token"}
+                )
+        for cookies, data in (
+            ({}, {"access_token": "new-access-token-0123456789"}),
+            ({"access_token_web": "cookie-access-token-0123456789"}, {}),
+        ):
+            response = Mock(
+                status_code=200,
+                json=Mock(return_value=data),
+                text="",
+                headers={},
+                cookies=requests.cookies.cookiejar_from_dict(cookies),
+            )
+            with patch.object(client.session, "request", return_value=response):
+                self.assertEqual(
+                    client.request(
+                        "POST", "/web/api/auth/oauth", {"grant_type": "refresh_token"}
+                    ),
+                    data,
+                )
+        client.session.close()
+
+    def test_nominal_http_success_does_not_accept_marketplace_errors_or_error_tokens(
+        self,
+    ):
+        old = "old-access-token-0123456789"
+        client = buyer.Client({"cookies": {"access_token_web": old}})
+        for path, data, reason in (
+            ("/api/v2/items/123", {"error": "invalid_token"}, "credentials"),
+            (
+                "/api/v2/purchases/checkout/build",
+                {"error_code": "invalid_csrf_token"},
+                "csrf",
+            ),
+            (
+                "/web/api/auth/refresh",
+                {
+                    "error": "invalid_grant",
+                    "access_token": "untrusted-new-token-0123456789",
+                },
+                "credentials",
+            ),
+        ):
+            response = Mock(
+                status_code=200, text="", headers={}, json=Mock(return_value=data)
+            )
+            with patch.object(
+                client.session, "request", return_value=response
+            ) as request, self.assertRaises(buyer.BuyerError) as error:
+                client.request("POST", path, {})
+            self.assertEqual(error.exception.reason, reason)
+            self.assertEqual(client.exported()["cookies"]["access_token_web"], old)
+            self.assertEqual(client.session.headers["Authorization"], "Bearer " + old)
+            request.assert_called_once()
+        client.session.close()
+
+    def test_direct_refresh_rejects_empty_invalid_or_error_success_without_retry(self):
+        old = "old-access-token-0123456789"
+        for data in (
+            {},
+            {"access_token": "bad\r\nvalue"},
+            {"error": "invalid_grant"},
+            {
+                "error_code": "invalid_token",
+                "access_token": "new-access-token-0123456789",
+            },
+        ):
+            with self.subTest(data=data):
+                client = buyer.Client({"cookies": {"access_token_web": old}})
+                response = Mock(
+                    status_code=200,
+                    json=Mock(return_value=data),
+                    text="",
+                    headers={},
+                )
+                with patch.object(
+                    client.session, "request", return_value=response
+                ) as request, self.assertLogs(
+                    "vinted_buyer", level="INFO"
+                ) as logs, self.assertRaises(
+                    buyer.BuyerError
+                ) as error:
+                    client.request(
+                        "POST",
+                        "/web/api/auth/refresh",
+                        {"refresh_token": "private-refresh-token-0123456789"},
+                    )
+                request.assert_called_once()
+                for value in (old, "private-refresh-token-0123456789"):
+                    self.assertNotIn(value, " ".join(logs.output))
+                    self.assertNotIn(value, str(error.exception))
+                client.session.close()
+
+    def test_direct_refresh_accepts_access_token_from_body_or_rotated_cookie(self):
+        new = "new-access-token-0123456789"
+        for cookies, data in (
+            ({}, {"access_token": new}),
+            ({"access_token_web": new}, {}),
+        ):
+            with self.subTest(cookies=cookies):
+                client = buyer.Client(
+                    {"cookies": {"access_token_web": "old-access-token-0123456789"}}
+                )
+                response = Mock(
+                    status_code=200,
+                    json=Mock(return_value=data),
+                    text="",
+                    headers={},
+                    cookies=requests.cookies.cookiejar_from_dict(cookies),
+                )
+                with patch.object(
+                    client.session, "request", return_value=response
+                ) as request:
+                    self.assertEqual(
+                        client.request("POST", "/web/api/auth/refresh", {}), data
+                    )
+                request.assert_called_once()
+                self.assertEqual(client.exported()["cookies"]["access_token_web"], new)
+                self.assertEqual(
+                    client.session.headers["Authorization"], "Bearer " + new
+                )
+                client.session.close()
+
+    def test_redirect_diagnostics_never_include_path_or_query_secrets(self):
+        for location, label in (
+            ("/private-token?secret=do-not-log", "same_origin_other_path"),
+            ("https://vinted.co.uk/?secret=do-not-log", "uk_apex"),
+            ("https://evil.test/private-token?secret=do-not-log", "other_origin"),
+            ("https://private-token@www.vinted.co.uk/", "userinfo"),
+        ):
+            response = Mock(status_code=307, headers={"Location": location}, text="")
+            with self.assertLogs("vinted_buyer", level="INFO") as logs:
+                buyer.response_error(response, None, "homepage")
+            self.assertIn(label, " ".join(logs.output))
+            self.assertNotIn("private-token", " ".join(logs.output))
+            self.assertNotIn("do-not-log", " ".join(logs.output))
 
     def test_homepage_block_stops_before_sending_password(self):
         with closing(search_settings.connection()) as conn, conn:
@@ -543,7 +861,11 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(buyer.decrypt(saved), rotated)
         self.assertEqual(before, after)
         client.request.assert_called_once()
-        self.assertEqual(client.request.call_args.args[1], "/web/api/auth/oauth")
+        self.assertEqual(client.request.call_args.args[1], "/web/api/auth/refresh")
+        self.assertEqual(
+            client.request.call_args.args[2],
+            {"refresh_token": old_session["cookies"]["refresh_token_web"]},
+        )
         client.identity.assert_called_once()
         client.session.close.assert_called_once()
         self.assertEqual(buyer.settings()["access"]["http_status"], 307)
@@ -591,9 +913,22 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                 if refresh_expected:
                     self.assertIs(buyer.connected_client(), client)
                     client.request.assert_called_once()
-                    self.assertEqual(
-                        client.request.call_args.args[2]["grant_type"], "refresh_token"
-                    )
+                    if reason == "session_refresh":
+                        client.request.assert_called_once_with(
+                            "POST",
+                            "/web/api/auth/refresh",
+                            {"refresh_token": "refresh"},
+                        )
+                    else:
+                        client.request.assert_called_once_with(
+                            "POST",
+                            "/web/api/auth/oauth",
+                            {
+                                "client_id": "web",
+                                "grant_type": "refresh_token",
+                                "refresh_token": "refresh",
+                            },
+                        )
                     self.assertEqual(buyer.settings()["access"]["http_status"], 200)
                 else:
                     with self.assertRaises(buyer.BuyerError):
@@ -601,6 +936,100 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                     client.request.assert_not_called()
                     self.assertEqual(buyer.settings()["access"]["http_status"], status)
                     client.session.close.assert_called_once()
+
+    def test_direct_refresh_rechecks_identity_once_and_preserves_rotated_session(self):
+        old = {
+            "csrf": "old-csrf-token-0123456789",
+            "cookies": {
+                "access_token_web": "old-access-token-0123456789",
+                "refresh_token_web": "old-refresh-token-0123456789",
+            },
+        }
+        new = {
+            "access_token": "new-access-token-0123456789",
+            "refresh_token": "new-refresh-token-0123456789",
+        }
+
+        def response(status, data, *, location=None, text=""):
+            return Mock(
+                status_code=status,
+                text=text,
+                json=Mock(return_value=data),
+                headers={"Location": location} if location else {},
+                cookies=requests.cookies.RequestsCookieJar(),
+            )
+
+        for outcome in ("connected", "second_redirect", "changed_account"):
+            with self.subTest(outcome=outcome):
+                with closing(search_settings.connection()) as conn, conn:
+                    conn.execute(
+                        "UPDATE vinted_buyer SET session=?", (buyer.encrypt(old),)
+                    )
+                final = (
+                    response(307, None, location="/web/api/auth/refresh")
+                    if outcome == "second_redirect"
+                    else response(
+                        200,
+                        {"user": {"id": 99 if outcome == "connected" else 100}},
+                    )
+                )
+                responses = [
+                    response(
+                        307,
+                        None,
+                        location="/web/api/auth/refresh?private=never-log-this",
+                    ),
+                    response(200, new),
+                    response(
+                        200, None, text='{"CSRF_TOKEN":"new-csrf-token-0123456789"}'
+                    ),
+                    final,
+                ]
+                with patch.object(
+                    requests.Session, "request", side_effect=responses
+                ) as request, self.assertLogs("vinted_buyer", level="INFO") as logs:
+                    if outcome == "connected":
+                        client = buyer.connected_client()
+                        client.session.close()
+                    else:
+                        with self.assertRaises(buyer.BuyerError):
+                            buyer.connected_client()
+                self.assertEqual(
+                    [(c.args[0], c.args[1]) for c in request.call_args_list],
+                    [
+                        ("GET", buyer.BASE + "/api/v2/users/current"),
+                        ("POST", buyer.BASE + "/web/api/auth/refresh"),
+                        ("GET", buyer.BASE + "/"),
+                        ("GET", buyer.BASE + "/api/v2/users/current"),
+                    ],
+                )
+                self.assertEqual(
+                    request.call_args_list[1].kwargs["json"],
+                    {"refresh_token": old["cookies"]["refresh_token_web"]},
+                )
+                self.assertTrue(
+                    all(not c.kwargs["allow_redirects"] for c in request.call_args_list)
+                )
+                with closing(search_settings.connection()) as conn:
+                    saved = conn.execute("SELECT session FROM vinted_buyer").fetchone()[
+                        0
+                    ]
+                self.assertEqual(
+                    buyer.decrypt(saved)["cookies"],
+                    {
+                        "access_token_web": new["access_token"],
+                        "refresh_token_web": new["refresh_token"],
+                    },
+                )
+                self.assertTrue(buyer.settings()["enabled"])
+                self.assertEqual(buyer.settings()["user_id"], "99")
+                for value in (
+                    *old["cookies"].values(),
+                    *new.values(),
+                    "never-log-this",
+                ):
+                    self.assertNotIn(value, " ".join(logs.output))
+                    self.assertNotIn(value.encode(), Path(db.DB_PATH).read_bytes())
 
     def test_saved_connection_check_never_prepares_checkout_or_changes_permission(self):
         with patch.object(buyer, "connected_client", return_value=self.client) as check:

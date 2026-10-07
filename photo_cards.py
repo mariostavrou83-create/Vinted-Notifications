@@ -54,6 +54,23 @@ def control_health(platform, event, error=""):
             )
 
 
+async def enrichment_failures(platform, message_id, *, failed):
+    """Count Telegram edit failures independently of marketplace cooldown jobs."""
+    async with lock(platform, message_id):
+        saved = load(platform, message_id)
+        if not saved:
+            return 1 if failed else 0
+        details = saved[1]
+        failures = details.get("telegram_edit_failures", 0) + 1 if failed else 0
+        details["telegram_edit_failures"] = failures
+        with closing(connection()) as conn, conn:
+            conn.execute(
+                "UPDATE telegram_photo_cards SET details=? WHERE platform=? AND message_id=?",
+                (json.dumps(details), platform, message_id),
+            )
+        return failures
+
+
 def cache_key(bot, platform):
     # Telegram file IDs belong to one bot. Rotating a token invalidates its cache.
     return hashlib.sha256(
@@ -324,6 +341,9 @@ def record(row, details, result):
                     file_id,
                 ),
             )
+            from alert_delivery import acknowledge_listing
+
+            acknowledge_listing(conn, row, result.message_id)
     except sqlite3.Error:
         # A bookkeeping failure must not resend an already accepted notification.
         logger.exception(
@@ -438,7 +458,11 @@ async def enrich(bot, chat_id, row, details, before_edit):
     if not saved:
         return True
     details = dict(saved[1])
-    if not details.get("description_checked"):
+    from vinted_gallery import retry_pending
+
+    if not details.get("description_checked") or (
+        platform == "vinted" and retry_pending(details)
+    ):
         if platform == "ebay":
             from ebay_images import resolve
         else:
@@ -458,6 +482,9 @@ async def enrich(bot, chat_id, row, details, before_edit):
             "photos",
             "gallery_checked",
             "gallery_state",
+            "listing_attempts",
+            "listing_retry_after",
+            "listing_retry_until",
         ):
             if key in details:
                 current[key] = details[key]
@@ -471,11 +498,23 @@ async def enrich(bot, chat_id, row, details, before_edit):
         needs_photo = not card["listing_file_id"] or photos != details.get(
             "rendered_listing_photos", photos
         )
-        raw = (
-            await listing_photo(details)
-            if needs_photo and card["view"] == "listing"
-            else None
+        image_failures = details.get("listing_image_failures", 0)
+        if details.get("listing_image_failure_photos") != photos:
+            image_failures = 0
+        try_image = (
+            needs_photo
+            and card["view"] == "listing"
+            and (platform != "vinted" or image_failures < 3)
         )
+        raw = await listing_photo(details) if try_image else None
+        if platform == "vinted" and try_image:
+            details["listing_image_failures"] = image_failures + 1 if raw is None else 0
+            details["listing_image_failure_photos"] = photos
+            with closing(connection()) as conn, conn:
+                conn.execute(
+                    "UPDATE telegram_photo_cards SET details=? WHERE platform=? AND message_id=?",
+                    (json.dumps(details), platform, message_id),
+                )
         if raw is None:
             caption, note_pages = captions(row, details)
             view = card["view"]
@@ -517,7 +556,9 @@ async def enrich(bot, chat_id, row, details, before_edit):
                 after_edit(platform, message_id, view=view)
             # Even if an image download fails, finish the readable description
             # instead of leaving "loading" on the text/photo fallback forever.
-            return not needs_photo or card["view"] != "listing"
+            return (not needs_photo or card["view"] != "listing") and not (
+                platform == "vinted" and retry_pending(details)
+            )
         await before_edit()
         if load(platform, message_id) is None:
             return True
@@ -553,7 +594,7 @@ async def enrich(bot, chat_id, row, details, before_edit):
 
                 with closing(connection()) as conn, conn:
                     queue_redaction(conn, message_id)
-        return True
+        return not (platform == "vinted" and retry_pending(details))
 
 
 async def handle_callback(bot, query, platform, chat_id):
