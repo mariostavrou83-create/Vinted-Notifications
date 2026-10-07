@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import math
 import os
 import re
 import time
@@ -241,7 +242,7 @@ def checkout_prices(checkout, item_price, maximum, *, item_id=None):
             raise buyer.BuyerError(
                 "Choose and save your payment method in Vinted first."
             )
-        if code.lower() == "credit_card":
+        if code.lower() in ("card", "credit_card"):
             card = selected.get("credit_card")
             if not isinstance(card, dict) or card.get("expired") is not False:
                 raise buyer.BuyerError(
@@ -267,8 +268,7 @@ def checkout_prices(checkout, item_price, maximum, *, item_id=None):
         )
     shipping = components.get("shipping_pickup_details") or {}
     options = components.get("shipping_pickup_options") or {}
-    # Use the account's existing delivery choice only. Never invent a pickup
-    # point, pick a different address, or purchase an optional add-on.
+    # Choices must be confirmed by Vinted, whether saved or selected below.
     if (
         not isinstance(shipping, dict)
         or not isinstance(options, dict)
@@ -334,6 +334,332 @@ def checkout_prices(checkout, item_price, maximum, *, item_id=None):
         ):
             raise buyer.BuyerError("Save your delivery phone number in Vinted first.")
     return total
+
+
+def choice_preferences(config):
+    return {
+        "pickup_mode": config["pickup_mode"],
+        "preferred_card_last4": config["preferred_card_last4"],
+    }
+
+
+def coordinates(value):
+    if not isinstance(value, dict):
+        raise TypeError
+    result = []
+    for key, bound in (("latitude", 90), ("longitude", 180)):
+        raw = value.get(key)
+        if isinstance(raw, bool) or not isinstance(raw, (str, int, float)):
+            raise TypeError
+        number = float(raw)
+        if not math.isfinite(number) or not -bound <= number <= bound:
+            raise ValueError
+        result.append(number)
+    return tuple(result)
+
+
+def choice_id(value):
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= 200
+        and all(32 <= ord(char) < 127 for char in value)
+    )
+
+
+def nearest_pickup(client, components):
+    address_component = components.get("shipping_address") or {}
+    address = address_component.get("address") or {}
+    shipping = components.get("shipping_pickup_details") or {}
+    option = (components.get("shipping_pickup_options") or {}).get("pickup_options")
+    pickup = option.get("pickup") if isinstance(option, dict) else None
+    order_id = str(shipping.get("shipping_order_id", ""))
+    if (
+        not address.get("id")
+        or address.get("is_complete") is not True
+        or address_component.get("address_is_missing")
+        or address.get("country_code") != "GB"
+        or not re.fullmatch(r"[0-9]{1,24}", order_id)
+        or (
+            address_component.get("shipping_order_id") is not None
+            and str(address_component["shipping_order_id"]) != order_id
+        )
+        or not isinstance(pickup, dict)
+        or type(pickup.get("pickup_option_type")) not in (int, str)
+    ):
+        raise buyer.BuyerError(
+            "Vinted did not confirm pickup delivery for your saved UK address."
+        )
+    try:
+        latitude, longitude = coordinates(address.get("coordinates"))
+    except (ValueError, TypeError, OverflowError):
+        raise buyer.BuyerError(
+            "Vinted did not provide coordinates for your saved address. Save a complete address in Vinted first."
+        ) from None
+    data = client.request(
+        "GET",
+        f"/web/gateway/shipping-estimation/external/shipping_orders/{order_id}/nearby_pickup_points",
+        params={"country_code": "GB", "latitude": latitude, "longitude": longitude},
+    )
+    points, rates = data.get("shipping_points"), data.get("shipping_rates")
+    if (
+        not isinstance(points, list)
+        or not isinstance(rates, list)
+        or len(points) > 1000
+        or len(rates) > 100
+    ):
+        raise buyer.BuyerError(
+            "Vinted did not return readable available pickup points."
+        )
+    eligible = {}
+    for rate in rates:
+        if (
+            not isinstance(rate, dict)
+            or rate.get("restriction")
+            or rate.get("verification_service_type")
+            or not choice_id(rate.get("rate_uuid"))
+        ):
+            continue
+        try:
+            price = cents(rate.get("price"))
+        except buyer.BuyerError:
+            continue
+        if rate["rate_uuid"] in eligible:
+            raise buyer.BuyerError("Vinted returned conflicting pickup rates.")
+        eligible[rate["rate_uuid"]] = price
+    candidates = []
+    lat = math.radians(latitude)
+    for entry in points:
+        point = entry.get("point") if isinstance(entry, dict) else None
+        if (
+            not isinstance(point, dict)
+            or point.get("rate_uuid") not in eligible
+            or not choice_id(point.get("uuid"))
+            or not choice_id(point.get("code"))
+        ):
+            continue
+        try:
+            point_lat, point_lon = coordinates(point)
+        except (ValueError, TypeError, OverflowError):
+            continue
+        delta_lat = math.radians(point_lat - latitude)
+        delta_lon = math.radians(point_lon - longitude)
+        square = (
+            math.sin(delta_lat / 2) ** 2
+            + math.cos(lat)
+            * math.cos(math.radians(point_lat))
+            * math.sin(delta_lon / 2) ** 2
+        )
+        distance = 6371000 * 2 * math.asin(math.sqrt(min(1, max(0, square))))
+        candidates.append(
+            (
+                distance,
+                eligible[point["rate_uuid"]],
+                point["code"],
+                point["uuid"],
+                point["rate_uuid"],
+                point,
+            )
+        )
+    if not candidates:
+        raise buyer.BuyerError(
+            "Vinted did not return an available pickup point for your saved address."
+        )
+    point = min(candidates, key=lambda candidate: candidate[:5])[-1]
+    return address["id"], pickup["pickup_option_type"], point
+
+
+def preferred_payment(payment, last4):
+    selected = payment.get("selected_payment_method") or {}
+    method = selected.get("pay_in_method") or {}
+    code = method.get("payment_method")
+    card = selected.get("credit_card") or {}
+    methods = payment.get("pay_in_methods")
+    if (
+        code == "balance"
+        and isinstance(methods, list)
+        and any(
+            isinstance(method, dict)
+            and method.get("payment_method") == "balance"
+            and method.get("enabled") is not True
+            for method in methods
+        )
+    ):
+        raise buyer.BuyerError(
+            "Vinted did not confirm an available balance for this checkout."
+        )
+    if code == "balance" or (
+        code in ("card", "credit_card")
+        and card.get("last4") == last4
+        and card.get("expired") is False
+    ):
+        return None
+    cards = payment.get("cards")
+    if not isinstance(methods, list) or not isinstance(cards, list):
+        raise buyer.BuyerError(
+            "Vinted did not confirm your preferred saved card or an available balance."
+        )
+    valid = [
+        card
+        for card in cards
+        if isinstance(card, dict)
+        and card.get("last4") == last4
+        and card.get("expired") is False
+        and re.fullmatch(r"[0-9]{1,24}", str(card.get("id", "")))
+    ]
+    card_methods = [
+        method["payment_method"]
+        for method in methods
+        if isinstance(method, dict)
+        and method.get("enabled") is True
+        and method.get("payment_method") in ("card", "credit_card")
+    ]
+    if len(valid) == 1 and card_methods:
+        return {"card_id": str(valid[0]["id"]), "payment_method": card_methods[0]}
+    if any(
+        isinstance(method, dict)
+        and method.get("enabled") is True
+        and method.get("payment_method") == "balance"
+        for method in methods
+    ):
+        return {"payment_method": "balance"}
+    raise buyer.BuyerError(
+        "Your preferred saved card or an available Vinted balance could not be confirmed."
+    )
+
+
+def configure_checkout_choices(client, checkout, config):
+    """Select only the owner's preferences through the current first-party API."""
+    preferences = choice_preferences(config)
+    if preferences == {"pickup_mode": "saved", "preferred_card_last4": ""}:
+        return checkout
+    purchase_id = str(checkout.get("id", ""))
+    components = checkout.get("components")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", purchase_id) or not isinstance(
+        components, dict
+    ):
+        raise buyer.BuyerError("Vinted did not confirm readable checkout choices.")
+    changes = {}
+    expected = None
+    if config["pickup_mode"] == "nearest":
+        address_id, pickup_type, point = nearest_pickup(client, components)
+        expected = address_id, pickup_type, point
+        details = (components.get("shipping_pickup_details") or {}).get(
+            "pickup_details"
+        ) or {}
+        current_point = details.get("shipping_point") or {}
+        if (
+            details.get("selected_rate_uuid"),
+            current_point.get("uuid"),
+            current_point.get("code"),
+            (components.get("shipping_pickup_options") or {}).get(
+                "selected_pickup_option"
+            ),
+        ) != (point["rate_uuid"], point["uuid"], point["code"], pickup_type):
+            changes["shipping_pickup_options"] = {"pickup_type": pickup_type}
+            changes["shipping_pickup_details"] = {
+                "rate_uuid": point["rate_uuid"],
+                "point_code": point["code"],
+                "point_uuid": point["uuid"],
+            }
+    last4 = config["preferred_card_last4"]
+    if last4:
+        payment = components.get("payment_method")
+        if not isinstance(payment, dict):
+            raise buyer.BuyerError("Vinted did not return readable payment choices.")
+        change = preferred_payment(payment, last4)
+        if change:
+            changes["payment_method"] = change
+    if changes:
+        updated = client.request(
+            "PUT", f"/api/v2/purchases/{purchase_id}/checkout", {"components": changes}
+        )
+        checkout = updated.get("checkout")
+        if (
+            not isinstance(checkout, dict)
+            or str(checkout.get("id")) != purchase_id
+            or not isinstance(checkout.get("components"), dict)
+        ):
+            raise buyer.BuyerError(
+                "Vinted did not confirm your selected checkout choices."
+            )
+        components = checkout["components"]
+    if expected:
+        address_id, pickup_type, point = expected
+        address = (components.get("shipping_address") or {}).get("address") or {}
+        details = (components.get("shipping_pickup_details") or {}).get(
+            "pickup_details"
+        ) or {}
+        current_point = details.get("shipping_point") or {}
+        if address.get("id") != address_id or (
+            details.get("selected_rate_uuid"),
+            current_point.get("uuid"),
+            current_point.get("code"),
+            current_point.get("rate_uuid"),
+            (components.get("shipping_pickup_options") or {}).get(
+                "selected_pickup_option"
+            ),
+        ) != (
+            point["rate_uuid"],
+            point["uuid"],
+            point["code"],
+            point["rate_uuid"],
+            pickup_type,
+        ):
+            raise buyer.BuyerError(
+                "Vinted did not confirm the nearest available pickup point. No payment was sent."
+            )
+    if (
+        last4
+        and preferred_payment(components.get("payment_method") or {}, last4) is not None
+    ):
+        raise buyer.BuyerError(
+            "Vinted did not confirm your preferred card or balance. No payment was sent."
+        )
+    return checkout
+
+
+def checkout_choice_details(checkout):
+    components = checkout["components"]
+    selected = components["payment_method"].get("selected_payment_method") or {}
+    code = (selected.get("pay_in_method") or {}).get("payment_method")
+    card = selected.get("credit_card") or {}
+    shipping = (components.get("shipping_pickup_details") or {}).get(
+        "pickup_details"
+    ) or {}
+    point = shipping.get("shipping_point") or {}
+    name = point.get("name")
+    return {
+        "signature": {
+            "address_id": (components["shipping_address"].get("address") or {}).get(
+                "id"
+            ),
+            "payment": code,
+            "card_last4": (
+                card.get("last4") if code in ("card", "credit_card") else None
+            ),
+            "point_uuid": point.get("uuid"),
+            "point_code": point.get("code"),
+            "rate_uuid": shipping.get("selected_rate_uuid"),
+            "pickup_type": (components.get("shipping_pickup_options") or {}).get(
+                "selected_pickup_option"
+            ),
+        },
+        "pickup_name": (
+            "".join(char for char in name[:150] if ord(char) >= 32)
+            if isinstance(name, str)
+            else ""
+        ),
+        "payment_label": (
+            "Vinted balance"
+            if code == "balance"
+            else (
+                f"Saved card ending {card.get('last4')}"
+                if code in ("card", "credit_card")
+                and re.fullmatch(r"[0-9]{4}", str(card.get("last4", "")))
+                else "Saved Vinted payment method"
+            )
+        ),
+    }
 
 
 def payment_action_url(paid):
@@ -493,7 +819,7 @@ def checkout_item_evidence(items):
     return json.dumps(evidence, separators=(",", ":"))
 
 
-def check_checkout(url):
+def check_checkout(url, *, prepare_test=False):
     """Load a selected existing checkout; never claim or submit a payment."""
     purchase_id = checkout_link_id(url)
     with buyer.exclusive():
@@ -509,6 +835,7 @@ def check_checkout(url):
         client = None
         phase = "checking your buyer account"
         try:
+            quoted_account = buyer.settings()
             client = buyer.connected_client()
             phase = "loading the existing checkout"
             # Current first-party fetchInitialSingleCheckoutData uses PUT with
@@ -517,6 +844,8 @@ def check_checkout(url):
             checkout = data.get("checkout")
             if not isinstance(checkout, dict) or str(checkout.get("id")) != purchase_id:
                 raise buyer.BuyerError("Vinted did not confirm this checkout.")
+            phase = "selecting your delivery and payment preferences"
+            checkout = configure_checkout_choices(client, checkout, quoted_account)
             components = checkout.get("components")
             if not isinstance(components, dict):
                 raise buyer.BuyerError(
@@ -580,10 +909,46 @@ def check_checkout(url):
                 if current_item["id"]
                 else ""
             )
-            return (
+            message = (
                 f"Checkout check passed{target}: item price £{item/100:.2f}; total £{total/100:.2f} including fees and delivery. "
                 "Saved delivery and payment choices passed validation. This check does not authorize payment or change any search budget. No payment was submitted."
             )
+            if not prepare_test:
+                return message
+            current_account = buyer.settings()
+            if (
+                not current_item["id"]
+                or not quoted_account["connected"]
+                or not current_account["connected"]
+                or current_account["user_id"] != quoted_account["user_id"]
+                or choice_preferences(current_account)
+                != choice_preferences(quoted_account)
+            ):
+                raise buyer.BuyerError(
+                    "Recheck this checkout with the same saved buyer account."
+                )
+            choices = checkout_choice_details(checkout)
+            quote = {
+                "purpose": "vinted_checkout_test_v1",
+                "checkout_id": purchase_id,
+                "item_id": current_item["id"],
+                "buyer_id": current_account["user_id"],
+                "item_price": item,
+                "total": total,
+                "created": time.time(),
+                "preferences": choice_preferences(current_account),
+                "choices": choices["signature"],
+            }
+            return {
+                "message": message,
+                "title": current_item["title"] or "Selected test item",
+                "item_id": current_item["id"],
+                "item_price": item,
+                "total": total,
+                "pickup_name": choices["pickup_name"],
+                "payment_label": choices["payment_label"],
+                "token": buyer.encrypt(quote).decode("ascii"),
+            }
         except buyer.BuyerError as exc:
             logger.info(
                 "Autobuy checkout check: phase=%s reason=%s http=%s",
@@ -600,6 +965,179 @@ def check_checkout(url):
         finally:
             if client:
                 client.session.close()
+
+
+def saved_browser_info():
+    with closing(connection()) as conn:
+        info = json.loads(
+            conn.execute("SELECT browser_info FROM vinted_buyer WHERE id=1").fetchone()[
+                0
+            ]
+        )
+    if not isinstance(info, dict) or not info:
+        raise buyer.BuyerError(
+            "Save the buyer settings from your browser before using Autobuy."
+        )
+    return info
+
+
+def record_payment_result(item_id, paid, total):
+    status = (paid.get("payment") or {}).get("status")
+    if status in ("success", "completed"):
+        record(item_id, "paid", f"Paid £{total/100:.2f}. Check your Vinted purchases.")
+    elif status in ("pending", "preparing", "requires_action"):
+        action_url = payment_action_url(paid)
+        record(
+            item_id,
+            "needs_action",
+            (
+                "Vinted needs payment or bank confirmation. Use the confirmation button below; do not buy again."
+                if action_url
+                else "Vinted needs payment or bank confirmation. Open your Vinted checkout; do not buy again."
+            ),
+            action_url=action_url,
+        )
+    elif status in ("failure", "failed"):
+        record(
+            item_id,
+            "payment_failed",
+            "Vinted reported a failed payment. Check the purchase in Vinted before trying again there.",
+        )
+    else:
+        record(
+            item_id,
+            "unknown",
+            "Payment result is unconfirmed. Check your Vinted purchases before doing anything else.",
+        )
+
+
+def buy_checkout_quote(token):
+    """Explicit one-off test using a checked item and its quoted all-in ceiling."""
+    message = "Prepare a fresh test checkout before buying. No payment was sent."
+    if not isinstance(token, str) or not 100 <= len(token) <= 8192:
+        raise buyer.BuyerError(message)
+    try:
+        quote = buyer.decrypt(token.encode("ascii"))
+    except (buyer.BuyerError, UnicodeError):
+        raise buyer.BuyerError(message) from None
+    if (
+        not isinstance(quote, dict)
+        or quote.get("purpose") != "vinted_checkout_test_v1"
+        or not isinstance(quote.get("checkout_id"), str)
+        or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", quote["checkout_id"])
+        or not isinstance(quote.get("item_id"), str)
+        or not re.fullmatch(r"[0-9]{1,24}", quote["item_id"])
+        or not isinstance(quote.get("buyer_id"), str)
+        or not re.fullmatch(r"[0-9]{1,24}", quote["buyer_id"])
+        or type(quote.get("total")) is not int
+        or type(quote.get("item_price")) is not int
+        or not 0 < quote["item_price"] <= quote["total"] <= 100000000
+        or type(quote.get("created")) not in (float, int)
+        or not 0 <= time.time() - quote["created"] <= 1800
+    ):
+        raise buyer.BuyerError(message)
+    item_id, purchase_id = quote["item_id"], quote["checkout_id"]
+    with buyer.exclusive():
+        config = buyer.settings()
+        if (
+            not config["connected"]
+            or not config["enabled"]
+            or config["user_id"] != quote["buyer_id"]
+            or choice_preferences(config) != quote.get("preferences")
+        ):
+            raise buyer.BuyerError(
+                "Prepare a fresh test with Autobuy enabled and your current buyer preferences. No payment was sent."
+            )
+        with closing(connection()) as conn:
+            submitted = conn.execute(
+                "SELECT item_id FROM vinted_buy_attempts WHERE checkout_id=? AND state IN ('paying','unknown','needs_action','paid','payment_failed') LIMIT 1",
+                (purchase_id,),
+            ).fetchone()
+        if submitted:
+            if submitted["item_id"] == item_id:
+                return result(item_id)
+            raise buyer.BuyerError(
+                "This checkout already has a payment attempt. Check Vinted before doing anything else."
+            )
+        if not claim({"item_id": item_id}, recover_preparing=True):
+            return result(item_id)
+        client = None
+        payment_started = False
+        phase = "checking your buyer account"
+        try:
+            client = buyer.connected_client()
+            record(
+                item_id,
+                "preparing",
+                "Checking the quoted test checkout",
+                checkout_id=purchase_id,
+            )
+            phase = "checking the quoted checkout"
+            data = client.request("PUT", f"/api/v2/purchases/{purchase_id}/checkout")
+            checkout = data.get("checkout")
+            if not isinstance(checkout, dict) or str(checkout.get("id")) != purchase_id:
+                raise buyer.BuyerError("Vinted did not confirm the selected checkout.")
+            phase = "confirming your delivery and payment preferences"
+            checkout = configure_checkout_choices(client, checkout, config)
+            if checkout_choice_details(checkout)["signature"] != quote.get("choices"):
+                raise buyer.BuyerError(
+                    "The quoted delivery or payment choice changed. Prepare a fresh test before buying."
+                )
+            total = checkout_prices(
+                checkout, quote["item_price"], quote["total"], item_id=item_id
+            )
+            current = buyer.settings()
+            if (
+                not current["connected"]
+                or not current["enabled"]
+                or current["user_id"] != quote["buyer_id"]
+                or choice_preferences(current) != quote["preferences"]
+            ):
+                raise buyer.BuyerError(
+                    "The buyer connection or Autobuy setting changed before payment."
+                )
+            info = saved_browser_info()
+            record(
+                item_id,
+                "paying",
+                "Payment submitted; awaiting Vinted confirmation",
+                total=total,
+            )
+            payment_started = True
+            phase = "submitting payment"
+            paid = client.request(
+                "POST",
+                f"/api/v2/purchases/{purchase_id}/checkout/payment",
+                {
+                    "checksum": checkout["checksum"],
+                    "payment_options": {"browser_info": info},
+                },
+            )
+            record_payment_result(item_id, paid, total)
+        except Exception as exc:  # noqa: BLE001 -- preserve uncertain payments
+            logger.info(
+                "Autobuy test stopped: phase=%s error_type=%s",
+                phase,
+                type(exc).__name__,
+            )
+            if payment_started:
+                outcome = "Payment result is unconfirmed. Check Vinted before retrying."
+            elif isinstance(exc, buyer.BuyerError):
+                http = f" (HTTP {exc.status})" if exc.status else ""
+                outcome = f"Test purchase stopped while {phase}{http}: {exc} No payment was sent."
+            else:
+                outcome = (
+                    f"Unexpected checkout error while {phase}. No payment was sent."
+                )
+            record(
+                item_id,
+                "unknown" if payment_started else "failed_before_payment",
+                outcome,
+            )
+        finally:
+            if client:
+                client.session.close()
+        return result(item_id)
 
 
 def check_listing(item_id):
@@ -720,18 +1258,20 @@ def buy(row):
             config = buyer.settings()
             if not config["enabled"] or not config["connected"]:
                 raise buyer.BuyerError("Autobuy was disabled before payment.")
+            checkout = configure_checkout_choices(client, checkout, config)
+            current = buyer.settings()
+            if (
+                not current["enabled"]
+                or not current["connected"]
+                or current["user_id"] != config["user_id"]
+                or choice_preferences(current) != choice_preferences(config)
+            ):
+                raise buyer.BuyerError(
+                    "Your buyer account or preferences changed before payment."
+                )
             maximum = vinted_budget.payment_limit(row)
             total = checkout_prices(checkout, current_price, maximum, item_id=item_id)
-            with closing(connection()) as conn:
-                info = json.loads(
-                    conn.execute(
-                        "SELECT browser_info FROM vinted_buyer WHERE id=1"
-                    ).fetchone()[0]
-                )
-            if not info:
-                raise buyer.BuyerError(
-                    "Save the buyer settings from your browser before using Autobuy."
-                )
+            info = saved_browser_info()
             record(
                 item_id,
                 "paying",
@@ -748,37 +1288,7 @@ def buy(row):
                     "payment_options": {"browser_info": info},
                 },
             )
-            status = (paid.get("payment") or {}).get("status")
-            if status in ("success", "completed"):
-                record(
-                    item_id,
-                    "paid",
-                    f"Paid £{total/100:.2f}. Check your Vinted purchases.",
-                )
-            elif status in ("pending", "preparing", "requires_action"):
-                action_url = payment_action_url(paid)
-                record(
-                    item_id,
-                    "needs_action",
-                    (
-                        "Vinted needs payment or bank confirmation. Use the confirmation button below; do not buy again."
-                        if action_url
-                        else "Vinted needs payment or bank confirmation. Open your Vinted checkout; do not buy again."
-                    ),
-                    action_url=action_url,
-                )
-            elif status in ("failure", "failed"):
-                record(
-                    item_id,
-                    "payment_failed",
-                    "Vinted reported a failed payment. Check the purchase in Vinted before trying again there.",
-                )
-            else:
-                record(
-                    item_id,
-                    "unknown",
-                    "Payment result is unconfirmed. Check your Vinted purchases before doing anything else.",
-                )
+            record_payment_result(item_id, paid, total)
         except buyer.BuyerError as exc:
             reason = exc.reason
             message = str(exc)
