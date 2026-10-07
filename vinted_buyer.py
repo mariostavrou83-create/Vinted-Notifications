@@ -726,6 +726,64 @@ class Client:
             )
         return data
 
+    def listing_page(self, url, item_id):
+        """Read one canonical listing page with the verified account session."""
+        from vinted_gallery import listing_url
+        from vinted_page_data import _url_id, parse_purchase_item
+
+        target = listing_url(url)
+        if not target or _url_id(target) != str(item_id):
+            raise BuyerError(
+                "The Vinted listing URL could not be verified.",
+                reason="item_unavailable",
+            )
+        try:
+            response = self.session.get(
+                target,
+                headers={"Accept": "text/html"},
+                timeout=(4, 12),
+                allow_redirects=False,
+            )
+            if not security_challenge(response) and response.status_code in (
+                301,
+                302,
+                307,
+                308,
+            ):
+                location = response.headers.get("Location", "")
+                redirected = urljoin(target, location)
+                canonical = listing_url(redirected)
+                # A single same-origin, same-item slug redirect is normal page
+                # navigation. Never follow sign-in, challenge or foreign URLs.
+                if (
+                    canonical
+                    and urlsplit(redirected).netloc == "www.vinted.co.uk"
+                    and _url_id(canonical) == str(item_id)
+                ):
+                    response = self.session.get(
+                        canonical,
+                        headers={"Accept": "text/html"},
+                        timeout=(4, 12),
+                        allow_redirects=False,
+                    )
+        except requests.RequestException:
+            raise BuyerError(AUTH_REASONS["network"], reason="network") from None
+        if security_challenge(response) or response.status_code != 200:
+            raise response_error(response, None, "request")
+        item = parse_purchase_item(response.text, item_id)
+        if item is None:
+            raise BuyerError(
+                "Vinted's current page did not confirm this item's price, seller and availability. No payment was sent.",
+                reason="item_unavailable",
+            )
+        self.update_tokens(response, {})
+        token = csrf_from_html(response.text)
+        if token:
+            self.csrf = token
+            self.headers()
+        logger.info("Vinted listing page: result=verified http=200")
+        return {"item": item}
+
     def homepage(self):
         try:
             response = self.session.get(

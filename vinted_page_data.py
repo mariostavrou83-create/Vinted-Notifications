@@ -33,6 +33,7 @@ MAX_HTML = 4 * 1024 * 1024
 MAX_SCRIPTS = 512
 MAX_DEPTH = 64
 MAX_NODES = 10000
+MAX_PURCHASE_NODES = 50000
 MAX_ROWS = 2048
 _PUSH = "self.__next_f.push("
 _ROW = re.compile(rb"([0-9a-fA-F]{0,16}):")
@@ -297,6 +298,81 @@ def _add_photos(result, values):
         if identity not in seen and len(result) < 4:
             result.append(url)
             seen.add(identity)
+
+
+def parse_purchase_item(html, item_id):
+    """Read current buy eligibility from one consistent, identity-scoped item."""
+    item_id = _item_id(item_id)
+    if not item_id or not isinstance(html, str) or len(html) > MAX_HTML:
+        return None
+    parser = _Scripts()
+    parser.feed(html)
+    roots, rows = _records(parser.scripts)
+    pending = deque((root, 0) for root in roots)
+    candidates = []
+    visited = 0
+    required = ("seller_id", "price", "can_buy", "is_reserved", "is_hidden")
+    while pending and visited < MAX_PURCHASE_NODES:
+        value, depth = pending.popleft()
+        visited += 1
+        if depth > MAX_DEPTH:
+            return None
+        remaining = max(0, MAX_PURCHASE_NODES - visited - len(pending))
+        if isinstance(value, list):
+            children = [child for child in value if isinstance(child, (dict, list))]
+            if len(children) > remaining:
+                return None
+            pending.extend((child, depth + 1) for child in children)
+            continue
+        if not isinstance(value, dict):
+            continue
+        identities = [_item_id(value[key]) for key in ("id", "item_id") if key in value]
+        # Recommendations and independent status/description plugins cannot
+        # supply a target item's price or seller. Every field comes from the
+        # same complete item record, including resolved Flight references.
+        if _item_id(value.get("id")) == item_id and (
+            "price" in value or "can_buy" in value
+        ):
+            if any(identity != item_id for identity in identities) or not all(
+                key in value for key in required
+            ):
+                return None
+            if "url" in value and _url_id(value["url"]) != item_id:
+                return None
+            price = _resolve(value["price"], rows)
+            seller = _item_id(_resolve(value["seller_id"], rows))
+            flags = {
+                key: _resolve(value[key], rows)
+                for key in ("can_buy", "is_reserved", "is_hidden")
+            }
+            if (
+                not seller
+                or not isinstance(price, dict)
+                or not isinstance(price.get("currency_code"), str)
+                or "amount" not in price
+                or any(type(flag) is not bool for flag in flags.values())
+            ):
+                return None
+            candidate = {
+                "id": item_id,
+                "user_id": seller,
+                "price": {
+                    "amount": price["amount"],
+                    "currency_code": price["currency_code"],
+                },
+                **flags,
+            }
+            if candidates and candidate != candidates[0]:
+                return None
+            candidates.append(candidate)
+        children = [
+            child for child in value.values() if isinstance(child, (dict, list))
+        ]
+        if len(children) > remaining:
+            return None
+        pending.extend((child, depth + 1) for child in children)
+    # A truncated traversal cannot rule out a later conflicting target record.
+    return candidates[0] if candidates and not pending else None
 
 
 def parse_page_data(html, item_id):
