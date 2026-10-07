@@ -3,9 +3,9 @@
 <p>Tap <b>Autobuy</b> on a Vinted alert to buy and pay using your saved Vinted delivery and payment choices. It only runs when you tap; finding a listing never purchases it automatically.</p>
 <p>Connection: <b>{{buyer.username if buyer.connected else 'Not connected'}}</b> · Autobuy <b>{{'on' if buyer.enabled else 'off'}}</b>.</p>
 {% if buyer.access.message %}<div class="guide-section" role="status"><b>Last connection result</b><p>{{buyer.access.message}}</p><small>{{buyer.access.stage}}{% if buyer.access.http_status %} · HTTP {{buyer.access.http_status}}{% endif %}</small></div>{% endif %}
-{% if not buyer.connected %}
-<details class="guide-section" open>
-<summary><b>Connect an existing Vinted login</b></summary>
+{% if buyer.connected and buyer.access.message and buyer.access.message != 'Vinted verified the buyer account.' %}<p><b>The saved buyer connection needs attention.</b> Use the reconnect form below with your current Vinted login. Your searches and their spending limits stay saved; you do not need to disconnect first.</p>{% endif %}
+<details class="guide-section" {{'open' if not buyer.connected}}>
+<summary><b>{{'Reconnect your existing Vinted login' if buyer.connected else 'Connect an existing Vinted login'}}</b></summary>
 <p>Already signed in with Google, Apple or email? You can link that Vinted session here. Being signed in on your phone keeps listing links signed in, but does not connect this bot.</p>
 <p><small>This setup needs desktop Chrome. iPhone Safari does not expose the required session values directly. This option verifies an existing session; it cannot remove a Vinted security check.</small></p>
 <details><summary>Where to find the two session values</summary>
@@ -27,7 +27,6 @@
 <p><small>If you normally use Google, use Vinted's “Forgotten your password?” option with the same email to create a Vinted password. Never enter your Google password here.</small></p>
 <button class="primary" name="action" value="buyer_login">Connect Vinted buyer</button></form>
 </details>
-{% endif %}
 {% if buyer.pending_code %}<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><label for="buyer_code">Vinted verification code</label><input id="buyer_code" name="buyer_code" autocomplete="one-time-code" maxlength="12" required><button class="primary" name="action" value="buyer_verify">Verify buyer account</button></form>{% endif %}
 {% if buyer.connected %}
 <form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="buyer_recheck">Check saved buyer connection</button><p><small>Verifies the saved account session without preparing a checkout or sending payment.</small></p></form>
