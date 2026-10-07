@@ -110,13 +110,55 @@ def response_error(response, data, stage):
             data.get(key) for key in ("error", "error_code", "code", "message_code")
         ]
     codes = {value.lower() for value in values if isinstance(value, str)}
+    numeric_code = data.get("code") if isinstance(data, dict) else None
+    if type(numeric_code) is not int or not 0 <= numeric_code <= 1000:
+        numeric_code = None
+    fields = set()
+    messages = []
+    if isinstance(data, dict):
+        messages = [data.get(key) for key in ("message", "message_code", "error")]
+        errors = data.get("errors")
+        if isinstance(errors, dict):
+            fields.update(key for key in errors if isinstance(key, str))
+            for value in errors.values():
+                if isinstance(value, str):
+                    messages.append(value)
+        elif isinstance(errors, list):
+            for error in errors[:20]:
+                if isinstance(error, dict):
+                    field = error.get("field")
+                    if isinstance(field, str):
+                        fields.add(field)
+                    messages.extend(error.get(key) for key in ("value", "message"))
+    fields.intersection_update(
+        {
+            "refresh_token",
+            "access_token",
+            "client_id",
+            "scope",
+            "grant_type",
+            "csrf_token",
+            "password",
+            "username",
+            "email",
+            "device_id",
+        }
+    )
+    hints = " ".join(
+        value[:1024].lower() for value in messages if isinstance(value, str)
+    )
     redirect = redirect_reason(response)
     logger.info(
-        "Vinted response: stage=%s http=%s redirect=%s body=%s",
+        "Vinted response: stage=%s http=%s redirect=%s body=%s "
+        "api_code=%s fields=%s csrf_hint=%s required_hint=%s",
         stage,
         status,
         redirect_target(response),
         "json" if isinstance(data, dict) else "other",
+        numeric_code,
+        ",".join(sorted(fields)) or "none",
+        "csrf" in hints,
+        any(word in hints for word in ("required", "missing", "blank")),
     )
     if security_challenge(response, data) or redirect == "security_challenge":
         reason = "security_challenge"
@@ -169,6 +211,8 @@ def redirect_target(response):
         if target.scheme != "https":
             return "non_https"
         if target.netloc == "www.vinted.co.uk":
+            if target.path.rstrip("/") == "/catalog":
+                return "uk_catalogue"
             return "same_origin_other_path"
         if target.netloc == "vinted.co.uk":
             return "uk_apex"
@@ -392,6 +436,21 @@ class Client:
             else "identity" if path == "/api/v2/users/current" else "request"
         )
         previous_access = self.session.cookies.get_dict().get("access_token_web")
+        if path == "/web/api/auth/refresh":
+            prepared = self.session.prepare_request(
+                requests.Request(method, BASE + path, json=body)
+            )
+            cookie = prepared.headers.get("Cookie", "")
+            names = {part.split("=", 1)[0].strip() for part in cookie.split(";")}
+            logger.info(
+                "Vinted web renewal request: csrf=%s refresh_cookie=%s "
+                "access_cookie=%s anon_header=%s bearer=%s",
+                bool(prepared.headers.get("X-CSRF-Token")),
+                "refresh_token_web" in names,
+                "access_token_web" in names,
+                bool(prepared.headers.get("X-Anon-Id")),
+                bool(prepared.headers.get("Authorization")),
+            )
         try:
             response = self.session.request(
                 method, BASE + path, json=body, timeout=(4, 12), allow_redirects=False
