@@ -150,7 +150,7 @@ def response_error(response, data, stage):
     redirect = redirect_reason(response)
     logger.info(
         "Vinted response: stage=%s http=%s redirect=%s body=%s "
-        "api_code=%s fields=%s csrf_hint=%s required_hint=%s",
+        "api_code=%s fields=%s csrf_hint=%s refresh_hint=%s required_hint=%s",
         stage,
         status,
         redirect_target(response),
@@ -158,6 +158,9 @@ def response_error(response, data, stage):
         numeric_code,
         ",".join(sorted(fields)) or "none",
         "csrf" in hints,
+        "refresh_token" in fields
+        or "refresh_token" in hints
+        or "refresh token" in hints,
         any(word in hints for word in ("required", "missing", "blank")),
     )
     if security_challenge(response, data) or redirect == "security_challenge":

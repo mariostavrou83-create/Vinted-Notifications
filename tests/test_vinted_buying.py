@@ -60,7 +60,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
             buyer.response_error(response, data, "sign_in")
         text = " ".join(logs.output)
         self.assertIn("api_code=20 fields=refresh_token", text)
-        self.assertIn("csrf_hint=True required_hint=True", text)
+        self.assertIn("csrf_hint=True refresh_hint=True required_hint=True", text)
         self.assertNotIn("private", text)
 
     def test_web_transport_uses_owned_cookies_csrf_and_locale_without_bearer(self):
