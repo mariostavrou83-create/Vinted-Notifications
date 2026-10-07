@@ -2395,6 +2395,36 @@ class CheckoutInspectionTests(DatabaseFixture, unittest.TestCase):
         )
         self.assertNotIn("checkout-123", " ".join(logs.output))
 
+    def test_price_layout_diagnostics_never_include_checkout_or_private_fields(self):
+        value = web_checkout()
+        c = value["components"]
+        c["order_summary_v2"]["subtotal"] = None
+        c["order_summary_v2"]["order_items"] = [
+            {
+                "id": "private-item-marker",
+                "title": "private-title-marker",
+                "price": {"amount": "15.00", "currency_code": "GBP"},
+                "pricing": {
+                    "final_price": {
+                        "amount": "private-price-marker",
+                        "currency_code": "private-currency-marker",
+                    }
+                },
+            }
+        ]
+        c["single_item_presentation"] = {"payable_amount": "private-value-marker"}
+        self.client.request.return_value = {"checkout": value}
+        with self.assertLogs("vinted_buying", level="INFO") as logs, self.assertRaises(
+            buyer.BuyerError
+        ):
+            self.inspect()
+        output = " ".join(logs.output)
+        self.assertIn("subtotal=absent total=GBP:1884", output)
+        self.assertIn('"price":"GBP:1500","final":"unreadable"', output)
+        self.assertNotIn("private-", output)
+        self.assertNotIn("checkout-123", output)
+        self.client.request.assert_called_once()
+
     def test_account_refusal_never_loads_or_pays_a_checkout(self):
         with patch.object(
             buyer,
