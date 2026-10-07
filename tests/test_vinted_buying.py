@@ -688,6 +688,130 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(self.payments()[0].args[2]["checksum"], "verified-checksum")
         self.assertEqual(buying.result("123")["total"], 1900)
 
+    def test_listing_preflight_reads_saved_alert_without_changing_purchase_state(self):
+        self.batch(1, [123])
+        buying.claim(self.row)
+        for state in ("failed_before_payment", "unknown", "paid"):
+            with self.subTest(state=state):
+                buying.record(
+                    "123",
+                    state,
+                    "Keep this payment result",
+                    checkout_id="existing-checkout",
+                    total=1900,
+                )
+                before = buying.result("123")
+                self.client.reset_mock()
+                with patch.object(buyer, "connected_client", return_value=self.client):
+                    message = buying.check_listing("123")
+                self.assertIn("Listing check passed", message)
+                self.assertIn("£15.00", message)
+                self.assertIn("£20.00", message)
+                self.assertIn("still need verification at checkout", message)
+                self.assertIn("No checkout or payment was created", message)
+                self.client.request.assert_called_once_with("GET", "/api/v2/items/123")
+                self.client.session.close.assert_called_once()
+                self.assertEqual(buying.result("123"), before)
+
+    def test_listing_preflight_rejects_missing_alert_unsupported_platform_and_bad_ids(
+        self,
+    ):
+        self.batch(1, [123])
+        buying.claim(self.row)
+        with patch.object(buyer, "connected_client") as connect:
+            for value in ("", "123/../../users/current", "١٢٣", "9" * 25, "124"):
+                with self.subTest(value=value), self.assertRaises(buyer.BuyerError):
+                    buying.check_listing(value)
+            with closing(search_settings.connection()) as conn, conn:
+                conn.execute(
+                    "UPDATE alert_outbox SET platform='ebay' WHERE item_id='123'"
+                )
+            with self.assertRaises(buyer.BuyerError):
+                buying.check_listing("123")
+            connect.assert_not_called()
+
+    def test_listing_preflight_applies_live_price_availability_and_seller_checks(self):
+        self.batch(1, [123])
+        buying.claim(self.row)
+        before = buying.result("123")
+        for changes, reason in (
+            ({"is_sold": True}, "item_sold"),
+            ({"is_reserved": True}, "item_reserved"),
+            ({"price": {"amount": "16.00", "currency_code": "GBP"}}, "price_increased"),
+            ({"id": 124}, "item_unavailable"),
+            ({"user": {"id": 99}}, None),
+            ({"user": []}, None),
+        ):
+            with self.subTest(changes=changes):
+                self.item = {
+                    "item": {
+                        "id": 123,
+                        "price": {"amount": "15.00", "currency_code": "GBP"},
+                        "user": {"id": 100},
+                        **changes,
+                    }
+                }
+                self.client.reset_mock()
+                with patch.object(
+                    buyer, "connected_client", return_value=self.client
+                ), self.assertRaises(buyer.BuyerError) as error:
+                    buying.check_listing("123")
+                if reason:
+                    self.assertEqual(error.exception.reason, reason)
+                self.assertIn("checking the listing", str(error.exception))
+                self.assertIn(
+                    "No checkout or payment was created", str(error.exception)
+                )
+                self.client.request.assert_called_once_with("GET", "/api/v2/items/123")
+                self.client.session.close.assert_called_once()
+                self.assertEqual(buying.result("123"), before)
+
+    def test_listing_preflight_stops_on_disabled_or_paused_search_before_network(self):
+        self.batch(1, [123])
+        buying.claim(self.row)
+        before = buying.result("123")
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_buyer SET enabled=0")
+        with patch.object(buyer, "connected_client") as connect, self.assertRaises(
+            buyer.BuyerError
+        ):
+            buying.check_listing("123")
+        connect.assert_not_called()
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_buyer SET enabled=1")
+            conn.execute("INSERT INTO search_dashboard(query_id,paused) VALUES (1,1)")
+        with patch.object(buyer, "connected_client") as connect, self.assertRaises(
+            buyer.BuyerError
+        ):
+            buying.check_listing("123")
+        connect.assert_not_called()
+        self.assertEqual(buying.result("123"), before)
+
+    def test_listing_preflight_preserves_http_reason_and_never_retries_a_refusal(self):
+        self.batch(1, [123])
+        buying.claim(self.row)
+        before = buying.result("123")
+        for status, reason in (
+            (404, "request"),
+            (403, "security_challenge"),
+            (429, "rate_limited"),
+        ):
+            with self.subTest(status=status):
+                self.client.reset_mock()
+                self.client.request.side_effect = buyer.BuyerError(
+                    "Vinted did not accept this request.", status, reason=reason
+                )
+                with patch.object(
+                    buyer, "connected_client", return_value=self.client
+                ), self.assertRaises(buyer.BuyerError) as error:
+                    buying.check_listing("123")
+                self.assertEqual(error.exception.status, status)
+                self.assertEqual(error.exception.reason, reason)
+                self.assertIn(f"HTTP {status}", str(error.exception))
+                self.client.request.assert_called_once_with("GET", "/api/v2/items/123")
+                self.client.session.close.assert_called_once()
+                self.assertEqual(buying.result("123"), before)
+
     def test_exact_search_budget_is_allowed_regardless_of_old_global_caps(self):
         self.final = checkout("20.00")
         with closing(search_settings.connection()) as conn, conn:
@@ -1940,6 +2064,57 @@ class BuyerDashboardTests(DatabaseFixture, unittest.TestCase):
 
         self.app = create_app({"TESTING": True, "SESSION_COOKIE_SECURE": False})
         self.client = self.app.test_client()
+
+    def test_readonly_listing_check_requires_owner_and_csrf(self):
+        data = {
+            "csrf": "offline-csrf",
+            "action": "buyer_listing_check",
+            "buyer_item_id": "123",
+        }
+        with patch.object(buying, "check_listing") as check:
+            self.assertEqual(
+                self.client.post("/connections", data=data).status_code, 400
+            )
+            check.assert_not_called()
+        self.owner()
+        with patch.object(buying, "check_listing") as check:
+            self.assertEqual(
+                self.client.post(
+                    "/connections", data=dict(data, csrf="invalid")
+                ).status_code,
+                400,
+            )
+            check.assert_not_called()
+        with patch.object(
+            buying, "check_listing", return_value="No checkout or payment was created."
+        ) as check:
+            response = self.client.post("/connections", data=data)
+        check.assert_called_once_with("123")
+        self.assertEqual(response.status_code, 302)
+        response = self.client.get(response.headers["Location"])
+        self.assertIn(b"No checkout or payment was created", response.data)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+
+    def test_readonly_listing_check_errors_redirect_without_retrying(self):
+        self.owner()
+        with patch.object(
+            buying,
+            "check_listing",
+            side_effect=buyer.BuyerError("Listing check stopped (HTTP 404)"),
+        ) as check:
+            response = self.client.post(
+                "/connections",
+                data={
+                    "csrf": "offline-csrf",
+                    "action": "buyer_listing_check",
+                    "buyer_item_id": "123",
+                },
+            )
+            self.assertEqual(response.status_code, 303)
+            response = self.client.get(response.headers["Location"])
+            response = self.client.get("/connections")
+        check.assert_called_once_with("123")
+        self.assertNotIn(b"access_token_web=", response.data)
 
     def test_buyer_login_requires_owner_and_csrf_and_never_echoes_password(self):
         self.assertEqual(
