@@ -5,6 +5,7 @@ import json
 import stat
 import unittest
 from contextlib import closing
+from email.message import Message
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -79,6 +80,131 @@ def web_checkout(total="18.84", *, home=False):
 
 
 class BuyingTests(DatabaseFixture, unittest.TestCase):
+    def test_response_cookie_domain_survives_saved_session_and_real_buying_client(self):
+        headers = Message()
+        headers.add_header(
+            "Set-Cookie",
+            "anon_id=fictional-anonymous-id; Domain=www.vinted.co.uk; Path=/; Secure; HttpOnly",
+        )
+        client = buyer.Client(
+            {"cookies": {"access_token_web": "fictional-access-token-0123456789"}}
+        )
+        requests.cookies.extract_cookies_to_jar(
+            client.session.cookies,
+            requests.Request("GET", buyer.BASE + "/").prepare(),
+            SimpleNamespace(_original_response=SimpleNamespace(msg=headers)),
+        )
+        self.assertIn(".www.vinted.co.uk", {c.domain for c in client.session.cookies})
+        with patch.object(client, "identity", return_value=("99", "owner")):
+            buyer.save_connected(client)
+        client.session.close()
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_buyer SET enabled=1")
+
+        def response(method, url, **kwargs):
+            path = url.removeprefix(buyer.BASE)
+            if path == "/api/v2/users/current":
+                data = {"user": {"id": 99, "login": "owner"}}
+            else:
+                data = self.client.request(method, path, kwargs.get("json"))
+            return Mock(
+                status_code=200, json=Mock(return_value=data), headers={}, text=""
+            )
+
+        with patch.object(requests.Session, "request", side_effect=response) as wire:
+            self.assertEqual(buying.buy(self.row)["state"], "paid")
+            self.assertEqual(buying.buy(self.row)["state"], "paid")
+        self.assertEqual(
+            wire.call_args_list[0].args[:2],
+            ("GET", buyer.BASE + "/api/v2/users/current"),
+        )
+        self.assertEqual(len(self.payments()), 1)
+        self.assertEqual(
+            buyer.settings()["access"]["message"], buyer.AUTH_REASONS["connected"]
+        )
+
+    def test_rotated_www_domain_cookies_keep_their_received_scope(self):
+        client = buyer.Client(
+            {"cookies": {"access_token_web": "old-access-token-0123456789"}}
+        )
+        returned = requests.cookies.RequestsCookieJar()
+        for name in ("access_token_web", "refresh_token_web"):
+            returned.set(
+                name,
+                "fictional-" + name + "-0123456789",
+                domain=".www.vinted.co.uk",
+                path="/",
+                secure=True,
+            )
+        self.assertTrue(client.update_tokens(Mock(cookies=returned), {}))
+        restored = buyer.Client(client.exported())
+        self.assertEqual(
+            client.exported()["cookie_records"], restored.exported()["cookie_records"]
+        )
+        self.assertEqual(len(restored.session.cookies), 2)
+        prepared = restored.session.prepare_request(
+            requests.Request("GET", buyer.BASE + "/api/v2/users/current")
+        )
+        self.assertIn("access_token_web=fictional-", prepared.headers["Cookie"])
+        client.session.close()
+        restored.session.close()
+
+    def test_saved_session_errors_update_connection_result_without_network_or_secrets(
+        self,
+    ):
+        for saved in (
+            b"fictional-private-invalid-ciphertext",
+            buyer.encrypt(
+                {
+                    "cookie_records": [
+                        {
+                            "name": "access_token_web",
+                            "value": "fictional-private-token",
+                            "domain": ".www.vinted.co.uk.evil.test",
+                        }
+                    ]
+                }
+            ),
+        ):
+            with self.subTest(saved_type=type(saved).__name__):
+                with closing(search_settings.connection()) as conn, conn:
+                    conn.execute("UPDATE vinted_buyer SET session=?", (saved,))
+                    before = tuple(
+                        conn.execute(
+                            "SELECT user_id,username,enabled,max_total,max_extra FROM vinted_buyer"
+                        ).fetchone()
+                    )
+                with patch.object(
+                    requests.Session, "request"
+                ) as request, self.assertLogs(
+                    "vinted_buyer", level="INFO"
+                ) as logs, self.assertRaises(
+                    buyer.BuyerError
+                ) as error:
+                    buyer.connected_client()
+                request.assert_not_called()
+                self.assertEqual(error.exception.reason, "saved_session")
+                self.assertEqual(error.exception.stage, "saved_session")
+                self.assertEqual(
+                    buyer.settings()["access"]["message"],
+                    buyer.AUTH_REASONS["saved_session"],
+                )
+                self.assertIsNone(buyer.settings()["access"]["http_status"])
+                self.assertNotIn("fictional-private", " ".join(logs.output))
+                with closing(search_settings.connection()) as conn:
+                    self.assertEqual(
+                        before,
+                        tuple(
+                            conn.execute(
+                                "SELECT user_id,username,enabled,max_total,max_extra FROM vinted_buyer"
+                            ).fetchone()
+                        ),
+                    )
+                    self.assertEqual(
+                        conn.execute("SELECT session FROM vinted_buyer").fetchone()[0],
+                        saved,
+                    )
+
     def test_current_summary_inside_pay_button_supplies_verified_subtotal(self):
         self.final = web_checkout()
         c = self.final["components"]

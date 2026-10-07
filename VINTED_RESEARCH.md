@@ -1,5 +1,24 @@
 # Vinted buyer authentication and checkout research
 
+## Saved-session restoration regression, 7 October 2026
+
+The owner connected a current session successfully, then a later Autobuy tap
+failed locally while restoring that session, before a checkout or payment
+request. A reproduction using Requests' actual Set-Cookie parser showed that
+`Domain=www.vinted.co.uk` becomes `.www.vinted.co.uk`. The previous restore
+allowlist rejected that normal canonical-host representation. Token rotation
+also rejected it. The allowlist now accepts both forms of the canonical UK host
+while rejecting foreign hosts, suffix lookalikes and malformed cookie metadata.
+
+The regression test parses a fictional response cookie, saves and encrypts a
+verified session, then uses the real buyer client through an offline purchase
+and duplicate tap. It does not mock session restoration. A second test covers
+rotation and preservation of the received domain/path. Invalid encrypted or
+cookie data updates the connection diagnostic before any network request, with
+fixed labels only; credential values and cookie contents are never logged.
+The saved session and spending settings are preserved on those failures.
+Successful live restoration still requires a production identity check.
+
 ## Current checkout contract from the owner's supplied page
 
 The owner supplied a checkout screenshot and saved HTML on 7 October 2026.

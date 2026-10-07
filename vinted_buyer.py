@@ -18,14 +18,21 @@ import db
 from search_settings import connection
 
 BASE = "https://www.vinted.co.uk"
+# Requests preserves Domain=www.vinted.co.uk as .www.vinted.co.uk. Both
+# representations are scoped to the canonical buyer host, not another site.
+COOKIE_DOMAINS = frozenset(
+    {"www.vinted.co.uk", ".www.vinted.co.uk", "vinted.co.uk", ".vinted.co.uk"}
+)
 logger = logging.getLogger(__name__)
 AUTH_STAGES = {
+    "saved_session": "Saved buyer session",
     "homepage": "Vinted homepage",
     "sign_in": "Vinted sign-in endpoint",
     "identity": "Vinted account verification",
     "request": "Vinted request",
 }
 AUTH_REASONS = {
+    "saved_session": "The bot could not restore the saved Vinted session. The buyer connection needs attention.",
     "security_challenge": "Vinted requires a security check for this connection. The bot cannot complete that check; sign-in and Autobuy have stopped.",
     "csrf": "Vinted rejected the sign-in security token. Your password has not been confirmed.",
     "credentials": "Vinted did not accept the sign-in credentials or the session has expired.",
@@ -409,8 +416,9 @@ def decrypt(data):
     try:
         return json.loads(cipher().decrypt(data)) if data else None
     except (InvalidToken, ValueError, TypeError):
+        logger.warning("Vinted saved session unavailable: operation=decrypt")
         raise BuyerError(
-            "Reconnect the Vinted buyer account; its saved session is unavailable."
+            AUTH_REASONS["saved_session"], reason="saved_session", stage="saved_session"
         ) from None
 
 
@@ -453,10 +461,16 @@ class Client:
                 self.csrf = saved.get("csrf", "")
                 self.restore_cookies(saved)
                 self.headers()
-            except (AttributeError, TypeError, ValueError):
+            except (AttributeError, TypeError, ValueError) as exc:
                 self.session.close()
+                logger.warning(
+                    "Vinted saved session unavailable: operation=restore error_type=%s",
+                    type(exc).__name__,
+                )
                 raise BuyerError(
-                    "Reconnect the Vinted buyer account; its saved session is unavailable."
+                    AUTH_REASONS["saved_session"],
+                    reason="saved_session",
+                    stage="saved_session",
                 ) from None
 
     def restore_cookies(self, saved):
@@ -485,7 +499,7 @@ class Client:
                 or not isinstance(value, str)
                 or len(value) > 16384
                 or any(ord(char) < 32 or ord(char) > 126 for char in value)
-                or domain not in ("www.vinted.co.uk", "vinted.co.uk", ".vinted.co.uk")
+                or domain not in COOKIE_DOMAINS
                 or not isinstance(path, str)
                 or not path.startswith("/")
                 or len(path) > 2048
@@ -578,8 +592,7 @@ class Client:
             ):
                 continue
             if received is not None and (
-                received.domain
-                not in ("", "www.vinted.co.uk", "vinted.co.uk", ".vinted.co.uk")
+                (received.domain and received.domain not in COOKIE_DOMAINS)
                 or (received.expires is not None and received.expires <= time.time())
             ):
                 continue
@@ -947,11 +960,12 @@ def connected_client():
         row = conn.execute(
             "SELECT session,user_id FROM vinted_buyer WHERE id=1"
         ).fetchone()
-    saved = decrypt(row[0])
-    if not saved:
-        raise BuyerError("Connect your Vinted buyer account in Connections first.")
-    client = Client(saved)
+    client = None
     try:
+        saved = decrypt(row[0])
+        if not saved:
+            raise BuyerError("Connect your Vinted buyer account in Connections first.")
+        client = Client(saved)
         try:
             user_id, _ = client.identity()
         except BuyerError as exc:
@@ -991,7 +1005,8 @@ def connected_client():
         return client
     except BuyerError as exc:
         record_auth(exc.reason, exc.stage, exc.status)
-        client.session.close()
+        if client:
+            client.session.close()
         raise
 
 
