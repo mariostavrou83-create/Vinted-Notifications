@@ -388,6 +388,38 @@ def checkout_link_id(url):
     return values["purchase_id"][0]
 
 
+def checkout_price_evidence(value):
+    """Only fixed labels or verified GBP pennies may appear in diagnostics."""
+    if value is None:
+        return "absent"
+    try:
+        return f"GBP:{cents(value)}"
+    except buyer.BuyerError:
+        return "unreadable"
+
+
+def checkout_item_evidence(items):
+    if not isinstance(items, list):
+        return "absent"
+    if len(items) > 20:
+        return "too_many"
+    evidence = []
+    for item in items:
+        if not isinstance(item, dict):
+            evidence.append("unreadable")
+            continue
+        pricing = item.get("pricing")
+        evidence.append(
+            {
+                "price": checkout_price_evidence(item.get("price")),
+                "final": checkout_price_evidence(
+                    pricing.get("final_price") if isinstance(pricing, dict) else None
+                ),
+            }
+        )
+    return json.dumps(evidence, separators=(",", ":"))
+
+
 def check_checkout(url):
     """Load a selected existing checkout; never claim or submit a payment."""
     purchase_id = checkout_link_id(url)
@@ -430,6 +462,29 @@ def check_checkout(url):
                 )
             subtotal_part = summary.get("subtotal")
             amount_part = total_part.get("total")
+            presentation = components.get("item_presentation_escrow_v2")
+            single = components.get("single_item_presentation")
+            logger.info(
+                "Autobuy checkout price layout: subtotal=%s total=%s summary_items=%s presentation_items=%s single_payable=%s",
+                checkout_price_evidence(
+                    subtotal_part.get("price")
+                    if isinstance(subtotal_part, dict)
+                    else None
+                ),
+                checkout_price_evidence(
+                    amount_part.get("price") if isinstance(amount_part, dict) else None
+                ),
+                checkout_item_evidence(summary.get("order_items")),
+                checkout_item_evidence(
+                    presentation.get("order_items")
+                    if isinstance(presentation, dict)
+                    else None
+                ),
+                checkout_price_evidence(
+                    single.get("payable_amount") if isinstance(single, dict) else None
+                ),
+            )
+            phase = "checking the checkout prices"
             item = cents(
                 subtotal_part.get("price") if isinstance(subtotal_part, dict) else None
             )
