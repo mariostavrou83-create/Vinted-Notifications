@@ -46,6 +46,42 @@ def checkout(total="19.00"):
 
 
 class BuyingTests(DatabaseFixture, unittest.TestCase):
+    def test_web_transport_uses_owned_cookies_csrf_and_locale_without_bearer(self):
+        csrf = "saved-csrf-token-0123456789"
+        access = "saved-access-token-0123456789"
+        anonymous_id = "saved-anonymous-id-0123456789"
+        client = buyer.Client(
+            {
+                "csrf": csrf,
+                "cookies": {
+                    "access_token_web": access,
+                    "refresh_token_web": "saved-refresh-token-0123456789",
+                    "anon_id": anonymous_id,
+                },
+            }
+        )
+        client.session.headers["Authorization"] = "Bearer stale-credential"
+        client.headers()
+        for method, path in (
+            ("GET", "/api/v2/users/current"),
+            ("POST", "/web/api/auth/refresh"),
+        ):
+            prepared = client.session.prepare_request(
+                requests.Request(method, buyer.BASE + path)
+            )
+            self.assertNotIn("Authorization", prepared.headers)
+            self.assertIn("access_token_web=" + access, prepared.headers["Cookie"])
+            self.assertEqual(prepared.headers["X-CSRF-Token"], csrf)
+            self.assertEqual(prepared.headers["X-Anon-Id"], anonymous_id)
+            self.assertEqual(prepared.headers["Locale"], "en-GB")
+            self.assertIsNone(prepared.body)
+        client.csrf = ""
+        client.session.cookies.clear()
+        client.headers()
+        self.assertNotIn("X-CSRF-Token", client.session.headers)
+        self.assertNotIn("X-Anon-Id", client.session.headers)
+        client.session.close()
+
     def test_signin_token_parses_json_escaped_bootstrap_and_meta_attributes(self):
         token = "01234567-89ab-cdef-0123-456789abcdef"
         value = '{"CSRF_TOKEN":"' + token + '"}'
@@ -542,6 +578,8 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         client = buyer.Client({"cookies": {"access_token_web": old}})
         for path, data, reason in (
             ("/api/v2/items/123", {"error": "invalid_token"}, "credentials"),
+            ("/api/v2/users/current", {"code": 100}, "credentials"),
+            ("/api/v2/purchases/checkout/build", {"code": 114}, "http_error"),
             (
                 "/api/v2/purchases/checkout/build",
                 {"error_code": "invalid_csrf_token"},
@@ -565,7 +603,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                 client.request("POST", path, {})
             self.assertEqual(error.exception.reason, reason)
             self.assertEqual(client.exported()["cookies"]["access_token_web"], old)
-            self.assertEqual(client.session.headers["Authorization"], "Bearer " + old)
+            self.assertNotIn("Authorization", client.session.headers)
             request.assert_called_once()
         client.session.close()
 
@@ -631,9 +669,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                     )
                 request.assert_called_once()
                 self.assertEqual(client.exported()["cookies"]["access_token_web"], new)
-                self.assertEqual(
-                    client.session.headers["Authorization"], "Bearer " + new
-                )
+                self.assertNotIn("Authorization", client.session.headers)
                 client.session.close()
 
     def test_renewal_diagnostics_hide_conflicting_tokens_and_scope(self):
@@ -780,9 +816,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
             {"access_token_web": new_access, "refresh_token_web": new_refresh},
         )
         self.assertEqual(len(list(client.session.cookies)), 2)
-        self.assertEqual(
-            client.session.headers["Authorization"], "Bearer " + new_access
-        )
+        self.assertNotIn("Authorization", client.session.headers)
         prepared = client.session.prepare_request(
             requests.Request("GET", buyer.BASE + "/api/v2/users/current")
         )
@@ -790,7 +824,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(prepared.headers["Cookie"].count("access_token_web="), 1)
         client.session.close()
 
-    def test_json_refresh_tokens_are_validated_before_header_update(self):
+    def test_json_refresh_tokens_are_validated_before_cookie_update(self):
         old = "old-test-token-0123456789"
         client = buyer.Client({"cookies": {"access_token_web": old}})
         for invalid in (
@@ -800,10 +834,12 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
             "x" * 8193,
         ):
             client.update_tokens(Mock(), {"access_token": invalid})
-            self.assertEqual(client.session.headers["Authorization"], "Bearer " + old)
+            self.assertEqual(client.exported()["cookies"]["access_token_web"], old)
+            self.assertNotIn("Authorization", client.session.headers)
         new = "new-test-token-0123456789"
         client.update_tokens(Mock(), {"access_token": new})
-        self.assertEqual(client.session.headers["Authorization"], "Bearer " + new)
+        self.assertEqual(client.exported()["cookies"]["access_token_web"], new)
+        self.assertNotIn("Authorization", client.session.headers)
         client.session.close()
 
     def test_homepage_follows_one_same_origin_canonical_redirect(self):
@@ -897,10 +933,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(before, after)
         client.request.assert_called_once()
         self.assertEqual(client.request.call_args.args[1], "/web/api/auth/refresh")
-        self.assertEqual(
-            client.request.call_args.args[2],
-            {"refresh_token": old_session["cookies"]["refresh_token_web"]},
-        )
+        client.request.assert_called_once_with("POST", "/web/api/auth/refresh")
         client.identity.assert_called_once()
         client.session.close.assert_called_once()
         self.assertEqual(buyer.settings()["access"]["http_status"], 307)
@@ -948,23 +981,9 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                 if refresh_expected:
                     self.assertIs(buyer.connected_client(), client)
                     client.request.assert_called_once()
-                    if reason == "session_refresh":
-                        client.request.assert_called_once_with(
-                            "POST",
-                            "/web/api/auth/refresh",
-                            {"refresh_token": "refresh"},
-                        )
-                    else:
-                        client.request.assert_called_once_with(
-                            "POST",
-                            "/web/api/auth/oauth",
-                            {
-                                "client_id": "web",
-                                "scope": "user",
-                                "grant_type": "refresh_token",
-                                "refresh_token": "refresh",
-                            },
-                        )
+                    client.request.assert_called_once_with(
+                        "POST", "/web/api/auth/refresh"
+                    )
                     self.assertEqual(buyer.settings()["access"]["http_status"], 200)
                 else:
                     with self.assertRaises(buyer.BuyerError):
@@ -1035,10 +1054,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                         ("GET", buyer.BASE + "/api/v2/users/current"),
                     ],
                 )
-                self.assertEqual(
-                    request.call_args_list[1].kwargs["json"],
-                    {"refresh_token": old["cookies"]["refresh_token_web"]},
-                )
+                self.assertIsNone(request.call_args_list[1].kwargs["json"])
                 self.assertTrue(
                     all(not c.kwargs["allow_redirects"] for c in request.call_args_list)
                 )
@@ -1064,7 +1080,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                     self.assertNotIn(value, " ".join(logs.output))
                     self.assertNotIn(value.encode(), Path(db.DB_PATH).read_bytes())
 
-    def test_oauth_renewal_uses_saved_csrf_and_rejects_unverified_identity(self):
+    def test_native_web_renewal_uses_saved_csrf_and_rejects_unverified_identity(self):
         old = {
             "csrf": "saved-csrf-token-0123456789",
             "cookies": {
@@ -1119,19 +1135,11 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                     [(call.args[0], call.args[1]) for call in request.call_args_list],
                     [
                         ("GET", buyer.BASE + "/api/v2/users/current"),
-                        ("POST", buyer.BASE + "/web/api/auth/oauth"),
+                        ("POST", buyer.BASE + "/web/api/auth/refresh"),
                         ("GET", buyer.BASE + "/api/v2/users/current"),
                     ],
                 )
-                self.assertEqual(
-                    request.call_args_list[1].kwargs["json"],
-                    {
-                        "client_id": "web",
-                        "scope": "user",
-                        "grant_type": "refresh_token",
-                        "refresh_token": old["cookies"]["refresh_token_web"],
-                    },
-                )
+                self.assertIsNone(request.call_args_list[1].kwargs["json"])
                 self.assertTrue(
                     all(
                         not call.kwargs["allow_redirects"]
