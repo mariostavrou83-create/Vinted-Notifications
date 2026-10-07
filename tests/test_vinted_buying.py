@@ -836,6 +836,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
             ).fetchone()
             budgets = conn.execute("SELECT * FROM vinted_search_budgets").fetchall()
         client = Mock()
+        client.csrf = ""
         client.identity.side_effect = buyer.BuyerError(
             buyer.AUTH_REASONS["session_refresh"],
             307,
@@ -980,9 +981,6 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                         location="/web/api/auth/refresh?private=never-log-this",
                     ),
                     response(200, new),
-                    response(
-                        200, None, text='{"CSRF_TOKEN":"new-csrf-token-0123456789"}'
-                    ),
                     final,
                 ]
                 with patch.object(
@@ -999,7 +997,6 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                     [
                         ("GET", buyer.BASE + "/api/v2/users/current"),
                         ("POST", buyer.BASE + "/web/api/auth/refresh"),
-                        ("GET", buyer.BASE + "/"),
                         ("GET", buyer.BASE + "/api/v2/users/current"),
                     ],
                 )
@@ -1021,6 +1018,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                         "refresh_token_web": new["refresh_token"],
                     },
                 )
+                self.assertEqual(buyer.decrypt(saved)["csrf"], old["csrf"])
                 self.assertTrue(buyer.settings()["enabled"])
                 self.assertEqual(buyer.settings()["user_id"], "99")
                 for value in (
@@ -1030,6 +1028,84 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                 ):
                     self.assertNotIn(value, " ".join(logs.output))
                     self.assertNotIn(value.encode(), Path(db.DB_PATH).read_bytes())
+
+    def test_oauth_renewal_uses_saved_csrf_and_rejects_unverified_identity(self):
+        old = {
+            "csrf": "saved-csrf-token-0123456789",
+            "cookies": {
+                "access_token_web": "old-access-token-0123456789",
+                "refresh_token_web": "old-refresh-token-0123456789",
+            },
+        }
+        new = {
+            "access_token": "new-access-token-0123456789",
+            "refresh_token": "new-refresh-token-0123456789",
+        }
+
+        def response(status, data):
+            return Mock(
+                status_code=status,
+                text="",
+                json=Mock(return_value=data),
+                headers={},
+                cookies=requests.cookies.RequestsCookieJar(),
+            )
+
+        for status, payload, accepted in (
+            (200, {"user": {"id": 99}}, True),
+            (200, {"user": {"id": 100}}, False),
+            (200, {"user": None}, False),
+            (401, {"error": "invalid_token"}, False),
+            (403, {"error": "user_blocked"}, False),
+            (429, {}, False),
+            (403, {"error": "captcha_required"}, False),
+        ):
+            with self.subTest(status=status, accepted=accepted):
+                with closing(search_settings.connection()) as conn, conn:
+                    conn.execute(
+                        "UPDATE vinted_buyer SET session=?", (buyer.encrypt(old),)
+                    )
+                replies = [
+                    response(401, {"error": "invalid_token"}),
+                    response(200, new),
+                    response(status, payload),
+                ]
+                with patch.object(
+                    requests.Session, "request", side_effect=replies
+                ) as request, patch.object(requests.Session, "close") as close:
+                    if accepted:
+                        client = buyer.connected_client()
+                        self.assertEqual(client.csrf, old["csrf"])
+                        client.session.close()
+                    else:
+                        with self.assertRaises(buyer.BuyerError):
+                            buyer.connected_client()
+                self.assertEqual(
+                    [(call.args[0], call.args[1]) for call in request.call_args_list],
+                    [
+                        ("GET", buyer.BASE + "/api/v2/users/current"),
+                        ("POST", buyer.BASE + "/web/api/auth/oauth"),
+                        ("GET", buyer.BASE + "/api/v2/users/current"),
+                    ],
+                )
+                self.assertTrue(
+                    all(
+                        not call.kwargs["allow_redirects"]
+                        for call in request.call_args_list
+                    )
+                )
+                close.assert_called_once()
+                with closing(search_settings.connection()) as conn:
+                    saved = conn.execute("SELECT session FROM vinted_buyer").fetchone()[
+                        0
+                    ]
+                self.assertEqual(buyer.decrypt(saved)["csrf"], old["csrf"])
+                self.assertEqual(
+                    buyer.decrypt(saved)["cookies"]["access_token_web"],
+                    new["access_token"],
+                )
+                self.assertTrue(buyer.settings()["enabled"])
+                self.assertEqual(buyer.settings()["user_id"], "99")
 
     def test_saved_connection_check_never_prepares_checkout_or_changes_permission(self):
         with patch.object(buyer, "connected_client", return_value=self.client) as check:
