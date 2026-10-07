@@ -13,8 +13,13 @@ unofficial integrations below:
 MSJ now follows this native cookie flow instead of converting a web cookie into
 a Bearer header or posting a legacy OAuth refresh grant. It keeps one renewal,
 encrypted rotated-token persistence and mandatory same-account verification.
-CSRF and anonymous identifiers still come from the connected session; no
-public bundle token or hardcoded anonymous identifier is imported.
+An unexpired account continues with its saved cookies and security header.
+Before renewing an explicitly expired session, MSJ reads the current security
+token from Vinted's ordinary public homepage in a separate session. That token
+changes with frontend releases; no constant is copied from a JavaScript bundle.
+The buyer's cookies and anonymous identifier stay in its private connection.
+Cookie domain, path and expiry now survive encrypted storage. Set-Cookie takes
+precedence over a different OAuth body credential during web cookie rotation.
 
 Before this update, live renewal returned a changed token with matching body
 and cookie values and user scope, yet identity still returned HTTP 401. Those
@@ -31,7 +36,9 @@ Public sources inspected on 7 October 2026. No external project was installed or
 - [ScrapeUnblocker/vinted-scraper](https://github.com/ScrapeUnblocker/vinted-scraper/blob/main/src/scrapeunblocker_vinted/parsing.py), MIT, pushed 6 October 2026, documents Next.js Flight item/photo data and description plugins. Its test fixture is synthetic. Its external browser-service transport was not adopted.
 - [Official React Flight server](https://github.com/facebook/react/blob/main/packages/react-server/src/ReactFlightServer.js), MIT, establishes UTF-8 byte-length framing for raw text records; page JavaScript need not be executed to decode them.
 
-MSJ now reads matching JSON/Flight item records, explicitly anchored description plugins and references, and JSON-LD offer URLs. It preserves Unicode/newlines and rejects unanchored descriptions, conflicting item IDs, malformed frames, and unrelated photos. Nineteen standalone parser regressions plus gallery integration tests passed. Item-page reads can reuse the already encrypted saved buyer session, with no renewal, transaction creation or redirects. Requests without a saved account in this development instance still received HTTP 403; anonymous homepage HEAD returned no access-token cookie. No live seller-description success was established.
+MSJ reads matching JSON/Flight item records, explicitly anchored description plugins and references, and JSON-LD offer URLs. It preserves Unicode/newlines and rejects unanchored descriptions, conflicting item IDs, malformed frames, and unrelated photos.
+
+A real public [UK listing](https://www.vinted.co.uk/items/10276945623) returned one same-item canonical redirect and then HTTP 200 on 7 October 2026. Its current Flight payload contains the seller description, while the former depth-first scan exhausted its node limit on unrelated bootstrap values. The bounded breadth-first scan, excluding scalar children, extracted 126 description characters and four photos from that retrieved page. Public listing reads now use a separate ordinary session, so expired buyer cookies cannot redirect those reads into authentication. Authentication, challenge, foreign-host and cross-item redirects remain terminal. A separate once-per-release production probe can verify one already sent listing without sending or editing a Telegram message. Production description delivery still needs verification after deployment.
 
 ## Most useful implementation evidence
 

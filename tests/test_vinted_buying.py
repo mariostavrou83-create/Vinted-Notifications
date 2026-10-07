@@ -46,6 +46,170 @@ def checkout(total="19.00"):
 
 
 class BuyingTests(DatabaseFixture, unittest.TestCase):
+    def test_cookie_scope_and_expiry_survive_encrypted_session_restoration(self):
+        client = buyer.Client()
+        client.session.cookies.set(
+            "access_token_web",
+            "private-access-token-0123456789",
+            domain=".vinted.co.uk",
+            path="/",
+            secure=True,
+            expires=4102444800,
+        )
+        client.session.cookies.set(
+            "refresh_token_web",
+            "private-refresh-token-0123456789",
+            domain="www.vinted.co.uk",
+            path="/web/api/auth",
+            secure=True,
+        )
+        client.session.cookies.set(
+            "expired", "never-send", domain="www.vinted.co.uk", expires=1
+        )
+        saved = buyer.decrypt(buyer.encrypt(client.exported()))
+        restored = buyer.Client(saved)
+        self.assertEqual(saved["cookie_records"], restored.exported()["cookie_records"])
+        identity = restored.session.prepare_request(
+            requests.Request("GET", buyer.BASE + "/api/v2/users/current")
+        )
+        renewal = restored.session.prepare_request(
+            requests.Request("POST", buyer.BASE + "/web/api/auth/refresh")
+        )
+        self.assertIn("access_token_web=", identity.headers["Cookie"])
+        self.assertNotIn("refresh_token_web=", identity.headers["Cookie"])
+        self.assertNotIn("never-send", identity.headers["Cookie"])
+        self.assertIn("refresh_token_web=", renewal.headers["Cookie"])
+        client.session.close()
+        restored.session.close()
+
+    def test_web_cookie_rotation_uses_set_cookie_for_both_tokens_and_keeps_scope(self):
+        client = buyer.Client(
+            {
+                "cookies": {
+                    "access_token_web": "old-access-token-0123456789",
+                    "refresh_token_web": "old-refresh-token-0123456789",
+                }
+            }
+        )
+        returned = requests.cookies.RequestsCookieJar()
+        for name in ("access_token_web", "refresh_token_web"):
+            returned.set(
+                name,
+                "cookie-" + name + "-0123456789",
+                domain=".vinted.co.uk",
+                path="/",
+                secure=True,
+                expires=4102444800,
+            )
+        response = Mock(cookies=returned)
+        self.assertTrue(
+            client.update_tokens(
+                response,
+                {
+                    "access_token": "body-access-token-0123456789",
+                    "refresh_token": "body-refresh-token-0123456789",
+                },
+            )
+        )
+        for cookie in client.session.cookies:
+            self.assertEqual(cookie.value, "cookie-" + cookie.name + "-0123456789")
+            self.assertEqual(cookie.domain, ".vinted.co.uk")
+            self.assertEqual(cookie.expires, 4102444800)
+        self.assertEqual(len(client.session.cookies), 2)
+        client.session.close()
+
+    def test_malformed_or_foreign_saved_cookie_records_fail_without_leaking(self):
+        for record in (
+            {
+                "name": "access_token_web",
+                "value": "private-token",
+                "domain": "evil.test",
+            },
+            {
+                "name": "access_token_web",
+                "value": "private\r\ntoken",
+                "domain": "www.vinted.co.uk",
+            },
+            {
+                "name": "access_token_web",
+                "value": "private-token",
+                "domain": ".vinted.co.uk",
+                "path": "/\r\nprivate",
+            },
+        ):
+            with patch.object(requests.Session, "close") as close, self.assertRaises(
+                buyer.BuyerError
+            ) as error:
+                buyer.Client({"cookie_records": [record]})
+            close.assert_called_once()
+            self.assertNotIn("private", str(error.exception))
+
+    def test_nested_web_error_diagnostics_identify_csrf_without_secret_values(self):
+        response = Mock(status_code=400, headers={}, text="")
+        data = {
+            "error": {
+                "errorCode": "invalid_csrf_token",
+                "errorDescription": "csrf expired private-token",
+            }
+        }
+        with self.assertLogs("vinted_buyer", level="INFO") as logs:
+            error = buyer.response_error(response, data, "sign_in")
+        self.assertEqual(error.reason, "csrf")
+        self.assertIn("expired_hint=True", " ".join(logs.output))
+        self.assertNotIn("private", " ".join(logs.output))
+
+    def test_renewal_bootstrap_keeps_buyer_cookies_and_closes_public_client(self):
+        private = buyer.Client(
+            {
+                "csrf": "old-private-csrf",
+                "cookies": {"access_token_web": "private-access-token-0123456789"},
+            }
+        )
+        public = Mock(csrf="current-public-csrf-token-0123456789")
+        before = private.exported()["cookie_records"]
+        with patch.object(buyer, "Client", return_value=public), self.assertLogs(
+            "vinted_buyer", level="INFO"
+        ) as logs:
+            private.refresh_security_token()
+        public.homepage.assert_called_once()
+        public.session.close.assert_called_once()
+        self.assertEqual(private.csrf, public.csrf)
+        self.assertEqual(private.exported()["cookie_records"], before)
+        self.assertIn("csrf_changed=True", " ".join(logs.output))
+        self.assertNotIn("private", " ".join(logs.output))
+        private.session.close()
+
+    def test_refused_public_bootstrap_never_reaches_session_renewal(self):
+        saved = {
+            "csrf": "old-csrf",
+            "cookies": {
+                "access_token_web": "private-access-token-0123456789",
+                "refresh_token_web": "private-refresh-token-0123456789",
+            },
+        }
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_buyer SET session=?", (buyer.encrypt(saved),))
+        private = Mock()
+        private.identity.side_effect = buyer.BuyerError(
+            "expired", 401, reason="credentials"
+        )
+        private.refresh_security_token.side_effect = buyer.BuyerError(
+            "Stop", 403, reason="security_challenge", stage="homepage"
+        )
+        with patch.object(buyer, "Client", return_value=private), self.assertRaises(
+            buyer.BuyerError
+        ):
+            buyer.connected_client()
+        private.request.assert_not_called()
+        private.session.close.assert_called_once()
+        with closing(search_settings.connection()) as conn:
+            self.assertEqual(
+                buyer.decrypt(
+                    conn.execute("SELECT session FROM vinted_buyer").fetchone()[0]
+                ),
+                saved,
+            )
+
     def test_error_field_diagnostics_never_echo_values_or_unknown_fields(self):
         response = Mock(status_code=400, headers={}, text="")
         data = {
@@ -720,7 +884,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         self.assertIn("scope_present=True scope_user=True", text)
         for secret in (old, body, cookie, scope, "private-scope-marker"):
             self.assertNotIn(secret, text)
-        self.assertEqual(client.exported()["cookies"]["access_token_web"], body)
+        self.assertEqual(client.exported()["cookies"]["access_token_web"], cookie)
         client.session.close()
 
     def test_redirect_diagnostics_never_include_path_or_query_secrets(self):
@@ -1051,6 +1215,11 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                         None,
                         location="/web/api/auth/refresh?private=never-log-this",
                     ),
+                    response(
+                        200,
+                        {},
+                        text='<meta name="csrf-token" content="fresh-csrf-token-0123456789">',
+                    ),
                     response(200, new),
                     final,
                 ]
@@ -1067,11 +1236,12 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                     [(c.args[0], c.args[1]) for c in request.call_args_list],
                     [
                         ("GET", buyer.BASE + "/api/v2/users/current"),
+                        ("GET", buyer.BASE + "/"),
                         ("POST", buyer.BASE + "/web/api/auth/refresh"),
                         ("GET", buyer.BASE + "/api/v2/users/current"),
                     ],
                 )
-                self.assertIsNone(request.call_args_list[1].kwargs["json"])
+                self.assertIsNone(request.call_args_list[2].kwargs["json"])
                 self.assertTrue(
                     all(not c.kwargs["allow_redirects"] for c in request.call_args_list)
                 )
@@ -1086,7 +1256,9 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                         "refresh_token_web": new["refresh_token"],
                     },
                 )
-                self.assertEqual(buyer.decrypt(saved)["csrf"], old["csrf"])
+                self.assertEqual(
+                    buyer.decrypt(saved)["csrf"], "fresh-csrf-token-0123456789"
+                )
                 self.assertTrue(buyer.settings()["enabled"])
                 self.assertEqual(buyer.settings()["user_id"], "99")
                 for value in (
@@ -1097,7 +1269,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                     self.assertNotIn(value, " ".join(logs.output))
                     self.assertNotIn(value.encode(), Path(db.DB_PATH).read_bytes())
 
-    def test_native_web_renewal_uses_saved_csrf_and_rejects_unverified_identity(self):
+    def test_native_web_renewal_uses_current_csrf_and_rejects_unverified_identity(self):
         old = {
             "csrf": "saved-csrf-token-0123456789",
             "cookies": {
@@ -1110,10 +1282,10 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
             "refresh_token": "new-refresh-token-0123456789",
         }
 
-        def response(status, data):
+        def response(status, data, text=""):
             return Mock(
                 status_code=status,
-                text="",
+                text=text,
                 json=Mock(return_value=data),
                 headers={},
                 cookies=requests.cookies.RequestsCookieJar(),
@@ -1135,6 +1307,11 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                     )
                 replies = [
                     response(401, {"error": "invalid_token"}),
+                    response(
+                        200,
+                        {},
+                        text='<meta name="csrf-token" content="fresh-csrf-token-0123456789">',
+                    ),
                     response(200, new),
                     response(status, payload),
                 ]
@@ -1143,7 +1320,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                 ) as request, patch.object(requests.Session, "close") as close:
                     if accepted:
                         client = buyer.connected_client()
-                        self.assertEqual(client.csrf, old["csrf"])
+                        self.assertEqual(client.csrf, "fresh-csrf-token-0123456789")
                         client.session.close()
                     else:
                         with self.assertRaises(buyer.BuyerError):
@@ -1152,23 +1329,26 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                     [(call.args[0], call.args[1]) for call in request.call_args_list],
                     [
                         ("GET", buyer.BASE + "/api/v2/users/current"),
+                        ("GET", buyer.BASE + "/"),
                         ("POST", buyer.BASE + "/web/api/auth/refresh"),
                         ("GET", buyer.BASE + "/api/v2/users/current"),
                     ],
                 )
-                self.assertIsNone(request.call_args_list[1].kwargs["json"])
+                self.assertIsNone(request.call_args_list[2].kwargs["json"])
                 self.assertTrue(
                     all(
                         not call.kwargs["allow_redirects"]
                         for call in request.call_args_list
                     )
                 )
-                close.assert_called_once()
+                self.assertEqual(close.call_count, 2)
                 with closing(search_settings.connection()) as conn:
                     saved = conn.execute("SELECT session FROM vinted_buyer").fetchone()[
                         0
                     ]
-                self.assertEqual(buyer.decrypt(saved)["csrf"], old["csrf"])
+                self.assertEqual(
+                    buyer.decrypt(saved)["csrf"], "fresh-csrf-token-0123456789"
+                )
                 self.assertEqual(
                     buyer.decrypt(saved)["cookies"]["access_token_web"],
                     new["access_token"],

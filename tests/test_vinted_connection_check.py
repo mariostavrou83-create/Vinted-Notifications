@@ -13,6 +13,61 @@ from search_settings import connection, ensure_schema
 
 
 class StartupDiagnosisTests(DatabaseFixture, unittest.TestCase):
+    def test_latest_public_listing_diagnosis_is_opt_in_and_once_per_release(self):
+        self.batch(1, [110])
+        with closing(connection()) as conn, conn:
+            conn.execute(
+                "UPDATE alert_outbox SET status='sent',sent_at=100,telegram_message_id=42 WHERE item_id='110'"
+            )
+            before = tuple(
+                conn.execute(
+                    "SELECT * FROM alert_outbox WHERE item_id='110'"
+                ).fetchone()
+            )
+        with patch.dict(
+            os.environ,
+            {
+                "MSJ_BUYER_CHECK_ON_START": "listing-probe",
+                "MSJ_LISTING_CHECK_ON_START": "1",
+            },
+        ), patch("vinted_buyer.settings", return_value={"connected": False}), patch(
+            "vinted_gallery.fetch_listing",
+            return_value={
+                "state": "ready",
+                "description": "Private seller text",
+                "photos": [],
+            },
+        ) as fetch, self.assertLogs(
+            "vinted_connection_check", level="INFO"
+        ) as logs:
+            vinted_connection_check.run_once()
+            vinted_connection_check.run_once()
+        fetch.assert_called_once_with("https://www.vinted.co.uk/items/110")
+        self.assertIn("description_chars=19", " ".join(logs.output))
+        self.assertNotIn("Private", " ".join(logs.output))
+        with closing(connection()) as conn:
+            self.assertEqual(
+                before,
+                tuple(
+                    conn.execute(
+                        "SELECT * FROM alert_outbox WHERE item_id='110'"
+                    ).fetchone()
+                ),
+            )
+
+    def test_disabled_listing_diagnosis_does_not_fetch(self):
+        with patch.dict(
+            os.environ,
+            {
+                "MSJ_BUYER_CHECK_ON_START": "no-listing",
+                "MSJ_LISTING_CHECK_ON_START": "0",
+            },
+        ), patch("vinted_buyer.settings", return_value={"connected": False}), patch(
+            "vinted_gallery.fetch_listing"
+        ) as fetch:
+            vinted_connection_check.run_once()
+        fetch.assert_not_called()
+
     def test_bootstrap_probe_is_opt_in_once_and_stops_for_refusals(self):
         for index, (status, reason, expected) in enumerate(
             (

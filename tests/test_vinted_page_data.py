@@ -34,6 +34,41 @@ def flight(rows, chunks=3):
 
 
 class PageDataTests(unittest.TestCase):
+    def test_large_bootstrap_does_not_hide_later_listing_flight_record(self):
+        html = flight(
+            [
+                ("0", {"translations": ["irrelevant" for _ in range(11000)]}),
+                (
+                    "1",
+                    [
+                        "$",
+                        "$L2",
+                        None,
+                        {
+                            "item": {
+                                "id": "123",
+                                "seller_id": 2,
+                                "photos": [{"url": photo("a")}],
+                                "plugins": [
+                                    {
+                                        "name": "description",
+                                        "data": {
+                                            "item_id": "123",
+                                            "description": "Actual seller notes",
+                                        },
+                                    }
+                                ],
+                            }
+                        },
+                    ],
+                ),
+            ]
+        )
+        self.assertEqual(
+            page.parse_page_data(html, 123),
+            {"photos": [photo("a")], "description": "Actual seller notes"},
+        )
+
     def test_next_data_keeps_target_and_excludes_recommendations(self):
         html = next_data(
             {

@@ -10,6 +10,30 @@ from search_settings import connection
 logger = get_logger(__name__)
 
 
+def diagnose_latest_listing():
+    """Read one already sent public listing; do not edit or send a notification."""
+    import vinted_gallery
+
+    try:
+        with closing(connection()) as conn:
+            row = conn.execute(
+                "SELECT url FROM alert_outbox WHERE platform='vinted' AND status='sent' "
+                "ORDER BY sent_at DESC LIMIT 1"
+            ).fetchone()
+        if not row:
+            logger.info("Startup listing diagnosis: no sent listing; no request made")
+            return
+        data = vinted_gallery.fetch_listing(row[0])
+        logger.info(
+            "Startup listing diagnosis: state=%s description_chars=%s photos=%s; no messages",
+            data["state"],
+            len(data["description"]),
+            len(data["photos"]),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Startup listing diagnosis unavailable: %s", type(exc).__name__)
+
+
 def diagnose_bootstrap():
     """One ordinary page/identity read; no renewal, settings change or purchase."""
     import vinted_buyer
@@ -67,6 +91,8 @@ def run_once():
                 "INSERT OR REPLACE INTO parameters VALUES ('buyer_checked_release', ?)",
                 (release,),
             )
+        if os.environ.get("MSJ_LISTING_CHECK_ON_START") == "1":
+            diagnose_latest_listing()
         if not vinted_buyer.settings()["connected"]:
             logger.info("Startup buyer diagnosis: no saved account; no request made")
             return
