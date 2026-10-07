@@ -102,8 +102,19 @@ def checkout_prices(checkout, item_price, maximum):
         raise buyer.BuyerError("Vinted did not return a readable checkout total.")
     # Only an explicit checkout total is accepted. A subtotal or listing price
     # can omit delivery and buyer protection, so neither is a payment fallback.
-    total_part = summary.get("total") or {}
+    pay_button = components.get("pay_button_v2")
+    if "pay_button_v2" in components and not isinstance(pay_button, dict):
+        raise buyer.BuyerError("Vinted did not return a readable checkout total.")
+    # Current web checkout renders the all-in amount from pay_button_v2.total.
+    # order_summary_v2 contains the item subtotal and fee lines, not that total.
+    total_part = (pay_button if pay_button is not None else summary).get("total") or {}
     total = cents(total_part.get("price") if isinstance(total_part, dict) else None)
+    if pay_button is not None and summary.get("total") is not None:
+        old_total = summary["total"]
+        if not isinstance(old_total, dict) or cents(old_total.get("price")) != total:
+            raise buyer.BuyerError(
+                "Vinted's checkout totals disagree. No payment was sent."
+            )
     if total < item_price:
         raise buyer.BuyerError(
             "Autobuy stopped: Vinted's checkout total could not be verified."
@@ -142,6 +153,37 @@ def checkout_prices(checkout, item_price, maximum):
             raise buyer.BuyerError(
                 "Set your delivery address and payment method in Vinted first."
             )
+    payment = components["payment_method"]
+    if any(
+        key in payment for key in ("selected_payment_method", "cards", "pay_in_methods")
+    ):
+        selected = payment.get("selected_payment_method")
+        method = selected.get("pay_in_method") if isinstance(selected, dict) else None
+        code = method.get("payment_method") if isinstance(method, dict) else None
+        if not isinstance(code, str) or not code:
+            raise buyer.BuyerError(
+                "Choose and save your payment method in Vinted first."
+            )
+        if code.lower() == "credit_card":
+            card = selected.get("credit_card")
+            if not isinstance(card, dict) or card.get("expired") is not False:
+                raise buyer.BuyerError(
+                    "Choose a valid saved payment card in Vinted first."
+                )
+    elif not payment.get("id"):
+        raise buyer.BuyerError("Choose and save your payment method in Vinted first.")
+    address = components["shipping_address"]
+    if any(
+        key in address for key in ("address", "address_is_missing", "shipping_order_id")
+    ) and (
+        not isinstance(address.get("address"), dict)
+        or not address["address"].get("id")
+        or address["address"].get("is_complete") is not True
+        or address.get("address_is_missing")
+    ):
+        raise buyer.BuyerError(
+            "Complete and save your delivery address in Vinted first."
+        )
     shipping = components.get("shipping_pickup_details") or {}
     options = components.get("shipping_pickup_options") or {}
     # Use the account's existing delivery choice only. Never invent a pickup
@@ -152,9 +194,48 @@ def checkout_prices(checkout, item_price, maximum):
         or not shipping
         or shipping.get("errors")
         or options.get("errors")
-        or not options.get("selected_pickup_option")
+        or options.get("selected_pickup_option") is None
+        or type(options.get("selected_pickup_option")) not in (int, str)
+        or (
+            not options.get("selected_pickup_option")
+            and "pickup_details" not in shipping
+        )
     ):
         raise buyer.BuyerError("Choose and save your delivery option in Vinted first.")
+    if "pickup_details" in shipping:
+        details = shipping.get("pickup_details")
+        choices = options.get("pickup_options")
+        if not isinstance(details, dict) or not isinstance(choices, dict):
+            raise buyer.BuyerError(
+                "Choose and save your delivery option in Vinted first."
+            )
+        selected_types = [
+            kind
+            for kind in ("home", "pickup")
+            if isinstance(choices.get(kind), dict)
+            and choices[kind].get("pickup_option_type")
+            == options["selected_pickup_option"]
+        ]
+        rate = details.get("selected_rate_uuid")
+        if len(selected_types) != 1 or not isinstance(rate, str) or not rate:
+            raise buyer.BuyerError(
+                "Choose and save your delivery option in Vinted first."
+            )
+        if selected_types[0] == "pickup":
+            point = details.get("shipping_point")
+            if (
+                not isinstance(point, dict)
+                or not (point.get("uuid") or point.get("code"))
+                or (point.get("rate_uuid") is not None and point["rate_uuid"] != rate)
+            ):
+                raise buyer.BuyerError(
+                    "Choose and save your pickup point in Vinted first."
+                )
+        elif (
+            not isinstance(shipping.get("receiver_address"), dict)
+            or not shipping["receiver_address"]
+        ):
+            raise buyer.BuyerError("Save your home delivery address in Vinted first.")
     return total
 
 
@@ -278,7 +359,7 @@ def buy(row):
             )
             checkout = built.get("checkout") or {}
             purchase_id = str(checkout.get("id") or "")
-            if not re.fullmatch(r"[A-Za-z0-9-]{1,100}", purchase_id):
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", purchase_id):
                 raise buyer.BuyerError("Vinted did not return a valid checkout.")
             record(
                 item_id,
@@ -345,7 +426,7 @@ def buy(row):
                     "paid",
                     f"Paid £{total/100:.2f}. Check your Vinted purchases.",
                 )
-            elif status in ("pending", "requires_action"):
+            elif status in ("pending", "preparing", "requires_action"):
                 action_url = payment_action_url(paid)
                 record(
                     item_id,
@@ -415,6 +496,56 @@ def buy(row):
             if client:
                 client.session.close()
         return dict(result(item_id), reason=reason)
+
+
+def check_payment(item_id):
+    """Read a submitted payment once; never create a checkout or submit payment."""
+    with buyer.exclusive():
+        saved = result(item_id)
+        if not saved or saved["state"] not in ("paying", "unknown", "needs_action"):
+            return saved
+        purchase_id = saved.get("checkout_id")
+        if not isinstance(purchase_id, str) or not re.fullmatch(
+            r"[A-Za-z0-9_-]{1,100}", purchase_id
+        ):
+            return saved
+        client = buyer.connected_client()
+        try:
+            data = client.request(
+                "GET", f"/api/v2/purchases/{purchase_id}/checkout/payment"
+            )
+            payment = data.get("payment")
+            if not isinstance(payment, dict):
+                return saved
+            status = payment.get("status")
+            if status in ("success", "completed"):
+                total = saved.get("total")
+                record(
+                    item_id,
+                    "paid",
+                    (
+                        f"Paid £{total/100:.2f}. Check your Vinted purchases."
+                        if isinstance(total, int)
+                        else "Vinted confirmed payment. Check your purchases."
+                    ),
+                )
+            elif status in ("failure", "failed"):
+                record(
+                    item_id,
+                    "payment_failed",
+                    "Vinted reports that payment failed. Check your Vinted purchases before buying again.",
+                )
+            elif status in ("pending", "preparing", "requires_action"):
+                action = payment_action_url(data) or saved.get("action_url")
+                record(
+                    item_id,
+                    "needs_action",
+                    "Payment is awaiting Vinted or bank confirmation. Check again after completing any confirmation; do not buy again.",
+                    action_url=action,
+                )
+            return result(item_id)
+        finally:
+            client.session.close()
 
 
 def feedback_buttons(row, feedback=None):
@@ -606,6 +737,24 @@ async def callback(update, context):
     row, details, card = saved
     previous = result(row["item_id"])
     if getattr(query, "data", "") == "buy:status":
+        if previous and previous["state"] in ("paying", "unknown", "needs_action"):
+            await photo_cards.answer(query, "Checking the payment already submitted…")
+            try:
+                refreshed = await asyncio.to_thread(check_payment, row["item_id"])
+            except buyer.BuyerError as exc:
+                refreshed = dict(
+                    previous, message="Payment status could not be checked. " + str(exc)
+                )
+            except Exception:  # noqa: BLE001 -- keep the saved uncertain payment
+                refreshed = dict(
+                    previous,
+                    message="Payment status could not be checked. Check your Vinted purchases before retrying.",
+                )
+            async with photo_cards.lock("vinted", query.message.message_id):
+                await show_feedback(
+                    context.bot, query, row, details, card, refreshed or previous
+                )
+            return
         feedback = (
             previous
             if previous and previous["state"] != "failed_before_payment"

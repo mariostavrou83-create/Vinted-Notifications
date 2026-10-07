@@ -156,8 +156,16 @@ def response_error(response, data, stage):
                 fields.update(key for key in errors if isinstance(key, str))
                 messages.extend(v for v in errors.values() if isinstance(v, str))
     codes = {value.lower() for value in values if isinstance(value, str)}
+    numbers = [
+        (
+            int(value)
+            if isinstance(value, str) and re.fullmatch(r"[0-9]{1,4}", value)
+            else value
+        )
+        for value in values
+    ]
     numeric_code = next(
-        (value for value in values if type(value) is int and 0 <= value <= 1000), None
+        (value for value in numbers if type(value) is int and 0 <= value <= 1000), None
     )
     fields.intersection_update(
         {
@@ -176,11 +184,28 @@ def response_error(response, data, stage):
     hints = " ".join(
         value[:1024].lower() for value in messages if isinstance(value, str)
     )
+    known_codes = codes & {
+        "invalid_csrf_token",
+        "csrf_token_invalid",
+        "csrf_error",
+        "invalid_token",
+        "invalid_grant",
+        "invalid_refresh_token",
+        "refresh_token_expired",
+        "session_expired",
+        "authentication_required",
+        "unauthorized",
+        "unauthenticated",
+        "bad_request",
+        "forbidden",
+        "captcha_required",
+        "verification_required",
+    }
     redirect = redirect_reason(response)
     logger.info(
         "Vinted response: stage=%s http=%s redirect=%s body=%s "
         "api_code=%s fields=%s csrf_hint=%s refresh_hint=%s required_hint=%s "
-        "invalid_hint=%s expired_hint=%s shape=%s",
+        "invalid_hint=%s expired_hint=%s shape=%s code_type=%s known_code=%s auth_hint=%s",
         stage,
         status,
         redirect_target(response),
@@ -195,6 +220,12 @@ def response_error(response, data, stage):
         "invalid" in hints,
         "expired" in hints,
         ",".join(sorted(shape)) or "other",
+        type(data.get("code")).__name__ if isinstance(data, dict) else "none",
+        ",".join(sorted(known_codes)) or "other",
+        any(
+            word in hints
+            for word in ("authenticat", "unauthor", "log in", "logged in", "login")
+        ),
     )
     if (
         security_challenge(response, data)
@@ -211,7 +242,7 @@ def response_error(response, data, stage):
     elif codes & {"user_blocked", "account_blocked", "account_restricted"}:
         reason = "account_restricted"
     elif (
-        100 in values
+        numeric_code == 100
         or codes
         & {
             "invalid_grant",
@@ -219,6 +250,12 @@ def response_error(response, data, stage):
             "invalid_password",
             "invalid_username",
             "invalid_token",
+            "invalid_refresh_token",
+            "refresh_token_expired",
+            "session_expired",
+            "authentication_required",
+            "unauthorized",
+            "unauthenticated",
         }
         or status == 401
     ):
@@ -629,7 +666,7 @@ class Client:
             return {"challenge_id": str(data["payload"]["id"])}
         if response.status_code not in (200, 201) or not isinstance(data, dict):
             raise response_error(response, data, stage)
-        if any(data.get(k) for k in ("error", "error_code")) or data.get(
+        if any(data.get(k) for k in ("error", "error_code", "errors")) or data.get(
             "code"
         ) not in (
             None,

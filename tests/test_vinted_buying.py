@@ -45,7 +45,186 @@ def checkout(total="19.00"):
     }
 
 
+def web_checkout(total="18.84", *, home=False):
+    """Current first-party DTO shape with fictional address/card identifiers."""
+    value = checkout(total)
+    components = value["components"]
+    components["order_summary_v2"].pop("total")
+    components["pay_button_v2"] = {
+        "total": {"price": {"amount": total, "currency_code": "GBP"}}
+    }
+    components["payment_method"] = {
+        "selected_payment_method": {
+            "pay_in_method": {"payment_method": "credit_card"},
+            "credit_card": {"expired": False},
+        }
+    }
+    address = {"id": 456, "is_complete": True}
+    components["shipping_address"] = {"address": address, "address_is_missing": False}
+    components["shipping_pickup_options"] = {
+        "selected_pickup_option": "home" if home else "pickup",
+        "pickup_options": {
+            "home": {"pickup_option_type": "home"},
+            "pickup": {"pickup_option_type": "pickup"},
+        },
+    }
+    components["shipping_pickup_details"] = {
+        "pickup_details": {
+            "selected_rate_uuid": "saved-rate",
+            "shipping_point": {"uuid": "saved-point", "rate_uuid": "saved-rate"},
+        },
+        "receiver_address": address if home else None,
+    }
+    return value
+
+
 class BuyingTests(DatabaseFixture, unittest.TestCase):
+    def test_submitted_payment_recheck_confirms_success_without_another_payment(self):
+        self.payment = buyer.BuyerError("Timeout", reason="network")
+        self.assertEqual(self.run_buy()["state"], "unknown")
+        self.client.request.reset_mock()
+        self.payment = {"payment": {"status": "success"}}
+        with patch.object(buyer, "connected_client", return_value=self.client):
+            saved = buying.check_payment("123")
+        self.assertEqual(saved["state"], "paid")
+        self.client.request.assert_called_once_with(
+            "GET", "/api/v2/purchases/checkout-123/checkout/payment"
+        )
+        self.client.request.reset_mock()
+        self.assertEqual(self.run_buy()["state"], "paid")
+        self.client.request.assert_not_called()
+
+    def test_failed_payment_recheck_preserves_uncertainty_and_closes_client(self):
+        self.payment = buyer.BuyerError("Timeout", reason="network")
+        self.run_buy()
+        before = buying.result("123")
+        self.client.request.reset_mock()
+        self.client.session.close.reset_mock()
+        with patch.object(
+            buyer, "connected_client", return_value=self.client
+        ), self.assertRaises(buyer.BuyerError):
+            buying.check_payment("123")
+        self.assertEqual(buying.result("123"), before)
+        self.client.request.assert_called_once_with(
+            "GET", "/api/v2/purchases/checkout-123/checkout/payment"
+        )
+        self.client.session.close.assert_called_once()
+
+    def test_pending_preparing_and_failed_payment_reads_never_allow_a_payment_retry(
+        self,
+    ):
+        buying.claim(self.row)
+        for status, state in (
+            ("pending", "needs_action"),
+            ("preparing", "needs_action"),
+            ("failure", "payment_failed"),
+        ):
+            buying.record(
+                "123", "unknown", "Check Vinted", checkout_id="checkout-123", total=1884
+            )
+            self.client.request.reset_mock()
+            self.payment = {"payment": {"status": status}}
+            with patch.object(buyer, "connected_client", return_value=self.client):
+                self.assertEqual(buying.check_payment("123")["state"], state)
+            self.client.request.assert_called_once_with(
+                "GET", "/api/v2/purchases/checkout-123/checkout/payment"
+            )
+            self.client.request.reset_mock()
+            self.assertEqual(self.run_buy()["state"], state)
+            self.client.request.assert_not_called()
+
+    def test_current_web_pay_button_total_and_saved_pickup_pay_once(self):
+        self.final = web_checkout()
+        paid = self.run_buy()
+        self.assertEqual((paid["state"], paid["total"]), ("paid", 1884))
+        self.assertEqual(len(self.payments()), 1)
+        self.assertEqual(self.run_buy()["state"], "paid")
+        self.assertEqual(len(self.payments()), 1)
+
+    def test_current_web_saved_home_delivery_can_pay(self):
+        self.final = web_checkout(home=True)
+        self.assertEqual(self.run_buy()["state"], "paid")
+        self.assertEqual(len(self.payments()), 1)
+
+    def test_current_pay_total_cannot_fall_back_or_disagree_with_another_total(self):
+        bad = []
+        for total in ("20.01", "NaN", "-1", "1.001"):
+            bad.append(web_checkout(total))
+        value = web_checkout()
+        value["components"]["order_summary_v2"]["total"] = {
+            "price": {"amount": "19.00", "currency_code": "GBP"}
+        }
+        bad.append(value)
+        for pay in (
+            None,
+            [],
+            {},
+            {"total": None},
+            {"total": {"price": {"amount": "18.84", "currency_code": "EUR"}}},
+        ):
+            value = checkout()
+            value["components"]["pay_button_v2"] = pay
+            bad.append(value)
+        for value in bad:
+            self.final = value
+            self.assertEqual(self.run_buy()["state"], "failed_before_payment")
+        self.assertEqual(self.payments(), [])
+
+    def test_current_checkout_requires_saved_payment_address_rate_and_point(self):
+        mutations = [
+            lambda c: c["payment_method"].update(selected_payment_method=None),
+            lambda c: c["payment_method"]["selected_payment_method"][
+                "credit_card"
+            ].update(expired=True),
+            lambda c: c["payment_method"]["selected_payment_method"].update(
+                pay_in_method=None
+            ),
+            lambda c: c["shipping_address"].update(address=None),
+            lambda c: c["shipping_address"]["address"].update(is_complete=False),
+            lambda c: c["shipping_pickup_details"]["pickup_details"].update(
+                selected_rate_uuid=None
+            ),
+            lambda c: c["shipping_pickup_details"]["pickup_details"].update(
+                shipping_point=None
+            ),
+            lambda c: c["shipping_pickup_details"]["pickup_details"][
+                "shipping_point"
+            ].update(rate_uuid="different-rate"),
+            lambda c: c["shipping_pickup_options"].update(
+                selected_pickup_option="unavailable"
+            ),
+        ]
+        for change in mutations:
+            self.final = web_checkout()
+            change(self.final["components"])
+            self.assertEqual(self.run_buy()["state"], "failed_before_payment")
+        self.final = web_checkout(home=True)
+        self.final["components"]["shipping_pickup_details"]["receiver_address"] = None
+        self.assertEqual(self.run_buy()["state"], "failed_before_payment")
+        self.assertEqual(self.payments(), [])
+
+    def test_current_missing_selection_key_cannot_look_like_legacy_checkout(self):
+        self.final = web_checkout()
+        self.final["components"]["payment_method"] = {
+            "cards": [{"id": "available-card"}],
+            "pay_in_methods": [],
+        }
+        self.assertEqual(self.run_buy()["state"], "failed_before_payment")
+        self.final = web_checkout()
+        self.final["components"]["shipping_address"] = {"address_is_missing": True}
+        self.assertEqual(self.run_buy()["state"], "failed_before_payment")
+        self.assertEqual(self.payments(), [])
+
+    def test_numeric_web_error_code_strings_are_classified_without_values(self):
+        response = Mock(status_code=400, headers={}, text="")
+        with self.assertLogs("vinted_buyer", level="INFO") as logs:
+            error = buyer.response_error(
+                response, {"code": "100", "message": "private-message"}, "sign_in"
+            )
+        self.assertEqual(error.reason, "credentials")
+        self.assertIn("api_code=100", " ".join(logs.output))
+        self.assertNotIn("private-message", " ".join(logs.output))
+
     def test_cookie_scope_and_expiry_survive_encrypted_session_restoration(self):
         client = buyer.Client()
         client.session.cookies.set(

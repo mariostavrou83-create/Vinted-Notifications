@@ -1,5 +1,23 @@
 # Vinted buyer authentication and checkout research
 
+## Current checkout contract from the owner's supplied page
+
+The owner supplied a checkout screenshot and saved HTML on 7 October 2026.
+The screenshot shows an item at £15.00, a £1.45 fee and £2.39 pickup delivery,
+with £18.84 on Pay. The private page and its address/account information are not
+included in this repository. Its linked first-party scripts were read as source;
+none were executed and no purchase request was made.
+
+- [Checkout DTO and UI](https://marketplace-web-assets.vinted.com/_next/static/chunks/3lm50uk9fxxu0.js) read the all-in Pay amount from `components.pay_button_v2.total.price`. `order_summary_v2` contains subtotal, deductions and fee lines; it does not supply that current total. The bot now reads the explicit Pay total, keeps the old explicit-total shape for older responses, and stops if both amounts disagree or current Pay data is malformed.
+- The same source describes `payment_method.selected_payment_method`, `shipping_address.address`, and `shipping_pickup_details.pickup_details`. Validation now requires the account's selected payment method, a valid saved card when applicable, a complete address, a selected rate and the matching saved pickup point or home address. Available cards or delivery options do not count as a selection.
+- [Checkout API client](https://marketplace-web-assets.vinted.com/_next/static/chunks/23ayky4c3qoyq.js) builds a purchase from a transaction ID, then reads/updates its checkout. The listing ID, transaction ID and opaque purchase ID are separate identifiers. A copied checkout URL does not create a checkout for a different listing.
+- [Payment API client](https://marketplace-web-assets.vinted.com/_next/static/chunks/1k0cel-k1v-yt.js) posts the checksum and browser information, and exposes GET of the existing checkout payment. The status button now uses that read to reconcile an uncertain payment without sending another payment. `preparing` remains unconfirmed; only explicit success becomes paid. Duplicate-payment protection is retained.
+
+These changes are covered by offline regressions using fictional account/card
+identifiers. No live checkout or payment is claimed: production still rejects
+the bot's saved buyer session before checkout. The owner's logged-in browser
+checkout is valid evidence of its UI and current frontend contract.
+
 ## Current first-party web client inspected on 7 October 2026
 
 The public UK homepage loaded 66 JavaScript assets from Vinted's own asset host.
