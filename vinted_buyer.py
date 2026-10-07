@@ -430,17 +430,20 @@ class Client:
             )
             body_access = data.get("access_token")
             scope = data.get("scope")
+            current_access = self.session.cookies.get_dict().get("access_token_web")
+            sources_match = (
+                body_access == cookie_access
+                if isinstance(body_access, str) and isinstance(cookie_access, str)
+                else None
+            )
             logger.info(
                 "Vinted session renewal: usable_access_token=True "
                 "token_changed=%s body_access=%s cookie_access=%s "
                 "sources_match=%s scope_present=%s scope_user=%s",
-                previous_access
-                != self.session.cookies.get_dict().get("access_token_web"),
+                previous_access != current_access,
                 isinstance(body_access, str),
                 isinstance(cookie_access, str),
-                body_access == cookie_access
-                if isinstance(body_access, str) and isinstance(cookie_access, str)
-                else None,
+                sources_match,
                 isinstance(scope, str),
                 isinstance(scope, str) and "user" in scope.split(),
             )
