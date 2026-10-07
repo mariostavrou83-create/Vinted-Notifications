@@ -304,6 +304,98 @@ def ready(row):
     return config, vinted_budget.payment_limit(row)
 
 
+def verified_listing(client, row, config, maximum):
+    """Read the current item and apply the same listing gates for every caller."""
+    item_id = str(row["item_id"])
+    data = client.request("GET", f"/api/v2/items/{item_id}")
+    item = data.get("item") or {}
+    if not isinstance(item, dict) or str(item.get("id")) != item_id:
+        raise buyer.BuyerError(
+            "Vinted did not return this listing. Its availability could not be verified. No payment was sent.",
+            reason="item_unavailable",
+        )
+    for flag, label, code in (
+        ("is_sold", "already sold", "item_sold"),
+        ("is_reserved", "reserved", "item_reserved"),
+        ("is_closed", "closed or removed", "item_closed"),
+    ):
+        if item.get(flag):
+            raise buyer.BuyerError(
+                f"This item is {label} on Vinted. No payment was sent.", reason=code
+            )
+    price = item.get("price")
+    if not isinstance(price, dict):
+        price = {"amount": price, "currency_code": item.get("currency")}
+    current_price = cents(price)
+    alert_price = cents({"amount": row["price"], "currency_code": row["currency"]})
+    if current_price > alert_price:
+        raise buyer.BuyerError(
+            f"Item price increased from £{alert_price/100:.2f} to £{current_price/100:.2f} after your alert. No payment was sent.",
+            reason="price_increased",
+        )
+    if current_price > maximum:
+        raise buyer.BuyerError(
+            f"Over budget: the item alone is £{current_price/100:.2f}; search #{row['query_id']} has a £{maximum/100:.2f} limit including fees and delivery. No payment was sent.",
+            reason="item_over_budget",
+        )
+    user = item.get("user")
+    seller = str(
+        (user.get("id") if isinstance(user, dict) else None)
+        or item.get("user_id")
+        or ""
+    )
+    if not seller.isdigit() or seller == config["user_id"]:
+        raise buyer.BuyerError("The seller could not be verified for this purchase.")
+    return current_price, seller
+
+
+def check_listing(item_id):
+    """Owner-triggered preflight; no claim, conversation, checkout or payment."""
+    item_id = str(item_id)
+    if not item_id.isascii() or not item_id.isdigit() or len(item_id) > 24:
+        raise buyer.BuyerError("Choose an existing Vinted purchase attempt to check.")
+    with closing(connection()) as conn:
+        row = conn.execute(
+            "SELECT o.* FROM alert_outbox o JOIN vinted_buy_attempts a ON a.item_id=o.item_id WHERE o.item_id=? AND o.platform='vinted'",
+            (item_id,),
+        ).fetchone()
+    if row is None:
+        raise buyer.BuyerError("This Vinted alert is no longer available to check.")
+    row = dict(row)
+    if urlsplit(row["url"]).hostname != "www.vinted.co.uk" or row["currency"] != "GBP":
+        raise buyer.BuyerError("Autobuy currently supports UK Vinted listings in GBP.")
+    with buyer.exclusive():
+        client = None
+        phase = "checking your buyer account"
+        try:
+            config, maximum = ready(row)
+            client = buyer.connected_client()
+            phase = "checking the listing"
+            price, _ = verified_listing(client, row, config, maximum)
+            logger.info("Autobuy listing check: item=%s result=verified", item_id)
+            return (
+                f"Listing check passed: item £{price/100:.2f}; search #{row['query_id']} maximum total £{maximum/100:.2f}. "
+                "Delivery, fees and saved payment choices still need verification at checkout. No checkout or payment was created."
+            )
+        except buyer.BuyerError as exc:
+            logger.info(
+                "Autobuy listing check: item=%s phase=%s reason=%s http=%s",
+                item_id,
+                phase,
+                exc.reason,
+                exc.status,
+            )
+            status = f" (HTTP {exc.status})" if exc.status else ""
+            raise buyer.BuyerError(
+                f"Listing check stopped while {phase}{status}: {exc} No checkout or payment was created.",
+                reason=exc.reason,
+                status=exc.status,
+            ) from None
+        finally:
+            if client:
+                client.session.close()
+
+
 def buy(row):
     item_id = str(row["item_id"])
     host = urlsplit(row["url"]).hostname
@@ -320,47 +412,7 @@ def buy(row):
         try:
             client = buyer.connected_client()
             phase = "checking the listing"
-            data = client.request("GET", f"/api/v2/items/{item_id}")
-            item = data.get("item") or {}
-            if not isinstance(item, dict) or str(item.get("id")) != item_id:
-                raise buyer.BuyerError(
-                    "Vinted did not return this listing. Its availability could not be verified. No payment was sent.",
-                    reason="item_unavailable",
-                )
-            for flag, label, code in (
-                ("is_sold", "already sold", "item_sold"),
-                ("is_reserved", "reserved", "item_reserved"),
-                ("is_closed", "closed or removed", "item_closed"),
-            ):
-                if item.get(flag):
-                    raise buyer.BuyerError(
-                        f"This item is {label} on Vinted. No payment was sent.",
-                        reason=code,
-                    )
-            price = item.get("price")
-            if not isinstance(price, dict):
-                price = {"amount": price, "currency_code": item.get("currency")}
-            current_price = cents(price)
-            alert_price = cents(
-                {"amount": row["price"], "currency_code": row["currency"]}
-            )
-            if current_price > alert_price:
-                raise buyer.BuyerError(
-                    f"Item price increased from £{alert_price/100:.2f} to £{current_price/100:.2f} after your alert. No payment was sent.",
-                    reason="price_increased",
-                )
-            if current_price > maximum:
-                raise buyer.BuyerError(
-                    f"Over budget: the item alone is £{current_price/100:.2f}; search #{row['query_id']} has a £{maximum/100:.2f} limit including fees and delivery. No payment was sent.",
-                    reason="item_over_budget",
-                )
-            seller = str(
-                (item.get("user") or {}).get("id") or item.get("user_id") or ""
-            )
-            if not seller.isdigit() or seller == config["user_id"]:
-                raise buyer.BuyerError(
-                    "The seller could not be verified for this purchase."
-                )
+            current_price, seller = verified_listing(client, row, config, maximum)
             phase = "preparing the purchase"
             conversation = client.request(
                 "POST",
