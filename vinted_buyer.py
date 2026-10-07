@@ -382,6 +382,7 @@ class Client:
             if path.startswith("/web/api/auth/")
             else "identity" if path == "/api/v2/users/current" else "request"
         )
+        previous_access = self.session.cookies.get_dict().get("access_token_web")
         try:
             response = self.session.request(
                 method, BASE + path, json=body, timeout=(4, 12), allow_redirects=False
@@ -421,7 +422,31 @@ class Client:
             # Never treat the imported stale cookie as proof of renewal.
             if any(data.get(k) for k in ("error", "error_code")) or not access_updated:
                 raise response_error(response, data, stage)
-            logger.info("Vinted session renewal: usable_access_token=True")
+            returned = getattr(response, "cookies", None)
+            cookie_access = (
+                returned.get_dict().get("access_token_web")
+                if isinstance(returned, requests.cookies.RequestsCookieJar)
+                else None
+            )
+            body_access = data.get("access_token")
+            scope = data.get("scope")
+            current_access = self.session.cookies.get_dict().get("access_token_web")
+            sources_match = (
+                body_access == cookie_access
+                if isinstance(body_access, str) and isinstance(cookie_access, str)
+                else None
+            )
+            logger.info(
+                "Vinted session renewal: usable_access_token=True "
+                "token_changed=%s body_access=%s cookie_access=%s "
+                "sources_match=%s scope_present=%s scope_user=%s",
+                previous_access != current_access,
+                isinstance(body_access, str),
+                isinstance(cookie_access, str),
+                sources_match,
+                isinstance(scope, str),
+                isinstance(scope, str) and "user" in scope.split(),
+            )
         return data
 
     def homepage(self):
@@ -683,6 +708,7 @@ def connected_client():
                     "/web/api/auth/oauth",
                     {
                         "client_id": "web",
+                        "scope": "user",
                         "grant_type": "refresh_token",
                         "refresh_token": refresh,
                     },

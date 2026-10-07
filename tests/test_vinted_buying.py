@@ -636,6 +636,40 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                 )
                 client.session.close()
 
+    def test_renewal_diagnostics_hide_conflicting_tokens_and_scope(self):
+        old = "old-private-access-token-0123456789"
+        body = "body-private-access-token-0123456789"
+        cookie = "cookie-private-access-token-0123456789"
+        scope = "user private-scope-marker"
+        client = buyer.Client({"cookies": {"access_token_web": old}})
+        response = Mock(
+            status_code=200,
+            json=Mock(return_value={"access_token": body, "scope": scope}),
+            text="",
+            headers={},
+            cookies=requests.cookies.cookiejar_from_dict({"access_token_web": cookie}),
+        )
+
+        def merged_response(*args, **kwargs):
+            # Requests merges response cookies before the request method returns.
+            client.session.cookies.set(
+                "access_token_web", cookie, domain=".vinted.co.uk"
+            )
+            return response
+
+        with patch.object(
+            client.session, "request", side_effect=merged_response
+        ), self.assertLogs("vinted_buyer", level="INFO") as logs:
+            client.request("POST", "/web/api/auth/refresh", {})
+        text = " ".join(logs.output)
+        self.assertIn("token_changed=True", text)
+        self.assertIn("sources_match=False", text)
+        self.assertIn("scope_present=True scope_user=True", text)
+        for secret in (old, body, cookie, scope, "private-scope-marker"):
+            self.assertNotIn(secret, text)
+        self.assertEqual(client.exported()["cookies"]["access_token_web"], body)
+        client.session.close()
+
     def test_redirect_diagnostics_never_include_path_or_query_secrets(self):
         for location, label in (
             ("/private-token?secret=do-not-log", "same_origin_other_path"),
@@ -926,6 +960,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                             "/web/api/auth/oauth",
                             {
                                 "client_id": "web",
+                                "scope": "user",
                                 "grant_type": "refresh_token",
                                 "refresh_token": "refresh",
                             },
@@ -1087,6 +1122,15 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                         ("POST", buyer.BASE + "/web/api/auth/oauth"),
                         ("GET", buyer.BASE + "/api/v2/users/current"),
                     ],
+                )
+                self.assertEqual(
+                    request.call_args_list[1].kwargs["json"],
+                    {
+                        "client_id": "web",
+                        "scope": "user",
+                        "grant_type": "refresh_token",
+                        "refresh_token": old["cookies"]["refresh_token_web"],
+                    },
                 )
                 self.assertTrue(
                     all(
