@@ -33,6 +33,31 @@ from search_settings import connection
 logger = get_logger(__name__)
 
 
+def acknowledge_listing(conn, row, message_id, *, now=None):
+    """Save a known native send in the same transaction as its photo controls.
+
+    Keep the lease until ``finish`` releases it. If the process stops between
+    the native-send bookkeeping and ``finish``, an expired lease then schedules
+    enrichment of the accepted message instead of another notification. Owner
+    photo tests and callback recovery have no listing job and cannot acknowledge
+    an unrelated pending delivery.
+    """
+    if row.get("kind") != "listing" or not row.get("lease_token"):
+        return False
+    changed = conn.execute(
+        """UPDATE alert_outbox SET status='sent',telegram_message_id=?,sent_at=?,error=''
+        WHERE item_id=? AND platform=? AND status='pending' AND lease_token=?""",
+        (
+            message_id,
+            time.time() if now is None else now,
+            row["item_id"],
+            row.get("platform", "vinted"),
+            row["lease_token"],
+        ),
+    )
+    return changed.rowcount == 1
+
+
 def claim(now=None, preferred_photo=None, platform="vinted", allow_photos=True):
     now = time.time() if now is None else now
     with closing(connection()) as conn, conn:
@@ -517,17 +542,44 @@ class VintedDeliveryWorker(EbayDeliveryWorker):
                 from vinted_alerts import enrich
 
                 complete = await enrich(self.bot, self.chat_id, row, details, edit_slot)
+            if self.platform == "vinted" and details.get("photo_card"):
+                import photo_cards
+
+                await photo_cards.enrichment_failures(
+                    self.platform, row["telegram_message_id"], failed=False
+                )
             logger.info(
                 "Listing photo %s for item %s; message_id=%s",
                 "ready" if complete else "unavailable; retry pending",
                 row["item_id"],
                 row["telegram_message_id"],
             )
+            delay = 10
+            permanent = not complete and row["photo_attempts"] >= 2
+            if self.platform == "vinted" and details.get("photo_card") and not complete:
+                import photo_cards
+                from vinted_gallery import retry_pending
+
+                saved = photo_cards.load("vinted", row["telegram_message_id"])
+                if saved:
+                    pending_description = retry_pending(saved[1])
+                    # Deferrals by the shared Vinted cooldown are not failed
+                    # downloads. Keep the two bounded retry counts separate.
+                    permanent = (
+                        not pending_description
+                        and saved[1].get("listing_image_failures", 0) >= 3
+                    )
+                    if pending_description:
+                        retry_at = min(
+                            saved[1].get("listing_retry_after", 0),
+                            saved[1].get("listing_retry_until", 0),
+                        )
+                        delay = max(delay, retry_at - time.time())
             finish(
                 row,
                 failure=None if complete else "Listing photo temporarily unavailable",
-                delay=10,
-                permanent=not complete and row["photo_attempts"] >= 2,
+                delay=delay,
+                permanent=permanent,
                 now=now,
             )
         except RetryAfter as exc:
@@ -552,6 +604,12 @@ class VintedDeliveryWorker(EbayDeliveryWorker):
             )
         except (NetworkError, TelegramError) as exc:
             attempts = row["photo_attempts"] + 1
+            if self.platform == "vinted" and details.get("photo_card"):
+                import photo_cards
+
+                attempts = await photo_cards.enrichment_failures(
+                    self.platform, row["telegram_message_id"], failed=True
+                )
             finish(
                 row,
                 failure=type(exc).__name__,

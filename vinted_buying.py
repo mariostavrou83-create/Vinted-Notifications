@@ -42,11 +42,11 @@ def cents(value):
         ) from None
 
 
-def record(item_id, state, message, *, checkout_id=None, total=None):
+def record(item_id, state, message, *, checkout_id=None, total=None, action_url=None):
     with closing(connection()) as conn, conn:
         conn.execute(
-            "UPDATE vinted_buy_attempts SET state=?,message=?,checkout_id=COALESCE(?,checkout_id),total=COALESCE(?,total),updated=? WHERE item_id=?",
-            (state, message, checkout_id, total, time.time(), item_id),
+            "UPDATE vinted_buy_attempts SET state=?,message=?,checkout_id=COALESCE(?,checkout_id),total=COALESCE(?,total),action_url=?,updated=? WHERE item_id=?",
+            (state, message, checkout_id, total, action_url, time.time(), item_id),
         )
 
 
@@ -68,26 +68,38 @@ def history():
         ]
 
 
-def claim(row):
+def claim(row, *, recover_preparing=False):
     with closing(connection()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
         saved = conn.execute(
             "SELECT * FROM vinted_buy_attempts WHERE item_id=?", (row["item_id"],)
         ).fetchone()
-        if saved and saved["state"] != "failed_before_payment":
+        retryable = {"failed_before_payment"}
+        if recover_preparing:
+            # Only the caller holding buyer.exclusive() may recover this state:
+            # no live checkout can hold the same process-wide lock. Payment is
+            # never sent until the distinct durable 'paying' marker is saved.
+            retryable.add("preparing")
+        if saved and saved["state"] not in retryable:
             return False
         conn.execute(
-            "INSERT INTO vinted_buy_attempts(item_id,state,message,updated) VALUES (?,'preparing','Preparing checkout',?) ON CONFLICT(item_id) DO UPDATE SET state='preparing',message='Preparing checkout',checkout_id=NULL,total=NULL,updated=excluded.updated",
+            "INSERT INTO vinted_buy_attempts(item_id,state,message,updated) VALUES (?,'preparing','Preparing checkout',?) ON CONFLICT(item_id) DO UPDATE SET state='preparing',message='Preparing checkout',checkout_id=NULL,total=NULL,action_url=NULL,updated=excluded.updated",
             (row["item_id"], time.time()),
         )
     return True
 
 
 def checkout_prices(checkout, item_price, maximum):
+    if not isinstance(checkout, dict):
+        raise buyer.BuyerError("Vinted did not return a valid checkout.")
     components = checkout.get("components") or {}
+    if not isinstance(components, dict):
+        raise buyer.BuyerError("Vinted did not return readable checkout details.")
     summary = (
         components.get("order_summary_v2") or components.get("order_summary") or {}
     )
+    if not isinstance(summary, dict):
+        raise buyer.BuyerError("Vinted did not return a readable checkout total.")
     # Only an explicit checkout total is accepted. A subtotal or listing price
     # can omit delivery and buyer protection, so neither is a payment fallback.
     total_part = summary.get("total") or {}
@@ -110,12 +122,23 @@ def checkout_prices(checkout, item_price, maximum):
             f"Over budget: £{total/100:.2f} including fees and delivery; this search's maximum total is £{maximum/100:.2f}. No payment was sent.",
             reason="total_over_budget",
         )
-    if checkout.get("errors") or not checkout.get("checksum"):
+    checksum = checkout.get("checksum")
+    if (
+        checkout.get("errors")
+        or not isinstance(checksum, str)
+        or not checksum
+        or len(checksum) > 8192
+        or any(ord(char) < 32 or ord(char) == 127 for char in checksum)
+        or any(
+            isinstance(component, dict) and component.get("errors")
+            for component in components.values()
+        )
+    ):
         raise buyer.BuyerError(
             "Vinted needs checkout details before this item can be paid for."
         )
     for key in ("shipping_address", "payment_method"):
-        if not components.get(key) or components[key].get("errors"):
+        if not isinstance(components.get(key), dict) or not components[key]:
             raise buyer.BuyerError(
                 "Set your delivery address and payment method in Vinted first."
             )
@@ -124,13 +147,42 @@ def checkout_prices(checkout, item_price, maximum):
     # Use the account's existing delivery choice only. Never invent a pickup
     # point, pick a different address, or purchase an optional add-on.
     if (
-        not shipping
+        not isinstance(shipping, dict)
+        or not isinstance(options, dict)
+        or not shipping
         or shipping.get("errors")
         or options.get("errors")
         or not options.get("selected_pickup_option")
     ):
         raise buyer.BuyerError("Choose and save your delivery option in Vinted first.")
     return total
+
+
+def payment_action_url(paid):
+    """Read Vinted's bank-action link; never follow it or log its parameters."""
+    action = paid.get("action") if isinstance(paid, dict) else None
+    parameters = action.get("parameters") if isinstance(action, dict) else None
+    value = parameters.get("url") if isinstance(parameters, dict) else None
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 4096
+        or any(ord(char) <= 32 or ord(char) == 127 for char in value)
+    ):
+        return None
+    try:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.port not in (None, 443)
+        ):
+            return None
+    except ValueError:
+        return None
+    return value
 
 
 def ready(row):
@@ -154,7 +206,7 @@ def buy(row):
         raise buyer.BuyerError("Autobuy currently supports UK Vinted listings in GBP.")
     with buyer.exclusive():
         config, maximum = ready(row)
-        if not claim(row):
+        if not claim(row, recover_preparing=True):
             return result(item_id)
         client = None
         payment_started = False
@@ -294,10 +346,16 @@ def buy(row):
                     f"Paid £{total/100:.2f}. Check your Vinted purchases.",
                 )
             elif status in ("pending", "requires_action"):
+                action_url = payment_action_url(paid)
                 record(
                     item_id,
                     "needs_action",
-                    "Vinted needs payment or bank confirmation. Open your Vinted checkout; do not buy again.",
+                    (
+                        "Vinted needs payment or bank confirmation. Use the confirmation button below; do not buy again."
+                        if action_url
+                        else "Vinted needs payment or bank confirmation. Open your Vinted checkout; do not buy again."
+                    ),
+                    action_url=action_url,
                 )
             elif status == "failed":
                 record(
@@ -395,7 +453,11 @@ def feedback_buttons(row, feedback=None):
             "unexpected_error": "Checkout error · details",
         }.get(reason, label)
     buttons = [[InlineKeyboardButton(label, callback_data="buy:status")]]
-    if state in ("setup_required", "failed_before_payment") and reason not in (
+    if state == "preparing":
+        buttons.append(
+            [InlineKeyboardButton("Check / resume Autobuy", callback_data="buy:click")]
+        )
+    elif state in ("setup_required", "failed_before_payment") and reason not in (
         "item_sold",
         "item_closed",
         "security_challenge",
@@ -422,6 +484,16 @@ def feedback_buttons(row, feedback=None):
                 )
             )
             buttons.append(setup)
+    elif state == "needs_action" and payment_action_url(
+        {"action": {"parameters": {"url": feedback.get("action_url")}}}
+    ):
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    "Confirm payment / bank ↗", url=feedback["action_url"]
+                )
+            ]
+        )
     elif feedback.get("checkout_id"):
         buttons.append(
             [
@@ -444,7 +516,7 @@ async def show_feedback(bot, query, row, details, card, outcome):
     row, details, card = saved
     feedback = {
         key: outcome.get(key)
-        for key in ("state", "message", "checkout_id", "total", "reason")
+        for key in ("state", "message", "checkout_id", "total", "reason", "action_url")
     }
     details = dict(details, buy_feedback=feedback)
     try:
@@ -549,7 +621,7 @@ async def callback(update, context):
         )
         return
     logger.info("Autobuy tap item=%s search=%s", row["item_id"], row.get("query_id"))
-    if previous and previous["state"] != "failed_before_payment":
+    if previous and previous["state"] not in ("failed_before_payment", "preparing"):
         await photo_cards.answer(query, previous["message"][:190], alert=True)
         async with photo_cards.lock("vinted", query.message.message_id):
             await show_feedback(context.bot, query, row, details, card, previous)

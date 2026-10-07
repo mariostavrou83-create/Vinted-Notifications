@@ -36,13 +36,17 @@ class LeRobot:
         from telegram.ext import ApplicationBuilder
 
         try:
-
+            self._delivery_task = None
+            self._delivery_worker = None
             self.bot = Bot(db.get_parameter("telegram_token"))
             self.app = (
                 ApplicationBuilder()
                 .token(db.get_parameter("telegram_token"))
                 .concurrent_updates(8)
                 .connection_pool_size(24)
+                .post_init(self.start_delivery)
+                .post_stop(self.stop_delivery)
+                .post_shutdown(self.stop_delivery)
                 .build()
             )
 
@@ -68,13 +72,6 @@ class LeRobot:
             from telegram.ext import MessageHandler, filters
 
             self.app.add_handler(MessageHandler(filters.COMMAND, self.open_dashboard))
-
-            job_queue = self.app.job_queue
-            # Set the commands
-            job_queue.run_once(self.set_commands, when=1)
-            # Every day we check for a new version
-            # Every second we check for new posts to send to telegram
-            job_queue.run_once(self.check_telegram_queue, when=1)
 
             # Telegram remembers allowed_updates across deployments. Explicitly
             # subscribe to callbacks, including when the previous bot was commands-only.
@@ -406,16 +403,37 @@ class LeRobot:
         except Exception:
             logger.exception("Error checking for new version")
 
-    async def check_telegram_queue(self, context: ContextTypes.DEFAULT_TYPE):
+    async def start_delivery(self, application):
         from alert_delivery import VintedDeliveryWorker
 
-        await VintedDeliveryWorker(
-            context.bot, db.get_parameter("telegram_chat_id")
-        ).run()
+        if self._delivery_task is not None and not self._delivery_task.done():
+            return
+        await self.set_commands(application)
+        self._delivery_worker = VintedDeliveryWorker(
+            application.bot, db.get_parameter("telegram_chat_id")
+        )
+        # PTB waits for JobQueue jobs and Application.create_task tasks during
+        # stop(). The dispatcher deliberately runs forever, so own its task
+        # here and cancel it in the lifecycle hook before closing bot requests.
+        self._delivery_task = asyncio.create_task(
+            self._delivery_worker.run(), name="vinted-telegram-delivery"
+        )
+
+    async def stop_delivery(self, application):
+        task, worker = self._delivery_task, self._delivery_worker
+        self._delivery_task = None
+        self._delivery_worker = None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if worker is not None:
+            # Photo edits run separately from the listing dispatcher. Cancel
+            # these too; durable leases make unfinished alerts recoverable.
+            await worker.close()
 
     async def set_commands(self, context: ContextTypes.DEFAULT_TYPE):
         try:
-            await self.bot.set_my_commands(
+            await context.bot.set_my_commands(
                 [("dashboard", "Open your search dashboard")]
             )
             logger.info("Bot commands set successfully")

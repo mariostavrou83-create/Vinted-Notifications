@@ -5,6 +5,7 @@ The case counts below are deliberately stable and run in ordinary CI.
 """
 
 import random
+import sqlite3
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
@@ -18,6 +19,7 @@ from test_ebay_monitor import item
 from test_search_controls import DatabaseFixture
 from test_vinted_buying import checkout
 
+import db
 import ebay_monitor
 import ebay_search_link
 import ebay_store
@@ -230,6 +232,73 @@ class BoundaryMatrices(unittest.TestCase):
 
 
 class ContentionTests(DatabaseFixture, unittest.TestCase):
+    def test_committed_settings_stay_readable_during_exclusive_writer(self):
+        db.set_parameter("telegram_enabled", "True")
+        with closing(search_settings.connection()) as writer:
+            self.assertEqual(writer.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+            self.assertEqual(writer.execute("PRAGMA synchronous").fetchone()[0], 2)
+            writer.execute("BEGIN EXCLUSIVE")
+            writer.execute(
+                "UPDATE parameters SET value='False' WHERE key='telegram_enabled'"
+            )
+            # The supervisor sees the previous committed value while another
+            # process writes, rather than mistaking a lock for disabled alerts.
+            self.assertEqual(db.get_parameter("telegram_enabled"), "True")
+            writer.rollback()
+        self.assertEqual(db.get_parameter("telegram_enabled"), "True")
+
+    def test_unavailable_setting_raises_instead_of_disabling_worker(self):
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("DROP TABLE parameters")
+        with self.assertRaises(sqlite3.OperationalError):
+            db.get_parameter("telegram_enabled")
+
+    def test_restart_restores_wal_without_replaying_schema_migration(self):
+        from pathlib import Path
+
+        with closing(search_settings.connection()) as conn:
+            self.assertEqual(
+                conn.execute("PRAGMA journal_mode=DELETE").fetchone()[0], "delete"
+            )
+        self.assertIsNone(search_settings.ensure_schema())
+        with closing(search_settings.connection()) as conn:
+            self.assertEqual(conn.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+        self.assertEqual(len(list(Path(self.backup).parent.iterdir())), 1)
+
+    def test_description_enrichment_is_queued_without_photos_or_examples(self):
+        import alert_delivery
+
+        details = {
+            "single_message": True,
+            "photo_card": True,
+            "description_pending": True,
+            "photos": [],
+        }
+        self.assertTrue(
+            db.add_item_to_db(
+                123,
+                "Bench coat",
+                1,
+                "15",
+                200,
+                None,
+                "GBP",
+                alert={
+                    "search_name": "Bench",
+                    "content": "Seller description is loading",
+                    "url": "https://www.vinted.co.uk/items/123",
+                    "vinted_details": details,
+                },
+            )
+        )
+        initial = alert_delivery.claim()
+        self.assertEqual(initial["kind"], "listing")
+        self.assertEqual(initial["photo_status"], "pending")
+        alert_delivery.finish(initial, message_id=42)
+        enrichment = alert_delivery.claim()
+        self.assertEqual(enrichment["kind"], "photo")
+        self.assertEqual(enrichment["item_id"], "123")
+
     def test_malformed_vinted_record_does_not_drop_other_new_items(self):
         from pyVintedVN.items.items import Items
 
@@ -376,6 +445,7 @@ class WatchdogTests(unittest.TestCase):
 
     def test_main_monitor_covers_every_critical_process_and_bounded_queues(self):
         import ast
+        import threading
         from pathlib import Path
 
         from test_alert_reliability import functions
@@ -394,9 +464,13 @@ class WatchdogTests(unittest.TestCase):
             "item_extractor": Mock(),
             "dispatcher_function": Mock(),
             "web_ui_process": Mock(),
+            "monitor_lock": threading.Lock(),
+            "shutdown_requested": threading.Event(),
         }
         monitor = functions(
-            "vinted_notifications.py", {"monitor_processes"}, namespace
+            "vinted_notifications.py",
+            {"monitor_processes", "_monitor_processes"},
+            namespace,
         )["monitor_processes"]
         with patch("process_watchdog.ensure_running", return_value=Mock()) as ensure:
             monitor("items", "telegram", "rss", "new")
@@ -404,6 +478,10 @@ class WatchdogTests(unittest.TestCase):
             {c.kwargs["name"] for c in ensure.call_args_list},
             {"vinted-poller", "item-extractor", "dispatcher", "dashboard"},
         )
+        namespace["shutdown_requested"].set()
+        with patch("process_watchdog.ensure_running") as ensure:
+            monitor("items", "telegram", "rss", "new")
+            ensure.assert_not_called()
         tree = ast.parse((root / "vinted_notifications.py").read_text())
         queues = [
             n
