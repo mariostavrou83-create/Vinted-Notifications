@@ -31,12 +31,25 @@
 {% if buyer.connected %}
 <form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="buyer_recheck">Check saved buyer connection</button><p><small>Verifies the saved account session without preparing a checkout or sending payment.</small></p></form>
 <details class="guide-section"><summary><b>Check an existing Vinted checkout</b></summary>
-<p>Load the current total and saved delivery/payment choices for a checkout you already opened on Vinted. This does not submit payment or change your spending limits.</p>
+<p>Load the current total for a checkout you already opened on Vinted and apply your delivery/payment preferences below. This does not submit payment or change your spending limits.</p>
 <form method="post" autocomplete="off"><input type="hidden" name="csrf" value="{{csrf}}">
 <label for="buyer_checkout_url">Existing Vinted checkout link</label><input id="buyer_checkout_url" name="buyer_checkout_url" type="url" maxlength="2048" autocomplete="off" required>
-<button class="secondary" name="action" value="buyer_checkout_check">Load checkout without paying</button></form>
+<button class="secondary" name="action" value="buyer_checkout_check">Load checkout without paying</button>
+<button class="secondary" name="action" value="buyer_checkout_prepare">Prepare one-off purchase test</button>
+<p><small>Preparing checks the same checkout and shows one test purchase for approval. It does not pay or change your search budgets.</small></p></form>
 </details>
+{% if checkout_test %}<div class="guide-section" role="status">
+<h3>One-off purchase test</h3><p><b>{{checkout_test.title}}</b> · item {{checkout_test.item_id}}</p>
+<p>Item £{{'%.2f'|format(checkout_test.item_price/100)}} · <b>Maximum total £{{'%.2f'|format(checkout_test.total/100)}}</b>, including fees and delivery.</p>
+<p>{% if checkout_test.pickup_name %}Pickup: <b>{{checkout_test.pickup_name}}</b> · {% endif %}Payment: <b>{{checkout_test.payment_label}}</b>.</p>
+<p>Buy this one item on Vinted using your saved delivery and payment choices. Payment stops if the item or total price increases. This test uses the amount shown here; your search budgets stay saved separately.</p>
+<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="buyer_test_quote" value="{{checkout_test.token}}">
+<button class="primary" name="action" value="buyer_checkout_pay" {{'disabled' if not buyer.enabled}}>Buy test item · up to £{{'%.2f'|format(checkout_test.total/100)}}</button></form>
+<p><small>This button submits real payment. A bank may require confirmation. An uncertain payment is never retried automatically.</small></p></div>{% endif %}
 <form method="post" data-buyer-settings><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="buyer_browser_info" data-buyer-browser value="">
+<label for="buyer_pickup_mode">Delivery choice</label><select id="buyer_pickup_mode" name="buyer_pickup_mode"><option value="saved" {{'selected' if buyer.pickup_mode=='saved'}}>Use my saved Vinted delivery choice</option><option value="nearest" {{'selected' if buyer.pickup_mode=='nearest'}}>Nearest pickup point to my saved Vinted address</option></select>
+<label for="buyer_card_last4">Saved card ending in</label><input id="buyer_card_last4" name="buyer_card_last4" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" value="{{buyer.preferred_card_last4}}" placeholder="Four ending digits">
+<p><small>Enter only the last four digits of a card already saved in Vinted. That card or an available Vinted balance is used. The bot does not need your full card number.</small></p>
 <p><b>Your spending limit is set on each search.</b> Open a search and set “Maximum total including fees &amp; postage”. Different searches can have different budgets. A search without a budget cannot use Autobuy. <a href="/">Edit your searches →</a></p>
 <p><small>The actual checkout total must fit that search’s current budget, including the item, delivery and Vinted fees. The item price must also be no higher than the price in your alert. Paused, archived or deleted searches cannot buy.</small></p>
 <label class="checkbox"><input type="checkbox" name="buyer_enabled" value="yes" {{'checked' if buyer.enabled}}> Enable payment when I tap Autobuy, within that search’s total budget</label>
@@ -44,6 +57,6 @@
 <button class="primary" name="action" value="buyer_limits">Save buyer settings</button></form>
 <form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="buyer_disconnect">Disconnect Vinted buyer</button></form>
 {% endif %}
-<p><small>Live checkout still needs verification with your account. If Vinted asks this server to complete a security check, the connection stops. Nothing is charged by connecting or saving these settings.</small></p>
-{% if buying %}<h3>Recent purchase attempts</h3><p><small>Check a listing without starting another purchase. A passed check confirms the account, item price, seller and search budget; the final delivery, fees and payment choices are checked when you tap Autobuy.</small></p>{% for attempt in buying %}<div class="guide-section"><b>{{attempt.title or ('Item '+attempt.item_id)}}</b><p>{{attempt.message}}</p>{% if attempt.url %}<a href="{{attempt.url}}" target="_blank" rel="noopener noreferrer">Open Vinted listing ↗</a>{% endif %}{% if buyer.connected and attempt.url %}<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="buyer_item_id" value="{{attempt.item_id}}"><button class="secondary" name="action" value="buyer_listing_check">Check this listing without buying</button></form>{% endif %}</div>{% endfor %}{% endif %}
+<p><small>A bank may require payment confirmation. If Vinted asks this server to complete a security check, the connection stops. Nothing is charged by connecting or saving these settings.</small></p>
+{% if buying %}<h3>Recent purchase attempts</h3><p><small>Check a listing without starting another purchase. A passed check confirms the account, item price, seller and search budget; the final delivery, fees and payment choices are checked when you tap Autobuy.</small></p>{% for attempt in buying %}<div class="guide-section"><b>{{attempt.title or ('Item '+attempt.item_id)}}</b><p>{{attempt.message}}</p>{% if attempt.url %}<a href="{{attempt.url}}" target="_blank" rel="noopener noreferrer">Open Vinted listing ↗</a>{% endif %}{% if buyer.connected and attempt.url %}<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="buyer_item_id" value="{{attempt.item_id}}"><button class="secondary" name="action" value="buyer_listing_check">Check this listing without buying</button></form>{% endif %}{% if buyer.connected and attempt.state in ('paying','unknown','needs_action') %}{% if attempt.action_url %}<a href="{{attempt.action_url}}" target="_blank" rel="noopener noreferrer">Open bank confirmation ↗</a>{% endif %}<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="buyer_item_id" value="{{attempt.item_id}}"><button class="secondary" name="action" value="buyer_payment_check">Check payment status</button></form>{% endif %}</div>{% endfor %}{% endif %}
 </section>

@@ -69,9 +69,11 @@ def web_checkout(total="18.84", *, home=False):
     }
     components["payment_method"] = {
         "selected_payment_method": {
-            "pay_in_method": {"payment_method": "credit_card"},
-            "credit_card": {"expired": False},
-        }
+            "pay_in_method": {"payment_method": "card"},
+            "credit_card": {"expired": False, "last4": "1234"},
+        },
+        "cards": [{"id": 789, "last4": "1234", "expired": False}],
+        "pay_in_methods": [{"payment_method": "card", "enabled": True}],
     }
     address = {"id": 456, "is_complete": True}
     components["shipping_address"] = {"address": address, "address_is_missing": False}

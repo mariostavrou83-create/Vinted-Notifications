@@ -3,6 +3,7 @@
 import fcntl
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -368,6 +369,13 @@ def migrate(conn):
         max_total INTEGER NOT NULL DEFAULT 0, max_extra INTEGER NOT NULL DEFAULT 0,
         browser_info TEXT NOT NULL DEFAULT '{}')""")
     conn.execute("INSERT OR IGNORE INTO vinted_buyer(id) VALUES (1)")
+    buyer_columns = {row[1] for row in conn.execute("PRAGMA table_info(vinted_buyer)")}
+    for column, definition in (
+        ("pickup_mode", "TEXT NOT NULL DEFAULT 'saved'"),
+        ("preferred_card_last4", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        if column not in buyer_columns:
+            conn.execute(f"ALTER TABLE vinted_buyer ADD COLUMN {column} {definition}")
     conn.execute("""CREATE TABLE IF NOT EXISTS vinted_buy_attempts (
         item_id TEXT PRIMARY KEY, state TEXT NOT NULL, checkout_id TEXT,
         total INTEGER, message TEXT NOT NULL, updated REAL NOT NULL)""")
@@ -659,8 +667,35 @@ class Client:
         finally:
             public.session.close()
 
-    def request(self, method, path, body=None, *, allow_challenge=False):
-        if not path.startswith(("/api/v2/", "/web/api/auth/")):
+    def request(self, method, path, body=None, *, allow_challenge=False, params=None):
+        pickup_gateway = bool(
+            re.fullmatch(
+                r"/web/gateway/shipping-estimation/external/shipping_orders/[0-9]{1,24}/nearby_pickup_points",
+                path,
+            )
+        )
+        extra = {}
+        if pickup_gateway:
+            if (
+                method != "GET"
+                or body is not None
+                or allow_challenge
+                or not isinstance(params, dict)
+                or set(params) != {"country_code", "latitude", "longitude"}
+                or params["country_code"] != "GB"
+                or any(
+                    type(params[key]) not in (int, float)
+                    or not math.isfinite(params[key])
+                    or not -bound <= params[key] <= bound
+                    for key, bound in (("latitude", 90), ("longitude", 180))
+                )
+            ):
+                raise BuyerError("Vinted pickup-point request could not be verified.")
+            extra = {
+                "params": params,
+                "headers": {"Platform": "web", "X-Next-App": "marketplace-web"},
+            }
+        elif params is not None or not path.startswith(("/api/v2/", "/web/api/auth/")):
             raise BuyerError("Unsupported Vinted request.")
         stage = (
             "sign_in"
@@ -685,7 +720,12 @@ class Client:
             )
         try:
             response = self.session.request(
-                method, BASE + path, json=body, timeout=(4, 12), allow_redirects=False
+                method,
+                BASE + path,
+                json=body,
+                timeout=(4, 12),
+                allow_redirects=False,
+                **extra,
             )
         except requests.RequestException:
             raise BuyerError(
@@ -1164,13 +1204,24 @@ def save_limits(form):
         raise BuyerError(
             "Reload this page to capture your device details, then save the buyer settings again."
         ) from None
+    current = settings()
+    pickup_mode = form.get("buyer_pickup_mode", current["pickup_mode"])
+    preferred_card = form.get(
+        "buyer_card_last4", current["preferred_card_last4"]
+    ).strip()
+    if pickup_mode not in ("saved", "nearest") or (
+        preferred_card and not re.fullmatch(r"[0-9]{4}", preferred_card)
+    ):
+        raise BuyerError(
+            "Choose a pickup preference and enter only the four ending digits of your saved card."
+        )
     enabled = form.get("buyer_enabled") == "yes"
-    if enabled and not settings()["connected"]:
+    if enabled and not current["connected"]:
         raise BuyerError("Connect your Vinted buyer account first.")
-    with closing(connection()) as conn, conn:
+    with exclusive(), closing(connection()) as conn, conn:
         conn.execute(
-            "UPDATE vinted_buyer SET browser_info=?,enabled=? WHERE id=1",
-            (json.dumps(browser_info), enabled),
+            "UPDATE vinted_buyer SET browser_info=?,enabled=?,pickup_mode=?,preferred_card_last4=? WHERE id=1",
+            (json.dumps(browser_info), enabled, pickup_mode, preferred_card),
         )
 
 
