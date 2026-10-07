@@ -3,6 +3,8 @@
 import copy
 import json
 import stat
+import subprocess
+import sys
 import unittest
 from contextlib import closing
 from email.message import Message
@@ -80,6 +82,146 @@ def web_checkout(total="18.84", *, home=False):
 
 
 class BuyingTests(DatabaseFixture, unittest.TestCase):
+    def test_processes_share_the_buyer_lock_and_release_it_on_completion(self):
+        script = (
+            "import sys,db,vinted_buyer as b\n"
+            "db.DB_PATH=sys.argv[1]\n"
+            "try:\n"
+            ' with b.exclusive(): print("acquired")\n'
+            "except b.BuyerError:\n"
+            ' print("busy")\n'
+        )
+
+        def child():
+            return subprocess.run(
+                [sys.executable, "-c", script, db.DB_PATH],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=5,
+            ).stdout.strip()
+
+        with buyer.exclusive():
+            self.assertEqual(child(), "busy")
+        self.assertEqual(child(), "acquired")
+
+    def test_expiry_rotation_current_page_and_bank_pending_share_one_payment(self):
+        from test_vinted_page_data import next_data, purchase_item
+
+        seed = buyer.Client(
+            {
+                "cookies": {
+                    "access_token_web": "old-access-token-0123456789",
+                    "refresh_token_web": "old-refresh-token-0123456789",
+                }
+            }
+        )
+        seed.csrf = "01234567-89ab-cdef-0123-456789abcdef"
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE vinted_buyer SET session=?", (buyer.encrypt(seed.exported()),)
+            )
+        seed.session.close()
+        self.final = web_checkout()
+        identity_count = 0
+        payment_posts = 0
+        payment_gets = 0
+        original = self.client.request.side_effect
+
+        def response(method, url, **kwargs):
+            nonlocal identity_count, payment_posts, payment_gets
+            path = url.removeprefix(buyer.BASE)
+            cookies = requests.cookies.RequestsCookieJar()
+            text = ""
+            status = 200
+            if path == "/api/v2/users/current":
+                identity_count += 1
+                status = 401 if identity_count == 1 else 200
+                data = (
+                    {"error": "invalid_token"}
+                    if status == 401
+                    else {"user": {"id": 99, "login": "owner"}}
+                )
+            elif path == "/":
+                data = None
+                text = '<html><meta name="csrf-token" content="01234567-89ab-cdef-0123-456789abcdef"></html>'
+            elif path == "/web/api/auth/refresh":
+                data = {
+                    "access_token": "new-access-token-0123456789",
+                    "refresh_token": "new-refresh-token-0123456789",
+                    "scope": "user",
+                }
+                for name, value in (
+                    ("access_token_web", data["access_token"]),
+                    ("refresh_token_web", data["refresh_token"]),
+                ):
+                    cookies.set(
+                        name, value, domain=".www.vinted.co.uk", path="/", secure=True
+                    )
+            elif path == "/api/v2/items/123":
+                status = 404
+                data = None
+                text = "<html>Not found</html>"
+            elif path == "/items/123":
+                data = None
+                text = next_data(purchase_item(seller_id="100"))
+            elif path.endswith("/payment"):
+                if method == "POST":
+                    payment_posts += 1
+                    data = {"payment": {"status": "pending"}}
+                elif method == "GET":
+                    payment_gets += 1
+                    data = {"payment": {"status": "success"}}
+                else:
+                    raise AssertionError(method)
+            else:
+                data = original(method, path, kwargs.get("json"))
+            return Mock(
+                status_code=status,
+                text=text,
+                headers={},
+                cookies=cookies,
+                json=(
+                    Mock(return_value=data)
+                    if data is not None
+                    else Mock(side_effect=ValueError("HTML"))
+                ),
+            )
+
+        with patch.object(requests.Session, "request", side_effect=response) as wire:
+            self.assertEqual(buying.buy(self.row)["state"], "needs_action")
+            self.assertEqual(buying.buy(self.row)["state"], "needs_action")
+            self.assertEqual(buying.check_payment("123")["state"], "paid")
+            self.assertEqual(buying.buy(self.row)["state"], "paid")
+        self.assertEqual(payment_posts, 1)
+        self.assertEqual(payment_gets, 1)
+        self.assertEqual(
+            sum(
+                c.args[:2] == ("POST", buyer.BASE + "/web/api/auth/refresh")
+                for c in wire.call_args_list
+            ),
+            1,
+        )
+        self.assertIn(
+            ("GET", buyer.BASE + "/items/123"),
+            [c.args[:2] for c in wire.call_args_list],
+        )
+        with closing(search_settings.connection()) as conn:
+            row = conn.execute(
+                "SELECT session,user_id,enabled FROM vinted_buyer"
+            ).fetchone()
+            self.assertEqual(tuple(row[1:]), ("99", 1))
+            self.assertEqual(
+                buyer.decrypt(row[0])["cookies"]["access_token_web"],
+                "new-access-token-0123456789",
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT max_total FROM vinted_search_budgets WHERE query_id=1"
+                ).fetchone()[0],
+                2000,
+            )
+
     def test_response_cookie_domain_survives_saved_session_and_real_buying_client(self):
         headers = Message()
         headers.add_header(
