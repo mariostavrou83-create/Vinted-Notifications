@@ -82,6 +82,53 @@ def web_checkout(total="18.84", *, home=False):
 
 
 class BuyingTests(DatabaseFixture, unittest.TestCase):
+    def test_response_persistence_failure_after_payment_never_submits_again(self):
+        original = self.client.request.side_effect
+        payment_posts = 0
+
+        def response(method, url, **kwargs):
+            nonlocal payment_posts
+            path = url.removeprefix(buyer.BASE)
+            cookies = requests.cookies.RequestsCookieJar()
+            if path == "/api/v2/users/current":
+                data = {"user": {"id": 99}}
+            else:
+                data = original(method, path, kwargs.get("json"))
+            if path.endswith("/payment") and method == "POST":
+                payment_posts += 1
+                cookies.set(
+                    "refresh_token_web",
+                    "rotated-refresh-token-0123456789",
+                    domain=".www.vinted.co.uk",
+                    secure=True,
+                )
+                with closing(search_settings.connection()) as conn, conn:
+                    conn.execute(
+                        "UPDATE vinted_buyer SET session=? WHERE id=1",
+                        (
+                            buyer.encrypt(
+                                {
+                                    "cookies": {
+                                        "access_token_web": "replacement-access-token-0123456789"
+                                    }
+                                }
+                            ),
+                        ),
+                    )
+            return Mock(
+                status_code=200,
+                text="",
+                headers={},
+                cookies=cookies,
+                json=Mock(return_value=data),
+            )
+
+        with patch.object(requests.Session, "request", side_effect=response):
+            self.assertEqual(buying.buy(self.row)["state"], "unknown")
+            self.assertEqual(buying.buy(self.row)["state"], "unknown")
+        self.assertEqual(payment_posts, 1)
+        self.assertEqual(buying.result("123")["checkout_id"], "checkout-123")
+
     def test_processes_share_the_buyer_lock_and_release_it_on_completion(self):
         script = (
             "import sys,db,vinted_buyer as b\n"
@@ -2222,6 +2269,226 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
             client.request("POST", "/web/api/auth/oauth", {}, allow_challenge=True)
         request.assert_called_once()
         client.session.close()
+
+
+class SessionRotationPersistenceTests(DatabaseFixture, unittest.TestCase):
+    old_access = "old-access-token-0123456789"
+    old_refresh = "old-refresh-token-0123456789"
+    new_access = "rotated-access-token-0123456789"
+    new_refresh = "rotated-refresh-token-0123456789"
+
+    def setUp(self):
+        super().setUp()
+        seed = {
+            "cookies": {
+                "access_token_web": self.old_access,
+                "refresh_token_web": self.old_refresh,
+            },
+            "csrf": "old-csrf-token-0123456789",
+        }
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE vinted_buyer SET session=?,verified_at=1,user_id='99',username='owner',enabled=1 WHERE id=1",
+                (buyer.encrypt(seed),),
+            )
+            conn.execute("INSERT INTO vinted_search_budgets VALUES (1,2000,350)")
+
+    def response(self, data=None, *, status=200, text="", rotate=False):
+        cookies = requests.cookies.RequestsCookieJar()
+        if rotate:
+            for name, value in (
+                ("access_token_web", self.new_access),
+                ("refresh_token_web", self.new_refresh),
+            ):
+                cookies.set(
+                    name,
+                    value,
+                    domain=".www.vinted.co.uk",
+                    path="/",
+                    secure=True,
+                    expires=4102444800,
+                )
+        return Mock(
+            status_code=status,
+            text=text,
+            headers={},
+            cookies=cookies,
+            json=(
+                Mock(return_value=data)
+                if data is not None
+                else Mock(side_effect=ValueError("HTML"))
+            ),
+        )
+
+    def saved(self):
+        with closing(search_settings.connection()) as conn:
+            row = dict(conn.execute("SELECT * FROM vinted_buyer WHERE id=1").fetchone())
+        return row, buyer.decrypt(row["session"])
+
+    def connected(self):
+        with patch.object(
+            requests.Session,
+            "request",
+            return_value=self.response({"user": {"id": 99}}),
+        ):
+            client = buyer.connected_client()
+        self.addCleanup(client.session.close)
+        return client
+
+    def test_api_rotation_is_available_for_the_next_native_renewal(self):
+        client = self.connected()
+        with patch.object(
+            client.session, "request", return_value=self.response({}, rotate=True)
+        ):
+            client.request("GET", "/api/v2/items/123")
+        client.session.close()
+        _, saved = self.saved()
+        self.assertEqual(saved["cookies"]["refresh_token_web"], self.new_refresh)
+
+        responses = iter(
+            [
+                self.response({"error": "invalid_token"}, status=401),
+                self.response(
+                    text='<meta name="csrf-token" content="fresh-csrf-token-0123456789">'
+                ),
+                self.response({}, rotate=True),
+                self.response({"user": {"id": 99}}),
+            ]
+        )
+        sent_refresh = []
+
+        def native(session, method, url, **kwargs):
+            if url.endswith("/web/api/auth/refresh"):
+                prepared = session.prepare_request(requests.Request(method, url))
+                sent_refresh.append(prepared.headers.get("Cookie", ""))
+            return next(responses)
+
+        with patch.object(
+            requests.Session, "request", autospec=True, side_effect=native
+        ) as wire:
+            restored = buyer.connected_client()
+        self.addCleanup(restored.session.close)
+        self.assertEqual(wire.call_count, 4)
+        self.assertEqual(len(sent_refresh), 1)
+        self.assertIn(self.new_refresh, sent_refresh[0])
+        self.assertNotIn(self.old_refresh, sent_refresh[0])
+        self.assertTrue(buyer.settings()["enabled"])
+        self.assertNotIn(self.new_refresh.encode(), Path(db.DB_PATH).read_bytes())
+
+    def test_listing_rotation_survives_failed_item_parsing(self):
+        client = self.connected()
+        response = self.response(
+            text='<meta name="csrf-token" content="page-csrf-token-0123456789">',
+            rotate=True,
+        )
+        with patch.object(
+            client.session, "get", return_value=response
+        ) as get, self.assertRaises(buyer.BuyerError):
+            client.listing_page(buyer.BASE + "/items/123", "123")
+        get.assert_called_once()
+        row, saved = self.saved()
+        self.assertEqual(saved["cookies"]["access_token_web"], self.new_access)
+        self.assertEqual(saved["cookies"]["refresh_token_web"], self.new_refresh)
+        self.assertEqual(saved["csrf"], "page-csrf-token-0123456789")
+        self.assertEqual((row["user_id"], row["enabled"]), ("99", 1))
+        with closing(search_settings.connection()) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT max_total FROM vinted_search_budgets WHERE query_id=1"
+                ).fetchone()[0],
+                2000,
+            )
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM vinted_buy_attempts").fetchone()[0],
+                0,
+            )
+
+    def test_successful_payment_response_rotation_preserves_the_pending_result(self):
+        client = self.connected()
+        with patch.object(
+            client.session,
+            "request",
+            return_value=self.response({"payment": {"status": "pending"}}, rotate=True),
+        ) as wire:
+            data = client.request(
+                "POST",
+                "/api/v2/purchases/checkout-123/checkout/payment",
+                {"checksum": "fictional"},
+            )
+        wire.assert_called_once()
+        self.assertEqual(data["payment"]["status"], "pending")
+        _, saved = self.saved()
+        self.assertEqual(saved["cookies"]["refresh_token_web"], self.new_refresh)
+
+    def test_old_client_cannot_overwrite_a_replaced_or_disconnected_session(self):
+        for changed_user in ("99", "100", None):
+            with self.subTest(changed_user=changed_user):
+                with closing(search_settings.connection()) as conn, conn:
+                    conn.execute(
+                        "UPDATE vinted_buyer SET user_id='99',verified_at=1,session=? WHERE id=1",
+                        (
+                            buyer.encrypt(
+                                {"cookies": {"access_token_web": self.old_access}}
+                            ),
+                        ),
+                    )
+                client = self.connected()
+                replacement = (
+                    buyer.encrypt(
+                        {
+                            "cookies": {
+                                "access_token_web": "replacement-access-token-0123456789"
+                            }
+                        }
+                    )
+                    if changed_user
+                    else None
+                )
+                with closing(search_settings.connection()) as conn, conn:
+                    conn.execute(
+                        "UPDATE vinted_buyer SET session=?,user_id=? WHERE id=1",
+                        (replacement, changed_user),
+                    )
+                with patch.object(
+                    client.session,
+                    "request",
+                    return_value=self.response({}, rotate=True),
+                ) as wire, self.assertRaises(buyer.BuyerError):
+                    client.request("GET", "/api/v2/items/123")
+                wire.assert_called_once()
+                row, _ = self.saved()
+                self.assertEqual(row["session"], replacement)
+                self.assertEqual(row["user_id"], changed_user)
+
+    def test_refused_responses_never_persist_their_cookies_or_retry(self):
+        client = self.connected()
+        before, _ = self.saved()
+        for response in (
+            self.response({}, status=403, rotate=True),
+            self.response({"error": "invalid_token"}, rotate=True),
+            self.response(text="<html>Verify you are human</html>", rotate=True),
+        ):
+            with patch.object(
+                client.session, "request", return_value=response
+            ) as wire, self.assertRaises(buyer.BuyerError):
+                client.request("GET", "/api/v2/items/123")
+            wire.assert_called_once()
+            after, _ = self.saved()
+            self.assertEqual(after["session"], before["session"])
+
+    def test_unchanged_and_unverified_clients_do_not_write_the_saved_session(self):
+        client = self.connected()
+        before, _ = self.saved()
+        with patch.object(client.session, "request", return_value=self.response({})):
+            client.request("GET", "/api/v2/items/123")
+        self.assertEqual(self.saved()[0]["session"], before["session"])
+        anonymous = buyer.Client()
+        self.addCleanup(anonymous.session.close)
+        with patch.object(
+            anonymous.session, "request", return_value=self.response({}, rotate=True)
+        ):
+            anonymous.request("GET", "/api/v2/items/123")
+        self.assertEqual(self.saved()[0]["session"], before["session"])
 
 
 class SessionLinkTests(DatabaseFixture, unittest.TestCase):
