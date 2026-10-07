@@ -89,7 +89,83 @@ def claim(row, *, recover_preparing=False):
     return True
 
 
-def checkout_prices(checkout, item_price, maximum):
+def checkout_item_details(components, summary, *, item_id=None):
+    """Read the current frontend's single order item, never an aggregate subtotal."""
+    button = components.get("pay_button_v2")
+    embedded = button.get("order_summary_v2") if isinstance(button, dict) else None
+    found = []
+    seen = set()
+    for source in (
+        summary,
+        components.get("item_presentation_escrow_v2"),
+        embedded,
+    ):
+        if source is None or id(source) in seen:
+            continue
+        seen.add(id(source))
+        if not isinstance(source, dict):
+            raise buyer.BuyerError("Vinted did not return readable checkout items.")
+        items = source.get("order_items")
+        if items is None:
+            continue
+        if (
+            not isinstance(items, list)
+            or len(items) != 1
+            or not isinstance(items[0], dict)
+        ):
+            raise buyer.BuyerError(
+                "Vinted did not confirm a single item for this checkout."
+            )
+        item = items[0]
+        identity = str(item.get("id", ""))
+        if not re.fullmatch(r"[0-9]{1,24}", identity) or (
+            item_id is not None and identity != str(item_id)
+        ):
+            raise buyer.BuyerError(
+                "Vinted did not confirm the selected item in this checkout."
+            )
+        price = cents(item.get("price"))
+        pricing = item.get("pricing")
+        if pricing is not None:
+            if not isinstance(pricing, dict):
+                raise buyer.BuyerError("Vinted did not return readable item pricing.")
+            # The current item-presentation plugins render pricing.final_price.
+            price = cents(pricing.get("final_price"))
+        title = item.get("title")
+        found.append(
+            {
+                "id": identity,
+                "price": price,
+                "title": (
+                    "".join(char for char in title[:200] if ord(char) >= 32)
+                    if isinstance(title, str)
+                    else ""
+                ),
+            }
+        )
+    if found:
+        if any(
+            (item["id"], item["price"]) != (found[0]["id"], found[0]["price"])
+            for item in found[1:]
+        ):
+            raise buyer.BuyerError(
+                "Vinted's checkout item prices or identities disagree."
+            )
+        return found[0]
+    if "pay_button_v2" in components:
+        raise buyer.BuyerError(
+            "Vinted did not confirm a single item price in this checkout."
+        )
+    # Older checkout DTOs expose the item subtotal directly and no current button.
+    subtotal = summary.get("subtotal")
+    return {
+        "id": None,
+        "title": "",
+        "price": cents(subtotal.get("price") if isinstance(subtotal, dict) else None),
+    }
+
+
+def checkout_prices(checkout, item_price, maximum, *, item_id=None):
     if not isinstance(checkout, dict):
         raise buyer.BuyerError("Vinted did not return a valid checkout.")
     components = checkout.get("components") or {}
@@ -122,13 +198,10 @@ def checkout_prices(checkout, item_price, maximum):
         raise buyer.BuyerError(
             "Autobuy stopped: Vinted's checkout total could not be verified."
         )
-    subtotal_part = summary.get("subtotal") or {}
-    subtotal = cents(
-        subtotal_part.get("price") if isinstance(subtotal_part, dict) else None
-    )
-    if subtotal > item_price:
+    current_item = checkout_item_details(components, summary, item_id=item_id)
+    if current_item["price"] > item_price:
         raise buyer.BuyerError(
-            f"The item price changed during checkout to £{subtotal/100:.2f}. No payment was sent.",
+            f"The item price changed during checkout to £{current_item['price']/100:.2f}. No payment was sent.",
             reason="price_increased",
         )
     if total > maximum:
@@ -485,9 +558,8 @@ def check_checkout(url):
                 ),
             )
             phase = "checking the checkout prices"
-            item = cents(
-                subtotal_part.get("price") if isinstance(subtotal_part, dict) else None
-            )
+            current_item = checkout_item_details(components, summary)
+            item = current_item["price"]
             total = cents(
                 amount_part.get("price") if isinstance(amount_part, dict) else None
             )
@@ -495,7 +567,7 @@ def check_checkout(url):
             try:
                 # This is a diagnostic validation only. Using its actual total
                 # as the ceiling does not authorize any payment or change a budget.
-                checkout_prices(checkout, item, total)
+                checkout_prices(checkout, item, total, item_id=current_item["id"])
             except buyer.BuyerError as exc:
                 raise buyer.BuyerError(
                     f"Checkout total £{total/100:.2f} including fees and delivery; saved choices need attention: {exc}",
@@ -503,8 +575,13 @@ def check_checkout(url):
                     status=exc.status,
                 ) from None
             logger.info("Autobuy checkout check: result=verified")
+            target = (
+                f" for {current_item['title'] or 'the selected item'} (item {current_item['id']})"
+                if current_item["id"]
+                else ""
+            )
             return (
-                f"Checkout check passed: item subtotal £{item/100:.2f}; total £{total/100:.2f} including fees and delivery. "
+                f"Checkout check passed{target}: item price £{item/100:.2f}; total £{total/100:.2f} including fees and delivery. "
                 "Saved delivery and payment choices passed validation. This check does not authorize payment or change any search budget. No payment was submitted."
             )
         except buyer.BuyerError as exc:
@@ -644,7 +721,7 @@ def buy(row):
             if not config["enabled"] or not config["connected"]:
                 raise buyer.BuyerError("Autobuy was disabled before payment.")
             maximum = vinted_budget.payment_limit(row)
-            total = checkout_prices(checkout, current_price, maximum)
+            total = checkout_prices(checkout, current_price, maximum, item_id=item_id)
             with closing(connection()) as conn:
                 info = json.loads(
                     conn.execute(
