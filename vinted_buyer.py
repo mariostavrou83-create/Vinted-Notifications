@@ -695,7 +695,12 @@ def connected_client():
                     "UPDATE vinted_buyer SET session=? WHERE id=1",
                     (encrypt(client.exported()),),
                 )
-            client.homepage()
+            # Reuse the saved CSRF just as on the unexpired-session path.
+            # A frontend homepage redirect cannot establish API identity.
+            # When CSRF is missing, retain the bounded homepage gate.
+            logger.info("Vinted renewed session: csrf_present=%s", bool(client.csrf))
+            if not client.csrf:
+                client.homepage()
             user_id, _ = client.identity()
         if user_id != row[1]:
             raise BuyerError(
