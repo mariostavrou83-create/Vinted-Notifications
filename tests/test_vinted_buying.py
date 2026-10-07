@@ -53,6 +53,17 @@ def web_checkout(total="18.84", *, home=False):
     value = checkout(total)
     components = value["components"]
     components["order_summary_v2"].pop("total")
+    components["order_summary_v2"]["order_items"] = [
+        {
+            "id": 123,
+            "title": "Fictional test item",
+            "price": {"amount": "15.00", "currency_code": "GBP"},
+            "pricing": {
+                "final_price": {"amount": "15.00", "currency_code": "GBP"},
+                "original_price": None,
+            },
+        }
+    ]
     components["pay_button_v2"] = {
         "total": {"price": {"amount": total, "currency_code": "GBP"}}
     }
@@ -394,10 +405,87 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                         saved,
                     )
 
-    def test_current_summary_inside_pay_button_supplies_verified_subtotal(self):
+    def test_current_summary_inside_pay_button_supplies_verified_item_price(self):
         self.final = web_checkout()
         c = self.final["components"]
         c["pay_button_v2"]["order_summary_v2"] = c.pop("order_summary_v2")
+        self.assertEqual(self.run_buy()["state"], "paid")
+        self.assertEqual(len(self.payments()), 1)
+
+    def test_current_item_prices_allow_empty_or_aggregate_summary_subtotal(self):
+        for subtotal in (None, {"price": {"amount": "18.84", "currency_code": "GBP"}}):
+            with self.subTest(subtotal_present=subtotal is not None):
+                with closing(search_settings.connection()) as conn, conn:
+                    conn.execute("DELETE FROM vinted_buy_attempts")
+                self.client.reset_mock()
+                self.final = web_checkout()
+                self.final["components"]["order_summary_v2"]["subtotal"] = subtotal
+                self.assertEqual(self.run_buy()["state"], "paid")
+                self.assertEqual(len(self.payments()), 1)
+
+    def test_checkout_item_must_match_the_alert_before_payment(self):
+        self.final = web_checkout()
+        self.final["components"]["order_summary_v2"]["order_items"][0]["id"] = 789
+        self.assertEqual(self.run_buy()["state"], "failed_before_payment")
+        self.assertEqual(self.payments(), [])
+
+    def test_current_checkout_uses_the_final_item_price_and_enforces_price_increases(
+        self,
+    ):
+        for amount, state in (("14.50", "paid"), ("16.00", "failed_before_payment")):
+            with self.subTest(amount=amount):
+                with closing(search_settings.connection()) as conn, conn:
+                    conn.execute("DELETE FROM vinted_buy_attempts")
+                self.client.reset_mock()
+                self.final = web_checkout()
+                self.final["components"]["order_summary_v2"]["order_items"][0][
+                    "pricing"
+                ]["final_price"]["amount"] = amount
+                self.assertEqual(self.run_buy()["state"], state)
+                self.assertEqual(len(self.payments()), 1 if state == "paid" else 0)
+
+    def test_current_checkout_requires_one_consistent_gbp_item(self):
+        invalid_items = (
+            None,
+            [],
+            [{"id": 123}],
+            web_checkout()["components"]["order_summary_v2"]["order_items"] * 2,
+        )
+        for items in invalid_items:
+            with self.subTest(items_type=type(items).__name__):
+                self.final = web_checkout()
+                self.final["components"]["order_summary_v2"]["order_items"] = items
+                self.assertEqual(self.run_buy()["state"], "failed_before_payment")
+        for changed in ("id", "price"):
+            with self.subTest(changed=changed):
+                self.final = web_checkout()
+                item = json.loads(
+                    json.dumps(
+                        self.final["components"]["order_summary_v2"]["order_items"][0]
+                    )
+                )
+                if changed == "id":
+                    item["id"] = 789
+                else:
+                    item["pricing"]["final_price"]["amount"] = "14.00"
+                self.final["components"]["item_presentation_escrow_v2"] = {
+                    "order_items": [item]
+                }
+                self.assertEqual(self.run_buy()["state"], "failed_before_payment")
+        self.final = web_checkout()
+        self.final["components"]["order_summary_v2"]["order_items"][0]["pricing"][
+            "final_price"
+        ]["currency_code"] = "EUR"
+        self.assertEqual(self.run_buy()["state"], "failed_before_payment")
+        self.assertEqual(self.payments(), [])
+
+    def test_item_presentation_can_supply_the_current_item_without_a_subtotal(self):
+        self.final = web_checkout()
+        summary = self.final["components"]["order_summary_v2"]
+        self.final["components"]["item_presentation_escrow_v2"] = {
+            "order_items": summary.pop("order_items")
+        }
+        summary["subtotal"] = None
         self.assertEqual(self.run_buy()["state"], "paid")
         self.assertEqual(len(self.payments()), 1)
 
@@ -2294,7 +2382,7 @@ class CheckoutInspectionTests(DatabaseFixture, unittest.TestCase):
         before = buying.result("123")
         enabled = buyer.settings()["enabled"]
         message = self.inspect()
-        self.assertIn("item subtotal £15.00", message)
+        self.assertIn("item price £15.00", message)
         self.assertIn("total £18.84 including fees and delivery", message)
         self.assertIn("No payment was submitted", message)
         self.client.request.assert_called_once_with(
@@ -2314,6 +2402,20 @@ class CheckoutInspectionTests(DatabaseFixture, unittest.TestCase):
                 conn.execute("SELECT COUNT(*) FROM vinted_buy_attempts").fetchone()[0],
                 1,
             )
+
+    def test_empty_subtotal_uses_native_items_and_reports_the_confirmed_item(self):
+        value = web_checkout("17.17")
+        summary = value["components"]["order_summary_v2"]
+        summary["subtotal"] = None
+        item = summary["order_items"][0]
+        item["price"]["amount"] = "13.50"
+        item["pricing"]["final_price"]["amount"] = "13.50"
+        self.client.request.return_value = {"checkout": value}
+        message = self.inspect()
+        self.assertIn("Fictional test item (item 123)", message)
+        self.assertIn("item price £13.50; total £17.17", message)
+        self.assertIn("No payment was submitted", message)
+        self.client.request.assert_called_once()
 
     def test_invalid_checkout_links_are_rejected_before_connecting(self):
         for url in (
