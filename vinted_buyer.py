@@ -456,6 +456,7 @@ class Client:
             }
         )
         self.csrf = ""
+        self._verified_session = None
         if saved:
             try:
                 self.csrf = saved.get("csrf", "")
@@ -565,6 +566,33 @@ class Client:
                 for cookie in self.session.cookies
             ],
         }
+
+    def bind_verified_session(self, user_id, sealed, saved):
+        """Only a same-account identity check may enable session persistence."""
+        self._verified_session = (user_id, sealed, saved)
+
+    def persist_session(self):
+        """Keep accepted response rotations without overwriting a newer login."""
+        if self._verified_session is None:
+            return
+        user_id, previous_sealed, previous = self._verified_session
+        current = self.exported()
+        if current == previous:
+            return
+        sealed = encrypt(current)
+        with closing(connection()) as conn, conn:
+            updated = conn.execute(
+                "UPDATE vinted_buyer SET session=? WHERE id=1 AND user_id=? AND session=?",
+                (sealed, user_id, previous_sealed),
+            ).rowcount
+        if updated != 1:
+            raise BuyerError(
+                "The saved Vinted connection changed. Recheck it before buying.",
+                reason="saved_session",
+                stage="saved_session",
+            )
+        self._verified_session = (user_id, sealed, current)
+        logger.info("Vinted verified session rotation: persisted=True")
 
     def update_tokens(self, response, data):
         """Keep one current token per name after a normal refresh-cookie rotation."""
@@ -724,6 +752,7 @@ class Client:
                 isinstance(scope, str),
                 isinstance(scope, str) and "user" in scope.split(),
             )
+        self.persist_session()
         return data
 
     def listing_page(self, url, item_id):
@@ -770,17 +799,21 @@ class Client:
             raise BuyerError(AUTH_REASONS["network"], reason="network") from None
         if security_challenge(response) or response.status_code != 200:
             raise response_error(response, None, "request")
+        # A successful same-origin response can rotate session cookies even
+        # when its item payload is incomplete. Preserve those credentials before
+        # parsing; incomplete item metadata still cannot authorize a purchase.
+        self.update_tokens(response, {})
+        token = csrf_from_html(response.text)
+        if token:
+            self.csrf = token
+            self.headers()
+        self.persist_session()
         item = parse_purchase_item(response.text, item_id)
         if item is None:
             raise BuyerError(
                 "Vinted's current page did not confirm this item's price, seller and availability. No payment was sent.",
                 reason="item_unavailable",
             )
-        self.update_tokens(response, {})
-        token = csrf_from_html(response.text)
-        if token:
-            self.csrf = token
-            self.headers()
         logger.info("Vinted listing page: result=verified http=200")
         return {"item": item}
 
@@ -811,7 +844,9 @@ class Client:
         if token:
             self.csrf = token
             self.headers()
+            self.persist_session()
             return
+        self.persist_session()
         raise BuyerError(
             "Vinted did not supply the security token. The buyer connection has not been verified.",
             reason="csrf",
@@ -1054,11 +1089,14 @@ def connected_client():
             raise BuyerError(
                 "The connected Vinted account changed. Reconnect it before buying."
             )
+        saved = client.exported()
+        sealed = encrypt(saved)
         with closing(connection()) as conn, conn:
             conn.execute(
                 "UPDATE vinted_buyer SET session=?,verified_at=? WHERE id=1",
-                (encrypt(client.exported()), time.time()),
+                (sealed, time.time()),
             )
+        client.bind_verified_session(user_id, sealed, saved)
         record_auth("connected", "identity", 200)
         return client
     except BuyerError as exc:
