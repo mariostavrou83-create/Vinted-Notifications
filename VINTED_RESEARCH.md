@@ -1,5 +1,28 @@
 # Vinted buyer authentication and checkout research
 
+## Current first-party web client inspected on 7 October 2026
+
+The public UK homepage loaded 66 JavaScript assets from Vinted's own asset host.
+These current assets provide stronger request-shape evidence than the older
+unofficial integrations below:
+
+- [Web renewal client](https://marketplace-web-assets.vinted.com/_next/static/chunks/0y-y47kmvg5kq.js): `refreshSessionTokens` makes an empty POST to `/web/api/auth/refresh`, with CSRF and locale interceptors. It uses the browser's session cookies.
+- [API client and renewal interceptor](https://marketplace-web-assets.vinted.com/_next/static/chunks/1n585jmlbpsz8.js): the API base is `/api/v2`, current identity is `/users/current`, and HTTP 401 triggers that native web renewal before replaying the original request. The API uses CSRF, locale and the owned `anon_id` cookie's `X-Anon-Id` header.
+- [Transport and response handling](https://marketplace-web-assets.vinted.com/_next/static/chunks/03fhyz803cz37.js): the client uses normal Axios cookie transport, adds no bearer authentication interceptor, and rejects nonzero response `code` values. Numeric code 100 is `InvalidToken`.
+
+MSJ now follows this native cookie flow instead of converting a web cookie into
+a Bearer header or posting a legacy OAuth refresh grant. It keeps one renewal,
+encrypted rotated-token persistence and mandatory same-account verification.
+CSRF and anonymous identifiers still come from the connected session; no
+public bundle token or hardcoded anonymous identifier is imported.
+
+Before this update, live renewal returned a changed token with matching body
+and cookie values and user scope, yet identity still returned HTTP 401. Those
+facts rule out stale token selection and missing returned user scope in that
+attempt. The native-flow update still needs a successful live identity check
+before authentication or Autobuy is called working. No checkout or payment was
+made during this investigation.
+
 Public sources inspected on 7 October 2026. No external project was installed or executed, no account credentials were used, and no checkout, message or payment request was made. Public source is evidence of an implementation attempt, not proof that it currently works against UK Vinted.
 
 ## Seller description and gallery findings

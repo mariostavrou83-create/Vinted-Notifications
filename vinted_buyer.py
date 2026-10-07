@@ -129,7 +129,8 @@ def response_error(response, data, stage):
     elif codes & {"user_blocked", "account_blocked", "account_restricted"}:
         reason = "account_restricted"
     elif (
-        codes
+        100 in values
+        or codes
         & {
             "invalid_grant",
             "invalid_credentials",
@@ -320,6 +321,7 @@ class Client:
                 "User-Agent": "MSJ-Finder/1.0",
                 "Accept": "application/json",
                 "Accept-Language": "en-GB",
+                "Locale": "en-GB",
                 "Origin": BASE,
                 "Referer": BASE + "/",
             }
@@ -334,11 +336,18 @@ class Client:
             self.headers()
 
     def headers(self):
+        # The current Vinted web client authenticates with its session cookies.
+        # A web cookie is not an independently interchangeable bearer credential.
+        self.session.headers.pop("Authorization", None)
         if self.csrf:
             self.session.headers["X-CSRF-Token"] = self.csrf
-        token = self.session.cookies.get_dict().get("access_token_web")
-        if token:
-            self.session.headers["Authorization"] = "Bearer " + token
+        else:
+            self.session.headers.pop("X-CSRF-Token", None)
+        anonymous_id = self.session.cookies.get_dict().get("anon_id")
+        if isinstance(anonymous_id, str) and anonymous_id:
+            self.session.headers["X-Anon-Id"] = anonymous_id
+        else:
+            self.session.headers.pop("X-Anon-Id", None)
 
     def exported(self):
         return {"csrf": self.csrf, "cookies": self.session.cookies.get_dict()}
@@ -407,7 +416,12 @@ class Client:
             return {"challenge_id": str(data["payload"]["id"])}
         if response.status_code not in (200, 201) or not isinstance(data, dict):
             raise response_error(response, data, stage)
-        if any(data.get(k) for k in ("error", "error_code")):
+        if any(data.get(k) for k in ("error", "error_code")) or data.get(
+            "code"
+        ) not in (
+            None,
+            0,
+        ):
             # Vinted can return a business/authentication error inside HTTP 200.
             # Never adopt token fields from an explicit error response or let a
             # nominal status turn that response into an accepted checkout.
@@ -695,24 +709,9 @@ def connected_client():
             expired = exc.status == 401 and exc.reason == "credentials"
             if not (expired or exc.reason == "session_refresh") or not refresh:
                 raise
-            if exc.reason == "session_refresh":
-                # The same-origin redirect explicitly identifies the web
-                # renewal endpoint. Make one normal POST, without replaying
-                # the account GET or following its redirect destination.
-                client.request(
-                    "POST", "/web/api/auth/refresh", {"refresh_token": refresh}
-                )
-            else:
-                client.request(
-                    "POST",
-                    "/web/api/auth/oauth",
-                    {
-                        "client_id": "web",
-                        "scope": "user",
-                        "grant_type": "refresh_token",
-                        "refresh_token": refresh,
-                    },
-                )
+            # Match Vinted's current web refresh: cookies, CSRF and an empty
+            # POST. One renewal only, with no redirect following or checkout.
+            client.request("POST", "/web/api/auth/refresh")
             with closing(connection()) as conn, conn:
                 # Refresh tokens may rotate. Preserve the replacement even if
                 # a later homepage request fails; identity still must be checked
