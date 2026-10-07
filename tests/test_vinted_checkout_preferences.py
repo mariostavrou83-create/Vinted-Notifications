@@ -517,6 +517,56 @@ class CheckoutPreferencesTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(buyer.settings()["preferred_card_last4"], "5678")
 
 
+class ExistingBuyerMigrationTests(DatabaseFixture, unittest.TestCase):
+    def test_previous_production_schema_upgrades_preferences_without_losing_saved_data(
+        self,
+    ):
+        session = buyer.encrypt({"cookies": {"access_token_web": "fictional-token"}})
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("ALTER TABLE vinted_buyer DROP COLUMN pickup_mode")
+            conn.execute("ALTER TABLE vinted_buyer DROP COLUMN preferred_card_last4")
+            conn.execute(
+                "UPDATE parameters SET value='17' WHERE key='msj_search_schema'"
+            )
+            conn.execute(
+                "UPDATE vinted_buyer SET session=?,verified_at=1,user_id='99',username='owner',enabled=1,browser_info=?",
+                (session, json.dumps(DEVICE)),
+            )
+            conn.execute("INSERT INTO vinted_search_budgets VALUES (1,2000,350)")
+            conn.execute(
+                "INSERT INTO vinted_buy_attempts(item_id,state,checkout_id,total,message,updated) VALUES ('123','unknown','checkout-123',1884,'Preserve the uncertain payment',1)"
+            )
+            saved_buyer = dict(conn.execute("SELECT * FROM vinted_buyer").fetchone())
+            saved_queries = [
+                tuple(row) for row in conn.execute("SELECT * FROM queries ORDER BY id")
+            ]
+        backup = search_settings.ensure_schema()
+        self.assertIsNotNone(backup)
+        with closing(search_settings.connection()) as conn:
+            upgraded = dict(conn.execute("SELECT * FROM vinted_buyer").fetchone())
+            self.assertEqual(upgraded.pop("pickup_mode"), "saved")
+            self.assertEqual(upgraded.pop("preferred_card_last4"), "")
+            self.assertEqual(upgraded, saved_buyer)
+            self.assertEqual(
+                [
+                    tuple(row)
+                    for row in conn.execute("SELECT * FROM queries ORDER BY id")
+                ],
+                saved_queries,
+            )
+            self.assertEqual(
+                tuple(
+                    conn.execute(
+                        "SELECT * FROM vinted_search_budgets WHERE query_id=1"
+                    ).fetchone()
+                ),
+                (1, 2000, 350),
+            )
+        self.assertEqual(buying.result("123")["state"], "unknown")
+        self.assertEqual(buying.result("123")["total"], 1884)
+        self.assertIsNone(search_settings.ensure_schema())
+
+
 class PickupGatewayTests(DatabaseFixture, unittest.TestCase):
     path = "/web/gateway/shipping-estimation/external/shipping_orders/300/nearby_pickup_points"
     params: ClassVar = {"country_code": "GB", "latitude": 51.0, "longitude": -0.1}
