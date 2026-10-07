@@ -79,6 +79,48 @@ def web_checkout(total="18.84", *, home=False):
 
 
 class BuyingTests(DatabaseFixture, unittest.TestCase):
+    def test_current_summary_inside_pay_button_supplies_verified_subtotal(self):
+        self.final = web_checkout()
+        c = self.final["components"]
+        c["pay_button_v2"]["order_summary_v2"] = c.pop("order_summary_v2")
+        self.assertEqual(self.run_buy()["state"], "paid")
+        self.assertEqual(len(self.payments()), 1)
+
+    def test_current_checkout_cannot_use_incomplete_legacy_selection_objects(self):
+        for key in ("payment_method", "shipping_address", "shipping_pickup_details"):
+            self.final = web_checkout()
+            self.final["components"][key] = checkout()["components"][key]
+            self.assertEqual(self.run_buy()["state"], "failed_before_payment")
+        self.assertEqual(self.payments(), [])
+
+    def test_home_delivery_requires_the_selected_complete_address(self):
+        for address in ({"id": 789, "is_complete": True}, {"id": 456}, {}):
+            self.final = web_checkout(home=True)
+            self.final["components"]["shipping_pickup_details"][
+                "receiver_address"
+            ] = address
+            self.assertEqual(self.run_buy()["state"], "failed_before_payment")
+        self.assertEqual(self.payments(), [])
+
+    def test_required_delivery_contact_stops_before_payment_when_absent(self):
+        self.final = web_checkout()
+        self.final["components"]["shipping_contact"] = {
+            "is_receiver_phone_number_required": True,
+            "phone_number": None,
+        }
+        self.assertEqual(self.run_buy()["state"], "failed_before_payment")
+        self.assertEqual(self.payments(), [])
+        self.final["components"]["shipping_contact"]["phone_number"] = "+447700900123"
+        self.assertEqual(self.run_buy()["state"], "paid")
+        self.assertEqual(len(self.payments()), 1)
+
+    def test_explicit_failure_payment_is_recorded_without_retry(self):
+        self.payment = {"payment": {"status": "failure"}}
+        self.assertEqual(self.run_buy()["state"], "payment_failed")
+        self.assertEqual(len(self.payments()), 1)
+        self.assertEqual(self.run_buy()["state"], "payment_failed")
+        self.assertEqual(len(self.payments()), 1)
+
     def test_submitted_payment_recheck_confirms_success_without_another_payment(self):
         self.payment = buyer.BuyerError("Timeout", reason="network")
         self.assertEqual(self.run_buy()["state"], "unknown")

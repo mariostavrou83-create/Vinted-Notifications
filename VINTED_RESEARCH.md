@@ -9,7 +9,7 @@ included in this repository. Its linked first-party scripts were read as source;
 none were executed and no purchase request was made.
 
 - [Checkout DTO and UI](https://marketplace-web-assets.vinted.com/_next/static/chunks/3lm50uk9fxxu0.js) read the all-in Pay amount from `components.pay_button_v2.total.price`. `order_summary_v2` contains subtotal, deductions and fee lines; it does not supply that current total. The bot now reads the explicit Pay total, keeps the old explicit-total shape for older responses, and stops if both amounts disagree or current Pay data is malformed.
-- The same source describes `payment_method.selected_payment_method`, `shipping_address.address`, and `shipping_pickup_details.pickup_details`. Validation now requires the account's selected payment method, a valid saved card when applicable, a complete address, a selected rate and the matching saved pickup point or home address. Available cards or delivery options do not count as a selection.
+- The same source describes `payment_method.selected_payment_method`, `shipping_address.address`, and `shipping_pickup_details.pickup_details`. Validation now requires the account's selected payment method, a valid saved card when applicable, a complete address, a selected rate and the matching saved pickup point or home address. Available cards or delivery options do not count as a selection. Current checkout data cannot fall back to incomplete legacy selection objects. Required delivery contact details are checked before payment.
 - [Checkout API client](https://marketplace-web-assets.vinted.com/_next/static/chunks/23ayky4c3qoyq.js) builds a purchase from a transaction ID, then reads/updates its checkout. The listing ID, transaction ID and opaque purchase ID are separate identifiers. A copied checkout URL does not create a checkout for a different listing.
 - [Payment API client](https://marketplace-web-assets.vinted.com/_next/static/chunks/1k0cel-k1v-yt.js) posts the checksum and browser information, and exposes GET of the existing checkout payment. The status button now uses that read to reconcile an uncertain payment without sending another payment. `preparing` remains unconfirmed; only explicit success becomes paid. Duplicate-payment protection is retained.
 
@@ -17,6 +17,10 @@ These changes are covered by offline regressions using fictional account/card
 identifiers. No live checkout or payment is claimed: production still rejects
 the bot's saved buyer session before checkout. The owner's logged-in browser
 checkout is valid evidence of its UI and current frontend contract.
+The current source also permits the item summary within `pay_button_v2`, which
+is read when the standalone summary is absent. Explicit malformed or conflicting
+totals remain terminal. Numeric-string authentication codes are classified
+without logging response messages or credential values.
 
 ## Current first-party web client inspected on 7 October 2026
 
@@ -56,7 +60,7 @@ Public sources inspected on 7 October 2026. No external project was installed or
 
 MSJ reads matching JSON/Flight item records, explicitly anchored description plugins and references, and JSON-LD offer URLs. It preserves Unicode/newlines and rejects unanchored descriptions, conflicting item IDs, malformed frames, and unrelated photos.
 
-A real public [UK listing](https://www.vinted.co.uk/items/10276945623) returned one same-item canonical redirect and then HTTP 200 on 7 October 2026. Its current Flight payload contains the seller description, while the former depth-first scan exhausted its node limit on unrelated bootstrap values. The bounded breadth-first scan, excluding scalar children, extracted 126 description characters and four photos from that retrieved page. Public listing reads now use a separate ordinary session, so expired buyer cookies cannot redirect those reads into authentication. Authentication, challenge, foreign-host and cross-item redirects remain terminal. A separate once-per-release production probe can verify one already sent listing without sending or editing a Telegram message. Production description delivery still needs verification after deployment.
+A real public [UK listing](https://www.vinted.co.uk/items/10276945623) returned one same-item canonical redirect and then HTTP 200 on 7 October 2026. Its current Flight payload contains the seller description, while the former depth-first scan exhausted its node limit on unrelated bootstrap values. The bounded breadth-first scan, excluding scalar children, extracted 126 description characters and four photos from that retrieved page. Public listing reads now use a separate ordinary session, so expired buyer cookies cannot redirect those reads into authentication. Authentication, challenge, foreign-host and cross-item redirects remain terminal. Production logs after PR 47 confirmed ready descriptions on multiple new alerts, including 943 characters at 09:30 UTC and 85 characters at 09:59 UTC. No extra test alert was sent for these checks.
 
 ## Most useful implementation evidence
 

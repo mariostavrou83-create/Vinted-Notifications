@@ -95,15 +95,18 @@ def checkout_prices(checkout, item_price, maximum):
     components = checkout.get("components") or {}
     if not isinstance(components, dict):
         raise buyer.BuyerError("Vinted did not return readable checkout details.")
-    summary = (
-        components.get("order_summary_v2") or components.get("order_summary") or {}
-    )
-    if not isinstance(summary, dict):
-        raise buyer.BuyerError("Vinted did not return a readable checkout total.")
     # Only an explicit checkout total is accepted. A subtotal or listing price
     # can omit delivery and buyer protection, so neither is a payment fallback.
     pay_button = components.get("pay_button_v2")
     if "pay_button_v2" in components and not isinstance(pay_button, dict):
+        raise buyer.BuyerError("Vinted did not return a readable checkout total.")
+    current = pay_button is not None
+    summary = components.get("order_summary_v2")
+    if summary is None:
+        summary = components.get("order_summary")
+    if summary is None and current:
+        summary = pay_button.get("order_summary_v2")
+    if not isinstance(summary, dict):
         raise buyer.BuyerError("Vinted did not return a readable checkout total.")
     # Current web checkout renders the all-in amount from pay_button_v2.total.
     # order_summary_v2 contains the item subtotal and fee lines, not that total.
@@ -136,6 +139,7 @@ def checkout_prices(checkout, item_price, maximum):
     checksum = checkout.get("checksum")
     if (
         checkout.get("errors")
+        or summary.get("errors")
         or not isinstance(checksum, str)
         or not checksum
         or len(checksum) > 8192
@@ -154,7 +158,7 @@ def checkout_prices(checkout, item_price, maximum):
                 "Set your delivery address and payment method in Vinted first."
             )
     payment = components["payment_method"]
-    if any(
+    if current or any(
         key in payment for key in ("selected_payment_method", "cards", "pay_in_methods")
     ):
         selected = payment.get("selected_payment_method")
@@ -173,8 +177,12 @@ def checkout_prices(checkout, item_price, maximum):
     elif not payment.get("id"):
         raise buyer.BuyerError("Choose and save your payment method in Vinted first.")
     address = components["shipping_address"]
-    if any(
-        key in address for key in ("address", "address_is_missing", "shipping_order_id")
+    if (
+        current
+        or any(
+            key in address
+            for key in ("address", "address_is_missing", "shipping_order_id")
+        )
     ) and (
         not isinstance(address.get("address"), dict)
         or not address["address"].get("id")
@@ -194,6 +202,7 @@ def checkout_prices(checkout, item_price, maximum):
         or not shipping
         or shipping.get("errors")
         or options.get("errors")
+        or options.get("address_is_missing")
         or options.get("selected_pickup_option") is None
         or type(options.get("selected_pickup_option")) not in (int, str)
         or (
@@ -202,7 +211,7 @@ def checkout_prices(checkout, item_price, maximum):
         )
     ):
         raise buyer.BuyerError("Choose and save your delivery option in Vinted first.")
-    if "pickup_details" in shipping:
+    if current or "pickup_details" in shipping:
         details = shipping.get("pickup_details")
         choices = options.get("pickup_options")
         if not isinstance(details, dict) or not isinstance(choices, dict):
@@ -231,11 +240,26 @@ def checkout_prices(checkout, item_price, maximum):
                 raise buyer.BuyerError(
                     "Choose and save your pickup point in Vinted first."
                 )
-        elif (
-            not isinstance(shipping.get("receiver_address"), dict)
-            or not shipping["receiver_address"]
+        else:
+            receiver = shipping.get("receiver_address")
+            selected_address = address.get("address", address)
+            if (
+                not isinstance(receiver, dict)
+                or receiver.get("id") != selected_address.get("id")
+                or receiver.get("is_complete") is not True
+            ):
+                raise buyer.BuyerError(
+                    "Save your home delivery address in Vinted first."
+                )
+    contact = components.get("shipping_contact")
+    if contact is not None:
+        if not isinstance(contact, dict) or contact.get("errors"):
+            raise buyer.BuyerError("Check your saved delivery contact in Vinted first.")
+        if contact.get("is_receiver_phone_number_required") is True and (
+            not isinstance(contact.get("phone_number"), str)
+            or not contact["phone_number"].strip()
         ):
-            raise buyer.BuyerError("Save your home delivery address in Vinted first.")
+            raise buyer.BuyerError("Save your delivery phone number in Vinted first.")
     return total
 
 
@@ -438,7 +462,7 @@ def buy(row):
                     ),
                     action_url=action_url,
                 )
-            elif status == "failed":
+            elif status in ("failure", "failed"):
                 record(
                     item_id,
                     "payment_failed",
