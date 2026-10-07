@@ -30,6 +30,12 @@
 {% if buyer.pending_code %}<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><label for="buyer_code">Vinted verification code</label><input id="buyer_code" name="buyer_code" autocomplete="one-time-code" maxlength="12" required><button class="primary" name="action" value="buyer_verify">Verify buyer account</button></form>{% endif %}
 {% if buyer.connected %}
 <form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="buyer_recheck">Check saved buyer connection</button><p><small>Verifies the saved account session without preparing a checkout or sending payment.</small></p></form>
+<details class="guide-section"><summary><b>Check an existing Vinted checkout</b></summary>
+<p>Load the current total and saved delivery/payment choices for a checkout you already opened on Vinted. This does not submit payment or change your spending limits.</p>
+<form method="post" autocomplete="off"><input type="hidden" name="csrf" value="{{csrf}}">
+<label for="buyer_checkout_url">Existing Vinted checkout link</label><input id="buyer_checkout_url" name="buyer_checkout_url" type="url" maxlength="2048" autocomplete="off" required>
+<button class="secondary" name="action" value="buyer_checkout_check">Load checkout without paying</button></form>
+</details>
 <form method="post" data-buyer-settings><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="buyer_browser_info" data-buyer-browser value="">
 <p><b>Your spending limit is set on each search.</b> Open a search and set “Maximum total including fees &amp; postage”. Different searches can have different budgets. A search without a budget cannot use Autobuy. <a href="/">Edit your searches →</a></p>
 <p><small>The actual checkout total must fit that search’s current budget, including the item, delivery and Vinted fees. The item price must also be no higher than the price in your alert. Paused, archived or deleted searches cannot buy.</small></p>

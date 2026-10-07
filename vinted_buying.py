@@ -7,7 +7,7 @@ import re
 import time
 from contextlib import closing
 from decimal import Decimal, InvalidOperation
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from telegram import InlineKeyboardButton, LinkPreviewOptions
 from telegram.error import BadRequest, TelegramError
@@ -361,6 +361,113 @@ def verified_listing(client, row, config, maximum):
     if not seller.isdigit() or seller == config["user_id"]:
         raise buyer.BuyerError("The seller could not be verified for this purchase.")
     return current_price, seller
+
+
+def checkout_link_id(url):
+    """Accept only an ordinary, owner-supplied UK transaction checkout link."""
+    message = "Paste the existing Vinted UK checkout link, including its purchase and order details."
+    if not isinstance(url, str) or len(url) > 2048:
+        raise buyer.BuyerError(message)
+    try:
+        parts = urlsplit(url.strip())
+        values = parse_qs(parts.query, keep_blank_values=True, max_num_fields=3)
+        if (
+            parts.scheme != "https"
+            or parts.netloc != "www.vinted.co.uk"
+            or parts.path != "/checkout"
+            or parts.fragment
+            or set(values) != {"purchase_id", "order_id", "order_type"}
+            or any(len(value) != 1 for value in values.values())
+            or values["order_type"] != ["transaction"]
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", values["purchase_id"][0])
+            or not re.fullmatch(r"[0-9]{1,24}", values["order_id"][0])
+        ):
+            raise ValueError
+    except ValueError:
+        raise buyer.BuyerError(message) from None
+    return values["purchase_id"][0]
+
+
+def check_checkout(url):
+    """Load a selected existing checkout; never claim or submit a payment."""
+    purchase_id = checkout_link_id(url)
+    with buyer.exclusive():
+        with closing(connection()) as conn:
+            submitted = conn.execute(
+                "SELECT 1 FROM vinted_buy_attempts WHERE checkout_id=? AND state IN ('paying','unknown','needs_action','paid','payment_failed') LIMIT 1",
+                (purchase_id,),
+            ).fetchone()
+        if submitted:
+            raise buyer.BuyerError(
+                "This checkout already has a recorded payment attempt. Use its payment-status button or check Vinted; the checkout was not reloaded."
+            )
+        client = None
+        phase = "checking your buyer account"
+        try:
+            client = buyer.connected_client()
+            phase = "loading the existing checkout"
+            # Current first-party fetchInitialSingleCheckoutData uses PUT with
+            # no options to load a purchase already opened by the owner.
+            data = client.request("PUT", f"/api/v2/purchases/{purchase_id}/checkout")
+            checkout = data.get("checkout")
+            if not isinstance(checkout, dict) or str(checkout.get("id")) != purchase_id:
+                raise buyer.BuyerError("Vinted did not confirm this checkout.")
+            components = checkout.get("components")
+            if not isinstance(components, dict):
+                raise buyer.BuyerError(
+                    "Vinted did not return readable checkout details."
+                )
+            summary = components.get("order_summary_v2")
+            pay_button = components.get("pay_button_v2")
+            if summary is None:
+                summary = components.get("order_summary")
+            if summary is None and isinstance(pay_button, dict):
+                summary = pay_button.get("order_summary_v2")
+            total_part = pay_button if pay_button is not None else summary
+            if not isinstance(summary, dict) or not isinstance(total_part, dict):
+                raise buyer.BuyerError(
+                    "Vinted did not return a readable checkout total."
+                )
+            subtotal_part = summary.get("subtotal")
+            amount_part = total_part.get("total")
+            item = cents(
+                subtotal_part.get("price") if isinstance(subtotal_part, dict) else None
+            )
+            total = cents(
+                amount_part.get("price") if isinstance(amount_part, dict) else None
+            )
+            phase = "checking saved delivery and payment choices"
+            try:
+                # This is a diagnostic validation only. Using its actual total
+                # as the ceiling does not authorize any payment or change a budget.
+                checkout_prices(checkout, item, total)
+            except buyer.BuyerError as exc:
+                raise buyer.BuyerError(
+                    f"Checkout total £{total/100:.2f} including fees and delivery; saved choices need attention: {exc}",
+                    reason=exc.reason,
+                    status=exc.status,
+                ) from None
+            logger.info("Autobuy checkout check: result=verified")
+            return (
+                f"Checkout check passed: item subtotal £{item/100:.2f}; total £{total/100:.2f} including fees and delivery. "
+                "Saved delivery and payment choices passed validation. This check does not authorize payment or change any search budget. No payment was submitted."
+            )
+        except buyer.BuyerError as exc:
+            logger.info(
+                "Autobuy checkout check: phase=%s reason=%s http=%s",
+                phase,
+                exc.reason,
+                exc.status,
+            )
+            http = f" (HTTP {exc.status})" if exc.status else ""
+            raise buyer.BuyerError(
+                f"Checkout check stopped while {phase}{http}: {exc} No payment was submitted.",
+                reason=exc.reason,
+                status=exc.status,
+            ) from None
+        finally:
+            if client:
+                client.session.close()
 
 
 def check_listing(item_id):

@@ -533,6 +533,15 @@ def create_app(test_config=None):
                         ),
                         "success",
                     )
+                elif action == "buyer_checkout_check":
+                    import vinted_buying
+
+                    flash(
+                        vinted_buying.check_checkout(
+                            request.form.get("buyer_checkout_url", "")
+                        ),
+                        "success",
+                    )
                 elif action == "buyer_session":
                     flash(
                         vinted_buyer.link_session(

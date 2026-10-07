@@ -2271,6 +2271,161 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         client.session.close()
 
 
+class CheckoutInspectionTests(DatabaseFixture, unittest.TestCase):
+    url = "https://www.vinted.co.uk/checkout?purchase_id=checkout-123&order_id=456&order_type=transaction"
+
+    def setUp(self):
+        super().setUp()
+        self.client = Mock()
+        self.client.request.return_value = {"checkout": web_checkout()}
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("INSERT INTO vinted_search_budgets VALUES (1,2000,350)")
+            conn.execute(
+                "INSERT INTO vinted_buy_attempts(item_id,state,message,updated) VALUES ('123','unknown','Keep this payment result',1)"
+            )
+
+    def inspect(self):
+        with patch.object(buyer, "connected_client", return_value=self.client):
+            return buying.check_checkout(self.url)
+
+    def test_existing_checkout_uses_one_normal_load_without_payment_or_state_changes(
+        self,
+    ):
+        before = buying.result("123")
+        enabled = buyer.settings()["enabled"]
+        message = self.inspect()
+        self.assertIn("item subtotal £15.00", message)
+        self.assertIn("total £18.84 including fees and delivery", message)
+        self.assertIn("No payment was submitted", message)
+        self.client.request.assert_called_once_with(
+            "PUT", "/api/v2/purchases/checkout-123/checkout"
+        )
+        self.client.session.close.assert_called_once()
+        self.assertEqual(buying.result("123"), before)
+        self.assertEqual(buyer.settings()["enabled"], enabled)
+        with closing(search_settings.connection()) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT max_total FROM vinted_search_budgets WHERE query_id=1"
+                ).fetchone()[0],
+                2000,
+            )
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM vinted_buy_attempts").fetchone()[0],
+                1,
+            )
+
+    def test_invalid_checkout_links_are_rejected_before_connecting(self):
+        for url in (
+            "",
+            None,
+            "x" * 2049,
+            self.url.replace("https:", "http:"),
+            self.url.replace("www.vinted.co.uk", "foreign.example"),
+            self.url.replace("www.vinted.co.uk", "owner@www.vinted.co.uk"),
+            self.url.replace("/checkout?", "/other?"),
+            self.url + "#payment",
+            self.url + "&purchase_id=other",
+            self.url + "&extra=private",
+            self.url.replace("456", "١٢٣"),
+            self.url.replace("transaction", "bundle"),
+            self.url.replace("checkout-123", "../payment"),
+            self.url.replace("&order_id=456", ""),
+        ):
+            with self.subTest(url_type=type(url).__name__), patch.object(
+                buyer, "connected_client"
+            ) as connect, self.assertRaises(buyer.BuyerError):
+                buying.check_checkout(url)
+            connect.assert_not_called()
+
+    def test_submitted_checkouts_cannot_be_reinitialized(self):
+        for state in ("paying", "unknown", "needs_action", "paid", "payment_failed"):
+            with self.subTest(state=state):
+                with closing(search_settings.connection()) as conn, conn:
+                    conn.execute(
+                        "UPDATE vinted_buy_attempts SET checkout_id='checkout-123',state=? WHERE item_id='123'",
+                        (state,),
+                    )
+                before = buying.result("123")
+                with patch.object(
+                    buyer, "connected_client"
+                ) as connect, self.assertRaises(buyer.BuyerError):
+                    buying.check_checkout(self.url)
+                connect.assert_not_called()
+                self.client.request.assert_not_called()
+                self.assertEqual(buying.result("123"), before)
+
+    def test_unverifiable_checkout_identity_or_currency_stops_after_one_load(self):
+        for value in (
+            None,
+            [],
+            {"id": "another-checkout"},
+            {"id": "checkout-123", "components": []},
+            {"id": "checkout-123", "components": {"pay_button_v2": "invalid"}},
+        ):
+            with self.subTest(kind=type(value).__name__):
+                self.client.reset_mock()
+                self.client.request.return_value = {"checkout": value}
+                with self.assertRaises(buyer.BuyerError):
+                    self.inspect()
+                self.client.request.assert_called_once()
+                self.client.session.close.assert_called_once()
+        value = web_checkout()
+        value["components"]["pay_button_v2"]["total"]["price"]["currency_code"] = "EUR"
+        self.client.reset_mock()
+        self.client.request.return_value = {"checkout": value}
+        with self.assertRaises(buyer.BuyerError):
+            self.inspect()
+        self.client.request.assert_called_once()
+
+    def test_missing_saved_choices_report_the_total_without_private_details(self):
+        value = web_checkout()
+        value["components"]["payment_method"]["selected_payment_method"] = None
+        value["private_address"] = "private-address-must-not-appear"
+        self.client.request.return_value = {"checkout": value}
+        with self.assertLogs("vinted_buying", level="INFO") as logs, self.assertRaises(
+            buyer.BuyerError
+        ) as error:
+            self.inspect()
+        self.assertIn("£18.84", str(error.exception))
+        self.assertIn("payment method", str(error.exception))
+        self.assertIn("No payment was submitted", str(error.exception))
+        self.assertNotIn(
+            "private-address", str(error.exception) + " ".join(logs.output)
+        )
+        self.assertNotIn("checkout-123", " ".join(logs.output))
+
+    def test_account_refusal_never_loads_or_pays_a_checkout(self):
+        with patch.object(
+            buyer,
+            "connected_client",
+            side_effect=buyer.BuyerError("Session expired", 401, reason="credentials"),
+        ) as connect, self.assertRaises(buyer.BuyerError) as error:
+            buying.check_checkout(self.url)
+        connect.assert_called_once()
+        self.client.request.assert_not_called()
+        self.assertIn("checking your buyer account (HTTP 401)", str(error.exception))
+
+    def test_checkout_refusals_do_not_retry_or_submit_payment(self):
+        for status, reason in (
+            (403, "security_challenge"),
+            (404, "http_error"),
+            (429, "rate_limited"),
+        ):
+            with self.subTest(status=status):
+                self.client.reset_mock()
+                self.client.request.side_effect = buyer.BuyerError(
+                    "Vinted refused this request", status, reason=reason
+                )
+                with self.assertRaises(buyer.BuyerError) as error:
+                    self.inspect()
+                self.assertEqual(error.exception.status, status)
+                self.assertEqual(error.exception.reason, reason)
+                self.assertIn("loading the existing checkout", str(error.exception))
+                self.client.request.assert_called_once()
+                self.client.session.close.assert_called_once()
+
+
 class SessionRotationPersistenceTests(DatabaseFixture, unittest.TestCase):
     old_access = "old-access-token-0123456789"
     old_refresh = "old-refresh-token-0123456789"
@@ -2644,6 +2799,60 @@ class BuyerDashboardTests(DatabaseFixture, unittest.TestCase):
         response = self.client.get(response.headers["Location"])
         self.assertIn(b"No checkout or payment was created", response.data)
         self.assertEqual(response.headers["Cache-Control"], "no-store")
+
+    def test_existing_checkout_check_requires_owner_and_csrf(self):
+        data = {
+            "csrf": "offline-csrf",
+            "action": "buyer_checkout_check",
+            "buyer_checkout_url": CheckoutInspectionTests.url,
+        }
+        with patch.object(buying, "check_checkout") as check:
+            self.assertEqual(
+                self.client.post("/connections", data=data).status_code, 400
+            )
+            check.assert_not_called()
+        self.owner()
+        with patch.object(buying, "check_checkout") as check:
+            self.assertEqual(
+                self.client.post(
+                    "/connections", data=dict(data, csrf="invalid")
+                ).status_code,
+                400,
+            )
+            check.assert_not_called()
+        with patch.object(
+            buying,
+            "check_checkout",
+            return_value="Checkout total £18.84. No payment was submitted.",
+        ) as check:
+            response = self.client.post("/connections", data=data)
+        check.assert_called_once_with(CheckoutInspectionTests.url)
+        self.assertEqual(response.status_code, 302)
+        response = self.client.get(response.headers["Location"])
+        self.assertIn(b"No payment was submitted", response.data)
+        self.assertNotIn(b"purchase_id=checkout-123", response.data)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+
+    def test_checkout_check_failure_redirects_and_never_repeats_on_refresh(self):
+        self.owner()
+        with patch.object(
+            buying,
+            "check_checkout",
+            side_effect=buyer.BuyerError("Checkout stopped (HTTP 404)"),
+        ) as check:
+            response = self.client.post(
+                "/connections",
+                data={
+                    "csrf": "offline-csrf",
+                    "action": "buyer_checkout_check",
+                    "buyer_checkout_url": CheckoutInspectionTests.url,
+                },
+            )
+            self.assertEqual(response.status_code, 303)
+            response = self.client.get(response.headers["Location"])
+            response = self.client.get("/connections")
+        check.assert_called_once()
+        self.assertNotIn(b"purchase_id=checkout-123", response.data)
 
     def test_readonly_listing_check_errors_redirect_without_retrying(self):
         self.owner()
