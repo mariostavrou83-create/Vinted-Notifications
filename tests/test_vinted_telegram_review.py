@@ -295,6 +295,81 @@ class ReviewTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(review.load_review()["build_state"], original["build_state"])
         self.assertNotIn("456", json.dumps(result))
 
+    def test_only_existing_consistent_checkout_references_are_used(self):
+        for data, expected in (
+            ({}, None),
+            ({"purchase_id": "known-checkout"}, "known-checkout"),
+            ({"checkout_id": "one", "purchase_id": "two"}, None),
+            ({"checkout_id": True}, None),
+            (
+                {
+                    "checkout_url": "/checkout?purchase_id=known-checkout&order_id=456&order_type=transaction"
+                },
+                "known-checkout",
+            ),
+            (
+                {
+                    "checkout_url": "/checkout?purchase_id=wrong-item&order_id=999&order_type=transaction"
+                },
+                None,
+            ),
+            (
+                {
+                    "checkout_url": "https://untrusted.example.test/checkout?purchase_id=x&order_id=456&order_type=transaction"
+                },
+                None,
+            ),
+        ):
+            with self.subTest(data=data):
+                self.assertEqual(
+                    review.existing_checkout_reference(data, "456"), expected
+                )
+
+    def test_confirmed_existing_checkout_can_be_read_without_build_or_payment(self):
+        self.blocked_draft()
+        existing = copy.deepcopy(self.final)
+        existing["id"] = "existing-checkout"
+        self.client.request.side_effect = [
+            {
+                "transaction": {
+                    "id": 456,
+                    "buyer_id": 99,
+                    "item_id": 123,
+                    "purchase_id": "existing-checkout",
+                }
+            },
+            {"checkout": existing},
+        ]
+        with patch.object(buying, "verified_listing", return_value=(1500, "100")):
+            result = review.reconcile_selected()
+        self.assertEqual(result["checkout_status"], "confirmed_existing")
+        self.assertEqual(result["total"], 1884)
+        self.assertEqual(result["pickup_name"], "Fictional pickup point")
+        self.assertEqual(review.load_review()["checkout_id"], "existing-checkout")
+        self.assertTrue(
+            all(call.args[0] == "GET" for call in self.client.request.call_args_list)
+        )
+        self.assertNotIn("existing-checkout", json.dumps(result))
+
+    def test_remote_paid_transaction_is_never_requoted_or_submitted(self):
+        self.blocked_draft()
+        self.client.request.side_effect = [
+            {
+                "transaction": {
+                    "id": 456,
+                    "buyer_id": 99,
+                    "item_id": 123,
+                    "purchase_id": "already-paid-checkout",
+                    "is_paid": True,
+                }
+            }
+        ]
+        with patch.object(buying, "verified_listing", return_value=(1500, "100")):
+            result = review.reconcile_selected()
+        self.assertEqual(result["payment_status"], "paid_reported_by_vinted")
+        self.assertEqual(result["stage"], "existing_payment")
+        self.client.request.assert_called_once_with("GET", "/api/v2/transactions/456")
+
     def test_sold_selected_item_does_not_switch_or_create_checkout(self):
         self.blocked_draft()
         self.client.request.side_effect = [

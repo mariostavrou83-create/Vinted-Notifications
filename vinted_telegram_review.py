@@ -9,6 +9,7 @@ import sqlite3
 import time
 from contextlib import closing
 from datetime import datetime, timezone
+from urllib.parse import parse_qs, urlsplit
 
 import vinted_budget
 import vinted_buyer as buyer
@@ -371,6 +372,31 @@ def review_latest(*, item_id=None):
         )
 
 
+def existing_checkout_reference(transaction, transaction_id):
+    """Accept only an existing reference supplied by this bound transaction."""
+    candidates = [transaction.get("checkout_id"), transaction.get("purchase_id")]
+    checkout = transaction.get("checkout")
+    if isinstance(checkout, dict):
+        candidates.append(checkout.get("id"))
+    url = transaction.get("checkout_url")
+    if isinstance(url, str):
+        if url.startswith("/"):
+            url = buyer.BASE + url
+        try:
+            purchase_id = buying.checkout_link_id(url)
+            if parse_qs(urlsplit(url).query).get("order_id") == [transaction_id]:
+                candidates.append(purchase_id)
+        except buyer.BuyerError:
+            pass
+    valid = {
+        str(value)
+        for value in candidates
+        if type(value) in (str, int)
+        and re.fullmatch(r"[A-Za-z0-9_-]{1,100}", str(value))
+    }
+    return valid.pop() if len(valid) == 1 else None
+
+
 def reconcile_selected():
     """Read the preserved item's status, without checkout or solver submissions."""
     result = {
@@ -455,17 +481,105 @@ def reconcile_selected():
                     result["stage"] = "transaction_binding_unverified"
                     return result
                 result.update(transaction_exists=True, transaction_http_status=200)
+                result["transaction_fields"] = {
+                    key: (
+                        "absent"
+                        if transaction.get(key) is None
+                        else (
+                            "object"
+                            if isinstance(transaction[key], dict)
+                            else (
+                                "list"
+                                if isinstance(transaction[key], list)
+                                else (
+                                    "boolean"
+                                    if type(transaction[key]) is bool
+                                    else (
+                                        "number"
+                                        if type(transaction[key]) in (int, float)
+                                        else (
+                                            "string"
+                                            if isinstance(transaction[key], str)
+                                            else "other"
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                    )
+                    for key in (
+                        "checkout_id",
+                        "purchase_id",
+                        "checkout",
+                        "checkout_url",
+                        "order",
+                        "order_id",
+                        "payment",
+                        "status",
+                        "state",
+                        "is_paid",
+                    )
+                }
                 # A conversation/transaction alone is not evidence of an order,
                 # a checkout, or a paid purchase. Unknown schemas stay unverified.
                 if transaction.get("is_paid") is True:
                     result["payment_status"] = "paid_reported_by_vinted"
+                    result["stage"] = "existing_payment"
+                    return result
                 elif transaction.get("is_paid") is False:
                     result["payment_status"] = "unpaid_reported_by_vinted"
-                result["stage"] = "checkout_reconciliation"
+                checkout_id = existing_checkout_reference(transaction, transaction_id)
+                result["existing_checkout_reference"] = checkout_id is not None
+                if not checkout_id:
+                    result["stage"] = "checkout_reference_absent"
+                    return result
+                result["stage"] = "existing_checkout_read"
+                data = client.request(
+                    "GET", "/api/v2/purchases/" + checkout_id + "/checkout"
+                )
+                checkout = data.get("checkout")
+                if (
+                    not isinstance(checkout, dict)
+                    or str(checkout.get("id")) != checkout_id
+                ):
+                    return result
+                total = buying.checkout_prices(
+                    checkout, result["item_price"], None, item_id=item_id
+                )
+                choices = buying.checkout_choice_details(checkout)
+                result.update(
+                    checkout_status="confirmed_existing",
+                    total=total,
+                    pickup_name=choices["pickup_name"],
+                    payment_method=choices["payment_label"],
+                    stage="existing_checkout_confirmed",
+                )
+                current = load_review()
+                if current and current.get("transaction_id") == transaction_id:
+                    current.update(checkout_id=checkout_id, build_state="built")
+                    save_review(current)
+                limits = vinted_budget.purchase_limits(row)
+                result.update(
+                    search_maximum_item=limits.item_maximum,
+                    search_maximum_total=limits.total_maximum,
+                )
+                verify_limits(row, result["item_price"], total, limits)
+                result["search_limit_passed"] = True
             except buyer.BuyerError as exc:
                 if isinstance(exc.status, int):
-                    result["transaction_http_status"] = exc.status
-                result["stage"] = "transaction_read_unverified"
+                    result[
+                        (
+                            "checkout_http_status"
+                            if result["stage"] == "existing_checkout_read"
+                            else "transaction_http_status"
+                        )
+                    ] = exc.status
+                result["stage"] = (
+                    "checkout_read_unverified"
+                    if result["stage"]
+                    in ("existing_checkout_read", "existing_checkout_confirmed")
+                    else "transaction_read_unverified"
+                )
             return result
     except buyer.BuyerError as exc:
         result["stage"] = "connection_unverified"
