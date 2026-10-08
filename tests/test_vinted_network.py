@@ -92,11 +92,45 @@ class NetworkTests(DatabaseFixture, unittest.TestCase):
                 (buyer.encrypt(saved),),
             )
 
+    def bind_client(self, client):
+        with closing(search_settings.connection()) as conn:
+            sealed = conn.execute(
+                "SELECT session FROM vinted_buyer WHERE id=1"
+            ).fetchone()[0]
+        client.bind_verified_session("99", sealed, buyer.decrypt(sealed))
+
     def solver(self, state="solved"):
         return patch(
             "vinted_captcha.solve_datadome",
             return_value=SimpleNamespace(state=state, cookie="new-security-cookie"),
         )
+
+    def test_existing_schema_19_gets_network_column_without_losing_account_or_searches(
+        self,
+    ):
+        self.save_session(SAVED)
+        searches = db.get_queries()
+        with closing(search_settings.connection()) as conn, conn:
+            sealed = conn.execute(
+                "SELECT session FROM vinted_buyer WHERE id=1"
+            ).fetchone()[0]
+            conn.execute("ALTER TABLE vinted_buyer DROP COLUMN network")
+            conn.execute(
+                "UPDATE parameters SET value='19' WHERE key='msj_search_schema'"
+            )
+        backup = search_settings.ensure_schema()
+        self.assertTrue(Path(backup).is_file())
+        self.assertEqual(db.get_queries(), searches)
+        self.assertTrue(db.is_item_in_db_by_id(99))
+        with closing(search_settings.connection()) as conn:
+            current = conn.execute(
+                "SELECT session,network FROM vinted_buyer WHERE id=1"
+            ).fetchone()
+            self.assertEqual(current[0], sealed)
+            self.assertIsNone(current[1])
+        self.assertTrue(buyer.settings()["connected"])
+        self.assertFalse(buyer.settings()["network"]["enabled"])
+        self.assertIsNone(search_settings.ensure_schema())
 
     def test_credentials_are_encrypted_and_only_presence_reaches_settings(self):
         self.configure()
@@ -172,9 +206,10 @@ class NetworkTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(send.call_args.kwargs["proxies"]["https"], PROXY)
         self.assertEqual(send.call_args.kwargs["verify"], "/tmp/account-network-ca.pem")
 
-    def test_genuine_anon_cookie_refreshes_header_and_removed_tokens_drop_bearer(self):
+    def test_genuine_anon_header_is_safe_and_web_cookies_never_become_bearer(self):
         client = self.client(SAVED)
         self.assertEqual(client.session.headers["X-Anon-ID"], "genuine-anon-id")
+        self.assertNotIn("Authorization", client.session.headers)
         client.session.cookies.set(
             "anon_id", "renewed-anon-id", domain="www.vinted.co.uk", secure=True
         )
@@ -275,21 +310,52 @@ class NetworkTests(DatabaseFixture, unittest.TestCase):
         solver.assert_called_once()
         self.assertFalse(buyer.settings()["connected"])
 
-    def test_solver_cookie_merge_preserves_saved_identity_and_csrf(self):
+    def test_homepage_json_challenge_retries_once_and_oversized_denial_does_not_solve(
+        self,
+    ):
+        self.configure()
+        client = self.client()
+        blocked = response(403, CHALLENGE)
+        success = response(text='{"CSRF_TOKEN":"new-homepage-csrf-0123456789"}')
+        with self.solver() as solver, patch.object(
+            client.session, "get", side_effect=[blocked, success]
+        ) as get:
+            client.homepage()
+        solver.assert_called_once()
+        self.assertEqual(get.call_count, 2)
+        self.assertEqual(client.csrf, "new-homepage-csrf-0123456789")
+        blocked.close.assert_called_once()
+        client = self.client()
+        with self.solver() as solver, patch.object(
+            client.session,
+            "get",
+            return_value=response(403, text=json.dumps(CHALLENGE) + " " * 65536),
+        ) as get, self.assertRaises(buyer.BuyerError):
+            client.homepage()
+        solver.assert_not_called()
+        get.assert_called_once()
+
+    def test_verified_solver_persistence_preserves_identity_and_full_cookie_records(
+        self,
+    ):
         self.configure()
         self.save_session(SAVED)
         client = self.client(SAVED)
+        self.bind_client(client)
         with self.solver():
             self.assertTrue(client.solve_challenge(response(403, CHALLENGE), CHALLENGE))
         stored = self.stored_session()
         self.assertEqual(stored["csrf"], SAVED["csrf"])
         self.assertEqual(stored["cookies"]["datadome"], "new-security-cookie")
+        self.assertEqual(stored["cookie_records"], client.exported()["cookie_records"])
         for name in ("access_token_web", "refresh_token_web", "anon_id"):
             self.assertEqual(stored["cookies"][name], SAVED["cookies"][name])
 
     def test_solver_cannot_overwrite_a_concurrently_rotated_buyer_session(self):
         self.configure()
+        self.save_session(SAVED)
         client = self.client(SAVED)
+        self.bind_client(client)
         renewed = {
             "csrf": "renewed-csrf-token-0123456789",
             "cookies": {
@@ -299,8 +365,9 @@ class NetworkTests(DatabaseFixture, unittest.TestCase):
             },
         }
         self.save_session(renewed)
-        with self.solver():
-            self.assertTrue(client.solve_challenge(response(403, CHALLENGE), CHALLENGE))
+        with self.solver(), self.assertRaises(buyer.BuyerError) as error:
+            client.solve_challenge(response(403, CHALLENGE), CHALLENGE)
+        self.assertEqual(error.exception.reason, "saved_session")
         self.assertEqual(self.stored_session(), renewed)
         self.assertEqual(
             client.session.cookies.get_dict()["datadome"], "new-security-cookie"

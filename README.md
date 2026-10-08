@@ -9,6 +9,11 @@ when items matching your search criteria are posted.
 
 ## ⚡ Quickstart
 
+For the existing MSJ Railway bot, see
+[Vinted browser/proxy/CapSolver setup](VINTED_CONNECTION_SETUP.md) and
+[optional free Supabase authentication and backups](SUPABASE_SETUP.md).
+Keep the existing production service and persistent data volume.
+
 If you just want to get started fast with Docker Compose:
 
 ```bash

@@ -539,6 +539,70 @@ def create_app(test_config=None):
                     flash(vinted_buyer.check_signin(), "success")
                 elif action == "buyer_recheck":
                     flash(vinted_buyer.check_saved_connection(), "success")
+                elif action == "buyer_listing_check":
+                    import vinted_buying
+
+                    flash(
+                        vinted_buying.check_listing(
+                            request.form.get("buyer_item_id", "")
+                        ),
+                        "success",
+                    )
+                elif action == "buyer_checkout_check":
+                    import vinted_buying
+
+                    flash(
+                        vinted_buying.check_checkout(
+                            request.form.get("buyer_checkout_url", "")
+                        ),
+                        "success",
+                    )
+                elif action == "buyer_checkout_prepare":
+                    import vinted_buying
+
+                    prepared = vinted_buying.check_checkout(
+                        request.form.get("buyer_checkout_url", ""), prepare_test=True
+                    )
+                    session["buyer_test_quote"] = {
+                        key: prepared[key]
+                        for key in (
+                            "token",
+                            "title",
+                            "item_id",
+                            "item_price",
+                            "total",
+                            "pickup_name",
+                            "payment_label",
+                        )
+                    }
+                    flash(prepared["message"], "success")
+                    return redirect(url_for("connections"), code=303)
+                elif action == "buyer_checkout_pay":
+                    import vinted_buying
+
+                    quoted = session.get("buyer_test_quote") or {}
+                    token = request.form.get("buyer_test_quote", "")
+                    if not token or token != quoted.get("token"):
+                        raise ValueError("Prepare a fresh test checkout before buying.")
+                    outcome = vinted_buying.buy_checkout_quote(token)
+                    if outcome["state"] != "failed_before_payment":
+                        session.pop("buyer_test_quote", None)
+                    flash(
+                        outcome["message"],
+                        "success" if outcome["state"] == "paid" else "error",
+                    )
+                    return redirect(url_for("connections"), code=303)
+                elif action == "buyer_payment_check":
+                    import vinted_buying
+
+                    outcome = vinted_buying.check_payment(
+                        request.form.get("buyer_item_id", "")
+                    )
+                    flash(
+                        outcome["message"],
+                        "success" if outcome["state"] == "paid" else "error",
+                    )
+                    return redirect(url_for("connections"), code=303)
                 elif action == "buyer_session":
                     flash(
                         vinted_buyer.link_session(
@@ -564,8 +628,9 @@ def create_app(test_config=None):
                     )
                 elif action == "buyer_limits":
                     vinted_buyer.save_limits(request.form)
+                    session.pop("buyer_test_quote", None)
                     flash(
-                        "Buyer settings saved. Autobuy uses each search's maximum total and purchases only when you tap its button.",
+                        "Buyer settings saved. Tap Autobuy to purchase within the search's total budget, or its URL item-price limit plus fees and delivery when no total budget is saved.",
                         "success",
                     )
                 elif action == "buyer_network":
@@ -598,6 +663,7 @@ def create_app(test_config=None):
             photo_controls=__import__("photo_cards").health_summary(),
             buyer=vinted_buyer.settings(),
             buying=__import__("vinted_buying").history(),
+            checkout_test=session.get("buyer_test_quote"),
         )
 
     @app.route("/folders", methods=["GET", "POST"])

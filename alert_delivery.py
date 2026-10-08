@@ -33,6 +33,31 @@ from search_settings import connection
 logger = get_logger(__name__)
 
 
+def acknowledge_listing(conn, row, message_id, *, now=None):
+    """Save a known native send in the same transaction as its photo controls.
+
+    Keep the lease until ``finish`` releases it. If the process stops between
+    the native-send bookkeeping and ``finish``, an expired lease then schedules
+    enrichment of the accepted message instead of another notification. Owner
+    photo tests and callback recovery have no listing job and cannot acknowledge
+    an unrelated pending delivery.
+    """
+    if row.get("kind") != "listing" or not row.get("lease_token"):
+        return False
+    changed = conn.execute(
+        """UPDATE alert_outbox SET status='sent',telegram_message_id=?,sent_at=?,error=''
+        WHERE item_id=? AND platform=? AND status='pending' AND lease_token=?""",
+        (
+            message_id,
+            time.time() if now is None else now,
+            row["item_id"],
+            row.get("platform", "vinted"),
+            row["lease_token"],
+        ),
+    )
+    return changed.rowcount == 1
+
+
 def claim(now=None, preferred_photo=None, platform="vinted", allow_photos=True):
     now = time.time() if now is None else now
     with closing(connection()) as conn, conn:

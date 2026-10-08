@@ -136,7 +136,12 @@ def add_item_to_db(
                         if alert.get("reference_id")
                         or (
                             alert.get("vinted_details", {}).get("single_message")
-                            and alert.get("vinted_details", {}).get("photos")
+                            and (
+                                alert.get("vinted_details", {}).get("photos")
+                                or alert.get("vinted_details", {}).get(
+                                    "description_pending"
+                                )
+                            )
                         )
                         else "none"
                     ),
@@ -358,15 +363,18 @@ def clear_allowlist():
 
 
 def get_parameter(key):
+    """Return a saved setting; database failures are not missing settings.
+
+    Process supervision must not stop a healthy worker merely because SQLite
+    is temporarily unavailable. Let its next scheduled check retry the read.
+    """
     conn = None
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT value FROM parameters WHERE key=?", (key,))
         result = cursor.fetchone()
         return result[0] if result else None
-    except (sqlite3.Error, OSError):
-        print_exc()
     finally:
         if conn:
             conn.close()

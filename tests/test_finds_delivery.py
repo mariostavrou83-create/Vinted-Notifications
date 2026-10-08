@@ -16,6 +16,7 @@ from test_search_controls import DatabaseFixture
 import alert_delivery as delivery
 import dashboard_store as store
 import db
+import photo_cards
 import search_settings as settings
 
 
@@ -28,6 +29,59 @@ def outbox(item_id):
 
 
 class OutboxTests(DatabaseFixture, unittest.TestCase):
+    def test_native_send_ack_survives_restart_before_finish(self):
+        self.batch(1, [110])
+        with closing(settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE alert_outbox SET photo_status='pending' WHERE item_id='110'"
+            )
+        leased = delivery.claim(now=1000)
+        message = SimpleNamespace(
+            message_id=42, photo=[SimpleNamespace(file_id="native-listing")]
+        )
+        photo_cards.record(
+            leased, {"photos": ["https://images1.vinted.net/a.jpg"]}, message
+        )
+        # Simulate process loss after Telegram/card persistence but before finish.
+        self.assertEqual(outbox(110)["status"], "sent")
+        self.assertEqual(outbox(110)["telegram_message_id"], 42)
+        self.assertIsNone(delivery.claim(now=1119))
+        recovered = delivery.claim(now=1121)
+        self.assertEqual(recovered["kind"], "photo")
+        self.assertEqual(recovered["telegram_message_id"], 42)
+        self.assertNotEqual(recovered["lease_token"], leased["lease_token"])
+        delivery.finish(leased, message_id=99, now=1122)
+        self.assertEqual(outbox(110)["telegram_message_id"], 42)
+        delivery.finish(recovered, now=1123)
+        self.assertIsNone(delivery.claim(now=2000))
+
+    def test_owner_photo_test_cannot_acknowledge_a_pending_listing(self):
+        self.batch(1, [110])
+        leased = delivery.claim(now=1000)
+        test_row = outbox(110)
+        photo_cards.record(
+            test_row,
+            {"name": "PHOTO & BUTTON TEST", "photos": []},
+            SimpleNamespace(message_id=99, photo=[]),
+        )
+        self.assertEqual(outbox(110)["status"], "pending")
+        self.assertIsNone(outbox(110)["telegram_message_id"])
+        delivery.finish(leased, message_id=42, now=1001)
+        self.assertEqual(outbox(110)["telegram_message_id"], 42)
+
+    def test_stale_native_send_cannot_acknowledge_a_replacement_lease(self):
+        self.batch(1, [110])
+        first = delivery.claim(now=1000)
+        replacement = delivery.claim(now=1121)
+        photo_cards.record(
+            first,
+            {"photos": []},
+            SimpleNamespace(message_id=41, photo=[]),
+        )
+        self.assertEqual(outbox(110)["status"], "pending")
+        self.assertIsNone(outbox(110)["telegram_message_id"])
+        self.assertEqual(outbox(110)["lease_token"], replacement["lease_token"])
+
     def test_speed_upgrade_backs_up_and_preserves_searches_and_history(self):
         db.set_parameter("query_refresh_delay", "3")
         db.set_parameter("msj_search_schema", "3")

@@ -15,6 +15,7 @@ import photo_cards
 import search_settings
 import vinted_alerts
 import vinted_budget as budget
+import vinted_buyer as buyer
 import vinted_keywords
 
 
@@ -85,6 +86,62 @@ class Estimates(unittest.TestCase):
 
 
 class BudgetIntegration(DatabaseFixture, unittest.TestCase):
+    def test_url_limit_is_item_only_and_missing_url_limit_is_allowed(self):
+        for query, expected in (
+            ("https://www.vinted.co.uk/catalog?price_to=15&currency=GBP", 1500),
+            ("https://www.vinted.co.uk/catalog?price_to=0", 0),
+            ("https://www.vinted.co.uk/catalog?search_text=jacket", None),
+        ):
+            with self.subTest(query=query):
+                with closing(search_settings.connection()) as conn, conn:
+                    conn.execute("UPDATE queries SET query=? WHERE id=1", (query,))
+                limits = budget.purchase_limits({"query_id": 1})
+                self.assertEqual(limits.item_maximum, expected)
+                self.assertIsNone(limits.total_maximum)
+
+    def test_invalid_or_ambiguous_url_limits_do_not_allow_payment(self):
+        for suffix in (
+            "price_to=",
+            "price_to=NaN",
+            "price_to=-1",
+            "price_to=15.001",
+            "price_to=1000000.01",
+            "price_to=15&price_to=20",
+            "price_to=15&currency=EUR",
+            "currency=GBP&currency=EUR",
+        ):
+            with self.subTest(suffix=suffix):
+                with closing(search_settings.connection()) as conn, conn:
+                    conn.execute(
+                        "UPDATE queries SET query=? WHERE id=1",
+                        ("https://www.vinted.co.uk/catalog?" + suffix,),
+                    )
+                with self.assertRaises(buyer.BuyerError) as error:
+                    budget.purchase_limits({"query_id": 1})
+                self.assertEqual(error.exception.reason, "url_limit_invalid")
+
+    def test_explicit_total_budget_takes_precedence_over_url_item_filter(self):
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("INSERT INTO vinted_search_budgets VALUES (1,2000,350)")
+            conn.execute(
+                "UPDATE queries SET query='https://www.vinted.co.uk/catalog?price_to=9' WHERE id=1"
+            )
+        self.assertEqual(
+            budget.purchase_limits({"query_id": 1}),
+            budget.PurchaseLimits(total_maximum=2000),
+        )
+
+    def test_limits_can_only_tighten_during_checkout(self):
+        initial = budget.PurchaseLimits(item_maximum=1500)
+        self.assertEqual(initial.restrict(budget.PurchaseLimits()), initial)
+        self.assertEqual(
+            initial.restrict(budget.PurchaseLimits(item_maximum=2000)), initial
+        )
+        self.assertEqual(
+            initial.restrict(budget.PurchaseLimits(total_maximum=1800)),
+            budget.PurchaseLimits(item_maximum=1500, total_maximum=1800),
+        )
+
     def save(self, **changes):
         old = search_settings.get_search(1)
         form = {

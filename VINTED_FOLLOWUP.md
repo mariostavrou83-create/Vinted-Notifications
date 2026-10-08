@@ -1,102 +1,83 @@
-# Vinted follow-up — 7 October 2026
+# Vinted repair update — 7 October 2026
 
-The checkout matches the handover snapshot at
-`c591e9bbb0749ecd06d69f17a812d9e0bc89bc0d`. These changes are local; no
-production deployment or payment has been performed.
+## Browser integration — 8 October 2026
+
+The new integration builds on GitHub main `2b5b17b`, preserving its current
+checkout, quoted purchase, pickup preference, payment reconciliation and
+proactive buyer-session maintenance fixes.
+
+Buyer and public listing reads now use a verified, pinned Chrome 146 transport.
+The account's fixed BYOP proxy and opt-in CapSolver key can be stored encrypted
+through the private dashboard. Supported challenge retries retain accepted
+response-cookie rollback and verified-account persistence; payment is never
+replayed automatically. Public listing reads keep their anonymous cookies
+separate from the buyer session. Optional Supabase adds owner authentication
+and encrypted database backups while SQLite remains the live alerts source.
+
+A read-only development request returned HTTP 200 for the handover listing
+after one canonical same-item redirect, with four listing photos and an
+identity-scoped seller description. The latest purchase parser also verified
+its public seller, price and current availability fields. No checkout or
+payment was created by these checks. Production account and Telegram purchase
+acceptance still require live access and user-configured provider settings.
+
+See [VINTED_CONNECTION_SETUP.md](VINTED_CONNECTION_SETUP.md) and
+[SUPABASE_SETUP.md](SUPABASE_SETUP.md) for private configuration and activation.
+
+Final integrated validation: 593 Python 3.12 regressions passed, including an
+upgrade from existing schema 19 to schema 20 with searches/history and the
+encrypted account unchanged. Ruff, Black, dependency consistency and the
+requirements vulnerability audit passed. Public retrieval was checked again
+through the final downloader. Production checkout/payment remain unverified.
+
+This update includes the previously undeployed follow-up and additional fixes.
+Live acceptance remains separate from offline regression results.
 
 ## Changes
 
-- A server-requested same-origin refresh now uses `/web/api/auth/refresh`,
-  following the concrete public Autobuy-client contract. Explicit credential
-  expiry retains the existing OAuth route. Renewal still occurs once and must
-  reconfirm the same buyer identity before any checkout.
-- Buyer session renewal requires a syntactically usable access token from
-  the refresh response body or cookies. HTTP 200 alone is insufficient.
-- Buyer errors log fixed redirect classifications: known auth routes,
-  unexpected same-origin path, UK apex, other origin, invalid target, etc.
-  No raw path, query, credential or response body is logged. Redirect-following
-  permissions and purchase limits are unchanged.
-- Listing-detail requests log their numeric HTTP status, distinguishing
-  401/403/429 despite the existing shared `access_limited` outcome.
-- Item-page reads reuse the owner's existing encrypted saved session when
-  available, without renewing it or creating any marketplace transaction.
-  Server-rendered Next.js JSON/Flight payloads can supply descriptions and
-  photos, strictly scoped to the requested item. The parser supports explicit
-  plugin anchors, references, Unicode text frames and matching JSON-LD offer
-  URLs; it never executes page JavaScript or chooses the first global description.
-- Missing descriptions can retry transient failures after cooldown, for at
-  most three fetches within fifteen minutes. Security challenges, unavailable
-  listings and successfully parsed responses are terminal. Cooldown deferrals
-  do not consume the listing fetch count; the worker waits for the saved shared
-  cooldown's expiry. Image-download failures have a separate three-attempt cap
-  per photo set. Explicit challenges in HTTP 403 bodies are terminal too, with
-  bounded body inspection. Retry state persists in the alert
-  snapshot/card and uses the existing durable enrichment queue.
-- Telegram edit failures have a separate persistent counter, so many harmless
-  marketplace cooldown deferrals cannot exhaust the edit retry limit.
-- Enrichment edits the same message and preserves listing/example/notes views
-  and Autobuy feedback. Initial native-photo sends and catalogue polling are
-  unchanged.
+- Use the web renewal endpoint when Vinted explicitly redirects to that route;
+  require a usable replacement access token and reconfirm the same account.
+- Record sanitised authentication stage, HTTP status and redirect classification.
+- Reuse the encrypted saved buyer session for read-only seller-page retrieval.
+- Parse item-scoped Next.js JSON/Flight, DOM and JSON-LD descriptions and photos;
+  reject conflicting IDs, unrelated text, hidden controls and malformed URLs.
+- Allow one validated canonical redirect to the same UK listing only.
+- Retry transient missing descriptions at most three fetches in fifteen minutes,
+  honouring durable cooldowns and longer Retry-After values. Photo and Telegram
+  edit retries have separate counters. Update the original alert in place.
+- Fetch pending descriptions even when no catalogue photo or examples exist.
+- Resume interrupted preparation only under the buyer process lock. Never retry
+  paying, uncertain, bank-action, successful or failed-payment states automatically.
+- Preserve Vinted's validated HTTPS bank confirmation action in the alert button.
+- Reject HTTP-200 error bodies, malformed checkout checksums and component errors.
+- Persist original native alert acknowledgement atomically with photo controls.
+  A crash after this commit cannot resend that accepted listing; tests cannot
+  acknowledge production deliveries and stale leases cannot change them.
+- Enable SQLite WAL with FULL durability and consistent verified backups.
+  A failed settings read no longer masquerades as Telegram being disabled.
+- Cancel Telegram dispatcher/photo tasks through the application lifecycle;
+  bound process shutdown and prevent watchdog restarts during cleanup.
+- Schema 17 adds nullable action_url while retaining search and purchase history.
 
-## Validation and limits
+## Verification
 
-Python 3.12: the original 298-test baseline passed. With the new regressions,
-331 tests passed. The suite covers repeated cooldown recovery in the real SQLite delivery
-queue without a second notification. Ruff, Black, dependency consistency and
-Git whitespace checks passed. Marketplace and Telegram responses are mocked
-in these tests; they establish local behavior, not successful live retrieval
-or payment.
+Offline regressions use temporary SQLite databases and mocked network responses.
+369 tests cover the integrated behavior, including an upgrade from production
+schema 16, real PTB start/stop and concurrency/boundary matrices. Ruff, Black,
+dependency consistency and Git whitespace checks are required before deployment.
 
-Read-only Vinted homepage and handover-listing requests from this development
-machine were rejected by its network proxy with HTTP 403 at CONNECT, before
-reaching Vinted. This is separate from the historical Railway HTTP 307.
-`www.vinted.co.uk` was added to the cloud environment configuration draft.
-On the later reattachment, the saved configuration included the development
-scripts and reported unrestricted networking.
+A one-time read-only saved-account diagnosis can be requested with a fixed
+MSJ_BUYER_CHECK_ON_START release label. It reserves the release before checking,
+retains the existing diagnostic throttle and never creates checkout, payment or
+Telegram messages. It cannot establish payment acceptance.
 
-On continuing after the environment reattached, the Vinted homepage and the
-same handover listing returned HTTP 403 responses rather than a CONNECT
-exception. The listing response was HTML, with no recognised security-challenge
-marker. This does not identify the cause of the denial or establish that the
-historical item is still available. The existing Railway dashboard returned
-HTTP 302 to an unauthenticated request. Authenticated Railway tools/credentials
-are still unavailable in this chat; no production session was inspected.
-The user's Railway app mention did not expose executable tools to this Codex
-session. They report secure Railway sign-in works in regular ChatGPT. An
-optional `RAILWAY_PROJECT_TOKEN` secret requirement was saved as an API fallback,
-scoped to HTTPS requests to `backboard.railway.com`; no value was supplied.
-If using that fallback, enter its value securely in environment settings,
-review/save, and publish. No token is required merely to review this package.
+## Live acceptance still required
 
-## Next live checks
+A normal alert must show seller text for the exact live item. Buyer identity
+must succeed before an explicitly authorised item's checkout can be verified.
+A payment test requires that exact item and approved all-in total; this update
+has no authority to choose an item or spend money for testing. Current checkout
+response contracts and saved delivery selection must be verified live. A failed
+external access request remains an unresolved feature, even if tests pass.
 
-1. Connect Railway access to the current chat. The production database and
-   buyer-session key remain on its existing volume; the handover contains
-   neither. Do not initialise a replacement database or copy decrypted tokens.
-2. Review/deploy the changes to that existing service. Run the owner-facing
-   **Check saved buyer connection** once, respecting its 30-second throttle.
-   Inspect the fixed redirect classification and stage. A logged-in phone
-   browser is a separate session and cannot establish server identity.
-3. Observe one normal listing alert and its detail-request HTTP status.
-   If access succeeds, compare its description to the exact live item's seller
-   text, including Full notes overflow. Observe retry recovery and one-message
-   photo controls if a transient failure occurs.
-4. Only after identity succeeds, inspect live checkout contracts with an
-   explicitly authorised item. Preparation can create transaction state.
-   A payment test additionally requires explicit item and all-in spending
-   approval. Require the real total within the current per-search cap and
-   retain the existing protection against repeated ambiguous payments.
-
-Neither live feature is verified complete by this local change.
-
-## Public comparison
-
-Souk's September 2026 guides describe linked accounts, saved delivery/payment,
-one-click buying, bank confirmation and checking uncertain outcomes before
-retrying. Public clients exposed a concrete web-refresh contract and newer
-server-rendered description schema. The useful contracts were adapted into
-original code; their entire implementations were not installed. Several
-marketed bot repositories contain only READMEs/assets. Exact source links,
-dates and the remaining unverified checkout differences are documented in
-`VINTED_RESEARCH.md`. The exact Vintie product was not established from the
-available public search results.
+See VINTED_RESEARCH.md for supplied public-source evidence and its limitations.

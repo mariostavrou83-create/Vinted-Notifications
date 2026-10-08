@@ -1,11 +1,14 @@
 import multiprocessing
 import os
+import signal
+import threading
 import time
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
 import db
 from logger import get_logger
+from process_watchdog import stop_process
 
 # Get logger for this module
 logger = get_logger(__name__)
@@ -31,7 +34,10 @@ scrape_process = None
 item_extractor_process = None
 dispatcher_process = None
 web_ui_process_instance = None
+buyer_check_process = None
 current_query_refresh_delay = None
+monitor_lock = threading.Lock()
+shutdown_requested = threading.Event()
 
 
 def scraper_process(items_queue):
@@ -132,6 +138,13 @@ def check_refresh_delay(items_queue):
 
 
 def monitor_processes(items_queue, telegram_queue, rss_queue, new_items_queue=None):
+    with monitor_lock:
+        if shutdown_requested.is_set():
+            return
+        _monitor_processes(items_queue, telegram_queue, rss_queue, new_items_queue)
+
+
+def _monitor_processes(items_queue, telegram_queue, rss_queue, new_items_queue=None):
     global telegram_process, rss_process, ebay_worker_process
     global scrape_process, item_extractor_process, dispatcher_process, web_ui_process_instance
 
@@ -188,9 +201,8 @@ def monitor_processes(items_queue, telegram_queue, rss_queue, new_items_queue=No
     elif not telegram_should_run and telegram_is_running:
         # Stop telegram process
         logger.info("Stopping telegram bot process.")
-        telegram_process.terminate()
-        telegram_process.join()
-        telegram_process = None
+        if stop_process(telegram_process, name="telegram"):
+            telegram_process = None
 
     ### RSS ###
     # Check RSS process status
@@ -207,9 +219,8 @@ def monitor_processes(items_queue, telegram_queue, rss_queue, new_items_queue=No
     elif not rss_should_run and rss_is_running:
         # Stop RSS process
         logger.info("Stopping RSS process based on database status")
-        rss_process.terminate()
-        rss_process.join()
-        rss_process = None
+        if stop_process(rss_process, name="rss"):
+            rss_process = None
 
 
 def plugin_checker():
@@ -307,48 +318,49 @@ if __name__ == "__main__":
     web_ui_process_instance = multiprocessing.Process(target=web_ui_process)
     web_ui_process_instance.start()
 
+    if os.environ.get("MSJ_BUYER_CHECK_ON_START"):
+        from vinted_connection_check import run_once
+
+        buyer_check_process = multiprocessing.Process(
+            target=run_once, name="buyer-connection-check"
+        )
+        buyer_check_process.start()
+
+    parent_pid = os.getpid()
+
+    def stop_main(signum, frame):
+        # Watchdog replacements may inherit handlers when forked. Their normal
+        # terminate behavior must remain independent of the parent's cleanup.
+        if os.getpid() != parent_pid:
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+            return
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop_main)
+
     try:
         # Workers can be replaced by the watchdog; do not join obsolete handles.
         while True:
             time.sleep(5)
     except KeyboardInterrupt:
-        # Handle Ctrl+C gracefully
         logger.info("Main process interrupted")
-
-        # Shutdown the monitor scheduler
-        monitor_scheduler.shutdown()
-
-        # Terminate all processes
-        scrape_process.terminate()
-        item_extractor_process.terminate()
-        dispatcher_process.terminate()
-        # Terminate web UI process
-        web_ui_process_instance.terminate()
-
-        # Plugins
-        if ebay_worker_process and ebay_worker_process.is_alive():
-            ebay_worker_process.terminate()
-            ebay_worker_process.join()
-
-        if telegram_process and telegram_process.is_alive():
-            telegram_process.terminate()
-            # Set the process status in the database
-            db.set_parameter("telegram_process_running", "False")
-        if rss_process and rss_process.is_alive():
-            rss_process.terminate()
-            # Set the process status in the database
-            db.set_parameter("rss_process_running", "False")
-
-        # Wait for all processes to terminate
-        scrape_process.join()
-        item_extractor_process.join()
-        dispatcher_process.join()
-        web_ui_process_instance.join()
-
-        # Plugins
-        if telegram_process:
-            telegram_process.join()
-        if rss_process:
-            rss_process.join()
-
+    finally:
+        shutdown_requested.set()
+        monitor_scheduler.shutdown(wait=False)
+        # A running watchdog must finish before we capture the final handles;
+        # otherwise it could start an orphan replacement during shutdown.
+        with monitor_lock:
+            for process in (
+                scrape_process,
+                item_extractor_process,
+                dispatcher_process,
+                web_ui_process_instance,
+                ebay_worker_process,
+                telegram_process,
+                rss_process,
+                buyer_check_process,
+            ):
+                if process:
+                    stop_process(process, name=process.name)
         logger.info("All processes terminated")

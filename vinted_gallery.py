@@ -7,8 +7,9 @@ Only a configured, supported security check allows one additional listing read.
 import re
 import time
 from contextlib import closing, contextmanager
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import requests
 
@@ -41,7 +42,11 @@ def retry_pending(details):
 
 
 def listing_url(value):
-    if not isinstance(value, str) or len(value) > 4096:
+    if (
+        not isinstance(value, str)
+        or len(value) > 4096
+        or re.search(r"[\x00-\x20\x7f]", value)
+    ):
         return None
     try:
         parsed = urlparse(value)
@@ -50,38 +55,10 @@ def listing_url(value):
     if (
         parsed.scheme == "https"
         and parsed.netloc in ("www.vinted.co.uk", "vinted.co.uk")
-        and re.fullmatch(r"/items/\d+(?:-[\w-]+)?/?", parsed.path)
+        and re.fullmatch(r"/items/[0-9]{1,20}(?:-[\w-]+)?/?", unquote(parsed.path))
     ):
         return "https://www.vinted.co.uk" + parsed.path
     return None
-
-
-def canonical_listing_url(value, current):
-    """Allow one clean canonical redirect within the same UK listing identity."""
-    if (
-        not isinstance(value, str)
-        or not value
-        or len(value) > 4096
-        or any(ord(char) <= 32 or ord(char) == 127 for char in value)
-    ):
-        return None
-    try:
-        target = urljoin(current, value)
-        parsed = urlparse(target)
-    except ValueError:
-        return None
-    accepted = listing_url(target)
-    if (
-        not accepted
-        or parsed.netloc != "www.vinted.co.uk"
-        or parsed.query
-        or parsed.fragment
-        or target == current
-        or re.search(r"/items/(\d+)", target).group(1)
-        != re.search(r"/items/(\d+)", current).group(1)
-    ):
-        return None
-    return accepted
 
 
 def photo_identity(url):
@@ -103,30 +80,72 @@ def distinct_photos(urls):
 
 
 class GalleryParser(HTMLParser):
+    VOID_TAGS = frozenset(
+        {
+            "area",
+            "base",
+            "br",
+            "col",
+            "embed",
+            "hr",
+            "img",
+            "input",
+            "link",
+            "meta",
+            "param",
+            "source",
+            "track",
+            "wbr",
+        }
+    )
+    HIDDEN_TAGS = frozenset(
+        {"script", "style", "noscript", "iframe", "template", "button"}
+    )
+
     def __init__(self):
         super().__init__()
         self.photos = {}
-        self.description_parts = []
-        self.description_depth = 0
-        self.description_done = False
-        self.in_script = False
+        self.stack = []
+        self.descriptions = []
+
+    @property
+    def description(self):
+        # The outer item-description can include controls and a collapsed copy.
+        # Prefer the actual text anchor, while retaining the older outer markup.
+        for testid in ("item-description-text", "item-description"):
+            for candidate in self.descriptions:
+                if candidate["done"] and candidate["testid"] == testid:
+                    text = clean_description("".join(candidate["parts"]))
+                    if text:
+                        return text
+        return ""
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
-        if tag == "script":
-            self.in_script = True
-        if (
-            not self.description_done
-            and not self.description_depth
-            and attrs.get("data-testid")
-            in ("item-description", "item-description-text")
+        hidden = (
+            bool(self.stack and self.stack[-1][1])
+            or tag in self.HIDDEN_TAGS
+            or "hidden" in attrs
+            or attrs.get("aria-hidden", "").lower() == "true"
+        )
+        if not hidden and attrs.get("data-testid") in (
+            "item-description",
+            "item-description-text",
         ):
-            self.description_depth = 1
-        elif self.description_depth:
-            if tag not in ("br", "img", "hr", "input", "meta", "link"):
-                self.description_depth += 1
-            if tag in ("br", "p", "div", "li"):
-                self.description_parts.append("\n")
+            self.descriptions.append(
+                {
+                    "testid": attrs["data-testid"],
+                    "depth": len(self.stack) + 1,
+                    "parts": [],
+                    "done": tag in self.VOID_TAGS,
+                }
+            )
+        if not hidden and tag in ("br", "p", "div", "li"):
+            for candidate in self.descriptions:
+                if not candidate["done"]:
+                    candidate["parts"].append("\n")
+        if tag not in self.VOID_TAGS:
+            self.stack.append((tag, hidden))
         match = re.fullmatch(r"item-photo-(\d+)--img", attrs.get("data-testid", ""))
         if tag == "img" and match and safe_listing_photo(attrs.get("src")):
             index = int(match[1])
@@ -134,23 +153,25 @@ class GalleryParser(HTMLParser):
                 self.photos.setdefault(index, attrs["src"])
 
     def handle_endtag(self, tag):
-        if tag == "script":
-            self.in_script = False
-        if self.description_depth and tag not in (
-            "br",
-            "img",
-            "hr",
-            "input",
-            "meta",
-            "link",
-        ):
-            self.description_depth -= 1
-            if not self.description_depth:
-                self.description_done = True
+        if tag in self.VOID_TAGS:
+            return
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index][0] == tag:
+                if not self.stack[-1][1] and tag in ("p", "div", "li"):
+                    for candidate in self.descriptions:
+                        if not candidate["done"]:
+                            candidate["parts"].append("\n")
+                del self.stack[index:]
+                for candidate in self.descriptions:
+                    if candidate["depth"] > len(self.stack):
+                        candidate["done"] = True
+                return
 
     def handle_data(self, value):
-        if not self.in_script and self.description_depth:
-            self.description_parts.append(value)
+        if not self.stack or not self.stack[-1][1]:
+            for candidate in self.descriptions:
+                if not candidate["done"]:
+                    candidate["parts"].append(value)
 
 
 def parse_gallery(html):
@@ -160,16 +181,18 @@ def parse_gallery(html):
 
 
 def parse_listing(html, url):
+    url = listing_url(url)
+    if not url or not isinstance(html, str) or len(html) > 4 * 1024 * 1024:
+        return {"photos": [], "description": ""}
     parser = GalleryParser()
     parser.feed(html)
-    description = clean_description("".join(parser.description_parts))
-    item_id = re.search(r"/items/(\d+)", url).group(1)
+    item_id = re.match(r"/items/([0-9]+)", unquote(urlparse(url).path))[1]
     page = parse_page_data(html, item_id)
     return {
         "photos": distinct_photos(
             [url for _, url in sorted(parser.photos.items())] + page["photos"]
         ),
-        "description": description or page["description"],
+        "description": parser.description or page["description"],
     }
 
 
@@ -180,6 +203,26 @@ def _pause(seconds):
             ON CONFLICT(key) DO UPDATE SET value=MAX(value,excluded.value)""",
             (time.time() + seconds,),
         )
+        return conn.execute(
+            "SELECT value FROM delivery_runtime WHERE key='vinted_gallery_after'"
+        ).fetchone()[0]
+
+
+def retry_delay(response):
+    """Keep the shared five-minute minimum and honour a longer server pause."""
+    value = response.headers.get("Retry-After")
+    if not isinstance(value, str) or len(value) > 100:
+        return 300
+    value = value.strip()
+    if re.fullmatch(r"[0-9]{1,10}", value):
+        return max(300, int(value))
+    try:
+        date = parsedate_to_datetime(value)
+        if date.tzinfo is not None:
+            return max(300, date.timestamp() - time.time())
+    except (ValueError, TypeError, OverflowError):
+        pass
+    return 300
 
 
 def challenge_html(html):
@@ -194,33 +237,52 @@ def challenge_html(html):
     )
 
 
+def canonical_redirect(url, location):
+    """Accept only a canonical UK item URL for this same numeric listing."""
+    if (
+        not isinstance(location, str)
+        or len(location) > 4096
+        or re.search(r"[\x00-\x20\x7f]", location)
+    ):
+        return None
+    url = listing_url(url)
+    if not url:
+        return None
+    try:
+        destination = urljoin(url, location)
+        parsed = urlparse(destination)
+    except ValueError:
+        return None
+    # A canonical item redirect needs no query or fragment. This also excludes
+    # authentication/challenge parameters without copying them into diagnostics.
+    if parsed.query or parsed.fragment:
+        return None
+    target = listing_url(destination)
+    if not target or target == url:
+        return None
+    old_id = re.match(r"/items/([0-9]+)", unquote(urlparse(url).path))[1]
+    new_id = re.match(r"/items/([0-9]+)", unquote(urlparse(target).path))[1]
+    return target if old_id == new_id else None
+
+
 @contextmanager
 def listing_client(client=None):
-    """Use the configured browser transport, with available saved buyer cookies.
+    """Borrow the supplied buyer client, or create a public browser client.
 
-    An unreadable saved session can fall back to anonymous cookies. Invalid private
-    network settings fail closed rather than sending the request without its proxy.
-    This path never renews account credentials. Its caller validates canonical
-    redirects before making any additional same-item read.
+    Public reads keep saved account cookies separate, so an expired buyer cannot
+    redirect otherwise public item pages into authentication. Both paths use the
+    owner's configured fixed proxy and optional challenge service.
     """
     import vinted_buyer as buyer
 
     if client is not None:
         yield client
         return
-    with closing(connection()) as conn:
-        saved = conn.execute("SELECT session FROM vinted_buyer WHERE id=1").fetchone()
-    cookies = None
-    if saved and saved[0]:
-        try:
-            cookies = buyer.decrypt(saved[0])
-        except (buyer.BuyerError, OSError):
-            logger.info("Vinted listing detail: saved_session_unavailable")
-    client = buyer.Client(cookies) if cookies is not None else buyer.Client()
+    reader = buyer.Client()
     try:
-        yield client
+        yield reader
     finally:
-        client.session.close()
+        reader.session.close()
 
 
 @contextmanager
@@ -314,15 +376,23 @@ def fetch_listing(url, *, client=None, parser=parse_listing):
                     body, state = bounded_body(response, started)
                     snapshot = response_snapshot(response, body, current_url)
                 if snapshot.status_code in (301, 302, 303, 307, 308):
-                    canonical = canonical_listing_url(
-                        snapshot.headers.get("Location"), current_url
+                    canonical = canonical_redirect(
+                        current_url, snapshot.headers.get("Location")
                     )
-                    if attempt < 2 and not canonical_used and canonical:
+                    if (
+                        attempt < 2
+                        and not canonical_used
+                        and canonical
+                        and snapshot.status_code in (301, 302, 307, 308)
+                    ):
                         canonical_used = True
                         current_url = canonical
                         continue
                     if buyer.redirect_reason(snapshot) != "security_challenge":
                         return dict(empty, state=state)
+                if snapshot.status_code == 429:
+                    retry_after = _pause(retry_delay(snapshot))
+                    return dict(empty, state="access_limited", retry_after=retry_after)
                 html = body.decode("utf-8", errors="replace")
                 try:
                     challenge_data = snapshot.json()
@@ -338,10 +408,11 @@ def fetch_listing(url, *, client=None, parser=parse_listing):
                         solver_used = True
                         if reader.solve_challenge(snapshot, challenge_data):
                             continue
-                    _pause(300)
-                    return dict(empty, state="challenge")
+                    retry_after = _pause(retry_delay(snapshot))
+                    return dict(empty, state="challenge", retry_after=retry_after)
                 if state == "access_limited":
-                    _pause(300)
+                    retry_after = _pause(retry_delay(snapshot))
+                    return dict(empty, state=state, retry_after=retry_after)
                 if state != "ready":
                     return dict(empty, state=state)
                 data = parser(html, url)
@@ -425,6 +496,10 @@ async def resolve(row, details, *, persist=True, include_description=False):
                 (json.dumps(details, ensure_ascii=False), row["item_id"]),
             )
     logger.info(
-        "Vinted gallery item=%s photos=%s source=%s", row["item_id"], len(photos), state
+        "Vinted gallery item=%s photos=%s source=%s description_chars=%s",
+        row["item_id"],
+        len(photos),
+        state,
+        len(details.get("description", "")),
     )
     return photos

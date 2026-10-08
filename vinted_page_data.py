@@ -1,6 +1,7 @@
 """Read identity-scoped seller data from server-rendered listing scripts.
 
-Schema references (reviewed 7 October 2026; no live retrieval established):
+Schema references reviewed 7 October 2026; a current UK listing page also
+confirmed the anchored Flight description plugin on that date:
 https://github.com/teddy-vltn/vinted-discord-bot/blob/main/src/api/fetchItemDetail.js
 (Unlicense) reads descriptions from the rendered payload after detail API removal.
 https://github.com/ScrapeUnblocker/vinted-scraper/blob/main/src/scrapeunblocker_vinted/parsing.py
@@ -20,9 +21,10 @@ matches are excluded. Unsupported Flight record types fail closed.
 
 import json
 import re
+from collections import deque
 from html.parser import HTMLParser
 from itertools import islice
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from alert_images import safe_listing_photo
 from listing_text import clean_description
@@ -31,6 +33,7 @@ MAX_HTML = 4 * 1024 * 1024
 MAX_SCRIPTS = 512
 MAX_DEPTH = 64
 MAX_NODES = 10000
+MAX_PURCHASE_NODES = 50000
 MAX_ROWS = 2048
 _PUSH = "self.__next_f.push("
 _ROW = re.compile(rb"([0-9a-fA-F]{0,16}):")
@@ -67,7 +70,9 @@ def _url_id(value):
             return None
         if not parsed.netloc and parsed.scheme:
             return None
-        match = re.fullmatch(r"/items/([0-9]{1,20})(?:-[\w-]+)?/?", parsed.path)
+        match = re.fullmatch(
+            r"/items/([0-9]{1,20})(?:-[\w-]+)?/?", unquote(parsed.path)
+        )
         return match[1] if match else None
     except ValueError:
         return None
@@ -245,25 +250,30 @@ def _description(value, rows, *, html=False):
 
 
 def _plugins(value, item_id, *, scoped, rows):
+    value = _resolve(value, rows)
     if not isinstance(value, list) or len(value) > 100:
         return ""
+    plugins = []
     identities = []
-    for plugin in value:
-        if not isinstance(plugin, dict) or not isinstance(plugin.get("data"), dict):
+    for raw in value:
+        plugin = _resolve(raw, rows)
+        if not isinstance(plugin, dict):
             continue
-        if plugin.get("name") in ("summary", "shipping"):
-            data = plugin["data"]
-            if "item_id" in data:
-                identities.append(_item_id(data["item_id"]))
+        data = _resolve(plugin.get("data"), rows)
+        if not isinstance(data, dict):
+            continue
+        plugins.append((plugin.get("name"), data))
+        # An explicit identity anywhere in this plugin list must agree, including
+        # the description itself, not only the summary/shipping plugins.
+        if "item_id" in data:
+            identities.append(_item_id(data["item_id"]))
     if identities and any(identity != item_id for identity in identities):
         return ""
     if not scoped and not identities:
         return ""
-    for plugin in value:
-        if isinstance(plugin, dict) and plugin.get("name") == "description":
-            data = plugin.get("data")
-            if isinstance(data, dict):
-                return _description(data.get("description"), rows)
+    for name, data in plugins:
+        if name == "description":
+            return _description(data.get("description"), rows)
     return ""
 
 
@@ -290,6 +300,81 @@ def _add_photos(result, values):
             seen.add(identity)
 
 
+def parse_purchase_item(html, item_id):
+    """Read current buy eligibility from one consistent, identity-scoped item."""
+    item_id = _item_id(item_id)
+    if not item_id or not isinstance(html, str) or len(html) > MAX_HTML:
+        return None
+    parser = _Scripts()
+    parser.feed(html)
+    roots, rows = _records(parser.scripts)
+    pending = deque((root, 0) for root in roots)
+    candidates = []
+    visited = 0
+    required = ("seller_id", "price", "can_buy", "is_reserved", "is_hidden")
+    while pending and visited < MAX_PURCHASE_NODES:
+        value, depth = pending.popleft()
+        visited += 1
+        if depth > MAX_DEPTH:
+            return None
+        remaining = max(0, MAX_PURCHASE_NODES - visited - len(pending))
+        if isinstance(value, list):
+            children = [child for child in value if isinstance(child, (dict, list))]
+            if len(children) > remaining:
+                return None
+            pending.extend((child, depth + 1) for child in children)
+            continue
+        if not isinstance(value, dict):
+            continue
+        identities = [_item_id(value[key]) for key in ("id", "item_id") if key in value]
+        # Recommendations and independent status/description plugins cannot
+        # supply a target item's price or seller. Every field comes from the
+        # same complete item record, including resolved Flight references.
+        if _item_id(value.get("id")) == item_id and (
+            "price" in value or "can_buy" in value
+        ):
+            if any(identity != item_id for identity in identities) or not all(
+                key in value for key in required
+            ):
+                return None
+            if "url" in value and _url_id(value["url"]) != item_id:
+                return None
+            price = _resolve(value["price"], rows)
+            seller = _item_id(_resolve(value["seller_id"], rows))
+            flags = {
+                key: _resolve(value[key], rows)
+                for key in ("can_buy", "is_reserved", "is_hidden")
+            }
+            if (
+                not seller
+                or not isinstance(price, dict)
+                or not isinstance(price.get("currency_code"), str)
+                or "amount" not in price
+                or any(type(flag) is not bool for flag in flags.values())
+            ):
+                return None
+            candidate = {
+                "id": item_id,
+                "user_id": seller,
+                "price": {
+                    "amount": price["amount"],
+                    "currency_code": price["currency_code"],
+                },
+                **flags,
+            }
+            if candidates and candidate != candidates[0]:
+                return None
+            candidates.append(candidate)
+        children = [
+            child for child in value.values() if isinstance(child, (dict, list))
+        ]
+        if len(children) > remaining:
+            return None
+        pending.extend((child, depth + 1) for child in children)
+    # A truncated traversal cannot rule out a later conflicting target record.
+    return candidates[0] if candidates and not pending else None
+
+
 def parse_page_data(html, item_id):
     """Return only target-listing data from supported JSON and Flight records."""
     item_id = _item_id(item_id)
@@ -298,29 +383,45 @@ def parse_page_data(html, item_id):
     parser = _Scripts()
     parser.feed(html)
     roots, rows = _records(parser.scripts)
-    pending = [(root, 0) for root in reversed(roots)]
+    # Give each Flight record a turn before descending into a large bootstrap
+    # record. Current pages put the listing after thousands of translation and
+    # configuration values; depth-first traversal exhausts the bound first.
+    pending = deque((root, 0) for root in roots)
     result = _empty()
     visited = 0
     while pending and visited < MAX_NODES:
-        value, depth = pending.pop()
+        value, depth = pending.popleft()
         visited += 1
         if depth > MAX_DEPTH:
             continue
         remaining = max(0, MAX_NODES - visited - len(pending))
         if isinstance(value, list):
-            pending.extend((child, depth + 1) for child in reversed(value[:remaining]))
+            pending.extend(
+                (child, depth + 1)
+                for child in islice(
+                    (child for child in value if isinstance(child, (dict, list))),
+                    remaining,
+                )
+            )
             continue
         if not isinstance(value, dict):
             continue
         product = value.get("@type") == "Product"
+        explicit_ids = [
+            _item_id(value[key]) for key in ("id", "item_id") if key in value
+        ]
+        identity_matches = bool(explicit_ids) and all(
+            identity == item_id for identity in explicit_ids
+        )
         matched = (
             _product_identity(value, item_id)
             if product
             else (
-                _item_id(value.get("id")) == item_id
+                identity_matches
                 and (
-                    isinstance(value.get("photos"), list)
+                    isinstance(_resolve(value.get("photos"), rows), list)
                     or "seller_id" in value
+                    or "plugins" in value
                     or (
                         isinstance(value.get("title"), str)
                         and ("description" in value or "plugins" in value)
@@ -345,7 +446,12 @@ def parse_page_data(html, item_id):
                 result["photos"],
                 _resolve(value.get("image") if product else value.get("photos"), rows),
             )
-        elif not result["description"] and "plugins" in value:
+        elif (
+            not result["description"]
+            and "plugins" in value
+            and not product
+            and not explicit_ids
+        ):
             result["description"] = _plugins(
                 _resolve(value["plugins"], rows), item_id, scoped=False, rows=rows
             )
@@ -353,6 +459,9 @@ def parse_page_data(html, item_id):
         # descendants (which can contain recommendations or seller profiles).
         pending.extend(
             (child, depth + 1)
-            for child in reversed(list(islice(value.values(), remaining)))
+            for child in islice(
+                (child for child in value.values() if isinstance(child, (dict, list))),
+                remaining,
+            )
         )
     return result

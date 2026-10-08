@@ -341,6 +341,9 @@ def record(row, details, result):
                     file_id,
                 ),
             )
+            from alert_delivery import acknowledge_listing
+
+            acknowledge_listing(conn, row, result.message_id)
     except sqlite3.Error:
         # A bookkeeping failure must not resend an already accepted notification.
         logger.exception(
