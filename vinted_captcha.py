@@ -159,6 +159,11 @@ def _safe_error(data, status=200, *, request_payload=None):
             try:
                 parts = urlsplit(task.get("proxy", ""))
                 private_values.extend((parts.username, parts.password))
+                raw_proxy = task.get("proxy", "")
+                if isinstance(raw_proxy, str) and "://" not in raw_proxy:
+                    fields = raw_proxy.split(":")
+                    if len(fields) in (4, 5):
+                        private_values.extend(fields[-2:])
             except (ValueError, TypeError):
                 pass
         if re.fullmatch(r"ERROR_[A-Z_]{1,64}", normalized) and not any(
@@ -370,6 +375,21 @@ def _cookie(solution, user_agent):
     return token
 
 
+def solver_proxy(value):
+    """Serialize the SAME endpoint using the DataDome task's documented form."""
+    parsed = urlsplit(value)
+    username, password = unquote(parsed.username or ""), unquote(parsed.password or "")
+    # URL syntax preserves IPv6 and credentials containing delimiter characters.
+    if ":" in parsed.hostname or ":" in username or ":" in password:
+        return value
+    parts = [parsed.hostname, str(parsed.port)]
+    if username:
+        parts.extend((username, password))
+    if parsed.scheme != "http":
+        parts.insert(0, parsed.scheme)
+    return ":".join(parts)
+
+
 def _post(session, path, payload, deadline):
     remaining = deadline - time.monotonic()
     if remaining <= 0:
@@ -444,7 +464,7 @@ def solve_datadome(
                     "type": "DatadomeSliderTask",
                     "websiteURL": WEBSITE,
                     "captchaUrl": challenge_url,
-                    "proxy": proxy,
+                    "proxy": solver_proxy(proxy),
                     "userAgent": user_agent,
                 },
             },

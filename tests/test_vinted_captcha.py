@@ -245,7 +245,7 @@ class SolverTests(unittest.TestCase):
                 "type": "DatadomeSliderTask",
                 "websiteURL": captcha.WEBSITE,
                 "captchaUrl": CHALLENGE,
-                "proxy": PROXY,
+                "proxy": "proxy.example.com:8080:proxy-user:private-password",
                 "userAgent": captcha.CHROME_USER_AGENT,
             },
         )
@@ -266,7 +266,9 @@ class SolverTests(unittest.TestCase):
         self.assertEqual(self.solve(challenge_url=url).state, "solved")
         task = self.session.post.call_args.kwargs["json"]["task"]
         self.assertEqual(task["type"], "DatadomeSliderTask")
-        self.assertEqual(task["proxy"], PROXY)
+        self.assertEqual(
+            task["proxy"], "proxy.example.com:8080:proxy-user:private-password"
+        )
 
     def test_solver_cookie_and_metadata_are_never_in_public_diagnostics(self):
         self.session.post.return_value = response(
@@ -373,6 +375,29 @@ class SolverTests(unittest.TestCase):
         result = self.solve(api_key=secret)
         self.assertEqual(result.provider_error, "")
         self.assertNotIn(secret, repr(result) + json.dumps(result.public()))
+        result = self.solve(
+            proxy="http://ERROR_PRIVATE_KEY:offline-password@proxy.example.com:8080"
+        )
+        self.assertEqual(result.provider_error, "")
+        self.assertNotIn(secret, repr(result) + json.dumps(result.public()))
+
+    def test_solver_proxy_format_preserves_protocol_endpoint_and_credentials(self):
+        self.assertEqual(
+            captcha.solver_proxy("http://user:pass@proxy.example.com:8080"),
+            "proxy.example.com:8080:user:pass",
+        )
+        self.assertEqual(
+            captcha.solver_proxy("socks5://user:pass@proxy.example.com:8080"),
+            "socks5:proxy.example.com:8080:user:pass",
+        )
+        self.assertEqual(
+            captcha.solver_proxy("http://buyer%40test:p%24ss@proxy.example.com:8080"),
+            "proxy.example.com:8080:buyer@test:p$ss",
+        )
+        self.assertEqual(
+            captcha.solver_proxy("http://user:has%3Acolon@proxy.example.com:8080"),
+            "http://user:has%3Acolon@proxy.example.com:8080",
+        )
 
     def test_response_body_redirect_and_json_schemas_are_bounded(self):
         for fake, state in (
