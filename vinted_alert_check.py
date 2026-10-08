@@ -45,12 +45,13 @@ def readable_reference(media_id):
         return False
 
 
-def check_latest_alert():
+def check_latest_alert(*, require_examples=False):
     import photo_cards
     import vinted_alerts
     import vinted_gallery
 
     result = {
+        "check": "latest_with_examples" if require_examples else "latest_alert",
         "outcome": "unverified",
         "stage": "fresh_alert",
         "messages_sent": 0,
@@ -63,7 +64,8 @@ def check_latest_alert():
         with closing(connection()) as conn:
             row = conn.execute(
                 "SELECT * FROM alert_outbox WHERE platform='vinted' AND status='sent' "
-                "ORDER BY sent_at DESC LIMIT 1"
+                + ("AND reference_id IS NOT NULL " if require_examples else "")
+                + "ORDER BY sent_at DESC LIMIT 1"
             ).fetchone()
             health = conn.execute(
                 "SELECT last_success FROM telegram_control_health WHERE platform='vinted'"
@@ -175,7 +177,10 @@ def run_once():
             "Vinted private alert startup: outcome=unverified stage=reservation"
         )
         return None
-    return check_latest_alert()
+    result = check_latest_alert()
+    if result.get("example_reference_present") is False:
+        check_latest_alert(require_examples=True)
+    return result
 
 
 def summary(result):

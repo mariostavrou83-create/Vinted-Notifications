@@ -123,6 +123,26 @@ class AlertCheckTests(DatabaseFixture, unittest.TestCase):
             self.assertEqual(check.check_latest_alert()["stage"], "fresh_alert")
             fetch.assert_not_called()
 
+    def test_example_check_selects_an_alert_with_examples_after_a_newer_plain_alert(
+        self,
+    ):
+        self.batch(2, [111])
+        newer = alert_delivery.claim(now=time.time())
+        photo_cards.record(
+            newer,
+            vinted_alerts.get_details(newer),
+            SimpleNamespace(
+                message_id=43, photo=[SimpleNamespace(file_id="newer-photo")]
+            ),
+        )
+        with patch("vinted_gallery.fetch_listing", return_value=self.listing) as fetch:
+            result = check.check_latest_alert(require_examples=True)
+        self.assertEqual(result["check"], "latest_with_examples")
+        self.assertEqual(result["outcome"], "matched")
+        self.assertTrue(result["example_image_readable"])
+        self.assertTrue(result["listing_and_example_controls_present"])
+        fetch.assert_called_once_with(self.row["url"])
+
     def test_blocked_listing_and_secret_exception_remain_unverified(self):
         for candidate in (
             {"state": "cooldown"},

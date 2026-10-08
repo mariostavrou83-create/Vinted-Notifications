@@ -446,6 +446,14 @@ class PrivateRouteTests(DatabaseFixture, unittest.TestCase):
             self.assertEqual(result.status_code, 303)
             self.web.get(result.location)
             execute.assert_called_once_with()
+            execute.reset_mock()
+            result = self.web.post(
+                "/connections",
+                data={"action": "buyer_alert_examples_check", "csrf": csrf},
+            )
+            self.assertEqual(result.status_code, 303)
+            self.web.get(result.location)
+            execute.assert_called_once_with(require_examples=True)
 
     def test_iproyal_copy_row_is_saved_privately_and_preserves_search_preferences(self):
         csrf = self.login()

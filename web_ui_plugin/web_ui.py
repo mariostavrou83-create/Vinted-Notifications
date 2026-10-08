@@ -647,10 +647,14 @@ def create_app(test_config=None):
                         vinted_network_check.summary(result),
                         "success" if result["outcome"] == "verified" else "error",
                     )
-                elif action == "buyer_alert_check":
+                elif action in ("buyer_alert_check", "buyer_alert_examples_check"):
                     import vinted_alert_check
 
-                    result = vinted_alert_check.check_latest_alert()
+                    result = (
+                        vinted_alert_check.check_latest_alert(require_examples=True)
+                        if action == "buyer_alert_examples_check"
+                        else vinted_alert_check.check_latest_alert()
+                    )
                     flash(
                         vinted_alert_check.summary(result),
                         "success" if result["outcome"] == "matched" else "error",
@@ -667,7 +671,12 @@ def create_app(test_config=None):
                     code=(
                         303
                         if action
-                        in ("buyer_network", "buyer_network_check", "buyer_alert_check")
+                        in (
+                            "buyer_network",
+                            "buyer_network_check",
+                            "buyer_alert_check",
+                            "buyer_alert_examples_check",
+                        )
                         else 302
                     ),
                 )
