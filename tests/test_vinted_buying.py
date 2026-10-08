@@ -672,6 +672,122 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         self.assertIn("api_code=100", " ".join(logs.output))
         self.assertNotIn("private-message", " ".join(logs.output))
 
+    def test_cookie_expiry_evidence_is_bounded_and_never_exposes_claims_or_tokens(self):
+        import base64
+
+        def token(expiry):
+            payload = (
+                base64.urlsafe_b64encode(
+                    json.dumps(
+                        {"exp": expiry, "private": "never-log-this-claim"}
+                    ).encode()
+                )
+                .decode()
+                .rstrip("=")
+            )
+            return "header." + payload + ".signature"
+
+        with patch.object(buyer.time, "time", return_value=1000):
+            self.assertEqual(buyer.token_expiry_hint(token(999)), "expired")
+            self.assertEqual(buyer.token_expiry_hint(token(1001)), "not_expired")
+            for value in (
+                None,
+                "opaque-private-refresh",
+                "a.bad!.c",
+                token(True),
+                token(float("nan")),
+                "x" * 8193,
+            ):
+                self.assertEqual(buyer.token_expiry_hint(value), "unknown")
+        client = buyer.Client()
+        self.addCleanup(client.session.close)
+        client.session.cookies.set(
+            "access_token_web", token(1), domain="www.vinted.co.uk", secure=True
+        )
+        client.session.cookies.set(
+            "refresh_token_web",
+            "private-refresh-root-0123456789",
+            domain="www.vinted.co.uk",
+            path="/",
+            secure=True,
+        )
+        client.session.cookies.set(
+            "refresh_token_web",
+            "private-refresh-auth-0123456789",
+            domain="www.vinted.co.uk",
+            path="/web/api/auth",
+            secure=True,
+        )
+        with self.assertLogs("vinted_buyer", level="INFO") as logs:
+            client.log_cookie_evidence()
+        text = " ".join(logs.output)
+        self.assertIn("refresh_sent=2 refresh_stored=2", text)
+        self.assertIn("access_expiry=expired", text)
+        for secret in (
+            token(1),
+            "never-log-this-claim",
+            "private-refresh-root",
+            "private-refresh-auth",
+        ):
+            self.assertNotIn(secret, text)
+
+    def test_failed_native_renewal_reports_reconnect_and_never_starts_checkout(self):
+        saved = {
+            "csrf": "private-csrf-token-0123456789",
+            "cookies": {
+                "access_token_web": "private-access-token-0123456789",
+                "refresh_token_web": "private-refresh-token-0123456789",
+            },
+        }
+        with closing(search_settings.connection()) as conn, conn:
+            sealed = buyer.encrypt(saved)
+            conn.execute("UPDATE vinted_buyer SET session=?", (sealed,))
+
+        def response(status, data, text=""):
+            return Mock(
+                status_code=status,
+                json=Mock(return_value=data),
+                text=text,
+                headers={},
+                cookies=requests.cookies.RequestsCookieJar(),
+            )
+
+        replies = [
+            response(401, {"code": "unauthorized", "message": "Unauthorized"}),
+            response(
+                200,
+                {},
+                '<meta name="csrf-token" content="private-csrf-token-0123456789">',
+            ),
+            response(400, {"code": None, "message": "Bad Request"}),
+        ]
+        with patch.object(
+            requests.Session, "request", side_effect=replies
+        ) as wire, self.assertLogs("vinted_buyer", level="INFO") as logs:
+            outcome = buying.buy(self.row)
+        self.assertEqual(outcome["state"], "failed_before_payment")
+        self.assertEqual(outcome["reason"], "renewal_failed")
+        self.assertIn("Reconnect", outcome["message"])
+        self.assertEqual(wire.call_count, 3)
+        self.assertTrue(
+            all("checkout" not in call.args[1] for call in wire.call_args_list)
+        )
+        with closing(search_settings.connection()) as conn:
+            self.assertEqual(
+                conn.execute("SELECT session FROM vinted_buyer").fetchone()[0], sealed
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT max_total FROM vinted_search_budgets WHERE query_id=1"
+                ).fetchone()[0],
+                2000,
+            )
+        self.assertTrue(buyer.settings()["enabled"])
+        self.assertEqual(buyer.settings()["access"]["stage"], "Vinted session renewal")
+        self.assertIn("message_category=bad_request", " ".join(logs.output))
+        for secret in (*saved["cookies"].values(), saved["csrf"]):
+            self.assertNotIn(secret, " ".join(logs.output))
+
     def test_cookie_scope_and_expiry_survive_encrypted_session_restoration(self):
         client = buyer.Client()
         client.session.cookies.set(

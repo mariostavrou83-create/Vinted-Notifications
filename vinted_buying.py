@@ -1427,6 +1427,7 @@ def feedback_buttons(row, feedback=None):
             "budget_missing": f"No total budget on search #{row.get('query_id')} · details",
             "disabled": "Autobuy is off · details",
             "not_connected": "Buyer not connected · details",
+            "renewal_failed": "Buyer session needs reconnecting · details",
             "search_inactive": "Search is inactive · details",
             "item_sold": "Already sold · details",
             "item_reserved": "Item reserved · details",
