@@ -291,6 +291,35 @@ class SolverTests(unittest.TestCase):
         self.session.post.side_effect = requests.exceptions.SSLError(secret)
         self.assertEqual(self.solve().state, "network_error")
 
+    def test_known_provider_errors_in_http_400_and_401_are_fixed_and_private(self):
+        secret = API_KEY + PROXY + COOKIE + CHALLENGE
+        for status, code in (
+            (400, "ERROR_INVALID_TASK_DATA"),
+            (401, "ERROR_KEY_DENIED_ACCESS"),
+            (400, "ERROR_TASK_NOT_SUPPORTED"),
+        ):
+            with self.subTest(status=status, code=code):
+                self.session.post.return_value = response(
+                    {
+                        "errorId": 1,
+                        "errorCode": code,
+                        "errorDescription": "invalid proxy format " + secret,
+                    },
+                    status=status,
+                )
+                result = self.solve()
+                self.assertEqual(result.state, "service_error")
+                self.assertEqual(result.code, code)
+                self.assertEqual(result.http_status, status)
+                self.assertEqual(result.stage, "create_task")
+                self.assertNotIn(secret, repr(result) + json.dumps(result.public()))
+        self.session.post.return_value = response(
+            {"errorId": 1, "errorCode": secret, "errorDescription": secret}, status=400
+        )
+        result = self.solve()
+        self.assertEqual(result.code, "other")
+        self.assertNotIn(secret, repr(result) + json.dumps(result.public()))
+
     def test_invalid_cookie_names_token_characters_and_browser_mismatch_fail(self):
         for cookie in (
             "session=" + COOKIE,

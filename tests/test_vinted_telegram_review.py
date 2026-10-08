@@ -197,6 +197,42 @@ class ReviewTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(result["outcome"], "unverified")
         self.assertEqual(self.posts("/payment"), [])
 
+    def test_rejected_build_preserves_transaction_for_exact_item_retry(self):
+        original = self.client.request.side_effect
+        failed = [False]
+
+        def challenge(method, path, body=None):
+            if path == "/api/v2/purchases/checkout/build" and not failed[0]:
+                failed[0] = True
+                raise buyer.BuyerError("Supported challenge failed", 403, reason="security_challenge")
+            return original(method, path, body)
+
+        self.client.request.side_effect = challenge
+        first = review.review_latest(item_id="123")
+        self.assertEqual(first["stage"], "checkout_build")
+        self.assertEqual(review.public_review()["http_status"], 403)
+        second = review.review_latest(item_id="123")
+        self.assertEqual(second["outcome"], "quoted")
+        self.assertTrue(second["conversation_reused"])
+        self.assertEqual(len(self.posts("/conversations")), 1)
+        self.assertEqual(self.posts("/payment"), [])
+
+    def test_uncertain_build_cannot_automatically_create_another_checkout(self):
+        original = self.client.request.side_effect
+
+        def timeout(method, path, body=None):
+            if path == "/api/v2/purchases/checkout/build":
+                raise buyer.BuyerError("Timeout", reason="network")
+            return original(method, path, body)
+
+        self.client.request.side_effect = timeout
+        review.review_latest(item_id="123")
+        second = review.review_latest(item_id="123")
+        self.assertEqual(second["stage"], "checkout_reconciliation")
+        self.assertEqual(len(self.posts("/checkout/build")), 1)
+        self.assertEqual(len(self.posts("/conversations")), 1)
+        self.assertEqual(self.posts("/payment"), [])
+
     def test_exact_item_and_total_are_required_before_enabling(self):
         self.quoted()
         for item, maximum in (("999", 1884), ("123", 1900), ("123", True)):

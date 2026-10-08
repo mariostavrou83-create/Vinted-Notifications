@@ -35,6 +35,27 @@ MAX_POLLS = 12
 MAX_SECONDS = 60
 POLL_INTERVAL = 3
 _PROTOCOLS = frozenset(("http", "https", "socks4", "socks5"))
+ERROR_CODES = frozenset(
+    (
+        "ERROR_SERVICE_UNAVALIABLE",
+        "ERROR_RATE_LIMIT",
+        "ERROR_INVALID_TASK_DATA",
+        "ERROR_BAD_REQUEST",
+        "ERROR_TASKID_INVALID",
+        "ERROR_TASK_TIMEOUT",
+        "ERROR_SETTLEMENT_FAILED",
+        "ERROR_KEY_DENIED_ACCESS",
+        "ERROR_ZERO_BALANCE",
+        "ERROR_TASK_NOT_SUPPORTED",
+        "ERROR_CAPTCHA_UNSOLVABLE",
+        "ERROR_UNKNOWN_QUESTION",
+        "ERROR_PROXY_BANNED",
+        "ERROR_INVALID_IMAGE",
+        "ERROR_PARSE_IMAGE_FAIL",
+        "ERROR_IP_BANNED",
+        "ERROR_KEY_TEMP_BLOCKED",
+    )
+)
 
 
 @dataclass(frozen=True)
@@ -42,10 +63,67 @@ class SolverResult:
     state: str
     cookie: str = field(default="", repr=False)
     polls: int = 0
+    code: str = ""
+    stage: str = ""
+    http_status: int | None = None
+    category: str = ""
 
     def public(self):
         """Safe diagnostics; a solved cookie remains server-side only."""
-        return {"state": self.state, "polls": self.polls}
+        result = {"state": self.state, "polls": self.polls}
+        for field_name in ("code", "stage", "http_status", "category"):
+            value = getattr(self, field_name)
+            if value not in (None, ""):
+                result[field_name] = value
+        return result
+
+
+def _safe_error(data, status=200):
+    """Known codes and fixed categories only; never copy provider descriptions."""
+    code = data.get("errorCode") if isinstance(data, dict) else None
+    code = code if isinstance(code, str) and code in ERROR_CODES else "other"
+    description = data.get("errorDescription") if isinstance(data, dict) else None
+    description = description.lower()[:4096] if isinstance(description, str) else ""
+    category = "other"
+    if code == "ERROR_INVALID_TASK_DATA":
+        category = "invalid_task_data"
+        for phrase, fixed in (
+            ("proxy format", "proxy_format"),
+            ("invalid proxy", "proxy_format"),
+            ("useragent", "browser_identity"),
+            ("user-agent", "browser_identity"),
+            ("captchaurl", "challenge_url"),
+            ("html", "challenge_html"),
+        ):
+            if phrase in description:
+                category = fixed
+                break
+    return {
+        "code": code,
+        "category": category,
+        "http_status": status if type(status) is int and 100 <= status <= 599 else None,
+    }
+
+
+def _failure(error, data, stage, polls=0):
+    detail = (
+        {}
+        if data is None
+        else (
+            data
+            if isinstance(data, dict)
+            and set(data) <= {"code", "category", "http_status"}
+            else _safe_error(data)
+        )
+    )
+    return SolverResult(
+        error,
+        polls=polls,
+        code=detail.get("code", ""),
+        category=detail.get("category", ""),
+        stage=stage,
+        http_status=detail.get("http_status"),
+    )
 
 
 def _clean_string(value, maximum):
@@ -241,8 +319,9 @@ def _post(session, path, payload, deadline):
             verify=True,
             timeout=timeout,
         ) as response:
-            if response.status_code != 200:
-                return None, "service_error"
+            status = response.status_code
+            if status not in (200, 400, 401):
+                return _safe_error(None, status), "service_error"
             body = bytearray()
             for chunk in response.iter_content(8192):
                 if time.monotonic() >= deadline:
@@ -258,7 +337,9 @@ def _post(session, path, payload, deadline):
     if not isinstance(data, dict) or type(data.get("errorId")) is not int:
         return None, "invalid_response"
     if data["errorId"] != 0:
-        return None, "service_error"
+        return _safe_error(data, status), "service_error"
+    if status != 200:
+        return _safe_error(data, status), "service_error"
     return data, None
 
 
@@ -305,12 +386,12 @@ def solve_datadome(
             deadline,
         )
         if error:
-            return SolverResult(error)
+            return _failure(error, data, "create_task")
         if data.get("status") == "ready":
             cookie = _cookie(data.get("solution"), user_agent)
             return SolverResult("solved" if cookie else "invalid_cookie", cookie)
         if data.get("status") == "failed":
-            return SolverResult("service_error")
+            return _failure("service_error", data, "create_task")
         task = data.get("taskId")
         if not isinstance(task, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task):
             return SolverResult("invalid_response")
@@ -326,7 +407,7 @@ def solve_datadome(
                 deadline,
             )
             if error:
-                return SolverResult(error, polls=poll)
+                return _failure(error, data, "task_result", poll)
             if "taskId" in data and data["taskId"] != task:
                 return SolverResult("invalid_response", polls=poll)
             status = data.get("status")
@@ -336,7 +417,7 @@ def solve_datadome(
                     "solved" if cookie else "invalid_cookie", cookie, poll
                 )
             if status == "failed":
-                return SolverResult("service_error", polls=poll)
+                return _failure("service_error", data, "task_result", poll)
             if status not in ("idle", "processing"):
                 return SolverResult("invalid_response", polls=poll)
     return SolverResult("timeout", polls=MAX_POLLS)

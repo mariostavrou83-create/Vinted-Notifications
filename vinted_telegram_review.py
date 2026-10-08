@@ -53,10 +53,15 @@ def save_review(review):
         )
 
 
-def latest_row():
+def latest_row(item_id=None):
+    if item_id is not None and not re.fullmatch(r"[0-9]{1,24}", str(item_id)):
+        raise buyer.BuyerError("Choose a valid item from a sent Telegram alert.")
     with closing(connection()) as conn:
         row = conn.execute(
-            "SELECT * FROM alert_outbox WHERE platform='vinted' AND status='sent' ORDER BY sent_at DESC LIMIT 1"
+            "SELECT * FROM alert_outbox WHERE platform='vinted' AND status='sent' "
+            + ("AND item_id=? " if item_id is not None else "")
+            + "ORDER BY sent_at DESC LIMIT 1",
+            (str(item_id),) if item_id is not None else (),
         ).fetchone()
     if (
         row is None
@@ -104,7 +109,7 @@ def verify_limits(row, item_price, total, initial=None):
     return limits
 
 
-def review_latest():
+def review_latest(*, item_id=None):
     """Create or reuse one selected checkout, never submit or approve payment."""
     result = {
         "outcome": "unverified",
@@ -116,6 +121,7 @@ def review_latest():
         "autobuy_off": True,
     }
     client = None
+    draft = None
     try:
         verified_network = network_signature()
         connection_result = vinted_network_check.check_connection()
@@ -133,7 +139,7 @@ def review_latest():
                     "The private connection settings changed. Check again."
                 )
             result["stage"] = "selected_alert"
-            row = latest_row()
+            row = latest_row(item_id)
             result.update(
                 item_id=row["item_id"],
                 query_id=row["query_id"],
@@ -151,6 +157,10 @@ def review_latest():
                 return result
             config = buyer.settings()
             limits = vinted_budget.purchase_limits(row)
+            result.update(
+                search_maximum_total=limits.total_maximum,
+                search_maximum_item=limits.item_maximum,
+            )
             saved = load_review()
             if (
                 saved
@@ -171,24 +181,54 @@ def review_latest():
                 )
                 result["item_price"] = item_price
                 result["stage"] = "conversation"
-                data = client.request(
-                    "POST",
-                    "/api/v2/conversations",
-                    {
-                        "initiator": "buy",
-                        "item_id": row["item_id"],
-                        "opposite_user_id": seller,
-                    },
-                )
-                transaction = (data.get("conversation") or {}).get("transaction") or {}
-                transaction_id = transaction.get("id")
-                if not str(transaction_id).isdigit():
-                    raise buyer.BuyerError(
-                        "Vinted did not return a purchase transaction."
+                if (
+                    saved
+                    and saved.get("item_id") == row["item_id"]
+                    and saved.get("buyer_id") == config["user_id"]
+                    and re.fullmatch(
+                        r"[0-9]{1,24}", str(saved.get("transaction_id", ""))
                     )
-                result["conversation_created"] = True
-                if transaction.get("is_reserved") is True:
-                    result["reservation"] = "reported_by_vinted"
+                ):
+                    if saved.get("build_state") != "challenge_blocked":
+                        result["stage"] = "checkout_reconciliation"
+                        return result
+                    draft = saved
+                    transaction_id = draft["transaction_id"]
+                    result["conversation_reused"] = True
+                else:
+                    data = client.request(
+                        "POST",
+                        "/api/v2/conversations",
+                        {
+                            "initiator": "buy",
+                            "item_id": row["item_id"],
+                            "opposite_user_id": seller,
+                        },
+                    )
+                    transaction = (data.get("conversation") or {}).get(
+                        "transaction"
+                    ) or {}
+                    transaction_id = transaction.get("id")
+                    if not str(transaction_id).isdigit():
+                        raise buyer.BuyerError(
+                            "Vinted did not return a purchase transaction."
+                        )
+                    result["conversation_created"] = True
+                    if transaction.get("is_reserved") is True:
+                        result["reservation"] = "reported_by_vinted"
+                    draft = {
+                        "item_id": row["item_id"],
+                        "query_id": row["query_id"],
+                        "buyer_id": config["user_id"],
+                        "checkout_id": None,
+                        "transaction_id": str(transaction_id),
+                        "created": time.time(),
+                        "approved": False,
+                    }
+                draft.update(
+                    build_state="requested", result=result.copy(), approved=False
+                )
+                save_review(draft)
                 result["stage"] = "checkout_build"
                 data = client.request(
                     "POST",
@@ -200,16 +240,9 @@ def review_latest():
                 if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", purchase_id):
                     raise buyer.BuyerError("Vinted did not return a valid checkout.")
                 result["checkout_created"] = True
-                draft = {
-                    "item_id": row["item_id"],
-                    "query_id": row["query_id"],
-                    "buyer_id": config["user_id"],
-                    "checkout_id": purchase_id,
-                    "transaction_id": str(transaction_id),
-                    "created": time.time(),
-                    "approved": False,
-                    "result": result.copy(),
-                }
+                draft.update(
+                    checkout_id=purchase_id, build_state="built", result=result.copy()
+                )
                 save_review(draft)
             if client:
                 client.session.close()
@@ -291,6 +324,12 @@ def review_latest():
             save_review(draft)
         return result
     except buyer.BuyerError as exc:
+        if draft and result["stage"] == "checkout_build":
+            draft["build_state"] = (
+                "challenge_blocked"
+                if exc.reason == "security_challenge" and exc.status == 403
+                else "unverified"
+            )
         result["reason"] = (
             exc.reason
             if re.fullmatch(r"[a-z_]{1,60}", exc.reason or "")
@@ -304,6 +343,26 @@ def review_latest():
     finally:
         if client:
             client.session.close()
+        if draft and result["outcome"] != "quoted":
+            try:
+                with buyer.exclusive(wait_seconds=45):
+                    current = load_review()
+                    if (
+                        current
+                        and current.get("created") == draft.get("created")
+                        and current.get("item_id") == draft.get("item_id")
+                    ):
+                        current.update(
+                            result=result.copy(),
+                            approved=False,
+                            build_state=draft.get(
+                                "build_state", current.get("build_state")
+                            ),
+                        )
+                        current.pop("token", None)
+                        save_review(current)
+            except Exception:  # noqa: BLE001 -- diagnostics never expose private state
+                logger.info("Vinted Telegram review persistence: outcome=unverified")
         logger.info(
             "Vinted Telegram checkout review: %s", json.dumps(result, sort_keys=True)
         )
@@ -422,7 +481,8 @@ def run_once():
             )
         if match:
             return approve(match[1], int(match[2]))
-        return review_latest()
+        selected_item = os.environ.get("MSJ_TELEGRAM_REVIEW_ITEM_ON_START") or None
+        return review_latest(item_id=selected_item)
     except buyer.BuyerError as exc:
         logger.info(
             "Vinted Telegram approval startup: outcome=unverified stage=approval reason=%s",

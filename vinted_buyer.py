@@ -744,7 +744,15 @@ class Client:
             user_agent=BROWSER_USER_AGENT,
             enabled=True,
         )
-        logger.info("Vinted security check: state=%s", result.state)
+        logger.info(
+            "Vinted security check: state=%s phase=%s code=%s category=%s http=%s polls=%s",
+            result.state,
+            getattr(result, "stage", "") or "none",
+            getattr(result, "code", "") or "none",
+            getattr(result, "category", "") or "none",
+            getattr(result, "http_status", None),
+            getattr(result, "polls", 0),
+        )
         if result.state != "solved":
             return False
         for cookie in list(self.session.cookies):
