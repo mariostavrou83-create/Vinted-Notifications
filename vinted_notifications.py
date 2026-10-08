@@ -344,6 +344,15 @@ if __name__ == "__main__":
         )
         alert_check_process.start()
 
+    recovery_check_process = None
+    if os.environ.get("MSJ_SERVICE_RECOVERY_CHECK_ON_START"):
+        from supabase_service_recovery_check import run_once as run_recovery_check_once
+
+        recovery_check_process = multiprocessing.Process(
+            target=run_recovery_check_once, name="private-service-recovery-check"
+        )
+        recovery_check_process.start()
+
     parent_pid = os.getpid()
 
     def stop_main(signum, frame):
@@ -380,6 +389,7 @@ if __name__ == "__main__":
                 buyer_check_process,
                 network_check_process,
                 alert_check_process,
+                recovery_check_process,
             ):
                 if process:
                     stop_process(process, name=process.name)

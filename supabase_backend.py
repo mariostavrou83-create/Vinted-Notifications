@@ -392,8 +392,17 @@ class DashboardIntegration:
             return None
         return hashlib.sha256(reference.encode()).hexdigest()
 
-    def tokens(self):
-        digest = self._session_hash()
+    def tokens(self, *, authorized_session_hash=None):
+        # A Railway-authorized internal check may select an already stored
+        # session. Web routes never supply this argument; their opaque browser
+        # reference, owner verification, expiry and CSRF checks stay unchanged.
+        digest = (
+            authorized_session_hash
+            if authorized_session_hash is not None
+            else self._session_hash()
+        )
+        if not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
+            digest = None
         if not digest:
             self.app.logger.info(
                 "Supabase owner session: outcome=required stage=missing_reference"
