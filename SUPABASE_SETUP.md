@@ -60,6 +60,10 @@ backup timestamp and whether saved settings/buyer records match live data;
 it never restores the live database or exports keys. A missing key, corrupt
 snapshot, absent example reference or search count other than 44 is reported
 as unverified. This diagnostic is scoped to the current 44-search deployment.
+The original search check counts every `queries` row, including archives.
+Failures expose that total, the expected 44 and separate saved/archived counts
+when the dashboard table is present. This reports the mismatch without changing
+the check, replacing the saved backup or claiming the remaining checks passed.
 
 The application creates `supabase-backup.key` beside the live SQLite database on
 its first backup, with owner-only file permissions. Keep that key **separately**

@@ -180,12 +180,33 @@ class SnapshotTests(Fixture, unittest.TestCase):
         with self.assertRaises(recovery.RecoveryError) as error:
             recovery.verify_snapshot(self.encrypted(), self.directory)
         self.assertEqual(error.exception.stage, "expected_searches")
+        self.assertEqual(error.exception.observed["counts"]["searches"], 43)
+        self.assertEqual(error.exception.observed["integrity"], "ok")
         with closing(sqlite3.connect(self.database)) as conn, conn:
             conn.execute("INSERT INTO queries VALUES (44)")
             conn.execute("DELETE FROM dashboard_media")
         with self.assertRaises(recovery.RecoveryError) as error:
             recovery.verify_snapshot(self.encrypted(), self.directory)
         self.assertEqual(error.exception.stage, "example_photo_references")
+
+    def test_archived_total_is_exposed_without_changing_expected_check(self):
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute(
+                "CREATE TABLE search_dashboard(query_id INTEGER PRIMARY KEY,archived INTEGER)"
+            )
+            conn.executemany("INSERT INTO queries VALUES (?)", [(45,), (46,)])
+            conn.executemany(
+                "INSERT INTO search_dashboard VALUES (?,1)", [(45,), (46,)]
+            )
+        with self.assertRaises(recovery.RecoveryError) as error:
+            recovery.verify_snapshot(self.encrypted(), self.directory)
+        self.assertEqual(error.exception.stage, "expected_searches")
+        counts = error.exception.observed["counts"]
+        self.assertEqual(counts["searches"], 46)
+        self.assertEqual(counts["saved_searches"], 44)
+        self.assertEqual(counts["archived_searches"], 2)
+        self.assertEqual(counts["expected_searches"], 44)
+        self.assertNotIn("fictional-buyer-secret", json.dumps(error.exception.observed))
 
     def test_sessions_in_cloud_and_wrong_buyer_key_are_rejected(self):
         encrypted = self.encrypted()
@@ -295,6 +316,24 @@ class EndpointTests(Fixture, unittest.TestCase):
             "/supabase/login",
         )
         self.provider.download_backup.assert_not_called()
+
+    def test_search_count_failure_reports_only_completed_checks_and_counts(self):
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute("DELETE FROM queries WHERE id=44")
+        self.provider.download_backup.return_value = (self.encrypted(), STAMP)
+        csrf = self.login()
+        before = self.database.read_bytes()
+        with self.assertLogs(self.app.logger, level="INFO") as logs:
+            result = self.web.post("/supabase/backup/verify", data={"csrf": csrf})
+        self.assertEqual(result.status_code, 422)
+        self.assertIn(b"Result: unverified", result.data)
+        self.assertIn(b"SQLite integrity: ok", result.data)
+        self.assertIn(b"<td>searches</td><td>43</td>", result.data)
+        self.assertNotIn(b"Encrypted buyer session: readable", result.data)
+        self.assertIn('"searches": 43', " ".join(logs.output))
+        self.assertNotIn("fictional-buyer-secret", " ".join(logs.output))
+        self.assertNotIn(b"fictional-owner-access", result.data)
+        self.assertEqual(before, self.database.read_bytes())
 
     def test_non_owner_server_verification_denies_request(self):
         csrf = self.login()

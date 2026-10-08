@@ -344,8 +344,11 @@ BACKUP_PAGE = """<!doctype html><html lang="en"><meta charset="utf-8">
 {% if verification %}<h2>Recovery check</h2><p>Result: {{ verification.outcome }}. Stage: {{ verification.stage }}.</p>
 {% if verification.backup_timestamp %}<p>Backup saved: {{ verification.backup_timestamp }}</p>{% endif %}
 {% if verification.counts %}<table><thead><tr><th>Check</th><th>Count</th></tr></thead><tbody>{% for label, count in verification.counts.items() %}<tr><td>{{ label.replace('_', ' ') }}</td><td>{{ count }}</td></tr>{% endfor %}</tbody></table>
+{% if verification.integrity %}<p>SQLite integrity: {{ verification.integrity }}.</p>{% endif %}
+{% if verification.outcome == 'verified' %}
 <p>SQLite integrity: {{ verification.integrity }}. Expected searches and photo references: passed. Encrypted buyer session: readable. Dashboard sessions in backup: 0.</p>
-<p>Saved settings match live: {{ verification.settings_match_live }}. Buyer records match live: {{ verification.buyer_records_match_live }}.</p>{% endif %}
+<p>Saved settings match live: {{ verification.settings_match_live }}. Buyer records match live: {{ verification.buyer_records_match_live }}.</p>{% endif %}{% endif %}
+{% if verification.stage == 'expected_searches' %}<p>The current check compares every search row with 44. Saved and archived counts are shown separately for review; the check and saved backup have not been changed. Remaining recovery checks have not passed.</p>{% endif %}
 <p>The temporary copy was deleted. Your live database was not replaced.</p>{% endif %}
 <p><a href="{{ url_for('supabase.download') }}">Download saved encrypted backup</a></p>
 <p><a href="{{ url_for('dashboard') }}">Back to dashboard</a></p></main></body></html>"""
@@ -639,6 +642,7 @@ class DashboardIntegration:
                 message = "Saved cloud backup recovery verified."
             except SupabaseError as exc:
                 result = {
+                    **getattr(exc, "observed", {}),
                     "outcome": "unverified",
                     "stage": getattr(exc, "stage", stage),
                 }

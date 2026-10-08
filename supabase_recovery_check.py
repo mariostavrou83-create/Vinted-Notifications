@@ -33,9 +33,10 @@ COUNT_TABLES = {
 
 
 class RecoveryError(SupabaseError):
-    def __init__(self, stage):
+    def __init__(self, stage, *, observed=None):
         super().__init__("The saved cloud backup recovery check did not pass.")
         self.stage = stage
+        self.observed = observed or {}
 
 
 def existing_cipher(path, label):
@@ -69,6 +70,7 @@ def verify_snapshot(encrypted, directory, *, live_database=None, expected_search
         )
     }
     stage = "snapshot_decryption"
+    observed = {}
     try:
         payload = keys["backup"].decrypt(encrypted)
         stage = "snapshot_header"
@@ -96,6 +98,7 @@ def verify_snapshot(encrypted, directory, *, live_database=None, expected_search
                 stage = "sqlite_integrity"
                 if conn.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
                     raise RecoveryError(stage)
+                observed["integrity"] = "ok"
                 stage = "expected_tables"
                 tables = {
                     row[0]
@@ -114,6 +117,19 @@ def verify_snapshot(encrypted, directory, *, live_database=None, expected_search
                     label: conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
                     for label, table in COUNT_TABLES.items()
                 }
+                # Preserve the original all-row check while exposing the
+                # dashboard's saved/archived counts for owner review.
+                counts["expected_searches"] = expected_searches
+                if "search_dashboard" in tables:
+                    counts["saved_searches"] = conn.execute(
+                        "SELECT COUNT(*) FROM queries q "
+                        "LEFT JOIN search_dashboard d ON d.query_id=q.id "
+                        "WHERE COALESCE(d.archived,0)=0"
+                    ).fetchone()[0]
+                    counts["archived_searches"] = (
+                        counts["searches"] - counts["saved_searches"]
+                    )
+                observed["counts"] = counts
                 stage = "expected_searches"
                 if counts["searches"] != expected_searches:
                     raise RecoveryError(stage)
@@ -188,7 +204,8 @@ def verify_snapshot(encrypted, directory, *, live_database=None, expected_search
             "buyer_records_match_live": buyer_match,
             "photo_references_match_live": refs_match,
         }
-    except RecoveryError:
+    except RecoveryError as exc:
+        exc.observed.update(observed)
         raise
     except (InvalidToken, OSError, EOFError, sqlite3.Error, ValueError, TypeError):
-        raise RecoveryError(stage) from None
+        raise RecoveryError(stage, observed=observed) from None
