@@ -1,18 +1,22 @@
 """Native pickup/card selection and explicitly quoted one-off payment tests."""
 
+import asyncio
 import copy
 import json
 import time
 import unittest
 from contextlib import closing
+from types import SimpleNamespace
 from typing import ClassVar
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import test_dashboard
 from test_search_controls import DatabaseFixture
 from test_vinted_buying import DEVICE, web_checkout
 
+import photo_cards
 import search_settings
+import vinted_alerts
 import vinted_buyer as buyer
 import vinted_buying as buying
 
@@ -406,6 +410,93 @@ class CheckoutPreferencesTests(DatabaseFixture, unittest.TestCase):
             "NEAR",
         )
         self.assertEqual(len(self.payments()), 1)
+
+    def telegram_alert(self):
+        self.batch(1, [123])
+        with closing(search_settings.connection()) as conn:
+            row = dict(
+                conn.execute(
+                    "SELECT * FROM alert_outbox WHERE platform='vinted' AND item_id='123'"
+                ).fetchone()
+            )
+        details = vinted_alerts.get_details(row)
+        photo_cards.record(
+            row,
+            details,
+            SimpleNamespace(
+                message_id=42, photo=[SimpleNamespace(file_id="fictional-photo")]
+            ),
+        )
+        query = SimpleNamespace(
+            data="buy:click",
+            message=SimpleNamespace(message_id=42, chat=SimpleNamespace(id=123)),
+            from_user=SimpleNamespace(id=123),
+            answer=AsyncMock(),
+        )
+        bot = SimpleNamespace(edit_message_caption=AsyncMock())
+        return SimpleNamespace(callback_query=query), SimpleNamespace(bot=bot)
+
+    def test_telegram_single_tap_without_budget_selects_nearest_card_and_pays_once(
+        self,
+    ):
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE queries SET query='https://www.vinted.co.uk/catalog?price_to=15' WHERE id=1"
+            )
+        payment = self.checkout["components"]["payment_method"]
+        payment["selected_payment_method"]["credit_card"]["last4"] = "5678"
+        update, context = self.telegram_alert()
+        submitted = []
+
+        def request(method, path, body=None, **kwargs):
+            if method == "POST" and path.endswith("/checkout/payment"):
+                submitted.append(buying.result("123"))
+            return self.request(method, path, body, **kwargs)
+
+        self.client.request.side_effect = request
+        with patch.object(buyer, "connected_client", return_value=self.client):
+            asyncio.run(buying.callback(update, context))
+            asyncio.run(buying.callback(update, context))
+        self.assertEqual(len(self.payments()), 1)
+        self.assertEqual(submitted[0]["state"], "paying")
+        self.assertEqual(submitted[0]["total"], 1884)
+        self.assertEqual(buying.result("123")["state"], "paid")
+        choices = buying.checkout_choice_details(self.checkout)
+        self.assertEqual(choices["pickup_name"], "Fictional nearest shop")
+        self.assertEqual(choices["payment_label"], "Saved card ending 1234")
+        self.assertEqual(
+            self.payments()[0].args[2],
+            {
+                "checksum": self.checkout["checksum"],
+                "payment_options": {"browser_info": DEVICE},
+            },
+        )
+        feedback = photo_cards.load("vinted", 42)[1]["buy_feedback"]
+        self.assertEqual(feedback["state"], "paid")
+        self.assertEqual(feedback["total"], 1884)
+        edit = context.bot.edit_message_caption.call_args.kwargs
+        self.assertEqual(edit["message_id"], 42)
+        self.assertIn("Paid", edit["caption"])
+        self.assertIn("£18.84", edit["caption"])
+        with closing(search_settings.connection()) as conn:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM vinted_search_budgets").fetchone()[
+                    0
+                ],
+                0,
+            )
+
+    def test_telegram_unbudgeted_pending_payment_is_shown_without_resubmitting(self):
+        self.payment = {"payment": {"status": "pending"}}
+        update, context = self.telegram_alert()
+        with patch.object(buyer, "connected_client", return_value=self.client):
+            asyncio.run(buying.callback(update, context))
+            asyncio.run(buying.callback(update, context))
+        self.assertEqual(len(self.payments()), 1)
+        self.assertEqual(buying.result("123")["state"], "needs_action")
+        self.assertEqual(
+            photo_cards.load("vinted", 42)[1]["buy_feedback"]["state"], "needs_action"
+        )
 
     def test_expired_tampered_changed_account_or_changed_preferences_stop_before_network(
         self,

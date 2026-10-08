@@ -1236,16 +1236,82 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(self.run_buy()["state"], "paid")
         self.assertEqual(len(self.payments()), 1)
 
-    def test_missing_budget_or_inactive_search_cannot_prepare_checkout(self):
+    def test_missing_budget_buys_alerted_item_plus_verified_fees_and_delivery(self):
         with closing(search_settings.connection()) as conn, conn:
             conn.execute("DELETE FROM vinted_search_budgets")
-        with self.assertRaisesRegex(buyer.BuyerError, "maximum total"):
-            self.run_buy()
-        self.client.request.assert_not_called()
+        self.assertEqual(self.run_buy()["state"], "paid")
+        self.assertEqual(buying.result("123")["total"], 1900)
+        self.assertEqual(len(self.payments()), 1)
+
+    def test_inactive_search_cannot_prepare_checkout_without_budget(self):
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("DELETE FROM vinted_search_budgets")
         self.row["query_id"] = None
         with self.assertRaisesRegex(buyer.BuyerError, "no longer active"):
             self.run_buy()
         self.client.request.assert_not_called()
+
+    def test_url_item_limit_blocks_overpriced_listing_before_building_checkout(self):
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("DELETE FROM vinted_search_budgets")
+            conn.execute(
+                "UPDATE queries SET query='https://www.vinted.co.uk/catalog?price_to=14.99' WHERE id=1"
+            )
+        outcome = self.run_buy()
+        self.assertEqual(outcome["state"], "failed_before_payment")
+        self.assertEqual(outcome["reason"], "item_over_url_limit")
+        self.client.request.assert_called_once_with("GET", "/api/v2/items/123")
+
+    def test_url_limit_is_rechecked_after_delivery_selection_before_payment(self):
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("DELETE FROM vinted_search_budgets")
+            conn.execute(
+                "UPDATE queries SET query='https://www.vinted.co.uk/catalog?price_to=15' WHERE id=1"
+            )
+        response = self.client.request.side_effect
+
+        def lower_limit(method, path, body=None):
+            data = response(method, path, body)
+            if method == "PUT":
+                with closing(search_settings.connection()) as conn, conn:
+                    conn.execute(
+                        "UPDATE queries SET query='https://www.vinted.co.uk/catalog?price_to=14' WHERE id=1"
+                    )
+            return data
+
+        self.client.request.side_effect = lower_limit
+        outcome = self.run_buy()
+        self.assertEqual(outcome["reason"], "item_over_url_limit")
+        self.assertEqual(self.payments(), [])
+
+    def test_removing_total_budget_during_checkout_does_not_expand_this_tap(self):
+        self.final = checkout("21.00")
+        response = self.client.request.side_effect
+
+        def remove_budget(method, path, body=None):
+            data = response(method, path, body)
+            if method == "PUT":
+                with closing(search_settings.connection()) as conn, conn:
+                    conn.execute("DELETE FROM vinted_search_budgets")
+            return data
+
+        self.client.request.side_effect = remove_budget
+        outcome = self.run_buy()
+        self.assertEqual(outcome["reason"], "total_over_budget")
+        self.assertEqual(self.payments(), [])
+
+    def test_missing_budget_keeps_listing_and_checkout_price_increase_checks(self):
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("DELETE FROM vinted_search_budgets")
+        self.item["item"]["price"]["amount"] = "15.01"
+        self.assertEqual(self.run_buy()["reason"], "price_increased")
+        self.assertEqual(self.payments(), [])
+        self.item["item"]["price"]["amount"] = "15.00"
+        self.final["components"]["order_summary_v2"]["subtotal"]["price"][
+            "amount"
+        ] = "15.01"
+        self.assertEqual(self.run_buy()["reason"], "price_increased")
+        self.assertEqual(self.payments(), [])
 
     def test_current_budget_rechecked_after_checkout_and_before_any_payment(self):
         response = self.client.request.side_effect

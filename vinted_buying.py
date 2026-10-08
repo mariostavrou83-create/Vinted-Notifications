@@ -205,7 +205,7 @@ def checkout_prices(checkout, item_price, maximum, *, item_id=None):
             f"The item price changed during checkout to £{current_item['price']/100:.2f}. No payment was sent.",
             reason="price_increased",
         )
-    if total > maximum:
+    if maximum is not None and total > maximum:
         raise buyer.BuyerError(
             f"Over budget: £{total/100:.2f} including fees and delivery; this search's maximum total is £{maximum/100:.2f}. No payment was sent.",
             reason="total_over_budget",
@@ -697,13 +697,26 @@ def ready(row):
         )
     if not config["enabled"]:
         raise buyer.BuyerError(
-            "Autobuy is off. Set a maximum total on this search, then enable Autobuy in Connections. No purchase was started.",
+            "Autobuy is off. Enable Autobuy in Connections. No purchase was started.",
             reason="disabled",
         )
-    return config, vinted_budget.payment_limit(row)
+    return config, vinted_budget.purchase_limits(row)
 
 
-def verified_listing(client, row, config, maximum):
+def check_item_limits(price, limits, query_id):
+    if limits.item_maximum is not None and price > limits.item_maximum:
+        raise buyer.BuyerError(
+            f"The item is £{price/100:.2f}; search #{query_id}'s URL maximum item price is £{limits.item_maximum/100:.2f}. No payment was sent.",
+            reason="item_over_url_limit",
+        )
+    if limits.total_maximum is not None and price > limits.total_maximum:
+        raise buyer.BuyerError(
+            f"Over budget: the item alone is £{price/100:.2f}; search #{query_id} has a £{limits.total_maximum/100:.2f} limit including fees and delivery. No payment was sent.",
+            reason="item_over_budget",
+        )
+
+
+def verified_listing(client, row, config, limits):
     """Read the current item and apply the same listing gates for every caller."""
     item_id = str(row["item_id"])
     try:
@@ -746,11 +759,7 @@ def verified_listing(client, row, config, maximum):
             f"Item price increased from £{alert_price/100:.2f} to £{current_price/100:.2f} after your alert. No payment was sent.",
             reason="price_increased",
         )
-    if current_price > maximum:
-        raise buyer.BuyerError(
-            f"Over budget: the item alone is £{current_price/100:.2f}; search #{row['query_id']} has a £{maximum/100:.2f} limit including fees and delivery. No payment was sent.",
-            reason="item_over_budget",
-        )
+    check_item_limits(current_price, limits, row["query_id"])
     user = item.get("user")
     seller = str(
         (user.get("id") if isinstance(user, dict) else None)
@@ -1159,13 +1168,21 @@ def check_listing(item_id):
         client = None
         phase = "checking your buyer account"
         try:
-            config, maximum = ready(row)
+            config, limits = ready(row)
             client = buyer.connected_client()
             phase = "checking the listing"
-            price, _ = verified_listing(client, row, config, maximum)
+            price, _ = verified_listing(client, row, config, limits)
             logger.info("Autobuy listing check: item=%s result=verified", item_id)
+            if limits.total_maximum is not None:
+                limit_text = f"maximum total £{limits.total_maximum/100:.2f}"
+            elif limits.item_maximum is not None:
+                limit_text = f"URL maximum item price £{limits.item_maximum/100:.2f}; fees and delivery are added at checkout"
+            else:
+                limit_text = (
+                    "alerted item price; fees and delivery are added at checkout"
+                )
             return (
-                f"Listing check passed: item £{price/100:.2f}; search #{row['query_id']} maximum total £{maximum/100:.2f}. "
+                f"Listing check passed: item £{price/100:.2f}; search #{row['query_id']} {limit_text}. "
                 "Delivery, fees and saved payment choices still need verification at checkout. No checkout or payment was created."
             )
         except buyer.BuyerError as exc:
@@ -1193,7 +1210,7 @@ def buy(row):
     if not item_id.isdigit() or host != "www.vinted.co.uk" or row["currency"] != "GBP":
         raise buyer.BuyerError("Autobuy currently supports UK Vinted listings in GBP.")
     with buyer.exclusive():
-        config, maximum = ready(row)
+        config, limits = ready(row)
         if not claim(row, recover_preparing=True):
             return result(item_id)
         client = None
@@ -1203,7 +1220,7 @@ def buy(row):
         try:
             client = buyer.connected_client()
             phase = "checking the listing"
-            current_price, seller = verified_listing(client, row, config, maximum)
+            current_price, seller = verified_listing(client, row, config, limits)
             phase = "preparing the purchase"
             conversation = client.request(
                 "POST",
@@ -1269,8 +1286,11 @@ def buy(row):
                 raise buyer.BuyerError(
                     "Your buyer account or preferences changed before payment."
                 )
-            maximum = vinted_budget.payment_limit(row)
-            total = checkout_prices(checkout, current_price, maximum, item_id=item_id)
+            limits = limits.restrict(vinted_budget.purchase_limits(row))
+            check_item_limits(current_price, limits, row["query_id"])
+            total = checkout_prices(
+                checkout, current_price, limits.total_maximum, item_id=item_id
+            )
             info = saved_browser_info()
             record(
                 item_id,
@@ -1415,6 +1435,9 @@ def feedback_buttons(row, feedback=None):
             "price_increased": "Item price increased · details",
             "total_over_budget": "Over budget with fees & delivery · details",
             "item_over_budget": "Item exceeds total budget · details",
+            "item_over_url_limit": "Item exceeds URL price limit · details",
+            "url_limit_invalid": "Check search URL price limit · details",
+            "budget_invalid": "Check saved total budget · details",
             "unreadable": "Vinted response unreadable · details",
             "network": "Vinted connection error · details",
             "security_challenge": "Vinted security check required · details",
