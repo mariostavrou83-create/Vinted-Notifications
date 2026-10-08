@@ -56,7 +56,7 @@ class MaintenanceTests(buying_tests.SessionRotationFixture, unittest.TestCase):
             )
         if path == "/web/api/auth/refresh":
             self.assertEqual(prepared.method, "POST")
-            self.assertIsNone(prepared.body)
+            self.assertEqual(prepared.body, b"{}")
             self.assertIn(
                 self.saved()[1]["cookies"]["refresh_token_web"],
                 prepared.headers["Cookie"],

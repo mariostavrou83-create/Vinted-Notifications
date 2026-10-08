@@ -45,7 +45,8 @@ AUTH_REASONS = {
     "rate_limited": "Vinted requested a cooldown. Wait before trying again.",
     "unreadable": "Vinted returned a response the bot could not read.",
     "session_refresh": "Vinted requested renewal of the saved buyer session.",
-    "renewal_failed": "Vinted could not renew the saved buyer session. Reconnect your Vinted buyer in Connections. No purchase or payment was started.",
+    "renewal_failed": "Vinted could not renew the saved buyer session. Its renewal request or response needs checking. No purchase or payment was started.",
+    "refresh_rejected": "Vinted rejected the saved refresh credential. Reconnect your Vinted buyer in Connections. No purchase or payment was started.",
     "signin_redirect": "Vinted redirected this session to sign-in. Reconnect your buyer account.",
     "redirect": "Vinted redirected this account request instead of confirming it. The bot stopped without following the redirect.",
     "home_redirect": "Vinted redirected this request to its homepage instead of confirming the account.",
@@ -515,6 +516,10 @@ def settings():
         "enabled": config["enabled"],
     }
     row["access"] = {
+        "reason": (
+            access["reason"] if access["reason"] in AUTH_REASONS else "not_confirmed"
+        ),
+        "stage_code": access["stage"] if access["stage"] in AUTH_STAGES else "request",
         "message": AUTH_REASONS.get(access["reason"], ""),
         "stage": AUTH_STAGES.get(access["stage"], ""),
         "http_status": access["http_status"],
@@ -954,6 +959,10 @@ class Client:
             public.session.close()
 
     def request(self, method, path, body=None, *, allow_challenge=False, params=None):
+        # Send valid JSON when this native web renewal declares application/json.
+        # An empty byte body is not a JSON document.
+        if method == "POST" and path == "/web/api/auth/refresh" and body is None:
+            body = {}
         pickup_gateway = bool(
             re.fullmatch(
                 r"/web/gateway/shipping-estimation/external/shipping_orders/[0-9]{1,24}/nearby_pickup_points",
@@ -1011,12 +1020,13 @@ class Client:
             names = {part.split("=", 1)[0].strip() for part in cookie.split(";")}
             logger.info(
                 "Vinted web renewal request: csrf=%s refresh_cookie=%s "
-                "access_cookie=%s anon_header=%s bearer=%s",
+                "access_cookie=%s anon_header=%s bearer=%s json_object=%s",
                 bool(prepared.headers.get("X-CSRF-Token")),
                 "refresh_token_web" in names,
                 "access_token_web" in names,
                 bool(prepared.headers.get("X-Anon-Id")),
                 bool(prepared.headers.get("Authorization")),
+                isinstance(body, dict),
             )
         response, data = None, None
         try:
@@ -1470,10 +1480,14 @@ def renew_saved_client(client):
     try:
         client.request("POST", "/web/api/auth/refresh")
     except BuyerError as renewal:
-        if renewal.status in (400, 401, 422) and renewal.reason in (
-            "http_error",
-            "credentials",
-        ):
+        if renewal.status in (400, 401, 422) and renewal.reason == "credentials":
+            raise BuyerError(
+                AUTH_REASONS["refresh_rejected"],
+                renewal.status,
+                reason="refresh_rejected",
+                stage="renewal",
+            ) from None
+        if renewal.status in (400, 401, 422) and renewal.reason == "http_error":
             raise BuyerError(
                 AUTH_REASONS["renewal_failed"],
                 renewal.status,

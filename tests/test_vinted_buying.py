@@ -731,7 +731,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         ):
             self.assertNotIn(secret, text)
 
-    def test_failed_native_renewal_reports_reconnect_and_never_starts_checkout(self):
+    def test_unknown_400_renewal_does_not_require_reconnect_or_start_checkout(self):
         saved = {
             "csrf": "private-csrf-token-0123456789",
             "cookies": {
@@ -767,7 +767,9 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
             outcome = buying.buy(self.row)
         self.assertEqual(outcome["state"], "failed_before_payment")
         self.assertEqual(outcome["reason"], "renewal_failed")
-        self.assertIn("Reconnect", outcome["message"])
+        self.assertNotIn("Reconnect", outcome["message"])
+        self.assertIn("needs checking", outcome["message"])
+        self.assertEqual(wire.call_args_list[-1].kwargs["json"], {})
         self.assertEqual(wire.call_count, 3)
         self.assertTrue(
             all("checkout" not in call.args[1] for call in wire.call_args_list)
@@ -787,6 +789,25 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         self.assertIn("message_category=bad_request", " ".join(logs.output))
         for secret in (*saved["cookies"].values(), saved["csrf"]):
             self.assertNotIn(secret, " ".join(logs.output))
+
+    def test_renewal_distinguishes_refresh_rejection_csrf_and_unknown_failure(self):
+        for reason, expected in (
+            ("credentials", "refresh_rejected"),
+            ("csrf", "csrf"),
+            ("http_error", "renewal_failed"),
+            ("security_challenge", "security_challenge"),
+        ):
+            with self.subTest(reason=reason):
+                client = Mock()
+                client.request.side_effect = buyer.BuyerError(
+                    "Fixed test failure", 400, reason=reason, stage="renewal"
+                )
+                with self.assertRaises(buyer.BuyerError) as failure:
+                    buyer.renew_saved_client(client)
+                self.assertEqual(failure.exception.reason, expected)
+                self.assertEqual(failure.exception.stage, "renewal")
+                self.assertEqual(failure.exception.status, 400)
+                client.request.assert_called_once_with("POST", "/web/api/auth/refresh")
 
     def test_cookie_scope_and_expiry_survive_encrypted_session_restoration(self):
         client = buyer.Client()
@@ -2315,7 +2336,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                         ("GET", buyer.BASE + "/api/v2/users/current"),
                     ],
                 )
-                self.assertIsNone(request.call_args_list[2].kwargs["json"])
+                self.assertEqual(request.call_args_list[2].kwargs["json"], {})
                 self.assertTrue(
                     all(not c.kwargs["allow_redirects"] for c in request.call_args_list)
                 )
@@ -2408,7 +2429,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                         ("GET", buyer.BASE + "/api/v2/users/current"),
                     ],
                 )
-                self.assertIsNone(request.call_args_list[2].kwargs["json"])
+                self.assertEqual(request.call_args_list[2].kwargs["json"], {})
                 self.assertTrue(
                     all(
                         not call.kwargs["allow_redirects"]
@@ -3036,7 +3057,7 @@ class NativeCookieTransportTests(SessionRotationFixture, unittest.TestCase):
                 self.assertNotIn(rejected_refresh, cookie)
                 self.assertNotIn(rejected_access, cookie)
                 self.assertNotIn("public-anonymous-id", cookie)
-                self.assertIsNone(prepared.body)
+                self.assertEqual(prepared.body, b"{}")
                 self.assertNotIn("Authorization", prepared.headers)
                 return self.transport_response(
                     prepared,
@@ -3176,7 +3197,7 @@ class NativeCookieTransportTests(SessionRotationFixture, unittest.TestCase):
                 return self.transport_response(prepared, {"user": {"id": 99}})
             self.assertEqual(path, "/web/api/auth/refresh")
             self.assertEqual(prepared.method, "POST")
-            self.assertIsNone(prepared.body)
+            self.assertEqual(prepared.body, b"{}")
             self.assertEqual(cookie.count("refresh_token_web="), 1)
             self.assertIn("refresh_token_web=" + refresh, cookie)
             self.assertNotIn("Authorization", prepared.headers)

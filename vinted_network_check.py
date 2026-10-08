@@ -227,6 +227,7 @@ def check_connection(*, buyer=None):
             if balance <= 0:
                 raise CheckFailure("capsolver_credit")
             result["stage"] = "buyer_account"
+            result["supported_challenge_recovery"] = "unverified"
             client = buyer.connected_client()
             if (
                 client.network != config
@@ -245,6 +246,8 @@ def check_connection(*, buyer=None):
                 result["supported_challenge_recovery"] = "accepted_on_account_read"
             elif client.solver_attempted:
                 result["supported_challenge_recovery"] = "attempted_unverified"
+            else:
+                result["supported_challenge_recovery"] = "not_exercised"
             observation = {
                 "endpoint_digest": endpoint_digest,
                 "exit_digest": exit_digest,

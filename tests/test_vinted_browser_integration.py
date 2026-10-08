@@ -258,7 +258,7 @@ class BrowserCookieIntegrationTests(DatabaseFixture, unittest.TestCase):
             self.assertEqual(
                 (method, url), ("POST", buyer.BASE + "/web/api/auth/refresh")
             )
-            self.assertIsNone(outgoing["content"])
+            self.assertEqual(outgoing["content"], b"{}")
             return sdk_response(
                 url,
                 data={"access_token": "body-other-credential-0123456789"},

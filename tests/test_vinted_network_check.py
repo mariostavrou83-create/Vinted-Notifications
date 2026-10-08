@@ -470,6 +470,23 @@ class PrivateRouteTests(DatabaseFixture, unittest.TestCase):
         self.assertIn("Remove angle brackets", page)
         self.assertNotIn("offline-password", page)
 
+    def test_old_password_failure_and_unknown_renewal_do_not_prompt_reconnect(self):
+        self.login()
+        with closing(real_buyer.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE vinted_buyer SET session=?,verified_at=100,user_id='99'",
+                (real_buyer.encrypt({"cookies": {}}),),
+            )
+        for reason, stage, must_reconnect in (
+            ("credentials", "sign_in", False),
+            ("renewal_failed", "renewal", False),
+            ("refresh_rejected", "renewal", True),
+        ):
+            with self.subTest(reason=reason):
+                real_buyer.record_auth(reason, stage, 400)
+                page = self.web.get("/connections").get_data(as_text=True)
+                self.assertEqual("Use the reconnect form below" in page, must_reconnect)
+
 
 class StartupTests(DatabaseFixture, unittest.TestCase):
     def test_service_check_is_opt_in_and_reserved_once_before_execution(self):
