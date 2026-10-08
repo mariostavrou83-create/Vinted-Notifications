@@ -117,13 +117,20 @@ class FeedbackTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             photo_cards.load("vinted", 42)[1]["buy_feedback"]["message"],
         )
 
-    async def test_missing_budget_stops_before_any_purchase(self):
+    async def test_invalid_url_limit_stops_before_any_purchase(self):
         with closing(search_settings.connection()) as conn, conn:
             conn.execute("UPDATE vinted_buyer SET enabled=1")
+            conn.execute(
+                "UPDATE queries SET query='https://www.vinted.co.uk/catalog?price_to=NaN' WHERE id=1"
+            )
         with patch.object(buying, "buy") as buy:
             await self.tap()
         buy.assert_not_called()
         self.assertIn("Search #1", self.query.answer.call_args.args[0])
+        self.assertEqual(
+            photo_cards.load("vinted", 42)[1]["buy_feedback"]["reason"],
+            "url_limit_invalid",
+        )
 
     async def test_checkout_failure_uses_persistent_status_not_a_second_answer(self):
         self.enable()

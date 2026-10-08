@@ -615,7 +615,7 @@ def create_app(test_config=None):
                     vinted_buyer.save_limits(request.form)
                     session.pop("buyer_test_quote", None)
                     flash(
-                        "Buyer settings saved. Autobuy uses each search's maximum total and purchases only when you tap its button.",
+                        "Buyer settings saved. Tap Autobuy to purchase within the search's total budget, or its URL item-price limit plus fees and delivery when no total budget is saved.",
                         "success",
                     )
                 elif action == "buyer_disconnect":

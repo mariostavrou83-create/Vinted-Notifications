@@ -1,5 +1,6 @@
-"""Per-search GBP budgets: estimates for discovery, confirmed totals for payment."""
+"""Search price limits and optional all-in budgets for user-tapped purchases."""
 
+from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
@@ -140,7 +141,24 @@ def alert_lines(budget):
     return f" · Est. total: <b>£{budget['total']/100:.2f}</b> (fees + delivery)"
 
 
-def payment_limit(row):
+@dataclass(frozen=True)
+class PurchaseLimits:
+    item_maximum: int | None = None
+    total_maximum: int | None = None
+
+    def restrict(self, current):
+        # Editing/removing a limit while checkout runs cannot expand this tap.
+        def stricter(first, second):
+            values = [value for value in (first, second) if value is not None]
+            return min(values) if values else None
+
+        return PurchaseLimits(
+            stricter(self.item_maximum, current.item_maximum),
+            stricter(self.total_maximum, current.total_maximum),
+        )
+
+
+def purchase_limits(row):
     from search_settings import get_search
     from vinted_buyer import BuyerError
 
@@ -156,9 +174,35 @@ def payment_limit(row):
             reason="search_inactive",
         )
     maximum = search.get("vinted_max_total")
-    if maximum is None or not 100 <= maximum <= 100000:
+    if maximum is not None:
+        if not isinstance(maximum, int) or not 100 <= maximum <= 100000:
+            raise BuyerError(
+                f"Search #{search['id']} has an invalid maximum total. Check its saved budget.",
+                reason="budget_invalid",
+            )
+        return PurchaseLimits(total_maximum=maximum)
+    # With no all-in budget, the owner's tap buys the alerted item plus Vinted's
+    # verified fees and delivery. A URL price_to is an ITEM limit, never a total.
+    try:
+        parts = urlsplit(search["query"])
+        values = parse_qs(parts.query, keep_blank_values=True, max_num_fields=1000)
+        if (
+            parts.scheme != "https"
+            or parts.netloc not in ("www.vinted.co.uk", "vinted.co.uk")
+            or values.get("currency", ["GBP"]) != ["GBP"]
+        ):
+            raise ValueError
+        prices = values.get("price_to")
+        item_maximum = None
+        if prices is not None:
+            if len(prices) != 1:
+                raise ValueError
+            item_maximum = money({"amount": prices[0], "currency_code": "GBP"})
+            if item_maximum is None:
+                raise ValueError
+    except (ValueError, TypeError, KeyError):
         raise BuyerError(
-            f"Search #{search['id']} has no maximum total saved. Set its budget including fees and delivery. The price filter in a Vinted URL is only the item price.",
-            reason="budget_missing",
-        )
-    return maximum
+            f"Search #{search['id']}'s Vinted URL price limit could not be verified. Check its search link. No payment was sent.",
+            reason="url_limit_invalid",
+        ) from None
+    return PurchaseLimits(item_maximum=item_maximum)
