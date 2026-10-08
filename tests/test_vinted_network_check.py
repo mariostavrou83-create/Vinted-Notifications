@@ -309,6 +309,18 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(result["reason"], "security_challenge")
         self.assertNotIn("same_buyer_account", result)
 
+    def test_proxy_evidence_survives_failed_renewal_without_verifying_buyer(self):
+        self.buyer.connected_client.side_effect = real_buyer.BuyerError(
+            "Fixed renewal failure", 400, reason="renewal_failed", stage="renewal"
+        )
+        first = self.run_check()
+        self.assertIsNone(first["across_restart_match"])
+        with patch.object(check, "RUN_ID", "new-service-start"):
+            second = self.run_check()
+        self.assertIs(second["across_restart_match"], True)
+        self.assertEqual(second["outcome"], "unverified")
+        self.assertNotIn("same_buyer_account", second)
+
     def test_account_transport_must_use_same_proxy_and_browser_identity(self):
         for field in ("proxy", "agent", "environment"):
             with self.subTest(field=field):

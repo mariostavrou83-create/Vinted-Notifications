@@ -992,9 +992,14 @@ class Client:
             }
         elif params is not None or not path.startswith(("/api/v2/", "/web/api/auth/")):
             raise BuyerError("Unsupported Vinted request.")
+        renewal = path == "/web/api/auth/refresh" or (
+            path == "/web/api/auth/oauth"
+            and isinstance(body, dict)
+            and body.get("grant_type") == "refresh_token"
+        )
         stage = (
             "renewal"
-            if path == "/web/api/auth/refresh"
+            if renewal
             else (
                 "sign_in"
                 if path.startswith("/web/api/auth/")
@@ -1005,6 +1010,8 @@ class Client:
             referer = BASE + "/checkout?purchase_id=" + path.split("/")[4]
         elif path.startswith("/api/v2/items/"):
             referer = BASE + "/items/" + path.split("/")[4]
+        elif renewal:
+            referer = BASE + "/"
         elif path.startswith("/web/api/auth/"):
             referer = BASE + "/member/login"
         else:
@@ -1012,7 +1019,7 @@ class Client:
         self.session.headers["Referer"] = referer
         previous_access = self.session.cookies.get_dict().get("access_token_web")
         previous_refresh = self.session.cookies.get_dict().get("refresh_token_web")
-        if path == "/web/api/auth/refresh":
+        if renewal:
             prepared = self.session.prepare_request(
                 requests.Request(method, BASE + path, json=body)
             )
@@ -1020,13 +1027,14 @@ class Client:
             names = {part.split("=", 1)[0].strip() for part in cookie.split(";")}
             logger.info(
                 "Vinted web renewal request: csrf=%s refresh_cookie=%s "
-                "access_cookie=%s anon_header=%s bearer=%s json_object=%s",
+                "access_cookie=%s anon_header=%s bearer=%s json_object=%s method=%s",
                 bool(prepared.headers.get("X-CSRF-Token")),
                 "refresh_token_web" in names,
                 "access_token_web" in names,
                 bool(prepared.headers.get("X-Anon-Id")),
                 bool(prepared.headers.get("Authorization")),
                 isinstance(body, dict),
+                "oauth" if path == "/web/api/auth/oauth" else "cookie",
             )
         response, data = None, None
         try:
@@ -1074,11 +1082,7 @@ class Client:
                     # nominal status turn that response into an accepted checkout.
                     raise response_error(response, data, stage)
                 access_updated = self.update_tokens(response, data)
-                if path == "/web/api/auth/refresh" or (
-                    path == "/web/api/auth/oauth"
-                    and isinstance(body, dict)
-                    and body.get("grant_type") == "refresh_token"
-                ):
+                if renewal:
                     # HTTP 200 can still contain an OAuth error or no usable token.
                     # Never treat the imported stale cookie as proof of renewal.
                     if (
@@ -1475,10 +1479,38 @@ def verify_code(code):
 
 
 def renew_saved_client(client):
-    """One native UK renewal; keep accepted rotations before verifying identity."""
+    """One selected UK renewal; keep accepted rotations before verifying identity.
+
+    The OAuth refresh grant is adapted from Blim's MIT-licensed
+    feed/vinted_refresh.py at b4ee651da44c7fe5e387f064d46f77a19541d194.
+    Keep MSJ's TLS verification, browser identity, proxy and cross-process lock.
+    Never fall through to a second renewal format after an uncertain response.
+    """
+    method = os.environ.get("VINTED_BUYER_REFRESH_METHOD", "cookie")
+    if method not in ("cookie", "oauth"):
+        raise BuyerError(
+            AUTH_REASONS["renewal_failed"], reason="renewal_failed", stage="renewal"
+        )
+    path, body = "/web/api/auth/refresh", None
+    if method == "oauth":
+        refresh = client.session.cookies.get_dict().get("refresh_token_web")
+        if not isinstance(refresh, str) or not re.fullmatch(
+            r"[A-Za-z0-9._~+/=-]{16,8192}", refresh
+        ):
+            raise BuyerError(
+                AUTH_REASONS["renewal_failed"], reason="renewal_failed", stage="renewal"
+            )
+        path, body = "/web/api/auth/oauth", {
+            "client_id": "web",
+            "grant_type": "refresh_token",
+            "refresh_token": refresh,
+        }
     client.refresh_security_token()
     try:
-        client.request("POST", "/web/api/auth/refresh")
+        if body is None:
+            client.request("POST", path)
+        else:
+            client.request("POST", path, body)
     except BuyerError as renewal:
         if renewal.status in (400, 401, 422) and renewal.reason == "credentials":
             raise BuyerError(

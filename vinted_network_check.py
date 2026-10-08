@@ -200,6 +200,19 @@ def check_connection(*, buyer=None):
                     result["across_restart_match"] = matches
                 if not matches:
                     raise CheckFailure("proxy_exit_changed")
+            # Retain only hashes after three confirmed UK connections. Account
+            # renewal failure must not erase independent proxy evidence.
+            observation = {
+                "endpoint_digest": endpoint_digest,
+                "exit_digest": exit_digest,
+                "run_id": RUN_ID,
+                "checked_at": time.time(),
+            }
+            with closing(buyer.connection()) as conn, conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO parameters(key,value) VALUES (?,?)",
+                    (MARKER, json.dumps(observation)),
+                )
             result["stage"] = "capsolver_balance"
             # This balance request creates no paid task. Packages and provider
             # error descriptions may contain secrets and are never returned.
@@ -248,17 +261,6 @@ def check_connection(*, buyer=None):
                 result["supported_challenge_recovery"] = "attempted_unverified"
             else:
                 result["supported_challenge_recovery"] = "not_exercised"
-            observation = {
-                "endpoint_digest": endpoint_digest,
-                "exit_digest": exit_digest,
-                "run_id": RUN_ID,
-                "checked_at": time.time(),
-            }
-            with closing(buyer.connection()) as conn, conn:
-                conn.execute(
-                    "INSERT OR REPLACE INTO parameters(key,value) VALUES (?,?)",
-                    (MARKER, json.dumps(observation)),
-                )
             result.update(outcome="verified", stage="complete")
     except CheckFailure as exc:
         result["stage"] = exc.stage

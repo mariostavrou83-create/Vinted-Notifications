@@ -809,6 +809,117 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                 self.assertEqual(failure.exception.status, 400)
                 client.request.assert_called_once_with("POST", "/web/api/auth/refresh")
 
+    def test_oauth_renewal_uses_one_private_grant_and_verifies_same_account(self):
+        saved = {
+            "csrf": "private-csrf-token-0123456789",
+            "cookies": {
+                "access_token_web": "private-access-token-0123456789",
+                "refresh_token_web": "private-refresh-token-0123456789",
+            },
+        }
+
+        def response(status, data, text=""):
+            return Mock(
+                status_code=status,
+                json=Mock(return_value=data),
+                text=text,
+                headers={},
+                cookies=requests.cookies.RequestsCookieJar(),
+            )
+
+        for outcome in ("connected", "different_account", "refresh_rejected"):
+            with self.subTest(outcome=outcome):
+                with closing(search_settings.connection()) as conn, conn:
+                    sealed = buyer.encrypt(saved)
+                    conn.execute("UPDATE vinted_buyer SET session=?", (sealed,))
+                replies = [
+                    response(401, {"code": "unauthorized"}),
+                    response(
+                        200,
+                        {},
+                        '<meta name="csrf-token" content="fresh-csrf-token-0123456789">',
+                    ),
+                    (
+                        response(400, {"error": "invalid_grant"})
+                        if outcome == "refresh_rejected"
+                        else response(
+                            200,
+                            {
+                                "access_token": "rotated-access-token-0123456789",
+                                "refresh_token": "rotated-refresh-token-0123456789",
+                                "scope": "user",
+                            },
+                        )
+                    ),
+                ]
+                if outcome != "refresh_rejected":
+                    replies.append(
+                        response(
+                            200, {"user": {"id": 99 if outcome == "connected" else 100}}
+                        )
+                    )
+                with patch.dict(
+                    buyer.os.environ, {"VINTED_BUYER_REFRESH_METHOD": "oauth"}
+                ), patch.object(
+                    requests.Session, "request", side_effect=replies
+                ) as wire, self.assertLogs(
+                    "vinted_buyer", level="INFO"
+                ) as logs:
+                    if outcome == "connected":
+                        client = buyer.connected_client()
+                        client.session.close()
+                    else:
+                        with self.assertRaises(buyer.BuyerError) as failure:
+                            buyer.connected_client()
+                        if outcome == "refresh_rejected":
+                            self.assertEqual(failure.exception.reason, outcome)
+                            self.assertEqual(failure.exception.stage, "renewal")
+                self.assertEqual(wire.call_count, len(replies))
+                renewal = wire.call_args_list[2]
+                self.assertEqual(
+                    renewal.args, ("POST", buyer.BASE + "/web/api/auth/oauth")
+                )
+                self.assertEqual(
+                    renewal.kwargs["json"],
+                    {
+                        "client_id": "web",
+                        "grant_type": "refresh_token",
+                        "refresh_token": saved["cookies"]["refresh_token_web"],
+                    },
+                )
+                self.assertFalse(renewal.kwargs["allow_redirects"])
+                self.assertTrue(
+                    all("checkout" not in c.args[1] for c in wire.call_args_list)
+                )
+                self.assertIn("method=oauth", " ".join(logs.output))
+                for secret in (
+                    *saved["cookies"].values(),
+                    saved["csrf"],
+                    "rotated-access-token-0123456789",
+                    "rotated-refresh-token-0123456789",
+                ):
+                    self.assertNotIn(secret, " ".join(logs.output))
+                    self.assertNotIn(secret.encode(), Path(db.DB_PATH).read_bytes())
+                self.assertEqual(buyer.settings()["user_id"], "99")
+                if outcome == "refresh_rejected":
+                    with closing(search_settings.connection()) as conn:
+                        self.assertEqual(
+                            conn.execute("SELECT session FROM vinted_buyer").fetchone()[
+                                0
+                            ],
+                            sealed,
+                        )
+
+    def test_invalid_renewal_method_cannot_select_an_arbitrary_auth_route(self):
+        client = Mock()
+        with patch.dict(
+            buyer.os.environ, {"VINTED_BUYER_REFRESH_METHOD": "invalid"}
+        ), self.assertRaises(buyer.BuyerError) as failure:
+            buyer.renew_saved_client(client)
+        self.assertEqual(failure.exception.reason, "renewal_failed")
+        client.refresh_security_token.assert_not_called()
+        client.request.assert_not_called()
+
     def test_cookie_scope_and_expiry_survive_encrypted_session_restoration(self):
         client = buyer.Client()
         client.session.cookies.set(
