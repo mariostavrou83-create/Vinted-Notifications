@@ -527,8 +527,16 @@ def proxy_url(value):
     """Validate an owner's explicit fixed proxy, without returning its credentials."""
     if not isinstance(value, str) or not value or len(value) > 2048:
         raise BuyerError("Enter a complete fixed proxy URL, including its port.")
-    if any(ord(char) <= 32 or ord(char) == 127 for char in value):
-        raise BuyerError("The proxy URL contains invalid characters.")
+    if any(ord(char) <= 32 or ord(char) == 127 or char in "<>" for char in value):
+        raise BuyerError(
+            "The proxy URL contains invalid characters. Remove angle brackets, or paste your actual IPRoyal Copy list row."
+        )
+    if "://" not in value and len(value.split(":")) == 4:
+        from vinted_captcha import normalize_proxy
+
+        normalized = normalize_proxy(value)
+        if normalized:
+            value = normalized
     try:
         parsed = urlsplit(value)
         if (
@@ -543,7 +551,7 @@ def proxy_url(value):
             raise ValueError
     except ValueError:
         raise BuyerError(
-            "Use http://user:password@host:port, https://host:port or socks5://host:port for your dedicated proxy."
+            "Paste your actual IPRoyal Copy list row (host:port:username:password), or a complete dedicated proxy URL. Replace example words with your own details."
         ) from None
     return value.rstrip("/")
 
@@ -603,6 +611,7 @@ class Client:
         self.network = network_configuration()
         self.session = BrowserSession()
         self.solver_attempted = False
+        self.solver_solved = False
         if self.network["proxy"]:
             self.session.proxies.update(
                 {"http": self.network["proxy"], "https": self.network["proxy"]}
@@ -742,6 +751,7 @@ class Client:
         # Export full records so all cookie scopes and expiries survive restart;
         # persist_session's CAS rejects a concurrently replaced connection.
         self.persist_session()
+        self.solver_solved = True
         return True
 
     def retry_security_check(self, response, data, error, *, payment=False):

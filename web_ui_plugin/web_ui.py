@@ -639,6 +639,14 @@ def create_app(test_config=None):
                         "Vinted connection settings saved privately. Check the buyer connection before enabling Autobuy again.",
                         "success",
                     )
+                elif action == "buyer_network_check":
+                    import vinted_network_check
+
+                    result = vinted_network_check.check_connection()
+                    flash(
+                        vinted_network_check.summary(result),
+                        "success" if result["outcome"] == "verified" else "error",
+                    )
                 elif action == "buyer_disconnect":
                     vinted_buyer.disconnect()
                     flash("Vinted buyer disconnected. Autobuy is off.", "success")
@@ -648,7 +656,11 @@ def create_app(test_config=None):
                     flash(test_connection(action), "success")
                 return redirect(
                     url_for("connections"),
-                    code=303 if action == "buyer_network" else 302,
+                    code=(
+                        303
+                        if action in ("buyer_network", "buyer_network_check")
+                        else 302
+                    ),
                 )
             except ValueError as exc:
                 flash(str(exc), "error")
