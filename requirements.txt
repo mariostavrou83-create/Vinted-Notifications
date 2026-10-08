@@ -1,5 +1,6 @@
 python-telegram-bot[job-queue]>=21.6
 requests
+curl_cffi==0.16.3
 apscheduler>=3.10.0
 feedgen
 flask

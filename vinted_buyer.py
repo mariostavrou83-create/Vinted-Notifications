@@ -1,4 +1,4 @@
-"""Private buyer sessions: encrypted at rest, never passwords, no challenge bypass."""
+"""Private buyer sessions, verified browser transport and bounded challenge handling."""
 
 import fcntl
 import json
@@ -15,6 +15,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 import db
 from search_settings import connection
+from vinted_http import API_HEADERS, NAVIGATION_HEADERS, BrowserSession
 
 BASE = "https://www.vinted.co.uk"
 logger = logging.getLogger(__name__)
@@ -25,7 +26,7 @@ AUTH_STAGES = {
     "request": "Vinted request",
 }
 AUTH_REASONS = {
-    "security_challenge": "Vinted requires a security check for this connection. The bot cannot complete that check; sign-in and Autobuy have stopped.",
+    "security_challenge": "Vinted requires a security check for this connection. Check your proxy and CapSolver settings, then check the connection again.",
     "csrf": "Vinted rejected the sign-in security token. Your password has not been confirmed.",
     "credentials": "Vinted did not accept the sign-in credentials or the session has expired.",
     "account_restricted": "Vinted reports an account restriction. Check the account on Vinted before trying to connect it.",
@@ -101,6 +102,18 @@ def security_challenge(response, data=None):
     )
 
 
+def homepage_data(response):
+    """Read a small JSON denial without interpreting a successful HTML page."""
+    text = getattr(response, "text", "")
+    if response.status_code == 403 and isinstance(text, str) and len(text) <= 65536:
+        try:
+            value = json.loads(text)
+            return value if isinstance(value, dict) else None
+        except (ValueError, RecursionError):
+            pass
+    return None
+
+
 def response_error(response, data, stage):
     """Map a Vinted failure to fixed, non-secret diagnostics. Never echo its body."""
     status = response.status_code
@@ -111,12 +124,19 @@ def response_error(response, data, stage):
         ]
     codes = {value.lower() for value in values if isinstance(value, str)}
     redirect = redirect_reason(response)
-    if security_challenge(response, data) or redirect == "security_challenge":
+    logger.info(
+        "Vinted response: stage=%s http=%s redirect=%s body=%s",
+        stage,
+        status,
+        redirect_target(response),
+        "json" if isinstance(data, dict) else "other",
+    )
+    if status == 429:
+        reason = "rate_limited"
+    elif security_challenge(response, data) or redirect == "security_challenge":
         reason = "security_challenge"
     elif redirect:
         reason = redirect
-    elif status == 429:
-        reason = "rate_limited"
     elif codes & {"invalid_csrf_token", "csrf_token_invalid", "csrf_error"}:
         reason = "csrf"
     elif codes & {"user_blocked", "account_blocked", "account_restricted"}:
@@ -140,6 +160,33 @@ def response_error(response, data, stage):
     else:
         reason = "http_error"
     return BuyerError(AUTH_REASONS[reason], status, reason=reason, stage=stage)
+
+
+def redirect_target(response):
+    """Fixed labels only: no response paths, queries, userinfo or tokens in logs."""
+    reason = redirect_reason(response)
+    if reason is None:
+        return "none"
+    if reason != "redirect":
+        return reason
+    location = getattr(response, "headers", {}).get("Location", "")
+    if not isinstance(location, str) or not location or len(location) > 4096:
+        return "missing_or_invalid"
+    if any(ord(char) <= 32 for char in location):
+        return "missing_or_invalid"
+    try:
+        target = urlsplit(urljoin(BASE, location))
+        if target.username or target.password:
+            return "userinfo"
+        if target.scheme != "https":
+            return "non_https"
+        if target.netloc == "www.vinted.co.uk":
+            return "same_origin_other_path"
+        if target.netloc == "vinted.co.uk":
+            return "uk_apex"
+        return "other_origin"
+    except ValueError:
+        return "missing_or_invalid"
 
 
 def redirect_reason(response):
@@ -205,6 +252,10 @@ def migrate(conn):
         max_total INTEGER NOT NULL DEFAULT 0, max_extra INTEGER NOT NULL DEFAULT 0,
         browser_info TEXT NOT NULL DEFAULT '{}')""")
     conn.execute("INSERT OR IGNORE INTO vinted_buyer(id) VALUES (1)")
+    if "network" not in {
+        row[1] for row in conn.execute("PRAGMA table_info(vinted_buyer)")
+    }:
+        conn.execute("ALTER TABLE vinted_buyer ADD COLUMN network BLOB")
     conn.execute("""CREATE TABLE IF NOT EXISTS vinted_buy_attempts (
         item_id TEXT PRIMARY KEY, state TEXT NOT NULL, checkout_id TEXT,
         total INTEGER, message TEXT NOT NULL, updated REAL NOT NULL)""")
@@ -266,6 +317,14 @@ def settings():
     pending = decrypt(row.pop("pending"))
     row["pending_code"] = bool(pending and pending.get("expires", 0) > time.time())
     row.pop("browser_info")
+    row.pop("network")
+    config = network_configuration(validate=False)
+    row["network"] = {
+        "browser": True,
+        "proxy": bool(config["proxy"]),
+        "capsolver": bool(config["api_key"]),
+        "enabled": config["enabled"],
+    }
     row["access"] = {
         "message": AUTH_REASONS.get(access["reason"], ""),
         "stage": AUTH_STAGES.get(access["stage"], ""),
@@ -275,12 +334,99 @@ def settings():
     return row
 
 
+def proxy_url(value):
+    """Validate an owner's explicit fixed proxy, without returning its credentials."""
+    if not isinstance(value, str) or not value or len(value) > 2048:
+        raise BuyerError("Enter a complete fixed proxy URL, including its port.")
+    if any(ord(char) <= 32 or ord(char) == 127 for char in value):
+        raise BuyerError("The proxy URL contains invalid characters.")
+    try:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in ("http", "https", "socks5")
+            or not parsed.hostname
+            or not parsed.port
+            or parsed.path not in ("", "/")
+            or parsed.query
+            or parsed.fragment
+            or (bool(parsed.username) != bool(parsed.password))
+        ):
+            raise ValueError
+    except ValueError:
+        raise BuyerError(
+            "Use http://user:password@host:port, https://host:port or socks5://host:port for your dedicated proxy."
+        ) from None
+    return value.rstrip("/")
+
+
+def network_configuration(*, validate=True):
+    with closing(connection()) as conn:
+        saved = conn.execute("SELECT network FROM vinted_buyer WHERE id=1").fetchone()
+    values = decrypt(saved[0]) if saved and saved[0] else {}
+    configured_proxy = values.get("proxy") or os.environ.get(
+        "VINTED_BUYER_PROXY_URL", ""
+    )
+    key = values.get("api_key") or os.environ.get("CAPSOLVER_API_KEY", "")
+    return {
+        "proxy": (
+            proxy_url(configured_proxy)
+            if configured_proxy and validate
+            else configured_proxy
+        ),
+        "api_key": key,
+        "enabled": values.get(
+            "enabled",
+            os.environ.get("VINTED_CAPSOLVER_ENABLED", "").lower() in ("1", "true"),
+        ),
+    }
+
+
+def save_network(form):
+    """Store private credentials encrypted; blank fields retain current settings."""
+    with exclusive():
+        current = network_configuration(validate=False)
+        value = form.get("buyer_proxy_url", "").strip()
+        key = form.get("buyer_capsolver_key", "").strip()
+        if key and not re.fullmatch(r"[A-Za-z0-9_-]{8,256}", key):
+            raise BuyerError("The CapSolver API key contains invalid characters.")
+        updated = {
+            "proxy": (
+                proxy_url(value or current["proxy"])
+                if value or current["proxy"]
+                else ""
+            ),
+            "api_key": key or current["api_key"],
+            "enabled": form.get("buyer_capsolver_enabled") == "yes",
+        }
+        if updated["enabled"] and not (updated["proxy"] and updated["api_key"]):
+            raise BuyerError(
+                "Add your dedicated proxy and CapSolver API key before enabling security checks."
+            )
+        with closing(connection()) as conn, conn:
+            conn.execute(
+                "UPDATE vinted_buyer SET network=?,pending=NULL,enabled=0 WHERE id=1",
+                (encrypt(updated),),
+            )
+
+
 class Client:
     def __init__(self, saved=None):
-        self.session = requests.Session()
+        self.network = network_configuration()
+        self.session = BrowserSession()
+        self.solver_attempted = False
+        if self.network["proxy"]:
+            self.session.proxies.update(
+                {"http": self.network["proxy"], "https": self.network["proxy"]}
+            )
+            self.session.trust_env = False
+            self.session.verify = (
+                os.environ.get("REQUESTS_CA_BUNDLE")
+                or os.environ.get("CURL_CA_BUNDLE")
+                or True
+            )
         self.session.headers.update(
             {
-                "User-Agent": "MSJ-Finder/1.0",
+                **API_HEADERS,
                 "Accept": "application/json",
                 "Accept-Language": "en-GB",
                 "Origin": BASE,
@@ -302,6 +448,59 @@ class Client:
         token = self.session.cookies.get_dict().get("access_token_web")
         if token:
             self.session.headers["Authorization"] = "Bearer " + token
+        else:
+            self.session.headers.pop("Authorization", None)
+        anon = self.session.cookies.get_dict().get("anon_id")
+        if isinstance(anon, str) and re.fullmatch(r"[A-Za-z0-9._~-]{1,256}", anon):
+            self.session.headers["X-Anon-ID"] = anon
+        else:
+            self.session.headers.pop("X-Anon-ID", None)
+
+    def solve_challenge(self, response, data=None):
+        if self.solver_attempted or not self.network["enabled"]:
+            return False
+        from vinted_captcha import extract_challenge, solve_datadome
+        from vinted_http import BROWSER_USER_AGENT
+
+        challenge = extract_challenge(response, data)
+        if not challenge:
+            return False
+        self.solver_attempted = True
+        result = solve_datadome(
+            challenge,
+            proxy=self.network["proxy"],
+            api_key=self.network["api_key"],
+            user_agent=BROWSER_USER_AGENT,
+            enabled=True,
+        )
+        logger.info("Vinted security check: state=%s", result.state)
+        if result.state != "solved":
+            return False
+        for cookie in list(self.session.cookies):
+            if cookie.name == "datadome":
+                self.session.cookies.clear(cookie.domain, cookie.path, cookie.name)
+        self.session.cookies.set(
+            "datadome", result.cookie, domain="www.vinted.co.uk", secure=True
+        )
+        # Merge just the security cookie when this client's token pair still
+        # matches the stored account. Never overwrite a concurrently renewed
+        # session, and never turn an anonymous request into a buyer connection.
+        with closing(connection()) as conn, conn:
+            row = conn.execute("SELECT session FROM vinted_buyer WHERE id=1").fetchone()
+            stored = decrypt(row[0]) if row and row[0] else None
+            current = self.session.cookies.get_dict()
+            names = ("access_token_web", "refresh_token_web")
+            if stored and all(
+                current.get(name)
+                and current.get(name) == stored.get("cookies", {}).get(name)
+                for name in names
+            ):
+                stored.setdefault("cookies", {})["datadome"] = result.cookie
+                conn.execute(
+                    "UPDATE vinted_buyer SET session=? WHERE id=1 AND session=?",
+                    (encrypt(stored), row[0]),
+                )
+        return True
 
     def exported(self):
         return {"csrf": self.csrf, "cookies": self.session.cookies.get_dict()}
@@ -314,6 +513,7 @@ class Client:
             if isinstance(returned, requests.cookies.RequestsCookieJar)
             else {}
         )
+        access_updated = False
         for field, cookie in (
             ("access_token", "access_token_web"),
             ("refresh_token", "refresh_token_web"),
@@ -331,7 +531,10 @@ class Client:
             self.session.cookies.set(
                 cookie, value, domain="www.vinted.co.uk", secure=True
             )
+            if cookie == "access_token_web":
+                access_updated = True
         self.headers()
+        return access_updated
 
     def request(self, method, path, body=None, *, allow_challenge=False):
         if not path.startswith(("/api/v2/", "/web/api/auth/")):
@@ -341,6 +544,15 @@ class Client:
             if path.startswith("/web/api/auth/")
             else "identity" if path == "/api/v2/users/current" else "request"
         )
+        if path.endswith("/payment"):
+            referer = BASE + "/checkout?purchase_id=" + path.split("/")[4]
+        elif path.startswith("/api/v2/items/"):
+            referer = BASE + "/items/" + path.split("/")[4]
+        elif path.startswith("/web/api/auth/"):
+            referer = BASE + "/member/login"
+        else:
+            referer = self.session.headers.get("Referer", BASE + "/")
+        self.session.headers["Referer"] = referer
         try:
             response = self.session.request(
                 method, BASE + path, json=body, timeout=(4, 12), allow_redirects=False
@@ -353,7 +565,20 @@ class Client:
             data = response.json()
         except ValueError:
             data = None
-        if security_challenge(response, data):
+        challenged = (
+            security_challenge(response, data)
+            or redirect_reason(response) == "security_challenge"
+        )
+        # Payment is sent exactly once even when a challenge or timeout occurs.
+        if (
+            challenged
+            and response.status_code in (200, 401, 403, 301, 302, 303, 307, 308)
+            and not path.endswith("/payment")
+            and self.solve_challenge(response, data)
+        ):
+            response.close()
+            return self.request(method, path, body, allow_challenge=allow_challenge)
+        if challenged:
             raise response_error(response, data, stage)
         if (
             allow_challenge
@@ -365,14 +590,41 @@ class Client:
             return {"challenge_id": str(data["payload"]["id"])}
         if response.status_code not in (200, 201) or not isinstance(data, dict):
             raise response_error(response, data, stage)
-        self.update_tokens(response, data)
+        access_updated = self.update_tokens(response, data)
+        if path == "/web/api/auth/refresh" or (
+            path == "/web/api/auth/oauth"
+            and isinstance(body, dict)
+            and body.get("grant_type") == "refresh_token"
+        ):
+            # HTTP 200 can still contain an OAuth error or no usable token.
+            # Never treat the imported stale cookie as proof of renewal.
+            if any(data.get(k) for k in ("error", "error_code")) or not access_updated:
+                raise response_error(response, data, stage)
+            logger.info("Vinted session renewal: usable_access_token=True")
         return data
 
     def homepage(self):
+        navigation = {**NAVIGATION_HEADERS, "Content-Type": None, "Origin": None}
         try:
             response = self.session.get(
-                BASE + "/", timeout=(4, 12), allow_redirects=False
+                BASE + "/", headers=navigation, timeout=(4, 12), allow_redirects=False
             )
+            data = homepage_data(response)
+            if (
+                response.status_code in (200, 401, 403, 301, 302, 303, 307, 308)
+                and (
+                    security_challenge(response, data)
+                    or redirect_reason(response) == "security_challenge"
+                )
+                and self.solve_challenge(response, data)
+            ):
+                response.close()
+                response = self.session.get(
+                    BASE + "/",
+                    headers=navigation,
+                    timeout=(4, 12),
+                    allow_redirects=False,
+                )
             if (
                 not security_challenge(response)
                 and redirect_reason(response) == "home_redirect"
@@ -381,6 +633,7 @@ class Client:
                 # origin. Never follow authentication, challenge or other hosts.
                 response = self.session.get(
                     urljoin(BASE, response.headers["Location"]),
+                    headers=navigation,
                     timeout=(4, 12),
                     allow_redirects=False,
                 )
@@ -388,8 +641,9 @@ class Client:
             raise BuyerError(
                 AUTH_REASONS["network"], reason="network", stage="homepage"
             ) from None
-        if security_challenge(response) or response.status_code != 200:
-            raise response_error(response, None, "homepage")
+        data = homepage_data(response)
+        if security_challenge(response, data) or response.status_code != 200:
+            raise response_error(response, data, "homepage")
         self.update_tokens(response, {})
         token = csrf_from_html(response.text)
         if token:
@@ -443,7 +697,8 @@ def link_session(access_token, refresh_token):
     """Verify an owner's existing credentials; never import anti-bot cookies.
 
     Connection makes only the normal homepage and account-verification requests.
-    No login, refresh, purchase, challenge solving or automatic retry is attempted.
+    Supported security checks use the owner's configured proxy and solver.
+    No login grant, session refresh, checkout or payment is attempted.
     Tokens are not persisted unless Vinted confirms the authenticated identity.
     """
     tokens = (access_token.strip(), refresh_token.strip())
@@ -614,15 +869,23 @@ def connected_client():
             expired = exc.status == 401 and exc.reason == "credentials"
             if not (expired or exc.reason == "session_refresh") or not refresh:
                 raise
-            client.request(
-                "POST",
-                "/web/api/auth/oauth",
-                {
-                    "client_id": "web",
-                    "grant_type": "refresh_token",
-                    "refresh_token": refresh,
-                },
-            )
+            if exc.reason == "session_refresh":
+                # The same-origin redirect explicitly identifies the web
+                # renewal endpoint. Make one normal POST, without replaying
+                # the account GET or following its redirect destination.
+                client.request(
+                    "POST", "/web/api/auth/refresh", {"refresh_token": refresh}
+                )
+            else:
+                client.request(
+                    "POST",
+                    "/web/api/auth/oauth",
+                    {
+                        "client_id": "web",
+                        "grant_type": "refresh_token",
+                        "refresh_token": refresh,
+                    },
+                )
             with closing(connection()) as conn, conn:
                 # Refresh tokens may rotate. Preserve the replacement even if
                 # a later homepage request fails; identity still must be checked

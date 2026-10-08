@@ -1,5 +1,5 @@
 {% extends 'msj_base.html' %}{% block content %}
-<div class="page-heading"><div><span class="eyebrow">YOUR TWO TELEGRAM BOTS</span><h1>Connections & usage.</h1><p class="muted">One dashboard. Separate Vinted and eBay notifications.</p></div></div>
+<div class="page-heading"><div><span class="eyebrow">YOUR TWO TELEGRAM BOTS</span><h1>Connections & usage.</h1><p class="muted">One dashboard. Separate Vinted and eBay notifications.</p>{% if supabase_enabled %}<p><a href="{{url_for('supabase.backup')}}">Manage encrypted Supabase backups →</a></p>{% endif %}</div></div>
 <section class="form-card guide-section"><h2>Activate your eBay production keys</h2>
 <p>If eBay shows “Non Compliant” or “Your keyset is currently disabled”, use <b>Alerts &amp; Notifications → Marketplace Account Deletion</b>. Leave the exemption switch off. Save your notification email there, then copy these two values and save the endpoint.</p>
 {% if deletion.endpoint %}

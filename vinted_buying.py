@@ -84,10 +84,23 @@ def claim(row):
 
 
 def checkout_prices(checkout, item_price, maximum):
+    from collections.abc import Mapping
+
+    def identifier(value):
+        return isinstance(value, str) and bool(
+            re.fullmatch(r"[A-Za-z0-9_-]{1,200}", value)
+        )
+
+    if not isinstance(checkout, Mapping):
+        raise buyer.BuyerError("Vinted did not confirm the checkout details.")
     components = checkout.get("components") or {}
+    if not isinstance(components, Mapping):
+        raise buyer.BuyerError("Vinted did not confirm the checkout details.")
     summary = (
         components.get("order_summary_v2") or components.get("order_summary") or {}
     )
+    if not isinstance(summary, Mapping):
+        raise buyer.BuyerError("Vinted did not confirm the checkout price.")
     # Only an explicit checkout total is accepted. A subtotal or listing price
     # can omit delivery and buyer protection, so neither is a payment fallback.
     total_part = summary.get("total") or {}
@@ -110,26 +123,63 @@ def checkout_prices(checkout, item_price, maximum):
             f"Over budget: £{total/100:.2f} including fees and delivery; this search's maximum total is £{maximum/100:.2f}. No payment was sent.",
             reason="total_over_budget",
         )
-    if checkout.get("errors") or not checkout.get("checksum"):
+    checksum = checkout.get("checksum")
+    if (
+        checkout.get("errors")
+        or not isinstance(checksum, str)
+        or not re.fullmatch(r"[\x21-\x7e]{1,4096}", checksum)
+    ):
         raise buyer.BuyerError(
             "Vinted needs checkout details before this item can be paid for."
         )
     for key in ("shipping_address", "payment_method"):
-        if not components.get(key) or components[key].get("errors"):
+        component = components.get(key)
+        if (
+            not isinstance(component, Mapping)
+            or not component
+            or component.get("errors")
+        ):
             raise buyer.BuyerError(
                 "Set your delivery address and payment method in Vinted first."
             )
-    shipping = components.get("shipping_pickup_details") or {}
-    options = components.get("shipping_pickup_options") or {}
+    shipping = components.get("shipping_pickup_details", {})
+    options = components.get("shipping_pickup_options", {})
     # Use the account's existing delivery choice only. Never invent a pickup
     # point, pick a different address, or purchase an optional add-on.
     if (
-        not shipping
+        not isinstance(shipping, Mapping)
+        or not isinstance(options, Mapping)
         or shipping.get("errors")
         or options.get("errors")
-        or not options.get("selected_pickup_option")
     ):
         raise buyer.BuyerError("Choose and save your delivery option in Vinted first.")
+    choice = options.get("selected_pickup_option")
+    if type(choice) is not int or choice not in (1, 2):
+        raise buyer.BuyerError("Choose and save your delivery option in Vinted first.")
+    branches = options.get("pickup_options", {})
+    if not isinstance(branches, Mapping):
+        raise buyer.BuyerError("Vinted did not confirm the selected delivery rate.")
+    selected = branches.get("home" if choice == 1 else "pickup", {})
+    if not isinstance(selected, Mapping) or selected.get("errors"):
+        raise buyer.BuyerError("Vinted did not confirm the selected delivery rate.")
+    rates = [
+        component["selected_rate_uuid"]
+        for component in (options, selected)
+        if "selected_rate_uuid" in component
+    ]
+    # Mode 1 is home delivery: pickup details can be absent/empty, but the saved
+    # rate must be confirmed in the home/options component. Mode 2 requires a
+    # selected point as well as its rate. Available carrier lists prove neither.
+    if choice == 1 and not rates:
+        raise buyer.BuyerError("Choose and save your home delivery rate in Vinted first.")
+    if choice == 2 and not all(
+        identifier(shipping.get(key)) for key in ("rate_uuid", "point_code", "point_uuid")
+    ):
+        raise buyer.BuyerError("Choose and save your pickup point in Vinted first.")
+    if "rate_uuid" in shipping:
+        rates.append(shipping["rate_uuid"])
+    if not rates or not all(identifier(rate) for rate in rates) or len(set(rates)) != 1:
+        raise buyer.BuyerError("Vinted did not confirm one consistent delivery rate.")
     return total
 
 

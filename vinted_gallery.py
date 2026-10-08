@@ -1,15 +1,14 @@
-"""Read public listing gallery markup, never recommendations or account data.
+"""Read scoped listing details with bounded browser requests and optional solving.
 
-One bounded background page request per listing. Challenges and rate limits
-are reported, not worked around; the fast alert retains its catalogue photo.
+The fast alert retains its catalogue photo while detail requests run separately.
+Only a configured, supported security check allows one additional listing read.
 """
 
-import json
 import re
 import time
-from contextlib import closing
+from contextlib import closing, contextmanager
 from html.parser import HTMLParser
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 
@@ -17,14 +16,37 @@ from alert_images import safe_listing_photo
 from listing_text import clean_description
 from logger import get_logger
 from search_settings import connection
+from vinted_http import NAVIGATION_HEADERS
+from vinted_page_data import parse_page_data
 
 logger = get_logger(__name__)
+RETRY_STATES = {
+    "cooldown",
+    "access_limited",
+    "network_error",
+    "http_500",
+    "http_502",
+    "http_503",
+    "http_504",
+}
+
+
+def retry_pending(details):
+    return (
+        details.get("description_state") in RETRY_STATES
+        and not details.get("description")
+        and details.get("listing_attempts", 0) < 3
+        and time.time() < details.get("listing_retry_until", 0)
+    )
 
 
 def listing_url(value):
     if not isinstance(value, str) or len(value) > 4096:
         return None
-    parsed = urlparse(value)
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return None
     if (
         parsed.scheme == "https"
         and parsed.netloc in ("www.vinted.co.uk", "vinted.co.uk")
@@ -32,6 +54,34 @@ def listing_url(value):
     ):
         return "https://www.vinted.co.uk" + parsed.path
     return None
+
+
+def canonical_listing_url(value, current):
+    """Allow one clean canonical redirect within the same UK listing identity."""
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 4096
+        or any(ord(char) <= 32 or ord(char) == 127 for char in value)
+    ):
+        return None
+    try:
+        target = urljoin(current, value)
+        parsed = urlparse(target)
+    except ValueError:
+        return None
+    accepted = listing_url(target)
+    if (
+        not accepted
+        or parsed.netloc != "www.vinted.co.uk"
+        or parsed.query
+        or parsed.fragment
+        or target == current
+        or re.search(r"/items/(\d+)", target).group(1)
+        != re.search(r"/items/(\d+)", current).group(1)
+    ):
+        return None
+    return accepted
 
 
 def photo_identity(url):
@@ -59,13 +109,12 @@ class GalleryParser(HTMLParser):
         self.description_parts = []
         self.description_depth = 0
         self.description_done = False
-        self.structured = []
-        self.script_parts = None
+        self.in_script = False
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
-        if tag == "script" and attrs.get("type") == "application/ld+json":
-            self.script_parts = []
+        if tag == "script":
+            self.in_script = True
         if (
             not self.description_done
             and not self.description_depth
@@ -85,12 +134,8 @@ class GalleryParser(HTMLParser):
                 self.photos.setdefault(index, attrs["src"])
 
     def handle_endtag(self, tag):
-        if tag == "script" and self.script_parts is not None:
-            try:
-                self.structured.append(json.loads("".join(self.script_parts)))
-            except (ValueError, TypeError):
-                pass
-            self.script_parts = None
+        if tag == "script":
+            self.in_script = False
         if self.description_depth and tag not in (
             "br",
             "img",
@@ -104,9 +149,7 @@ class GalleryParser(HTMLParser):
                 self.description_done = True
 
     def handle_data(self, value):
-        if self.script_parts is not None:
-            self.script_parts.append(value)
-        elif self.description_depth:
+        if not self.in_script and self.description_depth:
             self.description_parts.append(value)
 
 
@@ -121,22 +164,12 @@ def parse_listing(html, url):
     parser.feed(html)
     description = clean_description("".join(parser.description_parts))
     item_id = re.search(r"/items/(\d+)", url).group(1)
-    pending = list(parser.structured)
-    while pending and not description:
-        value = pending.pop()
-        if isinstance(value, list):
-            pending.extend(value)
-        elif isinstance(value, dict):
-            if isinstance(value.get("@graph"), list):
-                pending.extend(value["@graph"])
-            identity = re.search(
-                r"/items/(\d+)", str(value.get("url") or value.get("@id") or "")
-            )
-            if value.get("@type") == "Product" and identity and identity[1] == item_id:
-                description = clean_description(value.get("description"), html=True)
+    page = parse_page_data(html, item_id)
     return {
-        "photos": distinct_photos([url for _, url in sorted(parser.photos.items())]),
-        "description": description,
+        "photos": distinct_photos(
+            [url for _, url in sorted(parser.photos.items())] + page["photos"]
+        ),
+        "description": description or page["description"],
     }
 
 
@@ -149,7 +182,113 @@ def _pause(seconds):
         )
 
 
-def fetch_listing(url):
+def challenge_html(html):
+    return any(
+        marker in html.lower()
+        for marker in (
+            "client challenge",
+            "verify you are human",
+            "captcha-delivery.com",
+            "checking your browser",
+        )
+    )
+
+
+@contextmanager
+def listing_client(client=None):
+    """Use the configured browser transport, with available saved buyer cookies.
+
+    An unreadable saved session can fall back to anonymous cookies. Invalid private
+    network settings fail closed rather than sending the request without its proxy.
+    This path never renews account credentials. Its caller validates canonical
+    redirects before making any additional same-item read.
+    """
+    import vinted_buyer as buyer
+
+    if client is not None:
+        yield client
+        return
+    with closing(connection()) as conn:
+        saved = conn.execute("SELECT session FROM vinted_buyer WHERE id=1").fetchone()
+    cookies = None
+    if saved and saved[0]:
+        try:
+            cookies = buyer.decrypt(saved[0])
+        except (buyer.BuyerError, OSError):
+            logger.info("Vinted listing detail: saved_session_unavailable")
+    client = buyer.Client(cookies) if cookies is not None else buyer.Client()
+    try:
+        yield client
+    finally:
+        client.session.close()
+
+
+@contextmanager
+def listing_response(url, client=None):
+    """Stream one HTML read; close the client only when this helper owns it."""
+    import vinted_buyer as buyer
+
+    url = listing_url(url)
+    if not url:
+        raise buyer.BuyerError("Unsupported Vinted listing URL.")
+    with listing_client(client) as reader, reader.session.get(
+        url,
+        headers={
+            **NAVIGATION_HEADERS,
+            "Origin": None,
+            "Content-Type": None,
+            "Sec-Fetch-Site": "same-origin",
+            "Referer": buyer.BASE + "/",
+        },
+        stream=True,
+        timeout=(2, 4),
+        allow_redirects=False,
+    ) as response:
+        yield response
+
+
+def response_snapshot(response, body, url):
+    """Expose only the bounded bytes already read to challenge classification."""
+    snapshot = requests.Response()
+    snapshot.status_code = response.status_code
+    snapshot.headers.update(response.headers)
+    snapshot.url = url
+    snapshot.encoding = "utf-8"
+    snapshot._content = body
+    return snapshot
+
+
+def bounded_body(response, started):
+    """Return listing bytes, or a denied response prefix, within the read limits."""
+    if response.status_code in (401, 403, 429):
+        prefix = bytearray()
+        try:
+            for chunk in response.iter_content(8192):
+                prefix.extend(chunk[: 65536 - len(prefix)])
+                if len(prefix) >= 65536 or time.monotonic() - started > 6:
+                    break
+        except requests.RequestException:
+            pass
+        return bytes(prefix), "access_limited"
+    if response.status_code != 200:
+        return b"", "http_" + str(response.status_code)
+    chunks, size = [], 0
+    for chunk in response.iter_content(65536):
+        size += len(chunk)
+        if size > 4 * 1024 * 1024 or time.monotonic() - started > 6:
+            return b"", "download_limit"
+        chunks.append(chunk)
+    return b"".join(chunks), "ready"
+
+
+def fetch_listing(url, *, client=None, parser=parse_listing):
+    """Fetch bounded same-item HTML, optionally through a caller-owned client.
+
+    The parser runs only after a successful, fully bounded HTML response. Extra
+    parsed fields are returned to the caller and are not written to alert data.
+    """
+    import vinted_buyer as buyer
+
     empty = {"photos": [], "description": ""}
     url = listing_url(url)
     if not url:
@@ -159,47 +298,69 @@ def fetch_listing(url):
             "SELECT value FROM delivery_runtime WHERE key='vinted_gallery_after'"
         ).fetchone()
     if paused and paused[0] > time.time():
-        return dict(empty, state="cooldown")
-    started = time.monotonic()
+        return dict(empty, state="cooldown", retry_after=paused[0])
     try:
-        with requests.get(
-            url,
-            stream=True,
-            timeout=(2, 4),
-            allow_redirects=False,
-        ) as response:
-            if response.status_code in (401, 403, 429):
-                _pause(300)
-                return dict(empty, state="access_limited")
-            if response.status_code != 200:
-                return dict(empty, state="http_" + str(response.status_code))
-            chunks, size = [], 0
-            for chunk in response.iter_content(65536):
-                size += len(chunk)
-                if size > 4 * 1024 * 1024 or time.monotonic() - started > 6:
-                    return dict(empty, state="download_limit")
-                chunks.append(chunk)
-            html = b"".join(chunks).decode("utf-8", errors="replace")
+        with listing_client(client) as reader:
+            current_url = url
+            canonical_used = False
+            solver_used = False
+            for attempt in range(3):
+                # A solver wait does not consume the next listing's six-second
+                # download budget. Both downloads still have independent caps.
+                started = time.monotonic()
+                with listing_response(current_url, reader) as response:
+                    # Retain only fixed diagnostics, never cookies or bodies.
+                    logger.info("Vinted listing detail: http=%s", response.status_code)
+                    body, state = bounded_body(response, started)
+                    snapshot = response_snapshot(response, body, current_url)
+                if snapshot.status_code in (301, 302, 303, 307, 308):
+                    canonical = canonical_listing_url(
+                        snapshot.headers.get("Location"), current_url
+                    )
+                    if attempt < 2 and not canonical_used and canonical:
+                        canonical_used = True
+                        current_url = canonical
+                        continue
+                    if buyer.redirect_reason(snapshot) != "security_challenge":
+                        return dict(empty, state=state)
+                html = body.decode("utf-8", errors="replace")
+                try:
+                    challenge_data = snapshot.json()
+                except (ValueError, RecursionError):
+                    challenge_data = None
+                challenge = (
+                    buyer.redirect_reason(snapshot) == "security_challenge"
+                    or challenge_html(html)
+                    or buyer.security_challenge(snapshot, challenge_data)
+                )
+                if challenge:
+                    if attempt < 2 and not solver_used:
+                        solver_used = True
+                        if reader.solve_challenge(snapshot, challenge_data):
+                            continue
+                    _pause(300)
+                    return dict(empty, state="challenge")
+                if state == "access_limited":
+                    _pause(300)
+                if state != "ready":
+                    return dict(empty, state=state)
+                data = parser(html, url)
+                if not isinstance(data, dict):
+                    return dict(empty, state="gallery_unavailable")
+                data = dict(empty, **data)
+                return dict(
+                    data,
+                    state=(
+                        "ready"
+                        if data["photos"] or data["description"] or data.get("item")
+                        else "gallery_unavailable"
+                    ),
+                )
     except requests.RequestException:
         return dict(empty, state="network_error")
-    if any(
-        marker in html.lower()
-        for marker in (
-            "client challenge",
-            "verify you are human",
-            "captcha-delivery.com",
-            "checking your browser",
-        )
-    ):
-        _pause(300)
-        return dict(empty, state="challenge")
-    data = parse_listing(html, url)
-    return dict(
-        data,
-        state=(
-            "ready" if data["photos"] or data["description"] else "gallery_unavailable"
-        ),
-    )
+    except (buyer.BuyerError, OSError):
+        logger.info("Vinted listing detail: configuration_unavailable")
+        return dict(empty, state="configuration_error")
 
 
 def fetch_gallery(url):
@@ -216,8 +377,13 @@ async def resolve(row, details, *, persist=True, include_description=False):
     import asyncio
     import json
 
-    if details.get("gallery_checked") and (
-        not include_description or details.get("description_checked")
+    retry = include_description and retry_pending(details)
+    if retry and time.time() < details.get("listing_retry_after", 0):
+        return details.get("photos", [])
+    if (
+        not retry
+        and details.get("gallery_checked")
+        and (not include_description or details.get("description_checked"))
     ):
         return details.get("photos", [])
     existing = distinct_photos(details.get("photos", []))
@@ -227,6 +393,18 @@ async def resolve(row, details, *, persist=True, include_description=False):
     ):
         data = await asyncio.to_thread(fetch_listing, row["url"])
         photos, state = distinct_photos(data["photos"] + existing), data["state"]
+        now = time.time()
+        details.setdefault("listing_retry_until", now + 900)
+        details["listing_attempts"] = details.get("listing_attempts", 0) + (
+            state != "cooldown"
+        )
+        details["listing_retry_after"] = max(
+            now + 1,
+            data.get(
+                "retry_after",
+                now + (300 if state in {"cooldown", "access_limited"} else 30),
+            ),
+        )
         details.update(
             description=data["description"] or details.get("description", ""),
             description_checked=True,

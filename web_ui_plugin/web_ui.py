@@ -68,6 +68,9 @@ def create_app(test_config=None):
     )
     if test_config:
         app.config.update(test_config)
+    import supabase_backend
+
+    hosted_auth = supabase_backend.install_dashboard(app, lambda: db.DB_PATH)
 
     @app.before_request
     def protect():
@@ -81,7 +84,12 @@ def create_app(test_config=None):
             session["csrf"], request.form.get("csrf", "")
         ):
             abort(400, "This form expired. Reload the page and try again.")
-        public = ("login", "setup", "static", "health")
+        # CSRF-protected local logout must work even when hosted Auth is down.
+        public = ("login", "setup", "static", "health", "supabase.login", "logout")
+        if hosted_auth and request.endpoint not in public:
+            if not hosted_auth.is_authenticated():
+                return redirect(url_for(hosted_auth.login_endpoint))
+            return None
         if request.endpoint not in public and not session.get("owner"):
             return redirect(url_for("login"))
         if request.endpoint not in public and not auth_row()["password_hash"]:
@@ -108,6 +116,7 @@ def create_app(test_config=None):
             "csrf": session.get("csrf"),
             "loads": json.loads,
             "money": lambda cents: "" if cents is None else f"{cents/100:.2f}",
+            "supabase_enabled": hosted_auth is not None,
         }
 
     def count_attempt():
@@ -141,6 +150,8 @@ def create_app(test_config=None):
 
     @app.route("/setup", methods=["GET", "POST"])
     def setup():
+        if hosted_auth:
+            return redirect(url_for(hosted_auth.login_endpoint))
         if auth_row()["password_hash"]:
             return redirect(url_for("login"))
         if request.method == "POST":
@@ -174,6 +185,8 @@ def create_app(test_config=None):
 
     @app.route("/login", methods=["GET", "POST"])
     def login():
+        if hosted_auth:
+            return redirect(url_for(hosted_auth.login_endpoint))
         if not auth_row()["password_hash"]:
             return redirect(url_for("setup"))
         if request.method == "POST":
@@ -188,6 +201,8 @@ def create_app(test_config=None):
 
     @app.post("/logout")
     def logout():
+        if hosted_auth:
+            hosted_auth.logout()
         session.clear()
         return redirect(url_for("login"))
 
@@ -553,6 +568,12 @@ def create_app(test_config=None):
                         "Buyer settings saved. Autobuy uses each search's maximum total and purchases only when you tap its button.",
                         "success",
                     )
+                elif action == "buyer_network":
+                    vinted_buyer.save_network(request.form)
+                    flash(
+                        "Vinted connection settings saved privately. Check the buyer connection before enabling Autobuy again.",
+                        "success",
+                    )
                 elif action == "buyer_disconnect":
                     vinted_buyer.disconnect()
                     flash("Vinted buyer disconnected. Autobuy is off.", "success")
@@ -560,7 +581,10 @@ def create_app(test_config=None):
                     from ebay_connections import test_connection
 
                     flash(test_connection(action), "success")
-                return redirect(url_for("connections"))
+                return redirect(
+                    url_for("connections"),
+                    code=303 if action == "buyer_network" else 302,
+                )
             except ValueError as exc:
                 flash(str(exc), "error")
                 if action.startswith("buyer_"):

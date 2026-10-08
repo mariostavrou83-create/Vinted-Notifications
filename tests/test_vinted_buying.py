@@ -39,8 +39,11 @@ def checkout(total="19.00"):
             },
             "payment_method": {"id": 123},
             "shipping_address": {"id": 456},
-            "shipping_pickup_details": {"rate_uuid": "saved-rate"},
-            "shipping_pickup_options": {"selected_pickup_option": 1},
+            "shipping_pickup_details": {},
+            "shipping_pickup_options": {
+                "selected_pickup_option": 1,
+                "selected_rate_uuid": "saved-rate",
+            },
         },
     }
 
@@ -223,7 +226,6 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         for field in (
             "payment_method",
             "shipping_address",
-            "shipping_pickup_details",
             "shipping_pickup_options",
         ):
             value = checkout()
@@ -236,6 +238,112 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
             with self.subTest(checkout=value):
                 self.final = value
                 self.assertEqual(self.run_buy()["state"], "failed_before_payment")
+        self.assertEqual(self.payments(), [])
+
+    def test_home_delivery_with_empty_pickup_details_uses_confirmed_saved_rate(self):
+        self.final = checkout()
+        self.assertEqual(self.run_buy()["state"], "paid")
+        self.assertEqual(len(self.payments()), 1)
+        for call in self.client.request.call_args_list:
+            if call.args[0] == "PUT":
+                self.assertEqual(call.args[2]["components"]["shipping_pickup_details"], {})
+                self.assertEqual(call.args[2]["components"]["shipping_pickup_options"], {})
+
+    def test_branch_scoped_home_rate_is_valid_without_pickup_details(self):
+        value = checkout()
+        value["components"].pop("shipping_pickup_details")
+        value["components"]["shipping_pickup_options"] = {
+            "selected_pickup_option": 1,
+            "pickup_options": {"home": {"selected_rate_uuid": "saved-home-rate"}},
+        }
+        self.assertEqual(buying.checkout_prices(value, 1500, 2000), 1900)
+
+    def test_pickup_requires_saved_point_and_consistent_selected_rate(self):
+        value = checkout()
+        value["components"]["shipping_pickup_options"] = {
+            "selected_pickup_option": 2,
+            "pickup_options": {"pickup": {"selected_rate_uuid": "saved-pickup-rate"}},
+        }
+        value["components"]["shipping_pickup_details"] = {
+            "rate_uuid": "saved-pickup-rate",
+            "point_code": "carrier-point-123",
+            "point_uuid": "saved-point-uuid",
+        }
+        self.assertEqual(buying.checkout_prices(value, 1500, 2000), 1900)
+        for key in ("rate_uuid", "point_code", "point_uuid"):
+            invalid = copy.deepcopy(value)
+            invalid["components"]["shipping_pickup_details"].pop(key)
+            self.final = invalid
+            self.assertEqual(self.run_buy()["state"], "failed_before_payment")
+        invalid = copy.deepcopy(value)
+        invalid["components"]["shipping_pickup_details"]["rate_uuid"] = "different-rate"
+        self.final = invalid
+        self.assertEqual(self.run_buy()["state"], "failed_before_payment")
+        self.assertEqual(self.payments(), [])
+
+    def test_available_rates_or_points_cannot_replace_a_saved_selection(self):
+        for mode in (1, 2):
+            value = checkout()
+            value["components"]["shipping_pickup_options"] = {
+                "selected_pickup_option": mode,
+                "pickup_types": {
+                    "home": {"shipping_options": [{"rate_uuid": "available-rate"}]},
+                    "pickup": {"shipping_options": [{"rate_uuid": "available-rate"}]},
+                },
+            }
+            value["components"]["shipping_pickup_details"] = {
+                "pickup_points": [{"point_code": "available-point", "point_uuid": "available-uuid"}]
+            }
+            self.final = value
+            self.assertEqual(self.run_buy()["state"], "failed_before_payment")
+        self.assertEqual(self.payments(), [])
+
+    def test_unknown_boolean_modes_and_nonmapping_delivery_components_fail_closed(self):
+        bad = []
+        for mode in (True, False, 0, 3, "1", None):
+            value = checkout()
+            value["components"]["shipping_pickup_options"]["selected_pickup_option"] = mode
+            bad.append(value)
+        for field in ("shipping_pickup_options", "shipping_pickup_details", "payment_method", "shipping_address"):
+            for malformed in ([], "configured", True):
+                value = checkout()
+                value["components"][field] = malformed
+                bad.append(value)
+        for value in bad:
+            self.final = value
+            self.assertEqual(self.run_buy()["state"], "failed_before_payment")
+        self.assertEqual(self.payments(), [])
+
+    def test_invalid_rate_point_identifiers_or_checksum_cannot_reach_payment(self):
+        bad = []
+        for rate in (True, 123, "", "rate with spaces", "rate\nheader"):
+            value = checkout()
+            value["components"]["shipping_pickup_options"]["selected_rate_uuid"] = rate
+            bad.append(value)
+        for checksum in (True, 123, {}, "", "checksum\nheader"):
+            value = checkout()
+            value["checksum"] = checksum
+            bad.append(value)
+        value = checkout()
+        value["components"]["shipping_pickup_options"]["pickup_options"] = {"home": {"selected_rate_uuid": "conflicting-rate"}}
+        bad.append(value)
+        value = checkout()
+        value["components"]["shipping_pickup_options"]["pickup_options"] = {
+            "home": {"selected_rate_uuid": "saved-rate", "errors": ["Choose delivery"]}
+        }
+        bad.append(value)
+        for field in ("point_code", "point_uuid"):
+            for invalid in (True, 123, {}, "", "point\nheader"):
+                value = checkout()
+                value["components"]["shipping_pickup_options"] = {"selected_pickup_option": 2}
+                value["components"]["shipping_pickup_details"] = {
+                    "rate_uuid": "saved-rate", "point_code": "saved-point", "point_uuid": "saved-uuid"
+                }
+                value["components"]["shipping_pickup_details"][field] = invalid
+                bad.append(value)
+        for value in bad:
+            self.final = value
+            self.assertEqual(self.run_buy()["state"], "failed_before_payment")
         self.assertEqual(self.payments(), [])
 
     def test_sold_reserved_or_higher_item_price_never_reaches_payment(self):
@@ -331,6 +439,126 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                 self.assertNotIn("do not display", str(error.exception))
                 request.assert_called_once()
         client.session.close()
+
+    def test_nominal_refresh_success_requires_a_usable_access_token(self):
+        client = buyer.Client(
+            {"cookies": {"access_token_web": "old-access-token-0123456789"}}
+        )
+        for data in (
+            {},
+            {"access_token": "bad\r\nvalue"},
+            {"error": "invalid_grant"},
+            {"error": "invalid_grant", "access_token": "new-access-token-0123456789"},
+        ):
+            response = Mock(
+                status_code=200, json=Mock(return_value=data), text="", headers={}
+            )
+            with patch.object(
+                client.session, "request", return_value=response
+            ), self.assertRaises(buyer.BuyerError):
+                client.request(
+                    "POST", "/web/api/auth/oauth", {"grant_type": "refresh_token"}
+                )
+        for cookies, data in (
+            ({}, {"access_token": "new-access-token-0123456789"}),
+            ({"access_token_web": "cookie-access-token-0123456789"}, {}),
+        ):
+            response = Mock(
+                status_code=200,
+                json=Mock(return_value=data),
+                text="",
+                headers={},
+                cookies=requests.cookies.cookiejar_from_dict(cookies),
+            )
+            with patch.object(client.session, "request", return_value=response):
+                self.assertEqual(
+                    client.request(
+                        "POST", "/web/api/auth/oauth", {"grant_type": "refresh_token"}
+                    ),
+                    data,
+                )
+        client.session.close()
+
+    def test_direct_refresh_rejects_empty_invalid_or_error_success_without_retry(self):
+        old = "old-access-token-0123456789"
+        for data in (
+            {},
+            {"access_token": "bad\r\nvalue"},
+            {"error": "invalid_grant"},
+            {
+                "error_code": "invalid_token",
+                "access_token": "new-access-token-0123456789",
+            },
+        ):
+            with self.subTest(data=data):
+                client = buyer.Client({"cookies": {"access_token_web": old}})
+                response = Mock(
+                    status_code=200,
+                    json=Mock(return_value=data),
+                    text="",
+                    headers={},
+                )
+                with patch.object(
+                    client.session, "request", return_value=response
+                ) as request, self.assertLogs(
+                    "vinted_buyer", level="INFO"
+                ) as logs, self.assertRaises(
+                    buyer.BuyerError
+                ) as error:
+                    client.request(
+                        "POST",
+                        "/web/api/auth/refresh",
+                        {"refresh_token": "private-refresh-token-0123456789"},
+                    )
+                request.assert_called_once()
+                for value in (old, "private-refresh-token-0123456789"):
+                    self.assertNotIn(value, " ".join(logs.output))
+                    self.assertNotIn(value, str(error.exception))
+                client.session.close()
+
+    def test_direct_refresh_accepts_access_token_from_body_or_rotated_cookie(self):
+        new = "new-access-token-0123456789"
+        for cookies, data in (
+            ({}, {"access_token": new}),
+            ({"access_token_web": new}, {}),
+        ):
+            with self.subTest(cookies=cookies):
+                client = buyer.Client(
+                    {"cookies": {"access_token_web": "old-access-token-0123456789"}}
+                )
+                response = Mock(
+                    status_code=200,
+                    json=Mock(return_value=data),
+                    text="",
+                    headers={},
+                    cookies=requests.cookies.cookiejar_from_dict(cookies),
+                )
+                with patch.object(
+                    client.session, "request", return_value=response
+                ) as request:
+                    self.assertEqual(
+                        client.request("POST", "/web/api/auth/refresh", {}), data
+                    )
+                request.assert_called_once()
+                self.assertEqual(client.exported()["cookies"]["access_token_web"], new)
+                self.assertEqual(
+                    client.session.headers["Authorization"], "Bearer " + new
+                )
+                client.session.close()
+
+    def test_redirect_diagnostics_never_include_path_or_query_secrets(self):
+        for location, label in (
+            ("/private-token?secret=do-not-log", "same_origin_other_path"),
+            ("https://vinted.co.uk/?secret=do-not-log", "uk_apex"),
+            ("https://evil.test/private-token?secret=do-not-log", "other_origin"),
+            ("https://private-token@www.vinted.co.uk/", "userinfo"),
+        ):
+            response = Mock(status_code=307, headers={"Location": location}, text="")
+            with self.assertLogs("vinted_buyer", level="INFO") as logs:
+                buyer.response_error(response, None, "homepage")
+            self.assertIn(label, " ".join(logs.output))
+            self.assertNotIn("private-token", " ".join(logs.output))
+            self.assertNotIn("do-not-log", " ".join(logs.output))
 
     def test_homepage_block_stops_before_sending_password(self):
         with closing(search_settings.connection()) as conn, conn:
@@ -543,7 +771,11 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(buyer.decrypt(saved), rotated)
         self.assertEqual(before, after)
         client.request.assert_called_once()
-        self.assertEqual(client.request.call_args.args[1], "/web/api/auth/oauth")
+        self.assertEqual(client.request.call_args.args[1], "/web/api/auth/refresh")
+        self.assertEqual(
+            client.request.call_args.args[2],
+            {"refresh_token": old_session["cookies"]["refresh_token_web"]},
+        )
         client.identity.assert_called_once()
         client.session.close.assert_called_once()
         self.assertEqual(buyer.settings()["access"]["http_status"], 307)
@@ -591,9 +823,22 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                 if refresh_expected:
                     self.assertIs(buyer.connected_client(), client)
                     client.request.assert_called_once()
-                    self.assertEqual(
-                        client.request.call_args.args[2]["grant_type"], "refresh_token"
-                    )
+                    if reason == "session_refresh":
+                        client.request.assert_called_once_with(
+                            "POST",
+                            "/web/api/auth/refresh",
+                            {"refresh_token": "refresh"},
+                        )
+                    else:
+                        client.request.assert_called_once_with(
+                            "POST",
+                            "/web/api/auth/oauth",
+                            {
+                                "client_id": "web",
+                                "grant_type": "refresh_token",
+                                "refresh_token": "refresh",
+                            },
+                        )
                     self.assertEqual(buyer.settings()["access"]["http_status"], 200)
                 else:
                     with self.assertRaises(buyer.BuyerError):
@@ -601,6 +846,100 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                     client.request.assert_not_called()
                     self.assertEqual(buyer.settings()["access"]["http_status"], status)
                     client.session.close.assert_called_once()
+
+    def test_direct_refresh_rechecks_identity_once_and_preserves_rotated_session(self):
+        old = {
+            "csrf": "old-csrf-token-0123456789",
+            "cookies": {
+                "access_token_web": "old-access-token-0123456789",
+                "refresh_token_web": "old-refresh-token-0123456789",
+            },
+        }
+        new = {
+            "access_token": "new-access-token-0123456789",
+            "refresh_token": "new-refresh-token-0123456789",
+        }
+
+        def response(status, data, *, location=None, text=""):
+            return Mock(
+                status_code=status,
+                text=text,
+                json=Mock(return_value=data),
+                headers={"Location": location} if location else {},
+                cookies=requests.cookies.RequestsCookieJar(),
+            )
+
+        for outcome in ("connected", "second_redirect", "changed_account"):
+            with self.subTest(outcome=outcome):
+                with closing(search_settings.connection()) as conn, conn:
+                    conn.execute(
+                        "UPDATE vinted_buyer SET session=?", (buyer.encrypt(old),)
+                    )
+                final = (
+                    response(307, None, location="/web/api/auth/refresh")
+                    if outcome == "second_redirect"
+                    else response(
+                        200,
+                        {"user": {"id": 99 if outcome == "connected" else 100}},
+                    )
+                )
+                responses = [
+                    response(
+                        307,
+                        None,
+                        location="/web/api/auth/refresh?private=never-log-this",
+                    ),
+                    response(200, new),
+                    response(
+                        200, None, text='{"CSRF_TOKEN":"new-csrf-token-0123456789"}'
+                    ),
+                    final,
+                ]
+                with patch.object(
+                    requests.Session, "request", side_effect=responses
+                ) as request, self.assertLogs("vinted_buyer", level="INFO") as logs:
+                    if outcome == "connected":
+                        client = buyer.connected_client()
+                        client.session.close()
+                    else:
+                        with self.assertRaises(buyer.BuyerError):
+                            buyer.connected_client()
+                self.assertEqual(
+                    [(c.args[0], c.args[1]) for c in request.call_args_list],
+                    [
+                        ("GET", buyer.BASE + "/api/v2/users/current"),
+                        ("POST", buyer.BASE + "/web/api/auth/refresh"),
+                        ("GET", buyer.BASE + "/"),
+                        ("GET", buyer.BASE + "/api/v2/users/current"),
+                    ],
+                )
+                self.assertEqual(
+                    request.call_args_list[1].kwargs["json"],
+                    {"refresh_token": old["cookies"]["refresh_token_web"]},
+                )
+                self.assertTrue(
+                    all(not c.kwargs["allow_redirects"] for c in request.call_args_list)
+                )
+                with closing(search_settings.connection()) as conn:
+                    saved = conn.execute("SELECT session FROM vinted_buyer").fetchone()[
+                        0
+                    ]
+                self.assertEqual(
+                    buyer.decrypt(saved)["cookies"],
+                    {
+                        "access_token_web": new["access_token"],
+                        "refresh_token_web": new["refresh_token"],
+                    },
+                )
+                self.assertTrue(buyer.settings()["enabled"])
+                self.assertEqual(buyer.settings()["user_id"], "99")
+                for value in (
+                    *old["cookies"].values(),
+                    *new.values(),
+                    "never-log-this",
+                ):
+                    self.assertNotIn(value, " ".join(logs.output))
+                    self.assertNotIn(value.encode(), Path(db.DB_PATH).read_bytes())
 
     def test_saved_connection_check_never_prepares_checkout_or_changes_permission(self):
         with patch.object(buyer, "connected_client", return_value=self.client) as check:

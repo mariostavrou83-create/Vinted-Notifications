@@ -2,12 +2,22 @@
 <h2>Vinted buyer &amp; Autobuy</h2>
 <p>Tap <b>Autobuy</b> on a Vinted alert to buy and pay using your saved Vinted delivery and payment choices. It only runs when you tap; finding a listing never purchases it automatically.</p>
 <p>Connection: <b>{{buyer.username if buyer.connected else 'Not connected'}}</b> · Autobuy <b>{{'on' if buyer.enabled else 'off'}}</b>.</p>
+<details class="guide-section"><summary><b>Browser, proxy &amp; CapSolver connection</b></summary>
+<p>Chrome browser fingerprint support is active. Dedicated proxy: <b>{{'configured' if buyer.network.proxy else 'needed'}}</b>. CapSolver: <b>{{'enabled' if buyer.network.enabled else 'off'}}</b>.</p>
+<p>Use a proxy with a fixed IP for this Vinted account. CapSolver can complete supported Vinted security checks through that same proxy. An unsupported check or blocked IP still stops the connection.</p>
+<form method="post" autocomplete="off"><input type="hidden" name="csrf" value="{{csrf}}">
+<label for="buyer_proxy_url">Dedicated proxy URL</label><input id="buyer_proxy_url" name="buyer_proxy_url" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="2048" placeholder="{{'Configured — leave blank to keep' if buyer.network.proxy else 'http://user:password@host:port'}}">
+<label for="buyer_capsolver_key">CapSolver API key</label><input id="buyer_capsolver_key" name="buyer_capsolver_key" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="256" placeholder="{{'Configured — leave blank to keep' if buyer.network.capsolver else 'Enter your CapSolver API key'}}">
+<label class="checkbox"><input type="checkbox" name="buyer_capsolver_enabled" value="yes" {{'checked' if buyer.network.enabled}}> Enable supported security checks using my CapSolver account</label>
+<p><small>Credentials are stored encrypted and these boxes clear after submission. CapSolver tasks may use paid credit. Saving connection settings turns Autobuy off; verify the connection before enabling it again.</small></p>
+<button class="primary" name="action" value="buyer_network">Save private connection settings</button></form>
+</details>
 {% if buyer.access.message %}<div class="guide-section" role="status"><b>Last connection result</b><p>{{buyer.access.message}}</p><small>{{buyer.access.stage}}{% if buyer.access.http_status %} · HTTP {{buyer.access.http_status}}{% endif %}</small></div>{% endif %}
 {% if not buyer.connected %}
 <details class="guide-section" open>
 <summary><b>Connect an existing Vinted login</b></summary>
 <p>Already signed in with Google, Apple or email? You can link that Vinted session here. Being signed in on your phone keeps listing links signed in, but does not connect this bot.</p>
-<p><small>This setup needs desktop Chrome. iPhone Safari does not expose the required session values directly. This option verifies an existing session; it cannot remove a Vinted security check.</small></p>
+<p><small>This setup needs desktop Chrome. iPhone Safari does not expose the required session values directly. Supported security checks use the private connection settings above.</small></p>
 <details><summary>Where to find the two session values</summary>
 <ol><li>In desktop Chrome, sign in to your own account at <a href="https://www.vinted.co.uk" target="_blank" rel="noopener noreferrer">Vinted UK</a> using your usual method. Complete any checks on Vinted itself.</li><li>Open Chrome's menu → More tools → Developer tools. Select <b>Application → Storage → Cookies</b>, then the Vinted domain.</li><li>Copy only the value of <b>access_token_web</b> into the first box and <b>refresh_token_web</b> into the second. Do not copy a full cookie file.</li></ol>
 <p><small>These values give access to your Vinted account. Enter them only on this private dashboard, never in Telegram, ChatGPT or a screenshot. No browser security-check cookies are needed.</small></p>
@@ -39,6 +49,6 @@
 <button class="primary" name="action" value="buyer_limits">Save buyer settings</button></form>
 <form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="buyer_disconnect">Disconnect Vinted buyer</button></form>
 {% endif %}
-<p><small>Live checkout still needs verification with your account. If Vinted asks this server to complete a security check, the connection stops. Nothing is charged by connecting or saving these settings.</small></p>
+<p><small>Live checkout still needs verification with your account. Connecting and saving settings do not submit a purchase. An uncertain payment is never sent again automatically.</small></p>
 {% if buying %}<h3>Recent purchase attempts</h3>{% for attempt in buying %}<div class="guide-section"><b>{{attempt.title or ('Item '+attempt.item_id)}}</b><p>{{attempt.message}}</p>{% if attempt.url %}<a href="{{attempt.url}}" target="_blank" rel="noopener noreferrer">Open Vinted listing ↗</a>{% endif %}</div>{% endfor %}{% endif %}
 </section>
