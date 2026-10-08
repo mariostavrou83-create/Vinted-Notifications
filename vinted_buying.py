@@ -1020,8 +1020,15 @@ def record_payment_result(item_id, paid, total):
         )
 
 
-def buy_checkout_quote(token):
+def buy_checkout_quote(token, *, alert_row=None):
     """Explicit one-off test using a checked item and its quoted all-in ceiling."""
+    from vinted_telegram_review import restricted
+
+    if restricted() and alert_row is None:
+        raise buyer.BuyerError(
+            "Use Autobuy on the specifically approved Telegram alert. No payment was sent.",
+            reason="item_approval_required",
+        )
     message = "Prepare a fresh test checkout before buying. No payment was sent."
     if not isinstance(token, str) or not 100 <= len(token) <= 8192:
         raise buyer.BuyerError(message)
@@ -1046,8 +1053,30 @@ def buy_checkout_quote(token):
     ):
         raise buyer.BuyerError(message)
     item_id, purchase_id = quote["item_id"], quote["checkout_id"]
-    with buyer.exclusive():
+    with buyer.exclusive(wait_seconds=45):
         config = buyer.settings()
+        limits = None
+        if alert_row is not None:
+            from vinted_telegram_review import approved_token
+
+            if restricted() and approved_token(alert_row) != token:
+                raise buyer.BuyerError(
+                    "The item approval changed. Review again. No payment was sent."
+                )
+            if str(alert_row["item_id"]) != item_id:
+                raise buyer.BuyerError(
+                    "The quote belongs to a different alert. No payment was sent."
+                )
+            config, limits = ready(alert_row)
+            alert_price = cents(
+                {"amount": alert_row["price"], "currency_code": alert_row["currency"]}
+            )
+            if quote["item_price"] > alert_price:
+                raise buyer.BuyerError(
+                    "The item price increased after its alert. No payment was sent.",
+                    reason="price_increased",
+                )
+            check_item_limits(quote["item_price"], limits, alert_row["query_id"])
         if (
             not config["connected"]
             or not config["enabled"]
@@ -1092,8 +1121,14 @@ def buy_checkout_quote(token):
                 raise buyer.BuyerError(
                     "The quoted delivery or payment choice changed. Prepare a fresh test before buying."
                 )
+            maximum = quote["total"]
+            if alert_row is not None:
+                limits = limits.restrict(vinted_budget.purchase_limits(alert_row))
+                check_item_limits(quote["item_price"], limits, alert_row["query_id"])
+                if limits.total_maximum is not None:
+                    maximum = min(maximum, limits.total_maximum)
             total = checkout_prices(
-                checkout, quote["item_price"], quote["total"], item_id=item_id
+                checkout, quote["item_price"], maximum, item_id=item_id
             )
             current = buyer.settings()
             if (
@@ -1101,9 +1136,10 @@ def buy_checkout_quote(token):
                 or not current["enabled"]
                 or current["user_id"] != quote["buyer_id"]
                 or choice_preferences(current) != quote["preferences"]
+                or not 0 <= time.time() - quote["created"] <= 1800
             ):
                 raise buyer.BuyerError(
-                    "The buyer connection or Autobuy setting changed before payment."
+                    "The buyer settings changed or the approval expired before payment. Review again."
                 )
             info = saved_browser_info()
             record(
@@ -1209,6 +1245,10 @@ def buy(row):
     host = urlsplit(row["url"]).hostname
     if not item_id.isdigit() or host != "www.vinted.co.uk" or row["currency"] != "GBP":
         raise buyer.BuyerError("Autobuy currently supports UK Vinted listings in GBP.")
+    from vinted_telegram_review import approved_token, restricted
+
+    if restricted():
+        return buy_checkout_quote(approved_token(row), alert_row=row)
     # Keep a Telegram tap queued during a bounded session renewal, rather than
     # making the owner tap again. Maintenance itself never waits on a purchase.
     with buyer.exclusive(wait_seconds=45):

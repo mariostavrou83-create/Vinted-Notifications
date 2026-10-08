@@ -46,6 +46,26 @@
 {% if buyer.pending_code %}<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><label for="buyer_code">Vinted verification code</label><input id="buyer_code" name="buyer_code" autocomplete="one-time-code" maxlength="12" required><button class="primary" name="action" value="buyer_verify">Verify buyer account</button></form>{% endif %}
 {% if buyer.connected %}
 <form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="buyer_recheck">Check saved buyer connection</button><p><small>Verifies the saved account session without preparing a checkout or sending payment.</small></p></form>
+{% if telegram_review_mode %}
+<div class="guide-section">
+<h3>Approve one Telegram Autobuy item</h3>
+<p>Purchases are restricted to the exact reviewed item and approved all-in total. Your search budgets remain saved.</p>
+<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="buyer_telegram_review_latest">Review the latest Telegram alert without paying</button></form>
+{% if telegram_review %}
+<p><b>{{telegram_review.title}}</b> · item {{telegram_review.item_id}} · search #{{telegram_review.query_id}}</p>
+{% if telegram_review.checkout_created %}<p>A checkout exists. Reservation: {{telegram_review.reservation}}. No payment was submitted by this review.</p>{% endif %}
+{% if telegram_review.outcome == 'quoted' %}
+<p>Item £{{'%.2f'|format(telegram_review.item_price/100)}} · <b>Maximum all-in total £{{'%.2f'|format(telegram_review.total/100)}}</b>.</p>
+<p>Delivery: {{telegram_review.delivery_choice}}{% if telegram_review.pickup_name %} · {{telegram_review.pickup_name}}{% endif %}. Payment: {{telegram_review.payment_method}}.</p>
+<p>Search limit: {% if telegram_review.search_maximum_total is not none %}£{{'%.2f'|format(telegram_review.search_maximum_total/100)}} including fees and delivery{% elif telegram_review.search_maximum_item is not none %}£{{'%.2f'|format(telegram_review.search_maximum_item/100)}} item price, plus verified fees and delivery{% else %}alerted item price, plus verified fees and delivery{% endif %}.</p>
+{% if not telegram_review.browser_info_ready %}<p>Save buyer settings below with Autobuy unticked to capture your browser details before approval.</p>{% elif telegram_review.expired %}<p>This review expired. Review the latest alert again before approving.</p>{% elif telegram_review.approved %}<p>This item is approved. Tap <b>Autobuy</b> on its Telegram alert to submit payment up to the approved total.</p>{% else %}
+<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="buyer_review_item" value="{{telegram_review.item_id}}"><input type="hidden" name="buyer_review_maximum" value="{{telegram_review.total}}"><button class="primary" name="action" value="buyer_telegram_review_approve">Approve this item for Telegram Autobuy · up to £{{'%.2f'|format(telegram_review.total/100)}}</button></form>
+<p><small>Approval enables only this reviewed item. Payment is submitted when you tap its Telegram Autobuy button. A changed item, total, delivery or payment choice stops the purchase.</small></p>
+{% endif %}
+{% endif %}
+{% endif %}
+</div>
+{% endif %}
 <details class="guide-section"><summary><b>Check an existing Vinted checkout</b></summary>
 <p>Load the current total for a checkout you already opened on Vinted and apply your delivery/payment preferences below. This does not submit payment or change your spending limits.</p>
 <form method="post" autocomplete="off"><input type="hidden" name="csrf" value="{{csrf}}">

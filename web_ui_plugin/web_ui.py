@@ -539,6 +539,33 @@ def create_app(test_config=None):
                     flash(vinted_buyer.check_signin(), "success")
                 elif action == "buyer_recheck":
                     flash(vinted_buyer.check_saved_connection(), "success")
+                elif action == "buyer_telegram_review_latest":
+                    import vinted_telegram_review
+
+                    result = vinted_telegram_review.review_latest()
+                    flash(
+                        (
+                            "Checkout reviewed. Review the exact item, delivery, payment method and total below. No payment was sent."
+                            if result["outcome"] == "quoted"
+                            else "Telegram checkout review stopped at "
+                            + result["stage"]
+                            + ". No payment was sent."
+                        ),
+                        "success" if result["outcome"] == "quoted" else "error",
+                    )
+                    return redirect(url_for("connections"), code=303)
+                elif action == "buyer_telegram_review_approve":
+                    import vinted_telegram_review
+
+                    vinted_telegram_review.approve(
+                        request.form.get("buyer_review_item", ""),
+                        int(request.form.get("buyer_review_maximum", "0")),
+                    )
+                    flash(
+                        "This item and maximum total are approved. Tap Autobuy on this item's Telegram alert to submit payment. Other items remain blocked.",
+                        "success",
+                    )
+                    return redirect(url_for("connections"), code=303)
                 elif action == "buyer_listing_check":
                     import vinted_buying
 
@@ -694,6 +721,8 @@ def create_app(test_config=None):
             buyer=vinted_buyer.settings(),
             buying=__import__("vinted_buying").history(),
             checkout_test=session.get("buyer_test_quote"),
+            telegram_review=__import__("vinted_telegram_review").public_review(),
+            telegram_review_mode=__import__("vinted_telegram_review").restricted(),
         )
 
     @app.route("/folders", methods=["GET", "POST"])

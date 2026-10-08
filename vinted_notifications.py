@@ -353,6 +353,15 @@ if __name__ == "__main__":
         )
         recovery_check_process.start()
 
+    telegram_review_process = None
+    if os.environ.get("MSJ_TELEGRAM_REVIEW_ON_START") or os.environ.get("MSJ_TELEGRAM_ITEM_APPROVAL_ON_START"):
+        from vinted_telegram_review import run_once as run_telegram_review_once
+
+        telegram_review_process = multiprocessing.Process(
+            target=run_telegram_review_once, name="private-telegram-checkout-review"
+        )
+        telegram_review_process.start()
+
     parent_pid = os.getpid()
 
     def stop_main(signum, frame):
@@ -390,6 +399,7 @@ if __name__ == "__main__":
                 network_check_process,
                 alert_check_process,
                 recovery_check_process,
+                telegram_review_process,
             ):
                 if process:
                     stop_process(process, name=process.name)
