@@ -326,6 +326,15 @@ if __name__ == "__main__":
         )
         buyer_check_process.start()
 
+    network_check_process = None
+    if os.environ.get("MSJ_NETWORK_CHECK_ON_START"):
+        from vinted_network_check import run_once as run_network_check_once
+
+        network_check_process = multiprocessing.Process(
+            target=run_network_check_once, name="private-network-connection-check"
+        )
+        network_check_process.start()
+
     parent_pid = os.getpid()
 
     def stop_main(signum, frame):
@@ -360,6 +369,7 @@ if __name__ == "__main__":
                 telegram_process,
                 rss_process,
                 buyer_check_process,
+                network_check_process,
             ):
                 if process:
                     stop_process(process, name=process.name)

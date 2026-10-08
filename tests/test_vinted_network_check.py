@@ -1,6 +1,7 @@
 """Private diagnostics and provider input, without live requests or paid tasks."""
 
 import json
+import os
 import sqlite3
 import tempfile
 import time
@@ -32,6 +33,19 @@ def response(body=None, *, status=200, raw=None):
         json.dumps(body).encode() if raw is None else raw
     ]
     return result
+
+
+def trace(body=EXIT, *, status=200):
+    return response(
+        status=status,
+        raw=(
+            "ip="
+            + body["ip"]
+            + "\nloc="
+            + body["country_code"]
+            + "\nvisit_scheme=https\nwarp=off\n"
+        ).encode(),
+    )
 
 
 class DiagnosticTests(unittest.TestCase):
@@ -79,7 +93,7 @@ class DiagnosticTests(unittest.TestCase):
             probe.cookies = {}
             probe.headers = {"User-Agent": BROWSER_USER_AGENT}
             probe.proxies = {}
-            probe.get.return_value = response(EXIT)
+            probe.get.return_value = trace()
             self.probes.append(probe)
             return probe
 
@@ -171,7 +185,7 @@ class DiagnosticTests(unittest.TestCase):
                         cookies={},
                         headers={},
                         proxies={},
-                        get=Mock(return_value=response(b)),
+                        get=Mock(return_value=trace(b)),
                     )
                     for b in bodies
                 ]
@@ -199,7 +213,7 @@ class DiagnosticTests(unittest.TestCase):
             response(raw=b"not json"),
             response(raw=b"[" * 1200 + b"0" + b"]" * 1200),
             response({"ip": {}, "country_code": "GB"}),
-            response({"ip": "127.0.0.1", "country_code": "GB"}),
+            trace({"ip": "127.0.0.1", "country_code": "GB"}),
             response([EXIT]),
         ):
             with self.subTest(response=candidate):
@@ -211,6 +225,35 @@ class DiagnosticTests(unittest.TestCase):
                 self.assertEqual(result["outcome"], "unverified")
                 candidate.close.assert_called_once()
                 self.solver_factory.assert_not_called()
+
+    def test_trace_duplicates_and_alternate_routes_are_rejected(self):
+        for raw in (
+            b"ip=8.8.8.8\nip=1.1.1.1\nloc=GB\nvisit_scheme=https\nwarp=off\n",
+            b"ip=8.8.8.8\nloc=GB\nvisit_scheme=http\nwarp=off\n",
+            b"ip=8.8.8.8\nloc=GB\nvisit_scheme=https\nwarp=on\n",
+        ):
+            self.browser.side_effect = None
+            self.browser.return_value = Mock(
+                cookies={},
+                headers={},
+                proxies={},
+                get=Mock(return_value=response(raw=raw)),
+            )
+            self.assertEqual(self.run_check()["outcome"], "unverified")
+            self.solver_factory.assert_not_called()
+
+    def test_documented_trace_without_optional_warp_field_is_accepted(self):
+        candidate = response(raw=b"ip=8.8.8.8\nloc=GB\nvisit_scheme=https\n")
+        self.assertEqual(
+            check.response_trace(candidate, deadline=time.monotonic() + 25), EXIT
+        )
+        candidate.close.assert_called_once()
+
+    def test_slow_stream_closes_and_never_reaches_buyer_or_solver(self):
+        with patch.object(check.time, "monotonic", side_effect=[0, 0, 26]):
+            self.assertEqual(self.run_check()["stage"], "proxy_exit_timeout")
+        self.solver_factory.assert_not_called()
+        self.buyer.connected_client.assert_not_called()
 
     def test_invalid_key_zero_balance_and_invalid_balance_stop_before_buyer(self):
         for body, stage in (
@@ -426,6 +469,37 @@ class PrivateRouteTests(DatabaseFixture, unittest.TestCase):
         page = self.web.get(result.location).get_data(as_text=True)
         self.assertIn("Remove angle brackets", page)
         self.assertNotIn("offline-password", page)
+
+
+class StartupTests(DatabaseFixture, unittest.TestCase):
+    def test_service_check_is_opt_in_and_reserved_once_before_execution(self):
+        def execute(**kwargs):
+            with closing(real_buyer.connection()) as conn:
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT value FROM parameters WHERE key=?",
+                        (check.STARTUP_MARKER,),
+                    ).fetchone()[0],
+                    "offline-release",
+                )
+            return {"outcome": "unverified", "stage": "proxy_exit"}
+
+        with patch.dict(
+            os.environ, {"MSJ_NETWORK_CHECK_ON_START": "offline-release"}
+        ), patch.object(
+            check, "check_connection", side_effect=execute
+        ) as execute_check:
+            self.assertEqual(check.run_once()["outcome"], "unverified")
+            self.assertIsNone(check.run_once())
+            execute_check.assert_called_once_with(buyer=real_buyer)
+
+    def test_unset_or_invalid_startup_labels_make_no_request(self):
+        for release in ("", "0", "off", "false", "bad release", "a" * 81):
+            with patch.dict(
+                os.environ, {"MSJ_NETWORK_CHECK_ON_START": release}
+            ), patch.object(check, "check_connection") as execute:
+                self.assertIsNone(check.run_once())
+                execute.assert_not_called()
 
 
 if __name__ == "__main__":

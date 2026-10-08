@@ -4,6 +4,8 @@ import hashlib
 import ipaddress
 import json
 import logging
+import os
+import re
 import secrets
 import sqlite3
 import time
@@ -16,11 +18,12 @@ import requests
 from vinted_http import BROWSER_IMPERSONATE, BROWSER_USER_AGENT, BrowserSession
 
 logger = logging.getLogger(__name__)
-EXIT_URL = "https://ipapi.co/json/"
+EXIT_URL = "https://www.cloudflare.com/cdn-cgi/trace"
 BALANCE_URL = "https://api.capsolver.com/getBalance"
 MARKER = "buyer_proxy_observation"
 RUN_ID = secrets.token_hex(16)
 MAX_RESPONSE_BYTES = 16 * 1024
+STARTUP_MARKER = "network_checked_release"
 
 
 class CheckFailure(Exception):
@@ -28,19 +31,70 @@ class CheckFailure(Exception):
         self.stage, self.status = stage, status
 
 
-def response_json(response, stage):
+def response_bytes(response, stage, *, deadline=None):
     with closing(response):
         if response.status_code != 200:
             raise CheckFailure(stage, status=response.status_code)
         raw = bytearray()
         for chunk in response.iter_content(4096):
+            if deadline is not None and time.monotonic() >= deadline:
+                raise CheckFailure(stage + "_timeout")
             raw.extend(chunk)
             if len(raw) > MAX_RESPONSE_BYTES:
                 raise CheckFailure(stage)
-        data = json.loads(raw)
-        if not isinstance(data, dict):
-            raise CheckFailure(stage)
-        return data
+        return bytes(raw)
+
+
+def response_json(response, stage):
+    data = json.loads(response_bytes(response, stage))
+    if not isinstance(data, dict):
+        raise CheckFailure(stage)
+    return data
+
+
+def response_trace(response, *, deadline):
+    """Read only Cloudflare's IP/country evidence; never expose its body."""
+    raw = response_bytes(response, "proxy_exit", deadline=deadline)
+    fields = {}
+    for line in raw.decode("ascii").splitlines():
+        key, separator, value = line.partition("=")
+        if not separator or not re.fullmatch(r"[a-z_]{1,32}", key):
+            raise CheckFailure("proxy_exit")
+        if key in fields:
+            raise CheckFailure("proxy_exit")
+        fields[key] = value
+    if fields.get("visit_scheme") != "https" or fields.get("warp", "off") != "off":
+        raise CheckFailure("proxy_trace_route")
+    return {"ip": fields.get("ip"), "country_code": fields.get("loc")}
+
+
+def run_once():
+    """Railway-authorized, opt-in diagnostic; reserve before any network call."""
+    release = os.environ.get("MSJ_NETWORK_CHECK_ON_START", "")
+    if release.lower() in ("", "0", "false", "off") or not re.fullmatch(
+        r"[A-Za-z0-9_.-]{1,80}", release
+    ):
+        return None
+    import vinted_buyer as buyer
+
+    try:
+        with closing(buyer.connection()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            previous = conn.execute(
+                "SELECT value FROM parameters WHERE key=?", (STARTUP_MARKER,)
+            ).fetchone()
+            if previous and previous[0] == release:
+                return None
+            conn.execute(
+                "INSERT OR REPLACE INTO parameters(key,value) VALUES (?,?)",
+                (STARTUP_MARKER, release),
+            )
+    except (OSError, sqlite3.Error):
+        logger.info(
+            "Vinted private connection startup: outcome=unverified stage=reservation"
+        )
+        return None
+    return check_connection(buyer=buyer)
 
 
 def digest(value):
@@ -86,6 +140,7 @@ def check_connection(*, buyer=None):
             result.update(
                 transport_version="0.16.3", browser_profile=BROWSER_IMPERSONATE
             )
+            result["proxy_probe"] = "cloudflare_trace"
             result["stage"] = "proxy_exit"
             exits = []
             started = time.monotonic()
@@ -105,17 +160,23 @@ def check_connection(*, buyer=None):
                         for field in ("Cookie", "Authorization", "X-CSRF-Token")
                     ):
                         raise CheckFailure("anonymous_probe")
-                    data = response_json(
+                    data = response_trace(
                         probe.get(
                             EXIT_URL, timeout=(2, 4), allow_redirects=False, stream=True
                         ),
-                        "proxy_exit",
+                        deadline=started + 25,
                     )
                 raw_address = data.get("ip")
                 if not isinstance(raw_address, str) or len(raw_address) > 45:
                     raise CheckFailure("proxy_exit")
                 address = ipaddress.ip_address(raw_address)
-                if not address.is_global or data.get("country_code") != "GB":
+                country = data.get("country_code")
+                if not isinstance(country, str) or not re.fullmatch(
+                    r"[A-Z]{2}", country
+                ):
+                    raise CheckFailure("proxy_exit")
+                result["country"] = country
+                if not address.is_global or country != "GB":
                     raise CheckFailure("proxy_country")
                 exits.append(str(address))
                 result["connections_checked"] += 1
