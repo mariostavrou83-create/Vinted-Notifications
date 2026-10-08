@@ -19,6 +19,7 @@ import time
 import uuid
 from contextlib import closing
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -279,13 +280,13 @@ class Client:
             headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
         )
 
-    def download_backup(self, token):
+    def download_backup(self, token, *, with_metadata=False):
         owner_id = self.verify_owner(token)
         data = self._request(
             "GET",
             "/rest/v1/msj_private_backups?owner_id=eq."
             + owner_id
-            + "&backup_kind=eq.sqlite-v1&select=ciphertext&limit=1",
+            + "&backup_kind=eq.sqlite-v1&select=ciphertext,updated_at&limit=1",
             token=token,
             limit=MAX_CIPHERTEXT_BYTES + 1024,
         )
@@ -303,9 +304,23 @@ class Client:
         ):
             raise SupabaseError("The saved encrypted backup is invalid.")
         try:
-            return encrypted.encode("ascii")
+            raw = encrypted.encode("ascii")
         except UnicodeError:
             raise SupabaseError("The saved encrypted backup is invalid.") from None
+        if not with_metadata:
+            return raw
+        try:
+            value = data[0].get("updated_at")
+            if not isinstance(value, str) or len(value) > 64:
+                raise ValueError
+            updated = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if updated.tzinfo is None:
+                raise ValueError
+        except ValueError:
+            raise SupabaseError(
+                "The saved cloud backup timestamp is invalid."
+            ) from None
+        return raw, updated.isoformat()
 
 
 LOGIN_PAGE = """<!doctype html><html lang="en"><meta charset="utf-8">
@@ -325,6 +340,13 @@ BACKUP_PAGE = """<!doctype html><html lang="en"><meta charset="utf-8">
 <p>Keep supabase-backup.key and vinted-buyer.key from the persistent volume separately for recovery.</p>
 {% if message %}<p role="status">{{ message }}</p>{% endif %}
 <form method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit">Save cloud backup</button></form>
+<form method="post" action="{{ url_for('supabase.verify_backup') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit">Verify saved cloud backup</button></form>
+{% if verification %}<h2>Recovery check</h2><p>Result: {{ verification.outcome }}. Stage: {{ verification.stage }}.</p>
+{% if verification.backup_timestamp %}<p>Backup saved: {{ verification.backup_timestamp }}</p>{% endif %}
+{% if verification.counts %}<table><thead><tr><th>Check</th><th>Count</th></tr></thead><tbody>{% for label, count in verification.counts.items() %}<tr><td>{{ label.replace('_', ' ') }}</td><td>{{ count }}</td></tr>{% endfor %}</tbody></table>
+<p>SQLite integrity: {{ verification.integrity }}. Expected searches and photo references: passed. Encrypted buyer session: readable. Dashboard sessions in backup: 0.</p>
+<p>Saved settings match live: {{ verification.settings_match_live }}. Buyer records match live: {{ verification.buyer_records_match_live }}.</p>{% endif %}
+<p>The temporary copy was deleted. Your live database was not replaced.</p>{% endif %}
 <p><a href="{{ url_for('supabase.download') }}">Download saved encrypted backup</a></p>
 <p><a href="{{ url_for('dashboard') }}">Back to dashboard</a></p></main></body></html>"""
 
@@ -370,6 +392,9 @@ class DashboardIntegration:
     def tokens(self):
         digest = self._session_hash()
         if not digest:
+            self.app.logger.info(
+                "Supabase owner session: outcome=required stage=missing_reference"
+            )
             return None
         cached = getattr(g, "_msj_supabase_tokens", None)
         if cached and cached[0] is self and cached[1] == digest:
@@ -380,7 +405,16 @@ class DashboardIntegration:
                 (digest,),
             ).fetchone()
         if not row or row[0] != self.client.config.owner_id or row[2] <= self.clock():
+            stage = (
+                "expired_session"
+                if row and row[2] <= self.clock()
+                else "missing_or_other_session"
+            )
+            self.app.logger.info(
+                "Supabase owner session: outcome=required stage=%s", stage
+            )
             return None
+        stage = "session_decryption"
         try:
             tokens = json.loads(self.cipher.decrypt(row[1]))
             if not isinstance(tokens, dict):
@@ -388,12 +422,17 @@ class DashboardIntegration:
             if not isinstance(tokens.get("expires_at"), (int, float)):
                 return None
             if tokens["expires_at"] <= self.clock() + 60:
+                stage = "session_refresh"
                 tokens = self._refresh_tokens(digest)
             else:
+                stage = "owner_verification"
                 self.client.verify_owner(tokens.get("access_token"))
             g._msj_supabase_tokens = (self, digest, tokens)
             return tokens
         except (SupabaseError, InvalidToken, ValueError, TypeError):
+            self.app.logger.warning(
+                "Supabase owner session: outcome=failed stage=%s", stage
+            )
             return None
 
     def _refresh_tokens(self, digest):
@@ -475,6 +514,7 @@ class DashboardIntegration:
         if request.method == "POST" and not secrets.compare_digest(
             session["csrf"], request.form.get("csrf", "")
         ):
+            self.app.logger.info("Supabase protected form: outcome=rejected stage=csrf")
             abort(400, "This form expired. Reload the page and try again.")
 
     def _count_attempt(self):
@@ -573,6 +613,50 @@ class DashboardIntegration:
                 as_attachment=True,
                 download_name="msj-sqlite-backup.fernet",
                 max_age=0,
+            )
+
+        @blueprint.post("/supabase/backup/verify")
+        def verify_backup():
+            tokens = self.tokens()
+            if not tokens:
+                return redirect(url_for(self.login_endpoint))
+            self._csrf()
+            stage = "owner_cloud_download"
+            timestamp = None
+            status = 200
+            try:
+                from supabase_recovery_check import verify_snapshot
+
+                encrypted, timestamp = self.client.download_backup(
+                    tokens["access_token"], with_metadata=True
+                )
+                stage = "isolated_recovery"
+                database = Path(self.database_path()).resolve()
+                result = verify_snapshot(
+                    encrypted, database.parent, live_database=database
+                )
+                result.update(stage="complete", backup_timestamp=timestamp)
+                message = "Saved cloud backup recovery verified."
+            except SupabaseError as exc:
+                result = {
+                    "outcome": "unverified",
+                    "stage": getattr(exc, "stage", stage),
+                }
+                if timestamp:
+                    result["backup_timestamp"] = timestamp
+                message = "The saved cloud backup could not be verified."
+                status = 502 if stage == "owner_cloud_download" else 422
+            self.app.logger.info(
+                "Supabase backup verification: %s", json.dumps(result, sort_keys=True)
+            )
+            return (
+                render_template_string(
+                    BACKUP_PAGE,
+                    csrf=session["csrf"],
+                    message=message,
+                    verification=result,
+                ),
+                status,
             )
 
         self.app.register_blueprint(blueprint)

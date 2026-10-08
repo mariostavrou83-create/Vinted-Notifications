@@ -50,6 +50,17 @@ before compression; larger deployments should use the hosting provider's volume
 backup instead. A Supabase free project can pause after inactivity, so keep a
 separate volume backup for recovery.
 
+
+A signed-in owner can choose **Verify saved cloud backup** on the same page. Its
+CSRF-protected POST `/supabase/backup/verify` reuses the verified owner session
+and owner-scoped cloud download. The check reads existing private keys only,
+validates the snapshot header, bounds decompression, checks a separate read-only
+temporary SQLite file, and then deletes that file. It reports safe counts,
+backup timestamp and whether saved settings/buyer records match live data;
+it never restores the live database or exports keys. A missing key, corrupt
+snapshot, absent example reference or search count other than 44 is reported
+as unverified. This diagnostic is scoped to the current 44-search deployment.
+
 The application creates `supabase-backup.key` beside the live SQLite database on
 its first backup, with owner-only file permissions. Keep that key **separately**
 in your private password manager or secured volume backup. Also retain the
@@ -85,3 +96,4 @@ web sessions. Owner identity is verified through
 Official references: [password authentication](https://supabase.com/docs/guides/auth/passwords),
 [API keys](https://supabase.com/docs/guides/api/api-keys), and
 [row-level security](https://supabase.com/docs/guides/database/postgres/row-level-security).
+
