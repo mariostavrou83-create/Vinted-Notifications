@@ -359,8 +359,20 @@ class SolverTests(unittest.TestCase):
                 result = self.solve()
                 self.assertEqual(result.code, "other")
                 self.assertEqual(result.category, expected)
-                self.assertNotIn(code, json.dumps(result.public()))
+                if code.startswith("ERROR_"):
+                    self.assertEqual(result.provider_error, code)
+                else:
+                    self.assertNotIn(code, json.dumps(result.public()))
                 self.assertNotIn(secret, repr(result) + json.dumps(result.public()))
+
+    def test_even_enum_shaped_credentials_cannot_be_exported_as_error_names(self):
+        secret = "ERROR_PRIVATE_KEY"
+        self.session.post.return_value = response(
+            {"errorId": 1, "errorCode": secret, "errorDescription": secret}, status=400
+        )
+        result = self.solve(api_key=secret)
+        self.assertEqual(result.provider_error, "")
+        self.assertNotIn(secret, repr(result) + json.dumps(result.public()))
 
     def test_response_body_redirect_and_json_schemas_are_bounded(self):
         for fake, state in (

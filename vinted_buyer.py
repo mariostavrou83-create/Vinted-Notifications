@@ -745,11 +745,12 @@ class Client:
             enabled=True,
         )
         logger.info(
-            "Vinted security check: state=%s phase=%s code=%s category=%s http=%s polls=%s",
+            "Vinted security check: state=%s phase=%s code=%s category=%s provider=%s http=%s polls=%s",
             result.state,
             getattr(result, "stage", "") or "none",
             getattr(result, "code", "") or "none",
             getattr(result, "category", "") or "none",
+            getattr(result, "provider_error", "") or "none",
             getattr(result, "http_status", None),
             getattr(result, "polls", 0),
         )

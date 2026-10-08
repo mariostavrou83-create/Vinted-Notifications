@@ -67,18 +67,25 @@ class SolverResult:
     stage: str = ""
     http_status: int | None = None
     category: str = ""
+    provider_error: str = ""
 
     def public(self):
         """Safe diagnostics; a solved cookie remains server-side only."""
         result = {"state": self.state, "polls": self.polls}
-        for field_name in ("code", "stage", "http_status", "category"):
+        for field_name in (
+            "code",
+            "stage",
+            "http_status",
+            "category",
+            "provider_error",
+        ):
             value = getattr(self, field_name)
             if value not in (None, ""):
                 result[field_name] = value
         return result
 
 
-def _safe_error(data, status=200):
+def _safe_error(data, status=200, *, request_payload=None):
     """Known codes and fixed categories only; never copy provider descriptions."""
     raw_code = data.get("errorCode") if isinstance(data, dict) else None
     normalized = (
@@ -135,11 +142,31 @@ def _safe_error(data, status=200):
             if phrase in description:
                 category = fixed
                 break
-    return {
+    result = {
         "code": code,
         "category": category,
         "http_status": status if type(status) is int and 100 <= status <= 599 else None,
     }
+    # A provider error NAME is diagnostic data. Accept only its bounded enum
+    # format, and explicitly exclude any request credential or task identifier.
+    # Descriptions, URLs, solution values and response bodies are never exported.
+    private_values = []
+    if isinstance(request_payload, dict):
+        private_values.extend(request_payload.get(k) for k in ("clientKey", "taskId"))
+        task = request_payload.get("task")
+        if isinstance(task, dict):
+            private_values.extend(task.get(k) for k in ("proxy", "captchaUrl"))
+            try:
+                parts = urlsplit(task.get("proxy", ""))
+                private_values.extend((parts.username, parts.password))
+            except (ValueError, TypeError):
+                pass
+        if re.fullmatch(r"ERROR_[A-Z_]{1,64}", normalized) and not any(
+            isinstance(value, str) and len(value) >= 4 and value.upper() in normalized
+            for value in private_values
+        ):
+            result["provider_error"] = normalized
+    return result
 
 
 def _failure(error, data, stage, polls=0):
@@ -149,7 +176,7 @@ def _failure(error, data, stage, polls=0):
         else (
             data
             if isinstance(data, dict)
-            and set(data) <= {"code", "category", "http_status"}
+            and set(data) <= {"code", "category", "http_status", "provider_error"}
             else _safe_error(data)
         )
     )
@@ -160,6 +187,7 @@ def _failure(error, data, stage, polls=0):
         category=detail.get("category", ""),
         stage=stage,
         http_status=detail.get("http_status"),
+        provider_error=detail.get("provider_error", ""),
     )
 
 
@@ -374,9 +402,9 @@ def _post(session, path, payload, deadline):
     if not isinstance(data, dict) or type(data.get("errorId")) is not int:
         return None, "invalid_response"
     if data["errorId"] != 0:
-        return _safe_error(data, status), "service_error"
+        return _safe_error(data, status, request_payload=payload), "service_error"
     if status != 200:
-        return _safe_error(data, status), "service_error"
+        return _safe_error(data, status, request_payload=payload), "service_error"
     return data, None
 
 
