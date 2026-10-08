@@ -1,5 +1,6 @@
 """Private buyer sessions: encrypted at rest, never passwords, no challenge bypass."""
 
+import base64
 import fcntl
 import json
 import logging
@@ -29,6 +30,7 @@ AUTH_STAGES = {
     "saved_session": "Saved buyer session",
     "homepage": "Vinted homepage",
     "sign_in": "Vinted sign-in endpoint",
+    "renewal": "Vinted session renewal",
     "identity": "Vinted account verification",
     "request": "Vinted request",
 }
@@ -42,6 +44,7 @@ AUTH_REASONS = {
     "rate_limited": "Vinted requested a cooldown. Wait before trying again.",
     "unreadable": "Vinted returned a response the bot could not read.",
     "session_refresh": "Vinted requested renewal of the saved buyer session.",
+    "renewal_failed": "Vinted could not renew the saved buyer session. Reconnect your Vinted buyer in Connections. No purchase or payment was started.",
     "signin_redirect": "Vinted redirected this session to sign-in. Reconnect your buyer account.",
     "redirect": "Vinted redirected this account request instead of confirming it. The bot stopped without following the redirect.",
     "home_redirect": "Vinted redirected this request to its homepage instead of confirming the account.",
@@ -78,6 +81,25 @@ class BuyerError(ValueError):
         self.status = status
         self.reason = reason
         self.stage = stage
+
+
+def token_expiry_hint(value):
+    """Diagnostic only: an unverified expiry claim never confirms authentication."""
+    if not isinstance(value, str) or len(value) > 8192:
+        return "unknown"
+    parts = value.split(".")
+    if len(parts) != 3 or len(parts[1]) > 4096:
+        return "unknown"
+    try:
+        claims = json.loads(
+            base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4))
+        )
+        expiry = claims.get("exp") if isinstance(claims, dict) else None
+        if type(expiry) not in (int, float) or not 0 <= expiry <= 4102444800:
+            return "unknown"
+        return "expired" if expiry <= time.time() else "not_expired"
+    except (ValueError, TypeError, UnicodeError):
+        return "unknown"
 
 
 def security_challenge(response, data=None):
@@ -213,7 +235,7 @@ def response_error(response, data, stage):
     logger.info(
         "Vinted response: stage=%s http=%s redirect=%s body=%s "
         "api_code=%s fields=%s csrf_hint=%s refresh_hint=%s required_hint=%s "
-        "invalid_hint=%s expired_hint=%s shape=%s code_type=%s known_code=%s auth_hint=%s",
+        "invalid_hint=%s expired_hint=%s shape=%s code_type=%s known_code=%s auth_hint=%s message_type=%s message_category=%s",
         stage,
         status,
         redirect_target(response),
@@ -233,6 +255,16 @@ def response_error(response, data, stage):
         any(
             word in hints
             for word in ("authenticat", "unauthor", "log in", "logged in", "login")
+        ),
+        type(data.get("message")).__name__ if isinstance(data, dict) else "none",
+        (
+            {
+                "bad request": "bad_request",
+                "unauthorized": "unauthorized",
+                "forbidden": "forbidden",
+            }.get(data["message"].strip().lower(), "other")
+            if isinstance(data, dict) and isinstance(data.get("message"), str)
+            else "non_text"
         ),
     )
     if (
@@ -575,6 +607,31 @@ class Client:
             ],
         }
 
+    def log_cookie_evidence(self):
+        """Only counts and fixed expiry labels, never cookies, claims or identifiers."""
+        prepared = self.session.prepare_request(
+            requests.Request("POST", BASE + "/web/api/auth/refresh")
+        )
+        names = [
+            part.split("=", 1)[0].strip()
+            for part in prepared.headers.get("Cookie", "").split(";")
+        ]
+        refresh = [
+            cookie
+            for cookie in self.session.cookies
+            if cookie.name == "refresh_token_web"
+        ]
+        values = self.session.cookies.get_dict()
+        logger.info(
+            "Vinted auth cookie evidence: access_sent=%s refresh_sent=%s refresh_stored=%s refresh_expired=%s access_expiry=%s refresh_expiry=%s",
+            names.count("access_token_web"),
+            names.count("refresh_token_web"),
+            len(refresh),
+            sum(cookie.is_expired() for cookie in refresh),
+            token_expiry_hint(values.get("access_token_web")),
+            token_expiry_hint(values.get("refresh_token_web")),
+        )
+
     def bind_verified_session(self, user_id, sealed, saved):
         """Only a same-account identity check may enable session persistence."""
         self._verified_session = (user_id, sealed, saved)
@@ -698,11 +755,16 @@ class Client:
         elif params is not None or not path.startswith(("/api/v2/", "/web/api/auth/")):
             raise BuyerError("Unsupported Vinted request.")
         stage = (
-            "sign_in"
-            if path.startswith("/web/api/auth/")
-            else "identity" if path == "/api/v2/users/current" else "request"
+            "renewal"
+            if path == "/web/api/auth/refresh"
+            else (
+                "sign_in"
+                if path.startswith("/web/api/auth/")
+                else "identity" if path == "/api/v2/users/current" else "request"
+            )
         )
         previous_access = self.session.cookies.get_dict().get("access_token_web")
+        previous_refresh = self.session.cookies.get_dict().get("refresh_token_web")
         if path == "/web/api/auth/refresh":
             prepared = self.session.prepare_request(
                 requests.Request(method, BASE + path, json=body)
@@ -774,6 +836,12 @@ class Client:
                 else None
             )
             body_access = data.get("access_token")
+            body_refresh = data.get("refresh_token")
+            cookie_refresh = (
+                returned.get_dict().get("refresh_token_web")
+                if isinstance(returned, requests.cookies.RequestsCookieJar)
+                else None
+            )
             scope = data.get("scope")
             current_access = self.session.cookies.get_dict().get("access_token_web")
             sources_match = (
@@ -784,13 +852,25 @@ class Client:
             logger.info(
                 "Vinted session renewal: usable_access_token=True "
                 "token_changed=%s body_access=%s cookie_access=%s "
-                "sources_match=%s scope_present=%s scope_user=%s",
+                "sources_match=%s scope_present=%s scope_user=%s refresh_changed=%s body_refresh=%s cookie_refresh=%s refresh_sources_match=%s refresh_expiry=%s",
                 previous_access != current_access,
                 isinstance(body_access, str),
                 isinstance(cookie_access, str),
                 sources_match,
                 isinstance(scope, str),
                 isinstance(scope, str) and "user" in scope.split(),
+                previous_refresh
+                != self.session.cookies.get_dict().get("refresh_token_web"),
+                isinstance(body_refresh, str),
+                isinstance(cookie_refresh, str),
+                (
+                    body_refresh == cookie_refresh
+                    if isinstance(body_refresh, str) and isinstance(cookie_refresh, str)
+                    else None
+                ),
+                token_expiry_hint(
+                    self.session.cookies.get_dict().get("refresh_token_web")
+                ),
             )
         self.persist_session()
         return data
@@ -1099,6 +1179,7 @@ def connected_client():
         if not saved:
             raise BuyerError("Connect your Vinted buyer account in Connections first.")
         client = Client(saved)
+        client.log_cookie_evidence()
         try:
             user_id, _ = client.identity()
         except BuyerError as exc:
@@ -1109,7 +1190,20 @@ def connected_client():
             # Match Vinted's current web refresh: cookies, CSRF and an empty
             # POST. One renewal only, with no redirect following or checkout.
             client.refresh_security_token()
-            client.request("POST", "/web/api/auth/refresh")
+            try:
+                client.request("POST", "/web/api/auth/refresh")
+            except BuyerError as renewal:
+                if renewal.status in (400, 401, 422) and renewal.reason in (
+                    "http_error",
+                    "credentials",
+                ):
+                    raise BuyerError(
+                        AUTH_REASONS["renewal_failed"],
+                        renewal.status,
+                        reason="renewal_failed",
+                        stage="renewal",
+                    ) from None
+                raise
             with closing(connection()) as conn, conn:
                 # Refresh tokens may rotate. Preserve the replacement even if
                 # a later homepage request fails; identity still must be checked
