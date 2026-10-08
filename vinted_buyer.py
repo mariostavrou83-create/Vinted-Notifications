@@ -659,6 +659,47 @@ class Client:
         self._verified_session = (user_id, sealed, current)
         logger.info("Vinted verified session rotation: persisted=True")
 
+    @contextmanager
+    def accepted_response_cookies(self, stage):
+        """Undo requests' automatic cookie merge when a response is rejected.
+
+        An expired identity check may be followed by one normal renewal using
+        this same client. Error-response cookies must not replace or delete the
+        owner's saved credentials before that renewal. Accepted responses,
+        including an explicit two-step login challenge, retain their cookies.
+        """
+        previous = self.session.cookies.copy()
+        try:
+            yield
+        except Exception:
+
+            def records(cookies, name):
+                return {
+                    (cookie.domain, cookie.path): (
+                        cookie.value,
+                        cookie.secure,
+                        cookie.expires,
+                    )
+                    for cookie in cookies
+                    if cookie.name == name
+                }
+
+            access_changed = records(previous, "access_token_web") != records(
+                self.session.cookies, "access_token_web"
+            )
+            refresh_changed = records(previous, "refresh_token_web") != records(
+                self.session.cookies, "refresh_token_web"
+            )
+            self.session.cookies = previous
+            self.headers()
+            logger.info(
+                "Vinted rejected response cookies: stage=%s access_changed=%s refresh_changed=%s restored=True",
+                stage,
+                access_changed,
+                refresh_changed,
+            )
+            raise
+
     def update_tokens(self, response, data):
         """Keep one current token per name after a normal refresh-cookie rotation."""
         returned = getattr(response, "cookies", None)
@@ -780,98 +821,103 @@ class Client:
                 bool(prepared.headers.get("X-Anon-Id")),
                 bool(prepared.headers.get("Authorization")),
             )
-        try:
-            response = self.session.request(
-                method,
-                BASE + path,
-                json=body,
-                timeout=(4, 12),
-                allow_redirects=False,
-                **extra,
-            )
-        except requests.RequestException:
-            raise BuyerError(
-                AUTH_REASONS["network"], reason="network", stage=stage
-            ) from None
-        try:
-            data = response.json()
-        except ValueError:
-            data = None
-        if security_challenge(response, data):
-            raise response_error(response, data, stage)
-        if (
-            allow_challenge
-            and response.status_code == 401
-            and isinstance(data, dict)
-            and isinstance(data.get("payload"), dict)
-            and data["payload"].get("id")
-        ):
-            return {"challenge_id": str(data["payload"]["id"])}
-        if response.status_code not in (200, 201) or not isinstance(data, dict):
-            raise response_error(response, data, stage)
-        if any(data.get(k) for k in ("error", "error_code", "errors")) or data.get(
-            "code"
-        ) not in (
-            None,
-            0,
-        ):
-            # Vinted can return a business/authentication error inside HTTP 200.
-            # Never adopt token fields from an explicit error response or let a
-            # nominal status turn that response into an accepted checkout.
-            raise response_error(response, data, stage)
-        access_updated = self.update_tokens(response, data)
-        if path == "/web/api/auth/refresh" or (
-            path == "/web/api/auth/oauth"
-            and isinstance(body, dict)
-            and body.get("grant_type") == "refresh_token"
-        ):
-            # HTTP 200 can still contain an OAuth error or no usable token.
-            # Never treat the imported stale cookie as proof of renewal.
-            if any(data.get(k) for k in ("error", "error_code")) or not access_updated:
+        with self.accepted_response_cookies(stage):
+            try:
+                response = self.session.request(
+                    method,
+                    BASE + path,
+                    json=body,
+                    timeout=(4, 12),
+                    allow_redirects=False,
+                    **extra,
+                )
+            except requests.RequestException:
+                raise BuyerError(
+                    AUTH_REASONS["network"], reason="network", stage=stage
+                ) from None
+            try:
+                data = response.json()
+            except ValueError:
+                data = None
+            if security_challenge(response, data):
                 raise response_error(response, data, stage)
-            returned = getattr(response, "cookies", None)
-            cookie_access = (
-                returned.get_dict().get("access_token_web")
-                if isinstance(returned, requests.cookies.RequestsCookieJar)
-                else None
-            )
-            body_access = data.get("access_token")
-            body_refresh = data.get("refresh_token")
-            cookie_refresh = (
-                returned.get_dict().get("refresh_token_web")
-                if isinstance(returned, requests.cookies.RequestsCookieJar)
-                else None
-            )
-            scope = data.get("scope")
-            current_access = self.session.cookies.get_dict().get("access_token_web")
-            sources_match = (
-                body_access == cookie_access
-                if isinstance(body_access, str) and isinstance(cookie_access, str)
-                else None
-            )
-            logger.info(
-                "Vinted session renewal: usable_access_token=True "
-                "token_changed=%s body_access=%s cookie_access=%s "
-                "sources_match=%s scope_present=%s scope_user=%s refresh_changed=%s body_refresh=%s cookie_refresh=%s refresh_sources_match=%s refresh_expiry=%s",
-                previous_access != current_access,
-                isinstance(body_access, str),
-                isinstance(cookie_access, str),
-                sources_match,
-                isinstance(scope, str),
-                isinstance(scope, str) and "user" in scope.split(),
-                previous_refresh
-                != self.session.cookies.get_dict().get("refresh_token_web"),
-                isinstance(body_refresh, str),
-                isinstance(cookie_refresh, str),
-                (
-                    body_refresh == cookie_refresh
-                    if isinstance(body_refresh, str) and isinstance(cookie_refresh, str)
+            if (
+                allow_challenge
+                and response.status_code == 401
+                and isinstance(data, dict)
+                and isinstance(data.get("payload"), dict)
+                and data["payload"].get("id")
+            ):
+                return {"challenge_id": str(data["payload"]["id"])}
+            if response.status_code not in (200, 201) or not isinstance(data, dict):
+                raise response_error(response, data, stage)
+            if any(data.get(k) for k in ("error", "error_code", "errors")) or data.get(
+                "code"
+            ) not in (
+                None,
+                0,
+            ):
+                # Vinted can return a business/authentication error inside HTTP 200.
+                # Never adopt token fields from an explicit error response or let a
+                # nominal status turn that response into an accepted checkout.
+                raise response_error(response, data, stage)
+            access_updated = self.update_tokens(response, data)
+            if path == "/web/api/auth/refresh" or (
+                path == "/web/api/auth/oauth"
+                and isinstance(body, dict)
+                and body.get("grant_type") == "refresh_token"
+            ):
+                # HTTP 200 can still contain an OAuth error or no usable token.
+                # Never treat the imported stale cookie as proof of renewal.
+                if (
+                    any(data.get(k) for k in ("error", "error_code"))
+                    or not access_updated
+                ):
+                    raise response_error(response, data, stage)
+                returned = getattr(response, "cookies", None)
+                cookie_access = (
+                    returned.get_dict().get("access_token_web")
+                    if isinstance(returned, requests.cookies.RequestsCookieJar)
                     else None
-                ),
-                token_expiry_hint(
-                    self.session.cookies.get_dict().get("refresh_token_web")
-                ),
-            )
+                )
+                body_access = data.get("access_token")
+                body_refresh = data.get("refresh_token")
+                cookie_refresh = (
+                    returned.get_dict().get("refresh_token_web")
+                    if isinstance(returned, requests.cookies.RequestsCookieJar)
+                    else None
+                )
+                scope = data.get("scope")
+                current_access = self.session.cookies.get_dict().get("access_token_web")
+                sources_match = (
+                    body_access == cookie_access
+                    if isinstance(body_access, str) and isinstance(cookie_access, str)
+                    else None
+                )
+                logger.info(
+                    "Vinted session renewal: usable_access_token=True "
+                    "token_changed=%s body_access=%s cookie_access=%s "
+                    "sources_match=%s scope_present=%s scope_user=%s refresh_changed=%s body_refresh=%s cookie_refresh=%s refresh_sources_match=%s refresh_expiry=%s",
+                    previous_access != current_access,
+                    isinstance(body_access, str),
+                    isinstance(cookie_access, str),
+                    sources_match,
+                    isinstance(scope, str),
+                    isinstance(scope, str) and "user" in scope.split(),
+                    previous_refresh
+                    != self.session.cookies.get_dict().get("refresh_token_web"),
+                    isinstance(body_refresh, str),
+                    isinstance(cookie_refresh, str),
+                    (
+                        body_refresh == cookie_refresh
+                        if isinstance(body_refresh, str)
+                        and isinstance(cookie_refresh, str)
+                        else None
+                    ),
+                    token_expiry_hint(
+                        self.session.cookies.get_dict().get("refresh_token_web")
+                    ),
+                )
         self.persist_session()
         return data
 
@@ -886,43 +932,44 @@ class Client:
                 "The Vinted listing URL could not be verified.",
                 reason="item_unavailable",
             )
-        try:
-            response = self.session.get(
-                target,
-                headers={"Accept": "text/html"},
-                timeout=(4, 12),
-                allow_redirects=False,
-            )
-            if not security_challenge(response) and response.status_code in (
-                301,
-                302,
-                307,
-                308,
-            ):
-                location = response.headers.get("Location", "")
-                redirected = urljoin(target, location)
-                canonical = listing_url(redirected)
-                # A single same-origin, same-item slug redirect is normal page
-                # navigation. Never follow sign-in, challenge or foreign URLs.
-                if (
-                    canonical
-                    and urlsplit(redirected).netloc == "www.vinted.co.uk"
-                    and _url_id(canonical) == str(item_id)
+        with self.accepted_response_cookies("request"):
+            try:
+                response = self.session.get(
+                    target,
+                    headers={"Accept": "text/html"},
+                    timeout=(4, 12),
+                    allow_redirects=False,
+                )
+                if not security_challenge(response) and response.status_code in (
+                    301,
+                    302,
+                    307,
+                    308,
                 ):
-                    response = self.session.get(
-                        canonical,
-                        headers={"Accept": "text/html"},
-                        timeout=(4, 12),
-                        allow_redirects=False,
-                    )
-        except requests.RequestException:
-            raise BuyerError(AUTH_REASONS["network"], reason="network") from None
-        if security_challenge(response) or response.status_code != 200:
-            raise response_error(response, None, "request")
-        # A successful same-origin response can rotate session cookies even
-        # when its item payload is incomplete. Preserve those credentials before
-        # parsing; incomplete item metadata still cannot authorize a purchase.
-        self.update_tokens(response, {})
+                    location = response.headers.get("Location", "")
+                    redirected = urljoin(target, location)
+                    canonical = listing_url(redirected)
+                    # A single same-origin, same-item slug redirect is normal page
+                    # navigation. Never follow sign-in, challenge or foreign URLs.
+                    if (
+                        canonical
+                        and urlsplit(redirected).netloc == "www.vinted.co.uk"
+                        and _url_id(canonical) == str(item_id)
+                    ):
+                        response = self.session.get(
+                            canonical,
+                            headers={"Accept": "text/html"},
+                            timeout=(4, 12),
+                            allow_redirects=False,
+                        )
+            except requests.RequestException:
+                raise BuyerError(AUTH_REASONS["network"], reason="network") from None
+            if security_challenge(response) or response.status_code != 200:
+                raise response_error(response, None, "request")
+            # A successful same-origin response can rotate session cookies even
+            # when its item payload is incomplete. Preserve those credentials before
+            # parsing; incomplete item metadata still cannot authorize a purchase.
+            self.update_tokens(response, {})
         token = csrf_from_html(response.text)
         if token:
             self.csrf = token
@@ -938,28 +985,29 @@ class Client:
         return {"item": item}
 
     def homepage(self):
-        try:
-            response = self.session.get(
-                BASE + "/", timeout=(4, 12), allow_redirects=False
-            )
-            if (
-                not security_challenge(response)
-                and redirect_reason(response) == "home_redirect"
-            ):
-                # Follow a single canonical homepage redirect on the same HTTPS
-                # origin. Never follow authentication, challenge or other hosts.
+        with self.accepted_response_cookies("homepage"):
+            try:
                 response = self.session.get(
-                    urljoin(BASE, response.headers["Location"]),
-                    timeout=(4, 12),
-                    allow_redirects=False,
+                    BASE + "/", timeout=(4, 12), allow_redirects=False
                 )
-        except requests.RequestException:
-            raise BuyerError(
-                AUTH_REASONS["network"], reason="network", stage="homepage"
-            ) from None
-        if security_challenge(response) or response.status_code != 200:
-            raise response_error(response, None, "homepage")
-        self.update_tokens(response, {})
+                if (
+                    not security_challenge(response)
+                    and redirect_reason(response) == "home_redirect"
+                ):
+                    # Follow a single canonical homepage redirect on the same HTTPS
+                    # origin. Never follow authentication, challenge or other hosts.
+                    response = self.session.get(
+                        urljoin(BASE, response.headers["Location"]),
+                        timeout=(4, 12),
+                        allow_redirects=False,
+                    )
+            except requests.RequestException:
+                raise BuyerError(
+                    AUTH_REASONS["network"], reason="network", stage="homepage"
+                ) from None
+            if security_challenge(response) or response.status_code != 200:
+                raise response_error(response, None, "homepage")
+            self.update_tokens(response, {})
         token = csrf_from_html(response.text)
         if token:
             self.csrf = token

@@ -2742,7 +2742,7 @@ class CheckoutInspectionTests(DatabaseFixture, unittest.TestCase):
                 self.client.session.close.assert_called_once()
 
 
-class SessionRotationPersistenceTests(DatabaseFixture, unittest.TestCase):
+class SessionRotationFixture(DatabaseFixture):
     old_access = "old-access-token-0123456789"
     old_refresh = "old-refresh-token-0123456789"
     new_access = "rotated-access-token-0123456789"
@@ -2806,6 +2806,8 @@ class SessionRotationPersistenceTests(DatabaseFixture, unittest.TestCase):
         self.addCleanup(client.session.close)
         return client
 
+
+class SessionRotationPersistenceTests(SessionRotationFixture, unittest.TestCase):
     def test_api_rotation_is_available_for_the_next_native_renewal(self):
         client = self.connected()
         with patch.object(
@@ -2960,6 +2962,253 @@ class SessionRotationPersistenceTests(DatabaseFixture, unittest.TestCase):
         ):
             anonymous.request("GET", "/api/v2/items/123")
         self.assertEqual(self.saved()[0]["session"], before["session"])
+
+
+class NativeCookieTransportTests(SessionRotationFixture, unittest.TestCase):
+    """Keep Session.request/send and automatic cookie extraction real."""
+
+    def transport_response(
+        self, prepared, data=None, *, status=200, text="", cookies=()
+    ):
+        headers = Message()
+        for value in cookies:
+            headers.add_header("Set-Cookie", value)
+        response = requests.Response()
+        response.status_code = status
+        response.request = prepared
+        response.url = prepared.url
+        response.raw = SimpleNamespace(_original_response=SimpleNamespace(msg=headers))
+        response._content = (
+            json.dumps(data).encode() if data is not None else text.encode()
+        )
+        response._content_consumed = True
+        requests.cookies.extract_cookies_to_jar(
+            response.cookies, prepared, response.raw
+        )
+        return response
+
+    def token_headers(self, access, refresh):
+        return tuple(
+            f"{name}={value}; Domain=www.vinted.co.uk; Path=/; Secure; HttpOnly"
+            for name, value in (
+                ("access_token_web", access),
+                ("refresh_token_web", refresh),
+            )
+        )
+
+    def test_rejected_identity_cookies_cannot_poison_the_normal_renewal(self):
+        calls = []
+        rejected_access = "rejected-access-token-0123456789"
+        rejected_refresh = "rejected-refresh-token-0123456789"
+
+        def native(adapter, prepared, **kwargs):
+            path = prepared.url.removeprefix(buyer.BASE)
+            calls.append((prepared.method, path))
+            if len(calls) == 1:
+                return self.transport_response(
+                    prepared,
+                    {"code": "unauthorized", "message": "Unauthorized"},
+                    status=401,
+                    cookies=self.token_headers(rejected_access, rejected_refresh),
+                )
+            if path == "/":
+                self.assertNotIn("access_token_web", prepared.headers.get("Cookie", ""))
+                return self.transport_response(
+                    prepared,
+                    text='<meta name="csrf-token" content="fresh-csrf-token-0123456789">',
+                    cookies=(
+                        "anon_id=public-anonymous-id; Domain=www.vinted.co.uk; Path=/; Secure",
+                    ),
+                )
+            if path == "/web/api/auth/refresh":
+                cookie = prepared.headers.get("Cookie", "")
+                self.assertEqual(cookie.count("refresh_token_web="), 1)
+                self.assertIn(self.old_refresh, cookie)
+                self.assertNotIn(rejected_refresh, cookie)
+                self.assertNotIn(rejected_access, cookie)
+                self.assertNotIn("public-anonymous-id", cookie)
+                self.assertIsNone(prepared.body)
+                self.assertNotIn("Authorization", prepared.headers)
+                return self.transport_response(
+                    prepared,
+                    {
+                        "access_token": self.new_access,
+                        "refresh_token": self.new_refresh,
+                    },
+                    cookies=self.token_headers(self.new_access, self.new_refresh),
+                )
+            self.assertEqual(path, "/api/v2/users/current")
+            self.assertIn(self.new_access, prepared.headers["Cookie"])
+            return self.transport_response(prepared, {"user": {"id": 99}})
+
+        with patch.object(
+            requests.adapters.HTTPAdapter, "send", autospec=True, side_effect=native
+        ), self.assertLogs("vinted_buyer", level="INFO") as logs:
+            self.assertIn("No checkout or payment", buyer.check_saved_connection())
+        self.assertEqual(
+            calls,
+            [
+                ("GET", "/api/v2/users/current"),
+                ("GET", "/"),
+                ("POST", "/web/api/auth/refresh"),
+                ("GET", "/api/v2/users/current"),
+            ],
+        )
+        row, saved = self.saved()
+        self.assertEqual(saved["cookies"]["refresh_token_web"], self.new_refresh)
+        self.assertEqual((row["user_id"], row["enabled"]), ("99", 1))
+        self.assertIn(
+            "access_changed=True refresh_changed=True restored=True",
+            "\n".join(logs.output),
+        )
+        for value in (
+            self.old_access,
+            self.old_refresh,
+            self.new_access,
+            self.new_refresh,
+            rejected_access,
+            rejected_refresh,
+        ):
+            self.assertNotIn(value, "\n".join(logs.output))
+
+    def test_rejected_api_and_page_cookies_are_rolled_back_after_real_auto_merge(self):
+        cases = (
+            ("api", 403, {"message": "Forbidden"}, ""),
+            ("api", 200, {"error": "invalid_token"}, ""),
+            ("api", 200, None, "<html>Verify you are human</html>"),
+            ("homepage", 403, None, "Forbidden"),
+            ("listing", 404, None, "Not found"),
+        )
+        for kind, status, data, text in cases:
+            with self.subTest(kind=kind, status=status):
+                client = self.connected()
+                before = client.exported()
+                sealed = self.saved()[0]["session"]
+
+                def native(
+                    adapter, prepared, *, data=data, status=status, text=text, **kwargs
+                ):
+                    return self.transport_response(
+                        prepared,
+                        data,
+                        status=status,
+                        text=text,
+                        cookies=self.token_headers(self.new_access, self.new_refresh),
+                    )
+
+                with patch.object(
+                    requests.adapters.HTTPAdapter,
+                    "send",
+                    autospec=True,
+                    side_effect=native,
+                ) as send, self.assertRaises(buyer.BuyerError):
+                    if kind == "api":
+                        client.request("GET", "/api/v2/items/123")
+                    elif kind == "homepage":
+                        client.homepage()
+                    else:
+                        client.listing_page(buyer.BASE + "/items/123", "123")
+                send.assert_called_once()
+                self.assertEqual(client.exported(), before)
+                self.assertEqual(self.saved()[0]["session"], sealed)
+
+    def test_explicit_two_step_login_keeps_its_accepted_challenge_cookie(self):
+        client = buyer.Client()
+        self.addCleanup(client.session.close)
+
+        def native(adapter, prepared, **kwargs):
+            return self.transport_response(
+                prepared,
+                {"payload": {"id": 123}},
+                status=401,
+                cookies=(
+                    "anon_id=two-step-login-context; Domain=www.vinted.co.uk; Path=/; Secure",
+                ),
+            )
+
+        with patch.object(
+            requests.adapters.HTTPAdapter, "send", autospec=True, side_effect=native
+        ) as send:
+            self.assertEqual(
+                client.request("POST", "/web/api/auth/oauth", {}, allow_challenge=True),
+                {"challenge_id": "123"},
+            )
+        send.assert_called_once()
+        self.assertEqual(
+            client.exported()["cookies"]["anon_id"], "two-step-login-context"
+        )
+
+    def test_two_native_renewals_survive_encrypted_restoration_over_a_simulated_hour(
+        self,
+    ):
+        clock = [2000000000]
+        access, refresh = self.old_access, self.old_refresh
+        valid_until = clock[0] + 1800
+        renewals = []
+        paths = []
+
+        def native(adapter, prepared, **kwargs):
+            nonlocal access, refresh, valid_until
+            path = prepared.url.removeprefix(buyer.BASE)
+            paths.append(path)
+            cookie = prepared.headers.get("Cookie", "")
+            if path == "/":
+                return self.transport_response(
+                    prepared,
+                    text='<meta name="csrf-token" content="fresh-csrf-token-0123456789">',
+                )
+            if path == "/api/v2/users/current":
+                self.assertIn("access_token_web=" + access, cookie)
+                self.assertEqual(cookie.count("access_token_web="), 1)
+                if clock[0] >= valid_until:
+                    return self.transport_response(
+                        prepared, {"code": "unauthorized"}, status=401
+                    )
+                return self.transport_response(prepared, {"user": {"id": 99}})
+            self.assertEqual(path, "/web/api/auth/refresh")
+            self.assertEqual(prepared.method, "POST")
+            self.assertIsNone(prepared.body)
+            self.assertEqual(cookie.count("refresh_token_web="), 1)
+            self.assertIn("refresh_token_web=" + refresh, cookie)
+            self.assertNotIn("Authorization", prepared.headers)
+            renewals.append(refresh)
+            access = f"rotated-access-cycle-{len(renewals)}-0123456789"
+            refresh = f"rotated-refresh-cycle-{len(renewals)}-0123456789"
+            valid_until = clock[0] + 1800
+            return self.transport_response(
+                prepared,
+                {"access_token": access, "refresh_token": refresh},
+                cookies=self.token_headers(access, refresh),
+            )
+
+        with patch.object(
+            buyer.time, "time", side_effect=lambda: clock[0]
+        ), patch.object(
+            requests.adapters.HTTPAdapter, "send", autospec=True, side_effect=native
+        ):
+            for elapsed in (0, 1900, 3900):
+                clock[0] = 2000000000 + elapsed
+                self.assertIn("No checkout or payment", buyer.check_saved_connection())
+                self.assertEqual(
+                    self.saved()[1]["cookies"]["refresh_token_web"], refresh
+                )
+        self.assertEqual(
+            renewals, [self.old_refresh, "rotated-refresh-cycle-1-0123456789"]
+        )
+        self.assertEqual(paths.count("/web/api/auth/refresh"), 2)
+        self.assertEqual(len(paths), 9)
+        with closing(search_settings.connection()) as conn:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM vinted_buy_attempts").fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT max_total FROM vinted_search_budgets WHERE query_id=1"
+                ).fetchone()[0],
+                2000,
+            )
+        self.assertTrue(buyer.settings()["enabled"])
 
 
 class SessionLinkTests(DatabaseFixture, unittest.TestCase):
