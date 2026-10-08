@@ -189,7 +189,7 @@ class SnapshotTests(Fixture, unittest.TestCase):
             recovery.verify_snapshot(self.encrypted(), self.directory)
         self.assertEqual(error.exception.stage, "example_photo_references")
 
-    def test_archived_total_is_exposed_without_changing_expected_check(self):
+    def test_archived_total_is_exposed_and_saved_searches_are_checked(self):
         with closing(sqlite3.connect(self.database)) as conn, conn:
             conn.execute(
                 "CREATE TABLE search_dashboard(query_id INTEGER PRIMARY KEY,archived INTEGER)"
@@ -198,15 +198,19 @@ class SnapshotTests(Fixture, unittest.TestCase):
             conn.executemany(
                 "INSERT INTO search_dashboard VALUES (?,1)", [(45,), (46,)]
             )
-        with self.assertRaises(recovery.RecoveryError) as error:
-            recovery.verify_snapshot(self.encrypted(), self.directory)
-        self.assertEqual(error.exception.stage, "expected_searches")
-        counts = error.exception.observed["counts"]
+        result = recovery.verify_snapshot(self.encrypted(), self.directory)
+        counts = result["counts"]
         self.assertEqual(counts["searches"], 46)
         self.assertEqual(counts["saved_searches"], 44)
         self.assertEqual(counts["archived_searches"], 2)
         self.assertEqual(counts["expected_searches"], 44)
-        self.assertNotIn("fictional-buyer-secret", json.dumps(error.exception.observed))
+        self.assertNotIn("fictional-buyer-secret", json.dumps(result))
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute("UPDATE search_dashboard SET archived=0 WHERE query_id=45")
+        with self.assertRaises(recovery.RecoveryError) as error:
+            recovery.verify_snapshot(self.encrypted(), self.directory)
+        self.assertEqual(error.exception.stage, "expected_searches")
+        self.assertEqual(error.exception.observed["counts"]["saved_searches"], 45)
 
     def test_sessions_in_cloud_and_wrong_buyer_key_are_rejected(self):
         encrypted = self.encrypted()

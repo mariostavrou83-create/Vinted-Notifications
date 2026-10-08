@@ -2149,6 +2149,21 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         self.assertFalse(buyer.settings()["enabled"])
         self.assertNotIn(b"never-store-password", Path(db.DB_PATH).read_bytes())
 
+    def test_username_password_login_sends_username_without_saving_password(self):
+        with patch.object(buyer, "Client") as client:
+            client.return_value.request.return_value = {}
+            client.return_value.identity.return_value = ("99", "owner")
+            client.return_value.exported.return_value = {
+                "cookies": {"access_token_web": "new-private-token"},
+                "csrf": "csrf",
+            }
+            buyer.start_login("offline_buyer", "never-store-password")
+        request = client.return_value.request.call_args
+        self.assertEqual(request.args[:2], ("POST", "/web/api/auth/oauth"))
+        self.assertEqual(request.args[2]["username"], "offline_buyer")
+        self.assertFalse(buyer.settings()["enabled"])
+        self.assertNotIn(b"never-store-password", Path(db.DB_PATH).read_bytes())
+
     def test_network_error_never_includes_credentials(self):
         client = buyer.Client()
         with patch.object(
@@ -3624,6 +3639,29 @@ class BuyerDashboardTests(DatabaseFixture, unittest.TestCase):
         response = self.client.get("/connections")
         self.assertNotIn(b"private-password", response.data)
         self.assertIn(b"Vinted requires verification", response.data)
+
+    def test_password_form_accepts_username_and_keeps_credentials_private(self):
+        self.owner()
+        response = self.client.get("/connections")
+        self.assertIn(b"Vinted username or email", response.data)
+        self.assertIn(
+            b'name="buyer_email" type="text" autocomplete="username"', response.data
+        )
+        with patch.object(
+            buyer, "start_login", return_value="Buyer connected"
+        ) as login:
+            response = self.client.post(
+                "/connections",
+                data={
+                    "csrf": "offline-csrf",
+                    "action": "buyer_login",
+                    "buyer_email": "offline_buyer",
+                    "buyer_password": "private-password",
+                },
+            )
+        login.assert_called_once_with("offline_buyer", "private-password")
+        response = self.client.get(response.headers["Location"])
+        self.assertNotIn(b"private-password", response.data)
 
     def test_session_link_is_owner_csrf_protected_and_never_repopulates_secrets(self):
         data = {

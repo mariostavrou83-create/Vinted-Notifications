@@ -117,9 +117,11 @@ def verify_snapshot(encrypted, directory, *, live_database=None, expected_search
                     label: conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
                     for label, table in COUNT_TABLES.items()
                 }
-                # Preserve the original all-row check while exposing the
-                # dashboard's saved/archived counts for owner review.
+                # Archived history remains part of the restored total, while
+                # the expected count refers to the owner's saved searches.
                 counts["expected_searches"] = expected_searches
+                counts["saved_searches"] = counts["searches"]
+                counts["archived_searches"] = 0
                 if "search_dashboard" in tables:
                     counts["saved_searches"] = conn.execute(
                         "SELECT COUNT(*) FROM queries q "
@@ -131,7 +133,7 @@ def verify_snapshot(encrypted, directory, *, live_database=None, expected_search
                     )
                 observed["counts"] = counts
                 stage = "expected_searches"
-                if counts["searches"] != expected_searches:
+                if counts["saved_searches"] != expected_searches:
                     raise RecoveryError(stage)
                 stage = "example_photo_references"
                 invalid_refs = conn.execute(

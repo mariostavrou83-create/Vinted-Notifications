@@ -1360,7 +1360,9 @@ def link_session(access_token, refresh_token):
 
 def start_login(email, password):
     if not email or not password or len(email) > 254 or len(password) > 1024:
-        raise BuyerError("Enter your Vinted email and password in this form.")
+        raise BuyerError(
+            "Enter your Vinted username or email and password in this form."
+        )
     with exclusive():
         reserve_connection_attempt()
         client = Client()

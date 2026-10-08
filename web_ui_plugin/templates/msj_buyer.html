@@ -37,9 +37,9 @@
 <details class="guide-section"><summary><b>Connect with a Vinted password</b></summary>
 <form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="buyer_check">Diagnose Vinted sign-in access</button><p><small>Checks the sign-in connection once without sending your email or password. This does not sign in or buy anything.</small></p></form>
 <form method="post" autocomplete="on"><input type="hidden" name="csrf" value="{{csrf}}">
-<label for="buyer_email">Vinted email</label><input id="buyer_email" name="buyer_email" type="email" autocomplete="username" maxlength="254" required>
+<label for="buyer_email">Vinted username or email</label><input id="buyer_email" name="buyer_email" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="254" required>
 <label for="buyer_password">Vinted password</label><input id="buyer_password" name="buyer_password" type="password" autocomplete="current-password" maxlength="1024" required>
-<p><small>These sign-in details are sent to Vinted by your private bot. Your password is never saved. The returned account session is encrypted. Use Vinted email/password sign-in; a Google or Apple sign-in cannot be completed in this form.</small></p>
+<p><small>These sign-in details are sent to Vinted by your private bot. Your password is never saved. The returned account session is encrypted. Use your Vinted username or email and Vinted password; a Google or Apple sign-in cannot be completed in this form.</small></p>
 <p><small>If you normally use Google, use Vinted's “Forgotten your password?” option with the same email to create a Vinted password. Never enter your Google password here.</small></p>
 <button class="primary" name="action" value="buyer_login">Connect Vinted buyer</button></form>
 </details>
