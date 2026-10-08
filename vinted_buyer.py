@@ -83,23 +83,31 @@ class BuyerError(ValueError):
         self.stage = stage
 
 
-def token_expiry_hint(value):
-    """Diagnostic only: an unverified expiry claim never confirms authentication."""
+def token_expiry_timestamp(value):
+    """Unverified claim for scheduling only; never proof of authentication."""
     if not isinstance(value, str) or len(value) > 8192:
-        return "unknown"
+        return None
     parts = value.split(".")
     if len(parts) != 3 or len(parts[1]) > 4096:
-        return "unknown"
+        return None
     try:
         claims = json.loads(
             base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4))
         )
         expiry = claims.get("exp") if isinstance(claims, dict) else None
         if type(expiry) not in (int, float) or not 0 <= expiry <= 4102444800:
-            return "unknown"
-        return "expired" if expiry <= time.time() else "not_expired"
+            return None
+        return expiry
     except (ValueError, TypeError, UnicodeError):
+        return None
+
+
+def token_expiry_hint(value):
+    """Diagnostic only: an unverified expiry claim never confirms authentication."""
+    expiry = token_expiry_timestamp(value)
+    if expiry is None:
         return "unknown"
+    return "expired" if expiry <= time.time() else "not_expired"
 
 
 def security_challenge(response, data=None):
@@ -418,19 +426,30 @@ def migrate(conn):
         id INTEGER PRIMARY KEY CHECK(id=1), last_probe REAL NOT NULL DEFAULT 0,
         checked REAL, reason TEXT, stage TEXT, http_status INTEGER)""")
     conn.execute("INSERT OR IGNORE INTO vinted_buyer_access(id) VALUES (1)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS vinted_buyer_maintenance (
+        id INTEGER PRIMARY KEY CHECK(id=1), session_fingerprint TEXT,
+        retry_at REAL NOT NULL DEFAULT 0, blocked INTEGER NOT NULL DEFAULT 0)""")
+    conn.execute("INSERT OR IGNORE INTO vinted_buyer_maintenance(id) VALUES (1)")
 
 
 @contextmanager
-def exclusive():
+def exclusive(*, wait_seconds=0):
     path = Path(db.DB_PATH).resolve().parent / "vinted-buyer.lock"
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise BuyerError(
-                "A buyer request is already running. Please wait for it to finish."
-            ) from None
+        deadline = time.monotonic() + wait_seconds
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise BuyerError(
+                        "A buyer request is already running. Please wait for it to finish.",
+                        reason="busy",
+                    ) from None
+                time.sleep(min(0.05, remaining))
         yield
     finally:
         os.close(fd)
@@ -1216,7 +1235,36 @@ def verify_code(code):
             client.session.close()
 
 
-def connected_client():
+def renew_saved_client(client):
+    """One native UK renewal; keep accepted rotations before verifying identity."""
+    client.refresh_security_token()
+    try:
+        client.request("POST", "/web/api/auth/refresh")
+    except BuyerError as renewal:
+        if renewal.status in (400, 401, 422) and renewal.reason in (
+            "http_error",
+            "credentials",
+        ):
+            raise BuyerError(
+                AUTH_REASONS["renewal_failed"],
+                renewal.status,
+                reason="renewal_failed",
+                stage="renewal",
+            ) from None
+        raise
+    with closing(connection()) as conn, conn:
+        # Every production caller holds exclusive(). Preserve a rotated token
+        # even if identity later fails, without changing buying permissions.
+        conn.execute(
+            "UPDATE vinted_buyer SET session=? WHERE id=1",
+            (encrypt(client.exported()),),
+        )
+    logger.info("Vinted renewed session: csrf_present=%s", bool(client.csrf))
+    if not client.csrf:
+        client.homepage()
+
+
+def connected_client(*, renew_before=0):
     with closing(connection()) as conn:
         row = conn.execute(
             "SELECT session,user_id FROM vinted_buyer WHERE id=1"
@@ -1235,38 +1283,29 @@ def connected_client():
             expired = exc.status == 401 and exc.reason == "credentials"
             if not (expired or exc.reason == "session_refresh") or not refresh:
                 raise
-            # Match Vinted's current web refresh: cookies, CSRF and an empty
-            # POST. One renewal only, with no redirect following or checkout.
-            client.refresh_security_token()
-            try:
-                client.request("POST", "/web/api/auth/refresh")
-            except BuyerError as renewal:
-                if renewal.status in (400, 401, 422) and renewal.reason in (
-                    "http_error",
-                    "credentials",
-                ):
-                    raise BuyerError(
-                        AUTH_REASONS["renewal_failed"],
-                        renewal.status,
-                        reason="renewal_failed",
-                        stage="renewal",
-                    ) from None
-                raise
-            with closing(connection()) as conn, conn:
-                # Refresh tokens may rotate. Preserve the replacement even if
-                # a later homepage request fails; identity still must be checked
-                # before any checkout, and enabled/budgets are never expanded.
-                conn.execute(
-                    "UPDATE vinted_buyer SET session=? WHERE id=1",
-                    (encrypt(client.exported()),),
-                )
-            # Reuse the saved CSRF just as on the unexpired-session path.
-            # A frontend homepage redirect cannot establish API identity.
-            # When CSRF is missing, retain the bounded homepage gate.
-            logger.info("Vinted renewed session: csrf_present=%s", bool(client.csrf))
-            if not client.csrf:
-                client.homepage()
+            renew_saved_client(client)
             user_id, _ = client.identity()
+        else:
+            # A successful identity read may already have rotated the cookies.
+            # Claims only schedule renewal; Vinted must verify the same account
+            # both before and after any proactive renewal.
+            current = client.exported().get("cookies", {})
+            expiry = token_expiry_timestamp(current.get("access_token_web"))
+            refresh_expiry = token_expiry_timestamp(current.get("refresh_token_web"))
+            if (
+                renew_before
+                and user_id == row[1]
+                and current.get("refresh_token_web")
+                and (
+                    (expiry is not None and expiry <= time.time() + renew_before)
+                    or (
+                        refresh_expiry is not None
+                        and refresh_expiry <= time.time() + 2 * 86400
+                    )
+                )
+            ):
+                renew_saved_client(client)
+                user_id, _ = client.identity()
         if user_id != row[1]:
             raise BuyerError(
                 "The connected Vinted account changed. Reconnect it before buying."

@@ -38,6 +38,7 @@ class LeRobot:
         try:
             self._delivery_task = None
             self._delivery_worker = None
+            self._buyer_maintenance_task = None
             self.bot = Bot(db.get_parameter("telegram_token"))
             self.app = (
                 ApplicationBuilder()
@@ -418,14 +419,23 @@ class LeRobot:
         self._delivery_task = asyncio.create_task(
             self._delivery_worker.run(), name="vinted-telegram-delivery"
         )
+        from vinted_session_worker import run as maintain_buyer_session
+
+        self._buyer_maintenance_task = asyncio.create_task(
+            maintain_buyer_session(), name="vinted-buyer-session-maintenance"
+        )
 
     async def stop_delivery(self, application):
         task, worker = self._delivery_task, self._delivery_worker
+        maintenance = self._buyer_maintenance_task
         self._delivery_task = None
         self._delivery_worker = None
-        if task is not None:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        self._buyer_maintenance_task = None
+        tasks = [running for running in (task, maintenance) if running is not None]
+        for running in tasks:
+            running.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         if worker is not None:
             # Photo edits run separately from the listing dispatcher. Cancel
             # these too; durable leases make unfinished alerts recoverable.

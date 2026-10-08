@@ -1209,7 +1209,9 @@ def buy(row):
     host = urlsplit(row["url"]).hostname
     if not item_id.isdigit() or host != "www.vinted.co.uk" or row["currency"] != "GBP":
         raise buyer.BuyerError("Autobuy currently supports UK Vinted listings in GBP.")
-    with buyer.exclusive():
+    # Keep a Telegram tap queued during a bounded session renewal, rather than
+    # making the owner tap again. Maintenance itself never waits on a purchase.
+    with buyer.exclusive(wait_seconds=45):
         config, limits = ready(row)
         if not claim(row, recover_preparing=True):
             return result(item_id)
