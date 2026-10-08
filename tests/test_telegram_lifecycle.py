@@ -114,6 +114,7 @@ class TelegramLifecycleTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
     async def test_real_ptb_stop_finishes_with_active_worker_and_cancels_photos(self):
         worker = await self.start_worker()
         task = self.robot._delivery_task
+        maintenance = self.robot._buyer_maintenance_task
         await self.app.start()
 
         # This is the stop() that formerly waited forever for the JobQueue
@@ -125,19 +126,23 @@ class TelegramLifecycleTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         await self.app.post_shutdown(self.app)
 
         self.assertTrue(task.cancelled())
+        self.assertTrue(maintenance.cancelled())
         self.assertTrue(worker.cancelled)
         self.assertTrue(worker.photo_cancelled)
         self.assertEqual(worker.close_calls, 1)
         self.assertIsNone(self.robot._delivery_task)
+        self.assertIsNone(self.robot._buyer_maintenance_task)
         self.assertEqual(self.request.methods, ["getMe", "setMyCommands"])
 
     async def test_start_is_idempotent_and_failed_startup_cleanup_cancels_worker(self):
         worker = await self.start_worker()
         task = self.robot._delivery_task
+        maintenance = self.robot._buyer_maintenance_task
         with patch("alert_delivery.VintedDeliveryWorker") as factory:
             await self.app.post_init(self.app)
         factory.assert_not_called()
         self.assertIs(self.robot._delivery_task, task)
+        self.assertIs(self.robot._buyer_maintenance_task, maintenance)
 
         # run_polling uses post_shutdown when initialization completed but
         # polling/start failed before Application.stop could call post_stop.
@@ -145,6 +150,7 @@ class TelegramLifecycleTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.app.post_shutdown(self.app), timeout=1)
         await self.app.post_shutdown(self.app)
         self.assertTrue(task.cancelled())
+        self.assertTrue(maintenance.cancelled())
         self.assertTrue(worker.photo_cancelled)
         self.assertEqual(worker.close_calls, 1)
 
