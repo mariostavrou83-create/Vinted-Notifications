@@ -554,6 +554,21 @@ def create_app(test_config=None):
                         "success" if result["outcome"] == "quoted" else "error",
                     )
                     return redirect(url_for("connections"), code=303)
+                elif action == "buyer_telegram_reconcile":
+                    import vinted_telegram_review
+
+                    result = vinted_telegram_review.reconcile_selected()
+                    flash(
+                        "Preserved item status checked: "
+                        + result["stage"]
+                        + ". No checkout or payment was submitted.",
+                        (
+                            "success"
+                            if result.get("listing_availability") == "available"
+                            else "error"
+                        ),
+                    )
+                    return redirect(url_for("connections"), code=303)
                 elif action == "buyer_telegram_review_approve":
                     import vinted_telegram_review
 

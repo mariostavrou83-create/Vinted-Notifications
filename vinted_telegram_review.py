@@ -342,6 +342,9 @@ def review_latest(*, item_id=None):
         return result
     finally:
         if client:
+            diagnostics = getattr(client, "solver_diagnostics", None)
+            if isinstance(diagnostics, dict) and diagnostics:
+                result["solver"] = diagnostics
             client.session.close()
         if draft and result["outcome"] != "quoted":
             try:
@@ -365,6 +368,128 @@ def review_latest(*, item_id=None):
                 logger.info("Vinted Telegram review persistence: outcome=unverified")
         logger.info(
             "Vinted Telegram checkout review: %s", json.dumps(result, sort_keys=True)
+        )
+
+
+def reconcile_selected():
+    """Read the preserved item's status, without checkout or solver submissions."""
+    result = {
+        "outcome": "unverified",
+        "stage": "preserved_transaction",
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "checkout_created_by_check": False,
+        "payment_submitted_by_check": False,
+        "solver_attempted_by_check": False,
+        "checkout_status": "unverified",
+        "payment_status": "unverified",
+    }
+    client = None
+    try:
+        with buyer.exclusive(wait_seconds=45):
+            saved = load_review()
+            if not saved or not re.fullmatch(
+                r"[0-9]{1,24}", str(saved.get("item_id", ""))
+            ):
+                result["stage"] = "selected_item_missing"
+                return result
+            item_id = saved["item_id"]
+            result["item_id"] = item_id
+            with closing(connection()) as conn, conn:
+                conn.execute("UPDATE vinted_buyer SET enabled=0 WHERE id=1")
+                row = conn.execute(
+                    "SELECT * FROM alert_outbox WHERE item_id=? AND platform='vinted' "
+                    "AND status='sent' ORDER BY sent_at DESC LIMIT 1",
+                    (item_id,),
+                ).fetchone()
+            if row is None:
+                result["stage"] = "selected_alert_missing"
+                return result
+            row = dict(row)
+            config = buyer.settings()
+            if saved.get("buyer_id") != config["user_id"]:
+                result["stage"] = "buyer_account_changed"
+                return result
+            client = buyer.connected_client(solve_challenges=False, allow_refresh=False)
+            result["same_buyer_account"] = True
+            attempt = buying.result(item_id)
+            result["payment_attempt_recorded"] = bool(attempt)
+            if attempt:
+                result["recorded_payment_state"] = (
+                    attempt["state"]
+                    if attempt["state"] in PAYMENT_STATES
+                    else "not_submitted"
+                )
+            try:
+                price, _ = buying.verified_listing(
+                    client, row, config, vinted_budget.purchase_limits(row)
+                )
+                result.update(listing_availability="available", item_price=price)
+            except buyer.BuyerError as exc:
+                result["listing_availability"] = {
+                    "item_sold": "sold",
+                    "item_reserved": "reserved",
+                    "item_closed": "closed",
+                }.get(exc.reason, "unverified")
+                if isinstance(exc.status, int):
+                    result["listing_http_status"] = exc.status
+            transaction_id = str(saved.get("transaction_id", ""))
+            if not re.fullmatch(r"[0-9]{1,24}", transaction_id):
+                result["stage"] = "transaction_missing"
+                return result
+            try:
+                data = client.request("GET", "/api/v2/transactions/" + transaction_id)
+                transaction = data.get("transaction")
+                if (
+                    not isinstance(transaction, dict)
+                    or str(transaction.get("id")) != transaction_id
+                ):
+                    result["stage"] = "transaction_identity_unverified"
+                    return result
+                owner = transaction.get("buyer") or {}
+                item = transaction.get("item") or {}
+                if (
+                    str(transaction.get("buyer_id") or owner.get("id", ""))
+                    != config["user_id"]
+                    or str(transaction.get("item_id") or item.get("id", "")) != item_id
+                ):
+                    result["stage"] = "transaction_binding_unverified"
+                    return result
+                result.update(transaction_exists=True, transaction_http_status=200)
+                # A conversation/transaction alone is not evidence of an order,
+                # a checkout, or a paid purchase. Unknown schemas stay unverified.
+                if transaction.get("is_paid") is True:
+                    result["payment_status"] = "paid_reported_by_vinted"
+                elif transaction.get("is_paid") is False:
+                    result["payment_status"] = "unpaid_reported_by_vinted"
+                result["stage"] = "checkout_reconciliation"
+            except buyer.BuyerError as exc:
+                if isinstance(exc.status, int):
+                    result["transaction_http_status"] = exc.status
+                result["stage"] = "transaction_read_unverified"
+            return result
+    except buyer.BuyerError as exc:
+        result["stage"] = "connection_unverified"
+        if isinstance(exc.status, int):
+            result["http_status"] = exc.status
+        return result
+    except Exception:  # noqa: BLE001 -- never export transaction or credentials
+        return result
+    finally:
+        if client:
+            client.session.close()
+        try:
+            with buyer.exclusive(wait_seconds=45):
+                current = load_review()
+                if current and current.get("item_id") == result.get("item_id"):
+                    current.setdefault("result", {})["reconciliation"] = result.copy()
+                    save_review(current)
+        except Exception:  # noqa: BLE001 -- failure remains explicitly unverified
+            logger.info(
+                "Vinted Telegram reconciliation persistence: outcome=unverified"
+            )
+        logger.info(
+            "Vinted Telegram checkout reconciliation: %s",
+            json.dumps(result, sort_keys=True),
         )
 
 
@@ -454,6 +579,9 @@ def approved_token(row):
 
 
 def run_once():
+    reconciled = run_reconciliation_once()
+    if reconciled is not None:
+        return reconciled
     release = os.environ.get("MSJ_TELEGRAM_REVIEW_ON_START", "")
     approval = os.environ.get("MSJ_TELEGRAM_ITEM_APPROVAL_ON_START", "")
     match = re.fullmatch(r"([0-9]{1,24}):([0-9]{1,9}):([A-Za-z0-9_.-]{1,80})", approval)
@@ -493,8 +621,35 @@ def run_once():
             ),
         )
         return None
+
     except (OSError, sqlite3.Error):
         logger.info(
             "Vinted Telegram review startup: outcome=unverified stage=reservation"
         )
+        return None
+
+
+def run_reconciliation_once():
+    value = os.environ.get("MSJ_TELEGRAM_RECONCILE_ON_START", "")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", value) or value.lower() in (
+        "off",
+        "false",
+        "0",
+    ):
+        return None
+    try:
+        with closing(connection()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            previous = conn.execute(
+                "SELECT value FROM parameters WHERE key='telegram_reconciled_release'"
+            ).fetchone()
+            if previous and previous[0] == value:
+                return None
+            conn.execute(
+                "INSERT OR REPLACE INTO parameters(key,value) VALUES ('telegram_reconciled_release',?)",
+                (value,),
+            )
+        return reconcile_selected()
+    except (OSError, sqlite3.Error):
+        logger.info("Vinted Telegram reconciliation startup: outcome=unverified")
         return None

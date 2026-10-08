@@ -617,6 +617,7 @@ class Client:
         self.network = network_configuration()
         self.session = BrowserSession()
         self.solver_attempted = False
+        self.solver_diagnostics = {}
         self.solver_solved = False
         if self.network["proxy"]:
             self.session.proxies.update(
@@ -744,6 +745,9 @@ class Client:
             user_agent=BROWSER_USER_AGENT,
             enabled=True,
         )
+        public_result = getattr(result, "public", None)
+        diagnostics = public_result() if callable(public_result) else None
+        self.solver_diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
         logger.info(
             "Vinted security check: state=%s phase=%s code=%s category=%s provider=%s http=%s polls=%s",
             result.state,
@@ -1560,7 +1564,7 @@ def renew_saved_client(client):
         client.homepage()
 
 
-def connected_client(*, renew_before=0):
+def connected_client(*, renew_before=0, solve_challenges=True, allow_refresh=True):
     with closing(connection()) as conn:
         row = conn.execute(
             "SELECT session,user_id FROM vinted_buyer WHERE id=1"
@@ -1571,13 +1575,21 @@ def connected_client(*, renew_before=0):
         if not saved:
             raise BuyerError("Connect your Vinted buyer account in Connections first.")
         client = Client(saved)
+        if not solve_challenges:
+            # Status reconciliation must not create a paid solver task or replay
+            # a challenged request. The saved network configuration is unchanged.
+            client.solver_attempted = True
         client.log_cookie_evidence()
         try:
             user_id, _ = client.identity()
         except BuyerError as exc:
             refresh = saved.get("cookies", {}).get("refresh_token_web")
             expired = exc.status == 401 and exc.reason == "credentials"
-            if not (expired or exc.reason == "session_refresh") or not refresh:
+            if (
+                not allow_refresh
+                or not (expired or exc.reason == "session_refresh")
+                or not refresh
+            ):
                 raise
             renew_saved_client(client)
             user_id, _ = client.identity()
@@ -1589,7 +1601,8 @@ def connected_client(*, renew_before=0):
             expiry = token_expiry_timestamp(current.get("access_token_web"))
             refresh_expiry = token_expiry_timestamp(current.get("refresh_token_web"))
             if (
-                renew_before
+                allow_refresh
+                and renew_before
                 and user_id == row[1]
                 and current.get("refresh_token_web")
                 and (

@@ -36,6 +36,7 @@ class ReviewTests(DatabaseFixture, unittest.TestCase):
                     "MSJ_TELEGRAM_REVIEW_ONLY": "1",
                     "MSJ_TELEGRAM_REVIEW_ON_START": "",
                     "MSJ_TELEGRAM_ITEM_APPROVAL_ON_START": "",
+                    "MSJ_TELEGRAM_RECONCILE_ON_START": "",
                 },
             )
         )
@@ -204,13 +205,25 @@ class ReviewTests(DatabaseFixture, unittest.TestCase):
         def challenge(method, path, body=None):
             if path == "/api/v2/purchases/checkout/build" and not failed[0]:
                 failed[0] = True
-                raise buyer.BuyerError("Supported challenge failed", 403, reason="security_challenge")
+                raise buyer.BuyerError(
+                    "Supported challenge failed", 403, reason="security_challenge"
+                )
             return original(method, path, body)
 
         self.client.request.side_effect = challenge
+        self.client.solver_diagnostics = {
+            "state": "service_error",
+            "provider_error": "ERROR_PROXY_CONNECT_REFUSED",
+            "http_status": 400,
+            "polls": 0,
+        }
         first = review.review_latest(item_id="123")
         self.assertEqual(first["stage"], "checkout_build")
         self.assertEqual(review.public_review()["http_status"], 403)
+        self.assertEqual(
+            review.public_review()["solver"]["provider_error"],
+            "ERROR_PROXY_CONNECT_REFUSED",
+        )
         second = review.review_latest(item_id="123")
         self.assertEqual(second["outcome"], "quoted")
         self.assertTrue(second["conversation_reused"])
@@ -232,6 +245,107 @@ class ReviewTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(len(self.posts("/checkout/build")), 1)
         self.assertEqual(len(self.posts("/conversations")), 1)
         self.assertEqual(self.posts("/payment"), [])
+
+    def blocked_draft(self):
+        self.client.request.side_effect = buyer.BuyerError(
+            "Checkout challenge", reason="security_challenge", status=403
+        )
+        with patch.object(buying, "verified_listing", return_value=(1500, "100")):
+            self.client.request.side_effect = [
+                {"conversation": {"transaction": {"id": 456}}},
+                buyer.BuyerError(
+                    "Checkout challenge", reason="security_challenge", status=403
+                ),
+            ]
+            review.review_latest()
+        self.client.request.reset_mock()
+
+    def test_status_read_is_bound_to_saved_transaction_and_never_posts(self):
+        self.blocked_draft()
+        original = review.load_review()
+        self.client.request.side_effect = [
+            {
+                "item": {
+                    "id": 123,
+                    "user_id": 100,
+                    "can_buy": True,
+                    "price": {"amount": "15.00", "currency_code": "GBP"},
+                }
+            },
+            {
+                "transaction": {
+                    "id": 456,
+                    "buyer_id": 99,
+                    "item_id": 123,
+                    "is_paid": False,
+                }
+            },
+        ]
+        result = review.reconcile_selected()
+        self.connected.assert_called_with(solve_challenges=False, allow_refresh=False)
+        self.assertEqual(result["listing_availability"], "available")
+        self.assertEqual(result["payment_status"], "unpaid_reported_by_vinted")
+        self.assertEqual(result["checkout_status"], "unverified")
+        self.assertTrue(
+            all(call.args[0] == "GET" for call in self.client.request.call_args_list)
+        )
+        self.assertEqual(
+            review.load_review()["transaction_id"], original["transaction_id"]
+        )
+        self.assertEqual(review.load_review()["build_state"], original["build_state"])
+        self.assertNotIn("456", json.dumps(result))
+
+    def test_sold_selected_item_does_not_switch_or_create_checkout(self):
+        self.blocked_draft()
+        self.client.request.side_effect = [
+            {"item": {"id": 123, "is_sold": True}},
+            buyer.BuyerError("Route unavailable", status=404, reason="http_error"),
+        ]
+        result = review.reconcile_selected()
+        self.assertEqual(result["item_id"], "123")
+        self.assertEqual(result["listing_availability"], "sold")
+        self.assertEqual(result["transaction_http_status"], 404)
+        self.assertEqual(result["outcome"], "unverified")
+        self.assertTrue(
+            all(call.args[0] == "GET" for call in self.client.request.call_args_list)
+        )
+
+    def test_transaction_wrong_buyer_or_item_cannot_report_paid(self):
+        self.blocked_draft()
+        for buyer_id, item_id in ((88, 123), (99, 321)):
+            with self.subTest(buyer_id=buyer_id, item_id=item_id), patch.object(
+                buying, "verified_listing", return_value=(1500, "100")
+            ):
+                self.client.request.side_effect = None
+                self.client.request.return_value = {
+                    "transaction": {
+                        "id": 456,
+                        "buyer_id": buyer_id,
+                        "item_id": item_id,
+                        "is_paid": True,
+                    }
+                }
+                result = review.reconcile_selected()
+                self.assertEqual(result["payment_status"], "unverified")
+                self.assertEqual(result["stage"], "transaction_binding_unverified")
+
+    def test_reconciliation_runs_once_without_masking_later_review(self):
+        self.blocked_draft()
+        with patch.dict(
+            os.environ, {"MSJ_TELEGRAM_RECONCILE_ON_START": "offline-read-status"}
+        ), patch.object(
+            review, "reconcile_selected", return_value={"outcome": "unverified"}
+        ) as check:
+            self.assertEqual(review.run_once()["outcome"], "unverified")
+            self.assertIsNone(review.run_once())
+            check.assert_called_once()
+            with patch.dict(
+                os.environ, {"MSJ_TELEGRAM_REVIEW_ON_START": "offline-new-review"}
+            ), patch.object(
+                review, "review_latest", return_value={"outcome": "unverified"}
+            ) as quote:
+                self.assertEqual(review.run_once()["outcome"], "unverified")
+                quote.assert_called_once()
 
     def test_exact_item_and_total_are_required_before_enabling(self):
         self.quoted()
@@ -400,6 +514,7 @@ class PrivateRoutesTests(DatabaseFixture, unittest.TestCase):
         for action, method in (
             ("buyer_telegram_review_latest", "review_latest"),
             ("buyer_telegram_review_approve", "approve"),
+            ("buyer_telegram_reconcile", "reconcile_selected"),
         ):
             data = {
                 "action": action,
@@ -416,6 +531,7 @@ class PrivateRoutesTests(DatabaseFixture, unittest.TestCase):
         for action, method in (
             ("buyer_telegram_review_latest", "review_latest"),
             ("buyer_telegram_review_approve", "approve"),
+            ("buyer_telegram_reconcile", "reconcile_selected"),
         ):
             data = {
                 "action": action,

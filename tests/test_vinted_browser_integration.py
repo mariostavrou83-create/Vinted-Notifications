@@ -112,6 +112,38 @@ class BrowserCookieIntegrationTests(DatabaseFixture, unittest.TestCase):
         self.assertTrue(outgoing["verify"])
         self.assertFalse(outgoing["allow_redirects"])
 
+    def test_readonly_identity_challenge_does_not_start_solver_or_replay(self):
+        client = self.verified_client()
+        stored = self.stored()
+        self.sdk.request.return_value = sdk_response(
+            buyer.BASE + "/api/v2/users/current", status=403, data=CHALLENGE
+        )
+        with patch.object(buyer, "Client", return_value=client), patch(
+            "vinted_captcha.solve_datadome"
+        ) as solver:
+            with self.assertRaises(buyer.BuyerError):
+                buyer.connected_client(solve_challenges=False)
+            solver.assert_not_called()
+        self.sdk.request.assert_called_once()
+        self.assertEqual(self.stored(), stored)
+
+    def test_readonly_expired_identity_does_not_refresh_or_submit_requests(self):
+        client = self.verified_client()
+        stored = self.stored()
+        self.sdk.request.return_value = sdk_response(
+            buyer.BASE + "/api/v2/users/current",
+            status=401,
+            data={"error": "invalid_token"},
+        )
+        with patch.object(buyer, "Client", return_value=client), patch.object(
+            buyer, "renew_saved_client"
+        ) as renewal:
+            with self.assertRaises(buyer.BuyerError):
+                buyer.connected_client(solve_challenges=False, allow_refresh=False)
+            renewal.assert_not_called()
+        self.sdk.request.assert_called_once()
+        self.assertEqual(self.stored(), stored)
+
     def test_challenge_cookies_roll_back_before_solving_and_real_replay_keeps_solution(
         self,
     ):

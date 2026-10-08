@@ -354,7 +354,11 @@ if __name__ == "__main__":
         recovery_check_process.start()
 
     telegram_review_process = None
-    if os.environ.get("MSJ_TELEGRAM_REVIEW_ON_START") or os.environ.get("MSJ_TELEGRAM_ITEM_APPROVAL_ON_START"):
+    if (
+        os.environ.get("MSJ_TELEGRAM_REVIEW_ON_START")
+        or os.environ.get("MSJ_TELEGRAM_ITEM_APPROVAL_ON_START")
+        or os.environ.get("MSJ_TELEGRAM_RECONCILE_ON_START")
+    ):
         from vinted_telegram_review import run_once as run_telegram_review_once
 
         telegram_review_process = multiprocessing.Process(
