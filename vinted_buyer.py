@@ -47,6 +47,7 @@ AUTH_REASONS = {
     "session_refresh": "Vinted requested renewal of the saved buyer session.",
     "renewal_failed": "Vinted could not renew the saved buyer session. Its renewal request or response needs checking. No purchase or payment was started.",
     "refresh_rejected": "Vinted rejected the saved refresh credential. Reconnect your Vinted buyer in Connections. No purchase or payment was started.",
+    "account_changed": "Vinted verified a different buyer account. Reconnect the account already linked here. No purchase or payment was started.",
     "signin_redirect": "Vinted redirected this session to sign-in. Reconnect your buyer account.",
     "redirect": "Vinted redirected this account request instead of confirming it. The bot stopped without following the redirect.",
     "home_redirect": "Vinted redirected this request to its homepage instead of confirming the account.",
@@ -1298,6 +1299,15 @@ class Client:
 def save_connected(client):
     user_id, username = client.identity()
     with closing(connection()) as conn, conn:
+        previous = conn.execute(
+            "SELECT user_id FROM vinted_buyer WHERE id=1"
+        ).fetchone()[0]
+        if previous and user_id != previous:
+            raise BuyerError(
+                AUTH_REASONS["account_changed"],
+                reason="account_changed",
+                stage="identity",
+            )
         conn.execute(
             "UPDATE vinted_buyer SET session=?,pending=NULL,verified_at=?,user_id=?,username=?,enabled=0 WHERE id=1",
             (encrypt(client.exported()), time.time(), user_id, username),

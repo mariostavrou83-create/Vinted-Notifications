@@ -920,6 +920,21 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         client.refresh_security_token.assert_not_called()
         client.request.assert_not_called()
 
+    def test_reconnect_cannot_replace_the_original_buyer_with_another_account(self):
+        with closing(search_settings.connection()) as conn:
+            original = tuple(conn.execute("SELECT * FROM vinted_buyer").fetchone())
+        client = Mock()
+        client.identity.return_value = ("100", "another-private-buyer")
+        with self.assertRaises(buyer.BuyerError) as failure:
+            buyer.save_connected(client)
+        self.assertEqual(failure.exception.reason, "account_changed")
+        self.assertNotIn("another-private-buyer", str(failure.exception))
+        client.exported.assert_not_called()
+        with closing(search_settings.connection()) as conn:
+            self.assertEqual(
+                tuple(conn.execute("SELECT * FROM vinted_buyer").fetchone()), original
+            )
+
     def test_cookie_scope_and_expiry_survive_encrypted_session_restoration(self):
         client = buyer.Client()
         client.session.cookies.set(

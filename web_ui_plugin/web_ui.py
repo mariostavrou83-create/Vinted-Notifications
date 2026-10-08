@@ -647,6 +647,14 @@ def create_app(test_config=None):
                         vinted_network_check.summary(result),
                         "success" if result["outcome"] == "verified" else "error",
                     )
+                elif action == "buyer_alert_check":
+                    import vinted_alert_check
+
+                    result = vinted_alert_check.check_latest_alert()
+                    flash(
+                        vinted_alert_check.summary(result),
+                        "success" if result["outcome"] == "matched" else "error",
+                    )
                 elif action == "buyer_disconnect":
                     vinted_buyer.disconnect()
                     flash("Vinted buyer disconnected. Autobuy is off.", "success")
@@ -658,7 +666,8 @@ def create_app(test_config=None):
                     url_for("connections"),
                     code=(
                         303
-                        if action in ("buyer_network", "buyer_network_check")
+                        if action
+                        in ("buyer_network", "buyer_network_check", "buyer_alert_check")
                         else 302
                     ),
                 )

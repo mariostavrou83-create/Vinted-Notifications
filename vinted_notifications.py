@@ -335,6 +335,15 @@ if __name__ == "__main__":
         )
         network_check_process.start()
 
+    alert_check_process = None
+    if os.environ.get("MSJ_ALERT_CHECK_ON_START"):
+        from vinted_alert_check import run_once as run_alert_check_once
+
+        alert_check_process = multiprocessing.Process(
+            target=run_alert_check_once, name="private-alert-verification"
+        )
+        alert_check_process.start()
+
     parent_pid = os.getpid()
 
     def stop_main(signum, frame):
@@ -370,6 +379,7 @@ if __name__ == "__main__":
                 rss_process,
                 buyer_check_process,
                 network_check_process,
+                alert_check_process,
             ):
                 if process:
                     stop_process(process, name=process.name)

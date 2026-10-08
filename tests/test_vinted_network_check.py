@@ -424,6 +424,29 @@ class PrivateRouteTests(DatabaseFixture, unittest.TestCase):
             self.assertEqual(self.web.get(result.location).status_code, 200)
             execute.assert_called_once_with()
 
+    def test_alert_check_requires_real_owner_and_csrf_and_redirects_once(self):
+        with patch(
+            "vinted_alert_check.check_latest_alert",
+            return_value={"outcome": "unverified", "stage": "fresh_alert"},
+        ) as execute:
+            with self.web.session_transaction() as state:
+                state.update(csrf="forged", owner=True)
+            result = self.web.post(
+                "/connections", data={"action": "buyer_alert_check", "csrf": "forged"}
+            )
+            self.assertEqual(result.location, "/supabase/login")
+            execute.assert_not_called()
+            csrf = self.login()
+            result = self.web.post("/connections", data={"action": "buyer_alert_check"})
+            self.assertEqual(result.status_code, 400)
+            execute.assert_not_called()
+            result = self.web.post(
+                "/connections", data={"action": "buyer_alert_check", "csrf": csrf}
+            )
+            self.assertEqual(result.status_code, 303)
+            self.web.get(result.location)
+            execute.assert_called_once_with()
+
     def test_iproyal_copy_row_is_saved_privately_and_preserves_search_preferences(self):
         csrf = self.login()
         with closing(search_settings.connection()) as conn:
@@ -497,7 +520,10 @@ class PrivateRouteTests(DatabaseFixture, unittest.TestCase):
             with self.subTest(reason=reason):
                 real_buyer.record_auth(reason, stage, 400)
                 page = self.web.get("/connections").get_data(as_text=True)
-                self.assertEqual("Use the reconnect form below" in page, must_reconnect)
+                self.assertEqual(
+                    "Use <b>Connect with a Vinted password</b> below" in page,
+                    must_reconnect,
+                )
 
 
 class StartupTests(DatabaseFixture, unittest.TestCase):
