@@ -335,6 +335,33 @@ class SolverTests(unittest.TestCase):
         self.session.post.return_value = response(solved(userAgent="Wrong browser"))
         self.assertEqual(self.solve().state, "invalid_cookie")
 
+    def test_unknown_provider_codes_are_classified_without_exporting_them(self):
+        secret = API_KEY + PROXY + COOKIE + CHALLENGE
+        for code, text, expected in (
+            ("ERROR_TASK_TYPE_UNSUPPORTED", "", "unsupported_task"),
+            (
+                "unrecognized",
+                "The task type is not supported " + secret,
+                "unsupported_task",
+            ),
+            ("unrecognized", "userAgent does not match " + secret, "browser_identity"),
+            (
+                "unrecognized",
+                "Proxy IP banned by target service " + secret,
+                "proxy_banned",
+            ),
+        ):
+            with self.subTest(expected=expected):
+                self.session.post.return_value = response(
+                    {"errorId": 1, "errorCode": code, "errorDescription": text},
+                    status=400,
+                )
+                result = self.solve()
+                self.assertEqual(result.code, "other")
+                self.assertEqual(result.category, expected)
+                self.assertNotIn(code, json.dumps(result.public()))
+                self.assertNotIn(secret, repr(result) + json.dumps(result.public()))
+
     def test_response_body_redirect_and_json_schemas_are_bounded(self):
         for fake, state in (
             (response(status=307), "service_error"),

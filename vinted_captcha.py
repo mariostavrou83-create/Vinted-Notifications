@@ -80,13 +80,50 @@ class SolverResult:
 
 def _safe_error(data, status=200):
     """Known codes and fixed categories only; never copy provider descriptions."""
-    code = data.get("errorCode") if isinstance(data, dict) else None
-    code = code if isinstance(code, str) and code in ERROR_CODES else "other"
+    raw_code = data.get("errorCode") if isinstance(data, dict) else None
+    normalized = (
+        raw_code.strip().upper()
+        if isinstance(raw_code, str) and len(raw_code) <= 100
+        else ""
+    )
+    code = normalized if normalized in ERROR_CODES else "other"
     description = data.get("errorDescription") if isinstance(data, dict) else None
     description = description.lower()[:4096] if isinstance(description, str) else ""
     category = "other"
+    if (
+        re.fullmatch(r"ERROR_[A-Z_]{1,64}", normalized)
+        and ("TASK" in normalized or "TYPE" in normalized)
+        and ("SUPPORT" in normalized or "TYPE" in normalized)
+    ):
+        category = "unsupported_task"
+    for phrase, fixed in (
+        ("proxy ip banned", "proxy_banned"),
+        ("proxy is banned", "proxy_banned"),
+        ("invalid proxy format", "proxy_format"),
+        ("invalid proxy", "proxy_format"),
+        ("useragent does not match", "browser_identity"),
+        ("user-agent does not match", "browser_identity"),
+        ("unsupported useragent", "browser_identity"),
+        ("task type is not supported", "unsupported_task"),
+        ("task type not supported", "unsupported_task"),
+        ("unsupported task type", "unsupported_task"),
+        ("unknown task type", "unsupported_task"),
+        ("not supported task type", "unsupported_task"),
+        ("task type not recognized", "unsupported_task"),
+        ("type has not been supported", "unsupported_task"),
+        ("type is not supported", "unsupported_task"),
+        ("html is required", "challenge_html"),
+        ("provide html", "challenge_html"),
+        ("invalid captchaurl", "challenge_url"),
+        ("captchaurl is required", "challenge_url"),
+        ("insufficient balance", "insufficient_credit"),
+    ):
+        if phrase in description:
+            category = fixed
+            break
     if code == "ERROR_INVALID_TASK_DATA":
-        category = "invalid_task_data"
+        if category == "other":
+            category = "invalid_task_data"
         for phrase, fixed in (
             ("proxy format", "proxy_format"),
             ("invalid proxy", "proxy_format"),
