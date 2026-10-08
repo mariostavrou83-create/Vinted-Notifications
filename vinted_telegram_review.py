@@ -374,20 +374,26 @@ def review_latest(*, item_id=None):
 
 def existing_checkout_reference(transaction, transaction_id):
     """Accept only an existing reference supplied by this bound transaction."""
-    candidates = [transaction.get("checkout_id"), transaction.get("purchase_id")]
-    checkout = transaction.get("checkout")
-    if isinstance(checkout, dict):
-        candidates.append(checkout.get("id"))
-    url = transaction.get("checkout_url")
-    if isinstance(url, str):
-        if url.startswith("/"):
-            url = buyer.BASE + url
-        try:
-            purchase_id = buying.checkout_link_id(url)
-            if parse_qs(urlsplit(url).query).get("order_id") == [transaction_id]:
-                candidates.append(purchase_id)
-        except buyer.BuyerError:
-            pass
+    candidates = []
+    sources = [transaction]
+    order = transaction.get("order")
+    if isinstance(order, dict):
+        sources.append(order)
+    for source in sources:
+        candidates.extend((source.get("checkout_id"), source.get("purchase_id")))
+        checkout = source.get("checkout")
+        if isinstance(checkout, dict):
+            candidates.append(checkout.get("id"))
+        url = source.get("checkout_url")
+        if isinstance(url, str):
+            if url.startswith("/"):
+                url = buyer.BASE + url
+            try:
+                purchase_id = buying.checkout_link_id(url)
+                if parse_qs(urlsplit(url).query).get("order_id") == [transaction_id]:
+                    candidates.append(purchase_id)
+            except buyer.BuyerError:
+                pass
     valid = {
         str(value)
         for value in candidates
@@ -395,6 +401,32 @@ def existing_checkout_reference(transaction, transaction_id):
         and re.fullmatch(r"[A-Za-z0-9_-]{1,100}", str(value))
     }
     return valid.pop() if len(valid) == 1 else None
+
+
+def reference_field_shapes(data):
+    types = {
+        str: "string",
+        bool: "boolean",
+        int: "number",
+        float: "number",
+        list: "list",
+        dict: "object",
+    }
+    return {
+        key: "absent" if data.get(key) is None else types.get(type(data[key]), "other")
+        for key in (
+            "checkout_id",
+            "purchase_id",
+            "checkout",
+            "checkout_url",
+            "order",
+            "order_id",
+            "payment",
+            "status",
+            "state",
+            "is_paid",
+        )
+    }
 
 
 def reconcile_selected():
@@ -481,45 +513,11 @@ def reconcile_selected():
                     result["stage"] = "transaction_binding_unverified"
                     return result
                 result.update(transaction_exists=True, transaction_http_status=200)
-                result["transaction_fields"] = {
-                    key: (
-                        "absent"
-                        if transaction.get(key) is None
-                        else (
-                            "object"
-                            if isinstance(transaction[key], dict)
-                            else (
-                                "list"
-                                if isinstance(transaction[key], list)
-                                else (
-                                    "boolean"
-                                    if type(transaction[key]) is bool
-                                    else (
-                                        "number"
-                                        if type(transaction[key]) in (int, float)
-                                        else (
-                                            "string"
-                                            if isinstance(transaction[key], str)
-                                            else "other"
-                                        )
-                                    )
-                                )
-                            )
-                        )
-                    )
-                    for key in (
-                        "checkout_id",
-                        "purchase_id",
-                        "checkout",
-                        "checkout_url",
-                        "order",
-                        "order_id",
-                        "payment",
-                        "status",
-                        "state",
-                        "is_paid",
-                    )
-                }
+                result["transaction_fields"] = reference_field_shapes(transaction)
+                order = transaction.get("order")
+                result["associated_order_present"] = isinstance(order, dict)
+                if isinstance(order, dict):
+                    result["order_fields"] = reference_field_shapes(order)
                 # A conversation/transaction alone is not evidence of an order,
                 # a checkout, or a paid purchase. Unknown schemas stay unverified.
                 if transaction.get("is_paid") is True:

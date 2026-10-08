@@ -299,6 +299,8 @@ class ReviewTests(DatabaseFixture, unittest.TestCase):
         for data, expected in (
             ({}, None),
             ({"purchase_id": "known-checkout"}, "known-checkout"),
+            ({"order": {"purchase_id": "known-checkout"}}, "known-checkout"),
+            ({"order": {"id": "not-a-checkout"}}, None),
             ({"checkout_id": "one", "purchase_id": "two"}, None),
             ({"checkout_id": True}, None),
             (
