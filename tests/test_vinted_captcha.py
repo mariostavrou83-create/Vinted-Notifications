@@ -235,7 +235,7 @@ class SolverTests(unittest.TestCase):
         self.assertEqual(result.state, "solved")
         self.assertEqual(result.cookie, COOKIE)
         self.assertEqual(result.polls, 2)
-        self.assertEqual(self.clock.sleeps, [1, 3])
+        self.assertEqual(self.clock.sleeps, [1, 2])
         calls = self.session.post.call_args_list
         self.assertEqual(calls[0].args, ("https://api.capsolver.com/createTask",))
         task = calls[0].kwargs["json"]["task"]
@@ -277,18 +277,26 @@ class SolverTests(unittest.TestCase):
         )
 
     def test_last_ready_poll_preserves_the_previous_slow_task_wait_window(self):
-        self.session.post.side_effect = (
+        responses = iter(
             [response(created())]
             + [response({"errorId": 0, "status": "processing"}) for _ in range(12)]
             + [response(solved())]
         )
+        query_times = []
+
+        def post(*args, **kwargs):
+            if args[0].endswith("getTaskResult"):
+                query_times.append(self.clock.now)
+            return next(responses)
+
+        self.session.post.side_effect = post
         result = self.solve()
         self.assertEqual(
             (result.state, result.polls, result.cookie), ("solved", 13, COOKIE)
         )
-        self.assertEqual(self.clock.sleeps, [1] + [3] * 12)
-        self.assertEqual(self.clock.now, 37)
-        self.assertGreaterEqual(self.clock.now, 12 * 3)
+        self.assertEqual(self.clock.sleeps, [1, 2] + [3] * 11)
+        self.assertEqual(self.clock.now, 36)
+        self.assertEqual(query_times, [1] + list(range(3, 37, 3)))
         calls = self.session.post.call_args_list
         self.assertEqual(len(calls), 14)
         self.assertEqual(calls[0].args[0], "https://api.capsolver.com/createTask")
@@ -298,19 +306,114 @@ class SolverTests(unittest.TestCase):
                 call.kwargs["json"], {"clientKey": API_KEY, "taskId": "task-123"}
             )
 
-    def test_processing_near_absolute_deadline_stops_before_another_wait_or_task(self):
+    def test_second_query_keeps_the_previous_first_query_opportunity(self):
+        query_times = []
+
         def post(*args, **kwargs):
             if args[0].endswith("createTask"):
                 return response(created())
-            self.clock.now += 58
+            query_times.append(self.clock.now)
+            return response(
+                solved()
+                if self.clock.now >= 2
+                else {"errorId": 0, "status": "processing"}
+            )
+
+        self.session.post.side_effect = post
+        result = self.solve()
+        self.assertEqual((result.state, result.polls), ("solved", 2))
+        self.assertEqual(query_times, [1, 3])
+        self.assertEqual(self.clock.sleeps, [1, 2])
+        self.assertEqual(self.session.post.call_count, 3)
+
+    def test_second_query_subtracts_the_first_query_duration_from_its_wait(self):
+        query_times = []
+
+        def post(*args, **kwargs):
+            if args[0].endswith("createTask"):
+                self.clock.now += 2
+                return response(created())
+            query_times.append(self.clock.now)
+            if len(query_times) == 1:
+                self.clock.now += 0.5
+                return response({"errorId": 0, "status": "processing"})
+            return response(solved())
+
+        self.session.post.side_effect = post
+        result = self.solve()
+        self.assertEqual((result.state, result.polls), ("solved", 2))
+        self.assertEqual(query_times, [3, 5])
+        self.assertEqual(self.clock.sleeps, [1, 1.5])
+        self.assertEqual(self.session.post.call_count, 3)
+
+    def test_slow_first_query_does_not_add_a_second_wait_after_its_target(self):
+        query_times = []
+
+        def post(*args, **kwargs):
+            if args[0].endswith("createTask"):
+                return response(created())
+            query_times.append(self.clock.now)
+            if len(query_times) == 1:
+                self.clock.now += 3.25
+                return response({"errorId": 0, "status": "processing"})
+            return response(solved())
+
+        self.session.post.side_effect = post
+        result = self.solve()
+        self.assertEqual((result.state, result.polls), ("solved", 2))
+        self.assertEqual(query_times, [1, 4.25])
+        self.assertEqual(self.clock.sleeps, [1])
+        self.assertEqual(self.session.post.call_count, 3)
+
+    def test_later_queries_keep_three_seconds_after_processing_response(self):
+        query_times = []
+
+        def post(*args, **kwargs):
+            if args[0].endswith("createTask"):
+                return response(created())
+            query_times.append(self.clock.now)
+            if len(query_times) == 1:
+                self.clock.now += 0.5
+            elif len(query_times) == 2:
+                self.clock.now += 0.25
+            else:
+                return response(solved())
+            return response({"errorId": 0, "status": "processing"})
+
+        self.session.post.side_effect = post
+        result = self.solve()
+        self.assertEqual((result.state, result.polls), ("solved", 3))
+        self.assertEqual(query_times, [1, 3, 6.25])
+        self.assertEqual(self.clock.sleeps, [1, 1.5, 3])
+        self.assertEqual(self.session.post.call_count, 4)
+
+    def test_processing_near_absolute_deadline_stops_before_a_later_wait_or_task(self):
+        def post(*args, **kwargs):
+            if args[0].endswith("createTask"):
+                return response(created())
+            if self.session.post.call_count == 2:
+                self.clock.now += 58
+            return response({"errorId": 0, "status": "processing"})
+
+        self.session.post.side_effect = post
+        result = self.solve()
+        self.assertEqual((result.state, result.polls), ("timeout", 2))
+        self.assertEqual(self.clock.sleeps, [1])
+        self.assertEqual(self.clock.now, 59)
+        self.assertLess(self.clock.now, captcha.MAX_SECONDS)
+        self.assertEqual(self.session.post.call_count, 3)
+
+    def test_first_query_crossing_deadline_prevents_an_anchored_second_query(self):
+        def post(*args, **kwargs):
+            if args[0].endswith("createTask"):
+                return response(created())
+            self.clock.now = captcha.MAX_SECONDS
             return response({"errorId": 0, "status": "processing"})
 
         self.session.post.side_effect = post
         result = self.solve()
         self.assertEqual((result.state, result.polls), ("timeout", 1))
         self.assertEqual(self.clock.sleeps, [1])
-        self.assertEqual(self.clock.now, 59)
-        self.assertLess(self.clock.now, captcha.MAX_SECONDS)
         self.assertEqual(self.session.post.call_count, 2)
 
     def test_interstitial_uses_same_documented_proxy_required_task_type(self):

@@ -37,11 +37,14 @@ session-rotation messages alone.
   up purchase preparation. Keep the same cross-process buyer lock and durable
   claim. Serialize card edits under the existing photo lock and select the latest
   saved purchase result before rendering feedback.
-- Query an asynchronous CapSolver result after one second initially; keep the
-  subsequent three-second interval. Thirteen result queries retain at least the
-  prior twelve-query wait window (37 versus 36 seconds), under the unchanged
-  60-second absolute deadline. Only one paid task may be created. Early readiness
-  can save two seconds; this does not speed up an unchallenged purchase.
+- Query an asynchronous CapSolver result after one second initially, then target
+  the second query at three seconds after task creation returns. Later queries
+  keep the three-second interval. With instantaneous API calls, the opportunities
+  are 1, 3, 6, ..., 36 seconds: the extra first query preserves every former
+  cumulative wait opportunity. Its response time reduces the second wait; a
+  response arriving after that target can still delay the second query. The
+  60-second absolute deadline and single paid task remain unchanged. Early
+  readiness can save two seconds; this does not speed up an unchallenged purchase.
 - Record numeric-only request and local-operation timings. Optional diagnostics
   failures cannot discard an accepted body, cookie rotation or stored result.
 

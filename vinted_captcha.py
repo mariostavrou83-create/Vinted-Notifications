@@ -31,10 +31,11 @@ CHROME_USER_AGENT = (
 )
 CHALLENGE_HOSTS = frozenset(("geo.captcha-delivery.com", "ct.captcha-delivery.com"))
 MAX_RESPONSE = 65536
-# The first query follows the DataDome sample's one-second delay. Later
-# processing queries retain the general getTaskResult three-second interval.
-# Thirteen queries preserve the former twelve-query/36-second wait window
-# (1 + 12 * 3 = 37), still bounded by the existing absolute deadline.
+# Add the DataDome sample's one-second query before the former first query.
+# Anchor the second query at three seconds after task creation returns so the
+# extra query's duration does not add another full wait. Later processing
+# queries retain their three-second interval. With instantaneous API calls,
+# thirteen queries occur at 1, 3, 6, ..., 36 seconds, under the same deadline.
 MAX_POLLS = 13
 MAX_SECONDS = 60
 FIRST_POLL_INTERVAL = 1
@@ -485,12 +486,17 @@ def solve_datadome(
         task = data.get("taskId")
         if not isinstance(task, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task):
             return SolverResult("invalid_response")
+        polling_started = time.monotonic()
         for poll in range(1, MAX_POLLS + 1):
+            now = time.monotonic()
             interval = FIRST_POLL_INTERVAL if poll == 1 else POLL_INTERVAL
-            remaining = deadline - time.monotonic()
+            if poll == 2:
+                interval = max(0, polling_started + POLL_INTERVAL - now)
+            remaining = deadline - now
             if remaining <= interval:
                 return SolverResult("timeout", polls=poll - 1)
-            time.sleep(interval)
+            if interval:
+                time.sleep(interval)
             data, error = _post(
                 session,
                 "getTaskResult",
