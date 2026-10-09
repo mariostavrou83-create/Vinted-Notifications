@@ -2,12 +2,14 @@
 
 import copy
 import io
+import math
 import time
 from datetime import timedelta
 from http.client import HTTPMessage
 from types import SimpleNamespace
 
 import requests
+from curl_cffi import CurlInfo
 from curl_cffi import requests as curl_requests
 from curl_cffi.requests import exceptions as curl_errors
 from requests.cookies import RequestsCookieJar, extract_cookies_to_jar
@@ -48,6 +50,58 @@ API_HEADERS = {
     "Sec-Fetch-Dest": "empty",
     "Priority": "u=1, i",
 }
+
+TRANSPORT_TIMING_INFOS = (
+    CurlInfo.CONNECT_TIME,
+    CurlInfo.APPCONNECT_TIME,
+    CurlInfo.STARTTRANSFER_TIME,
+    CurlInfo.NUM_CONNECTS,
+)
+
+
+def _duration_ms(value):
+    if (
+        type(value) not in (int, float)
+        or not 0 <= value <= 86400
+        or not math.isfinite(value)
+    ):
+        return None
+    return round(value * 1000, 3)
+
+
+def _transport_timings(result, elapsed):
+    """Expose only numeric latency evidence, never SDK URLs or credentials.
+
+    connect_ms and ttfb_ms are cumulative from transfer start. tls_ms excludes
+    the earlier TCP connection time, but can include proxy tunnel negotiation.
+    Reused connections normally report zero for connection/handshake timing.
+    This snapshot is observational only; streamed responses measure the time
+    to their initial response, not later body reads.
+    """
+    timings = {}
+    elapsed_ms = _duration_ms(elapsed)
+    if elapsed_ms is not None:
+        timings["elapsed_ms"] = elapsed_ms
+    infos = getattr(result, "infos", None)
+    if not isinstance(infos, dict):
+        return timings
+    connect = infos.get(CurlInfo.CONNECT_TIME)
+    handshake = infos.get(CurlInfo.APPCONNECT_TIME)
+    for key, value in (
+        ("connect_ms", connect),
+        ("ttfb_ms", infos.get(CurlInfo.STARTTRANSFER_TIME)),
+    ):
+        duration = _duration_ms(value)
+        if duration is not None:
+            timings[key] = duration
+    if _duration_ms(connect) is not None and _duration_ms(handshake) is not None:
+        duration = _duration_ms(handshake - connect)
+        if duration is not None:
+            timings["tls_ms"] = duration
+    connections = infos.get(CurlInfo.NUM_CONNECTS)
+    if type(connections) is int and 0 <= connections <= 2147483647:
+        timings["new_connections"] = connections
+    return timings
 
 
 def _request_error(error):
@@ -181,6 +235,7 @@ class BrowserSession(requests.Session):
             verify=True,
             trust_env=False,
             retry=0,
+            curl_infos=list(TRANSPORT_TIMING_INFOS),
         )
         # Requests resolves custom CA settings before send(); avoid an SDK
         # environment default overriding trust_env=False on individual calls.
@@ -246,7 +301,14 @@ class BrowserSession(requests.Session):
         response.reason = result.reason
         response.headers = CaseInsensitiveDict(result.headers.items())
         response.encoding = get_encoding_from_headers(response.headers)
-        response.elapsed = timedelta(seconds=time.monotonic() - start)
+        elapsed = time.monotonic() - start
+        response.elapsed = timedelta(seconds=elapsed)
+        try:
+            response.transport_timings = _transport_timings(result, elapsed)
+        except Exception:  # noqa: BLE001 -- optional timing must not affect responses
+            # Optional diagnostics must never discard an accepted response,
+            # including payment results or newly rotated response cookies.
+            response.transport_timings = {}
         response.request = request
         response.raw = _ResponseBody(result, message, streaming)
         # Only cookies genuinely supplied by this response establish rotation.

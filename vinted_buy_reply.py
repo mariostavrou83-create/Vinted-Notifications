@@ -55,7 +55,7 @@ async def reply_buy(update, context):
         return
 
     # Use the replied-to message ID, never a newer alert or a caption's URL.
-    async with photo_cards.lock("vinted", source.message_id):
+    async with buying.purchase_lock(source.message_id):
         saved = photo_cards.recover("vinted", source)
         if not saved:
             await send_status(
@@ -71,9 +71,14 @@ async def reply_buy(update, context):
             outcome = previous
             text = previous["message"] + "\nNo payment was sent again."
         else:
+            preparation = None
             try:
                 buying.ready(row)
-                await send_status(message, "Preparing your Vinted checkout…")
+                # This reply is purchase permission; Telegram status delivery
+                # must not postpone the existing account and listing checks.
+                preparation = asyncio.create_task(
+                    send_status(message, "Preparing your Vinted checkout…")
+                )
                 # BUY is the purchase instruction. The existing buyer rechecks
                 # live prices and limits, and retains the temporary test gates.
                 outcome = await asyncio.to_thread(buying.buy, row)
@@ -85,7 +90,9 @@ async def reply_buy(update, context):
                 }
             except Exception as exc:  # noqa: BLE001 -- never retry uncertain payment
                 logger.warning(
-                    "BUY reply failed item=%s error=%s", row["item_id"], type(exc).__name__
+                    "BUY reply failed item=%s error=%s",
+                    row["item_id"],
+                    type(exc).__name__,
                 )
                 outcome = buying.result(row["item_id"]) or {
                     "state": "unknown",
@@ -94,7 +101,30 @@ async def reply_buy(update, context):
                         "Check your Vinted purchases before trying again."
                     ),
                 }
-            text = (outcome or {}).get("message") or "Check the status on your Vinted alert."
+            finally:
+                if preparation:
+                    # Finish the informational message before the final result
+                    # so a delayed "Preparing" cannot arrive after "Paid".
+                    if not preparation.done():
+                        preparation.cancel()
+                    try:
+                        await preparation
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as exc:  # noqa: BLE001 -- no UI-based replay
+                        logger.warning(
+                            "BUY preparation status failed: error=%s",
+                            type(exc).__name__,
+                        )
+            text = (outcome or {}).get(
+                "message"
+            ) or "Check the status on your Vinted alert."
         if outcome:
-            await buying.show_alert_feedback(context.bot, source, outcome)
+            outcome = await buying.show_purchase_feedback(context.bot, source, outcome)
+            text = outcome.get("message") or text
+            if previous and previous["state"] not in (
+                "failed_before_payment",
+                "preparing",
+            ):
+                text += "\nNo payment was sent again."
         await send_status(message, text)

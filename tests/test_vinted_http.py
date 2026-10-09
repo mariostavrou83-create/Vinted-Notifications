@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import requests
+from curl_cffi import CurlInfo
 from curl_cffi.requests import exceptions as curl_errors
 from curl_cffi.requests.headers import Headers
 
@@ -17,6 +18,7 @@ from vinted_http import (
     BROWSER_IMPERSONATE,
     BROWSER_USER_AGENT,
     NAVIGATION_HEADERS,
+    TRANSPORT_TIMING_INFOS,
     BrowserSession,
 )
 
@@ -77,11 +79,113 @@ class BrowserSessionTests(unittest.TestCase):
             verify=True,
             trust_env=False,
             retry=0,
+            curl_infos=list(TRANSPORT_TIMING_INFOS),
         )
         hook.assert_called_once()
         response.close()
         response.close()
         result.close.assert_called_once()
+
+    def test_transport_timings_expose_only_numeric_latency_metadata(self):
+        result = sdk_response(
+            headers={"Set-Cookie": "private-cookie=private-secret; Path=/"}
+        )
+        result.infos = {
+            CurlInfo.CONNECT_TIME: 0.125,
+            CurlInfo.APPCONNECT_TIME: 0.325,
+            CurlInfo.STARTTRANSFER_TIME: 0.75,
+            CurlInfo.NUM_CONNECTS: 1,
+            CurlInfo.EFFECTIVE_URL: "https://private-user:private-pass@private.test/",
+            CurlInfo.PRIMARY_IP: "private-proxy",
+            "headers": "private-header",
+        }
+        self.sdk.request.return_value = result
+        with patch("vinted_http.time.monotonic", side_effect=[10.0, 11.5]):
+            response = self.session.get(BASE + "/", allow_redirects=False)
+        self.assertEqual(
+            response.transport_timings,
+            {
+                "elapsed_ms": 1500.0,
+                "connect_ms": 125.0,
+                "tls_ms": 200.0,
+                "ttfb_ms": 750.0,
+                "new_connections": 1,
+            },
+        )
+        self.assertNotIn("private", json.dumps(response.transport_timings))
+        self.assertEqual(response.elapsed.total_seconds(), 1.5)
+        self.sdk.request.assert_called_once()
+
+    def test_transport_timings_keep_reused_zero_connection_samples(self):
+        result = sdk_response()
+        result.infos = {
+            CurlInfo.CONNECT_TIME: 0,
+            CurlInfo.APPCONNECT_TIME: 0,
+            CurlInfo.STARTTRANSFER_TIME: 0.08,
+            CurlInfo.NUM_CONNECTS: 0,
+        }
+        self.sdk.request.return_value = result
+        response = self.session.get(BASE + "/", allow_redirects=False)
+        self.assertEqual(response.transport_timings["connect_ms"], 0)
+        self.assertEqual(response.transport_timings["tls_ms"], 0)
+        self.assertEqual(response.transport_timings["ttfb_ms"], 80)
+        self.assertEqual(response.transport_timings["new_connections"], 0)
+
+    def test_invalid_or_missing_sdk_timing_cannot_break_an_accepted_response(self):
+        for infos in (
+            None,
+            "private-secret",
+            {},
+            {
+                CurlInfo.CONNECT_TIME: float("nan"),
+                CurlInfo.APPCONNECT_TIME: float("inf"),
+                CurlInfo.STARTTRANSFER_TIME: "private-secret",
+                CurlInfo.NUM_CONNECTS: True,
+            },
+            {
+                CurlInfo.CONNECT_TIME: -1,
+                CurlInfo.APPCONNECT_TIME: 999999,
+                CurlInfo.STARTTRANSFER_TIME: False,
+                CurlInfo.NUM_CONNECTS: -1,
+            },
+            {
+                CurlInfo.CONNECT_TIME: 10**1000,
+                CurlInfo.APPCONNECT_TIME: 10**1000,
+                CurlInfo.STARTTRANSFER_TIME: 10**1000,
+                CurlInfo.NUM_CONNECTS: 10**1000,
+            },
+        ):
+            with self.subTest(infos=infos):
+                result = sdk_response(content=b'{"accepted":true}')
+                result.infos = infos
+                self.sdk.request.return_value = result
+                response = self.session.get(BASE + "/", allow_redirects=False)
+                self.assertEqual(response.json(), {"accepted": True})
+                self.assertEqual(set(response.transport_timings), {"elapsed_ms"})
+                self.assertNotIn("private", json.dumps(response.transport_timings))
+
+    def test_timing_extraction_failure_preserves_accepted_post_body_and_cookies(self):
+        result = sdk_response(
+            headers={
+                "Content-Type": "application/json",
+                "Set-Cookie": "access_token_web=new-secret; Path=/; Secure",
+            },
+            content=b'{"accepted":true}',
+        )
+        self.sdk.request.return_value = result
+        with patch(
+            "vinted_http._transport_timings", side_effect=RuntimeError("SDK timing")
+        ) as timings:
+            response = self.session.post(
+                BASE + "/api/v2/payments", json={}, allow_redirects=False
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"accepted": True})
+        self.assertEqual(response.transport_timings, {})
+        self.assertEqual(response.cookies.get("access_token_web"), "new-secret")
+        self.assertEqual(self.session.cookies.get("access_token_web"), "new-secret")
+        self.sdk.request.assert_called_once()
+        timings.assert_called_once()
 
     def test_browser_version_platform_and_hints_cannot_drift_via_header_override(self):
         self.session.headers["User-Agent"] = "unexpected-session-UA"

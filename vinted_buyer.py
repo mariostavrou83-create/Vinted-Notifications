@@ -22,6 +22,12 @@ from cryptography.fernet import Fernet, InvalidToken
 import db
 from search_settings import connection
 from vinted_http import API_HEADERS, NAVIGATION_HEADERS, BrowserSession
+from vinted_timing import (
+    log_duration,
+    log_response_timing,
+    request_operation,
+    timed_operation,
+)
 
 BASE = "https://www.vinted.co.uk"
 PICKUP_BASE = "https://api.vinted.co.uk"
@@ -679,6 +685,7 @@ def exclusive(*, wait_seconds=0):
     path = Path(db.DB_PATH).resolve().parent / "vinted-buyer.lock"
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
+        started = time.perf_counter()
         deadline = time.monotonic() + wait_seconds
         while True:
             try:
@@ -692,6 +699,7 @@ def exclusive(*, wait_seconds=0):
                         reason="busy",
                     ) from None
                 time.sleep(min(0.05, remaining))
+        log_duration("buyer_lock_wait", started)
         yield
     finally:
         os.close(fd)
@@ -953,6 +961,7 @@ class Client:
         else:
             self.session.headers.pop("X-Anon-Id", None)
 
+    @timed_operation("security_check")
     def solve_challenge(self, response, data=None):
         """One supported task on this client's fixed account proxy and browser."""
         if self.solver_attempted or not self.network["enabled"]:
@@ -1069,6 +1078,7 @@ class Client:
         """Only a same-account identity check may enable session persistence."""
         self._verified_session = (user_id, sealed, saved)
 
+    @timed_operation("session_save")
     def persist_session(self):
         """Keep accepted response rotations without overwriting a newer login."""
         if self._verified_session is None:
@@ -1304,6 +1314,7 @@ class Client:
                         allow_redirects=False,
                         **extra,
                     )
+                    log_response_timing(request_operation(method, path, body), response)
                 except requests.RequestException:
                     raise BuyerError(
                         AUTH_REASONS["network"], reason="network", stage=stage
@@ -1436,6 +1447,7 @@ class Client:
                         timeout=(4, 12),
                         allow_redirects=False,
                     )
+                    log_response_timing("listing_page", response)
                     data = homepage_data(response)
                     if not security_challenge(
                         response, data
@@ -1461,6 +1473,7 @@ class Client:
                                 timeout=(4, 12),
                                 allow_redirects=False,
                             )
+                            log_response_timing("listing_page", response)
                 except requests.RequestException:
                     raise BuyerError(
                         AUTH_REASONS["network"], reason="network"
@@ -1502,6 +1515,7 @@ class Client:
                         timeout=(4, 12),
                         allow_redirects=False,
                     )
+                    log_response_timing("homepage", response)
                     data = homepage_data(response)
                     if (
                         not security_challenge(response, data)
@@ -1515,6 +1529,7 @@ class Client:
                             timeout=(4, 12),
                             allow_redirects=False,
                         )
+                        log_response_timing("homepage", response)
                 except requests.RequestException:
                     raise BuyerError(
                         AUTH_REASONS["network"], reason="network", stage="homepage"
@@ -1819,6 +1834,7 @@ def renew_saved_client(client):
         client.homepage()
 
 
+@timed_operation("buyer_connect")
 def connected_client(*, renew_before=0, solve_challenges=True, allow_refresh=True):
     with closing(connection()) as conn:
         row = conn.execute(

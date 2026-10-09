@@ -31,8 +31,13 @@ CHROME_USER_AGENT = (
 )
 CHALLENGE_HOSTS = frozenset(("geo.captcha-delivery.com", "ct.captcha-delivery.com"))
 MAX_RESPONSE = 65536
-MAX_POLLS = 12
+# The first query follows the DataDome sample's one-second delay. Later
+# processing queries retain the general getTaskResult three-second interval.
+# Thirteen queries preserve the former twelve-query/36-second wait window
+# (1 + 12 * 3 = 37), still bounded by the existing absolute deadline.
+MAX_POLLS = 13
 MAX_SECONDS = 60
+FIRST_POLL_INTERVAL = 1
 POLL_INTERVAL = 3
 _PROTOCOLS = frozenset(("http", "https", "socks4", "socks5"))
 ERROR_CODES = frozenset(
@@ -481,10 +486,11 @@ def solve_datadome(
         if not isinstance(task, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task):
             return SolverResult("invalid_response")
         for poll in range(1, MAX_POLLS + 1):
+            interval = FIRST_POLL_INTERVAL if poll == 1 else POLL_INTERVAL
             remaining = deadline - time.monotonic()
-            if remaining <= POLL_INTERVAL:
+            if remaining <= interval:
                 return SolverResult("timeout", polls=poll - 1)
-            time.sleep(POLL_INTERVAL)
+            time.sleep(interval)
             data, error = _post(
                 session,
                 "getTaskResult",

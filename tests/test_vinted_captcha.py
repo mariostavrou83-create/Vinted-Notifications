@@ -235,7 +235,7 @@ class SolverTests(unittest.TestCase):
         self.assertEqual(result.state, "solved")
         self.assertEqual(result.cookie, COOKIE)
         self.assertEqual(result.polls, 2)
-        self.assertEqual(self.clock.sleeps, [3, 3])
+        self.assertEqual(self.clock.sleeps, [1, 3])
         calls = self.session.post.call_args_list
         self.assertEqual(calls[0].args, ("https://api.capsolver.com/createTask",))
         task = calls[0].kwargs["json"]["task"]
@@ -259,6 +259,59 @@ class SolverTests(unittest.TestCase):
             calls[1].kwargs["json"], {"clientKey": API_KEY, "taskId": "task-123"}
         )
         self.session.__exit__.assert_called_once()
+
+    def test_first_ready_poll_returns_after_one_second_and_creates_one_task(self):
+        self.session.post.side_effect = [response(created()), response(solved())]
+        result = self.solve()
+        self.assertEqual(
+            (result.state, result.polls, result.cookie), ("solved", 1, COOKIE)
+        )
+        self.assertEqual(self.clock.sleeps, [1])
+        self.assertEqual(self.clock.now, 1)
+        self.assertEqual(
+            [call.args[0] for call in self.session.post.call_args_list],
+            [
+                "https://api.capsolver.com/createTask",
+                "https://api.capsolver.com/getTaskResult",
+            ],
+        )
+
+    def test_last_ready_poll_preserves_the_previous_slow_task_wait_window(self):
+        self.session.post.side_effect = (
+            [response(created())]
+            + [response({"errorId": 0, "status": "processing"}) for _ in range(12)]
+            + [response(solved())]
+        )
+        result = self.solve()
+        self.assertEqual(
+            (result.state, result.polls, result.cookie), ("solved", 13, COOKIE)
+        )
+        self.assertEqual(self.clock.sleeps, [1] + [3] * 12)
+        self.assertEqual(self.clock.now, 37)
+        self.assertGreaterEqual(self.clock.now, 12 * 3)
+        calls = self.session.post.call_args_list
+        self.assertEqual(len(calls), 14)
+        self.assertEqual(calls[0].args[0], "https://api.capsolver.com/createTask")
+        for call in calls[1:]:
+            self.assertEqual(call.args[0], "https://api.capsolver.com/getTaskResult")
+            self.assertEqual(
+                call.kwargs["json"], {"clientKey": API_KEY, "taskId": "task-123"}
+            )
+
+    def test_processing_near_absolute_deadline_stops_before_another_wait_or_task(self):
+        def post(*args, **kwargs):
+            if args[0].endswith("createTask"):
+                return response(created())
+            self.clock.now += 58
+            return response({"errorId": 0, "status": "processing"})
+
+        self.session.post.side_effect = post
+        result = self.solve()
+        self.assertEqual((result.state, result.polls), ("timeout", 1))
+        self.assertEqual(self.clock.sleeps, [1])
+        self.assertEqual(self.clock.now, 59)
+        self.assertLess(self.clock.now, captcha.MAX_SECONDS)
+        self.assertEqual(self.session.post.call_count, 2)
 
     def test_interstitial_uses_same_documented_proxy_required_task_type(self):
         url = CHALLENGE.replace("/captcha/", "/interstitial/")
@@ -427,7 +480,7 @@ class SolverTests(unittest.TestCase):
         self.session.post.reset_mock()
         self.session.post.side_effect = None
         self.session.post.return_value = response(created())
-        with patch.object(captcha, "MAX_SECONDS", 2):
+        with patch.object(captcha, "MAX_SECONDS", captcha.FIRST_POLL_INTERVAL):
             result = self.solve()
         self.assertEqual((result.state, result.polls), ("timeout", 0))
         self.assertEqual(self.session.post.call_count, 1)

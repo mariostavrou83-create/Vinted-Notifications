@@ -96,6 +96,8 @@ def web_checkout(total="18.84", *, home=False):
 
 class BuyingTests(DatabaseFixture, unittest.TestCase):
     def test_response_persistence_failure_after_payment_never_submits_again(self):
+        from test_vinted_page_data import next_data, purchase_item
+
         original = self.client.request.side_effect
         payment_posts = 0
 
@@ -103,8 +105,12 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
             nonlocal payment_posts
             path = url.removeprefix(buyer.BASE)
             cookies = requests.cookies.RequestsCookieJar()
+            text = ""
             if path == "/api/v2/users/current":
                 data = {"user": {"id": 99}}
+            elif path == "/items/123":
+                data = None
+                text = next_data(purchase_item(seller_id="100"))
             else:
                 data = original(method, path, kwargs.get("json"))
             if path.endswith("/payment") and method == "POST":
@@ -130,7 +136,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                     )
             return Mock(
                 status_code=200,
-                text="",
+                text=text,
                 headers={},
                 cookies=cookies,
                 json=Mock(return_value=data),
@@ -283,6 +289,8 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
             )
 
     def test_response_cookie_domain_survives_saved_session_and_real_buying_client(self):
+        from test_vinted_page_data import next_data, purchase_item
+
         headers = Message()
         headers.add_header(
             "Set-Cookie",
@@ -305,12 +313,16 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
 
         def response(method, url, **kwargs):
             path = url.removeprefix(buyer.BASE)
+            text = ""
             if path == "/api/v2/users/current":
                 data = {"user": {"id": 99, "login": "owner"}}
+            elif path == "/items/123":
+                data = None
+                text = next_data(purchase_item(seller_id="100"))
             else:
                 data = self.client.request(method, path, kwargs.get("json"))
             return Mock(
-                status_code=200, json=Mock(return_value=data), headers={}, text=""
+                status_code=200, json=Mock(return_value=data), headers={}, text=text
             )
 
         with patch.object(requests.Session, "request", side_effect=response) as wire:
@@ -1211,6 +1223,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
             }
         }
         self.client = Mock()
+        self.client.listing_page.side_effect = lambda url, item_id: self.item
         self.final = checkout()
         self.payment = {"payment": {"status": "success"}}
 
@@ -1258,7 +1271,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(self.payments()[0].args[2]["checksum"], "verified-checksum")
         self.assertEqual(buying.result("123")["total"], 1900)
 
-    def test_removed_item_api_uses_current_page_and_still_pays_only_once(self):
+    def test_current_page_is_primary_without_removed_item_api_and_pays_only_once(self):
         original = self.client.request.side_effect
 
         def response(method, path, body=None):
@@ -1269,7 +1282,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
             return original(method, path, body)
 
         self.client.request.side_effect = response
-        self.client.listing_page.return_value = {
+        self.item = {
             "item": {
                 "id": "123",
                 "user_id": "100",
@@ -1283,8 +1296,14 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(self.run_buy()["state"], "paid")
         self.client.listing_page.assert_called_once_with(self.row["url"], "123")
         self.assertEqual(len(self.payments()), 1)
+        self.assertFalse(
+            any(
+                call.args[1].startswith("/api/v2/items/")
+                for call in self.client.request.call_args_list
+            )
+        )
 
-    def test_item_access_refusals_never_switch_to_the_listing_page(self):
+    def test_page_access_refusals_never_switch_to_another_route(self):
         for status, reason in (
             (401, "credentials"),
             (403, "security_challenge"),
@@ -1294,11 +1313,12 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         ):
             with self.subTest(status=status, reason=reason):
                 self.client.reset_mock()
-                self.client.request.side_effect = buyer.BuyerError(
+                self.client.listing_page.side_effect = buyer.BuyerError(
                     "Vinted refused this request.", status, reason=reason
                 )
                 self.assertEqual(self.run_buy()["state"], "failed_before_payment")
-                self.client.listing_page.assert_not_called()
+                self.client.listing_page.assert_called_once_with(self.row["url"], "123")
+                self.client.request.assert_not_called()
                 self.assertEqual(self.payments(), [])
 
     def test_current_page_disallowed_item_stops_before_conversation_or_payment(self):
@@ -1312,7 +1332,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                 self.client.request.side_effect = buyer.BuyerError(
                     "Item API no longer available.", 404, reason="http_error"
                 )
-                self.client.listing_page.return_value = {
+                self.item = {
                     "item": {
                         "id": "123",
                         "user_id": "100",
@@ -1326,7 +1346,8 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                 outcome = self.run_buy()
                 self.assertEqual(outcome["state"], "failed_before_payment")
                 self.assertIn("No payment was sent", outcome["message"])
-                self.client.request.assert_called_once_with("GET", "/api/v2/items/123")
+                self.client.listing_page.assert_called_once_with(self.row["url"], "123")
+                self.client.request.assert_not_called()
                 self.assertEqual(self.payments(), [])
 
     def test_buyer_listing_transport_uses_scoped_page_and_one_canonical_redirect(self):
@@ -1418,7 +1439,8 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                 self.assertIn("£20.00", message)
                 self.assertIn("still need verification at checkout", message)
                 self.assertIn("No checkout or payment was created", message)
-                self.client.request.assert_called_once_with("GET", "/api/v2/items/123")
+                self.client.listing_page.assert_called_once_with(self.row["url"], "123")
+                self.client.request.assert_not_called()
                 self.client.session.close.assert_called_once()
                 self.assertEqual(buying.result("123"), before)
 
@@ -1471,7 +1493,8 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                 self.assertIn(
                     "No checkout or payment was created", str(error.exception)
                 )
-                self.client.request.assert_called_once_with("GET", "/api/v2/items/123")
+                self.client.listing_page.assert_called_once_with(self.row["url"], "123")
+                self.client.request.assert_not_called()
                 self.client.session.close.assert_called_once()
                 self.assertEqual(buying.result("123"), before)
 
@@ -1507,7 +1530,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         ):
             with self.subTest(status=status):
                 self.client.reset_mock()
-                self.client.request.side_effect = buyer.BuyerError(
+                self.client.listing_page.side_effect = buyer.BuyerError(
                     "Vinted did not accept this request.", status, reason=reason
                 )
                 with patch.object(
@@ -1517,7 +1540,8 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                 self.assertEqual(error.exception.status, status)
                 self.assertEqual(error.exception.reason, reason)
                 self.assertIn(f"HTTP {status}", str(error.exception))
-                self.client.request.assert_called_once_with("GET", "/api/v2/items/123")
+                self.client.listing_page.assert_called_once_with(self.row["url"], "123")
+                self.client.request.assert_not_called()
                 self.client.session.close.assert_called_once()
                 self.assertEqual(buying.result("123"), before)
 
@@ -1552,7 +1576,8 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         outcome = self.run_buy()
         self.assertEqual(outcome["state"], "failed_before_payment")
         self.assertEqual(outcome["reason"], "item_over_url_limit")
-        self.client.request.assert_called_once_with("GET", "/api/v2/items/123")
+        self.client.listing_page.assert_called_once_with(self.row["url"], "123")
+        self.client.request.assert_not_called()
 
     def test_url_limit_is_rechecked_after_delivery_selection_before_payment(self):
         with closing(search_settings.connection()) as conn, conn:
@@ -1708,7 +1733,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         with patch.object(
             photo_cards, "recover", return_value=(self.row, {}, {})
         ), patch.object(photo_cards, "answer", new=AsyncMock()), patch.object(
-            buying, "show_feedback", new=AsyncMock()
+            buying, "show_purchase_feedback", new=AsyncMock()
         ), patch.object(
             buying, "buy", return_value=outcome
         ) as buy:
@@ -2356,6 +2381,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
             budgets = conn.execute("SELECT * FROM vinted_search_budgets").fetchall()
         client = Mock()
         client.csrf = ""
+        client._verified_session = None
         client.identity.side_effect = buyer.BuyerError(
             buyer.AUTH_REASONS["session_refresh"],
             307,
@@ -3047,7 +3073,9 @@ class SessionRotationPersistenceTests(SessionRotationFixture, unittest.TestCase)
             self.assertEqual(client.identity(), ("99", "99"))
         self.assertEqual(wire.call_count, 3)
         renewal = wire.call_args_list[1]
-        self.assertEqual(renewal.args[:2], ("POST", buyer.BASE + "/web/api/auth/refresh"))
+        self.assertEqual(
+            renewal.args[:2], ("POST", buyer.BASE + "/web/api/auth/refresh")
+        )
         self.assertIsNone(renewal.kwargs["json"])
         self.assertIsNone(renewal.kwargs["headers"]["Content-Type"])
         row, saved = self.saved()

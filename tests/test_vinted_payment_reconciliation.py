@@ -45,6 +45,9 @@ class PaymentReconciliationTests(DatabaseFixture, unittest.TestCase):
         self.payment = {"payment": {"status": "success"}}
         self.client = Mock()
         self.client.request.side_effect = self.request
+        self.client.listing_page.side_effect = lambda url, item_id: self.request(
+            "GET", "/api/v2/items/" + str(item_id)
+        )
         self.connected = patch.object(
             buyer, "connected_client", return_value=self.client
         )
@@ -117,9 +120,12 @@ class PaymentReconciliationTests(DatabaseFixture, unittest.TestCase):
         original = buying.result("123")
         for field, value in (("id", 777), ("buyer_id", 88), ("item_id", 321)):
             with self.subTest(field=field):
-                self.transaction = dict(
-                    id=456, buyer_id=99, item_id=123, purchase_id="checkout-123"
-                )
+                self.transaction = {
+                    "id": 456,
+                    "buyer_id": 99,
+                    "item_id": 123,
+                    "purchase_id": "checkout-123",
+                }
                 self.transaction[field] = value
                 self.client.request.reset_mock()
                 outcome = buying.check_payment("123")

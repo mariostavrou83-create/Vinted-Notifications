@@ -5,12 +5,12 @@ import copy
 import json
 import time
 import unittest
-import requests
 from contextlib import closing
 from types import SimpleNamespace
 from typing import ClassVar
 from unittest.mock import AsyncMock, Mock, patch
 
+import requests
 import test_dashboard
 from test_search_controls import DatabaseFixture
 from test_vinted_buying import DEVICE, web_checkout
@@ -102,6 +102,16 @@ class CheckoutPreferencesTests(DatabaseFixture, unittest.TestCase):
         self.corrupt = None
         self.client = Mock()
         self.client.request.side_effect = self.request
+        self.client.listing_page.return_value = {
+            "item": {
+                "id": "123",
+                "user_id": "100",
+                "price": {"amount": "15.00", "currency_code": "GBP"},
+                "can_buy": True,
+                "is_reserved": False,
+                "is_hidden": False,
+            }
+        }
         self.row = {
             "item_id": "123",
             "query_id": 1,

@@ -50,6 +50,16 @@ class ReviewTests(DatabaseFixture, unittest.TestCase):
             )
         )
         self.client = Mock()
+        self.client.listing_page.return_value = {
+            "item": {
+                "id": "123",
+                "user_id": "100",
+                "price": {"amount": "15.00", "currency_code": "GBP"},
+                "can_buy": True,
+                "is_reserved": False,
+                "is_hidden": False,
+            }
+        }
         self.connected = self.stack.enter_context(
             patch.object(buyer, "connected_client", return_value=self.client)
         )
@@ -276,14 +286,6 @@ class ReviewTests(DatabaseFixture, unittest.TestCase):
         original = review.load_review()
         self.client.request.side_effect = [
             {
-                "item": {
-                    "id": 123,
-                    "user_id": 100,
-                    "can_buy": True,
-                    "price": {"amount": "15.00", "currency_code": "GBP"},
-                }
-            },
-            {
                 "transaction": {
                     "id": 456,
                     "buyer_id": 99,
@@ -385,8 +387,8 @@ class ReviewTests(DatabaseFixture, unittest.TestCase):
 
     def test_sold_selected_item_does_not_switch_or_create_checkout(self):
         self.blocked_draft()
+        self.client.listing_page.return_value = {"item": {"id": 123, "is_sold": True}}
         self.client.request.side_effect = [
-            {"item": {"id": 123, "is_sold": True}},
             buyer.BuyerError("Route unavailable", status=404, reason="http_error"),
         ]
         result = review.reconcile_selected()
@@ -481,7 +483,7 @@ class ReviewTests(DatabaseFixture, unittest.TestCase):
         with patch.object(
             photo_cards, "recover", return_value=(self.row, {}, {})
         ), patch.object(photo_cards, "answer", new_callable=AsyncMock), patch.object(
-            buying, "show_feedback", new_callable=AsyncMock
+            buying, "show_purchase_feedback", new_callable=AsyncMock
         ) as feedback:
             asyncio.run(buying.callback(update, context))
             asyncio.run(buying.callback(update, context))
@@ -734,10 +736,10 @@ class ReviewTests(DatabaseFixture, unittest.TestCase):
                         "SELECT user_id,preferred_card_last4,browser_info,session,network FROM vinted_buyer"
                     ).fetchone()
 
-                def changed():
+                def changed(statement=change):
                     with closing(search_settings.connection()) as conn, conn:
                         conn.execute(
-                            "UPDATE vinted_buyer SET " + change + " WHERE id=1"
+                            "UPDATE vinted_buyer SET " + statement + " WHERE id=1"
                         )
                     return {"outcome": "verified"}
 
@@ -791,7 +793,7 @@ class ReviewTests(DatabaseFixture, unittest.TestCase):
         with patch.dict(os.environ, {"MSJ_TELEGRAM_REVIEW_ONLY": "0"}), patch.object(
             photo_cards, "recover", return_value=(self.row, {}, {})
         ), patch.object(photo_cards, "answer", new_callable=AsyncMock), patch.object(
-            buying, "show_feedback", new_callable=AsyncMock
+            buying, "show_purchase_feedback", new_callable=AsyncMock
         ):
             self.assertEqual(review.enable_buyer()["outcome"], "enabled")
             self.assertEqual(self.posts("/payment"), [])

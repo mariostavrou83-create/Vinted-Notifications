@@ -18,6 +18,7 @@ import vinted_budget
 import vinted_buyer as buyer
 from logger import get_logger
 from search_settings import connection
+from vinted_timing import timed_operation
 
 logger = get_logger(__name__)
 
@@ -825,15 +826,10 @@ def check_item_limits(price, limits, query_id):
 def verified_listing(client, row, config, limits):
     """Read the current item and apply the same listing gates for every caller."""
     item_id = str(row["item_id"])
-    try:
-        data = client.request("GET", f"/api/v2/items/{item_id}")
-    except buyer.BuyerError as exc:
-        if exc.status != 404 or exc.reason not in ("unreadable", "http_error"):
-            raise
-        # The former item-detail route returns 404 on the current UK site.
-        # Read the same canonical listing's first-party server-rendered item;
-        # access refusals and security challenges never use another route.
-        data = client.listing_page(row["url"], item_id)
+    # The former item-detail API returns 404 on the current UK site. Read the
+    # canonical first-party page directly with this verified account, retaining
+    # its strict item parser and transport gates. A refusal never changes route.
+    data = client.listing_page(row["url"], item_id)
     item = data.get("item") or {}
     if not isinstance(item, dict) or str(item.get("id")) != item_id:
         raise buyer.BuyerError(
@@ -1112,6 +1108,7 @@ def saved_browser_info():
     return info
 
 
+@timed_operation("payment_result_save")
 def record_payment_result(item_id, paid, total):
     status = (paid.get("payment") or {}).get("status")
     if status in ("success", "completed"):
@@ -1386,6 +1383,7 @@ def check_listing(item_id):
                 client.session.close()
 
 
+@timed_operation("purchase")
 def buy(row):
     item_id = str(row["item_id"])
     host = urlsplit(row["url"]).hostname
@@ -1817,6 +1815,38 @@ async def show_feedback(bot, query, row, details, card, outcome):
     await show_alert_feedback(bot, query.message, outcome)
 
 
+def purchase_lock(message_id):
+    """Serialize purchases from this alert independently of its photo edits."""
+    import photo_cards
+
+    return photo_cards.lock("vinted-purchase", message_id)
+
+
+async def show_purchase_feedback(bot, message, outcome):
+    """Merge the current purchase result after any queued photo or status edit."""
+    import photo_cards
+
+    # Purchase handlers take purchase_lock first; UI-only writers never take it.
+    # Hold the UI lock only while reloading, merging and displaying this result.
+    async with photo_cards.lock("vinted", message.message_id):
+        saved = photo_cards.load("vinted", message.message_id)
+        updated = outcome.get("updated")
+        if saved and type(updated) in (int, float) and math.isfinite(updated):
+            latest = result(saved[0]["item_id"])
+            latest_updated = latest.get("updated") if latest else None
+            if (
+                type(latest_updated) in (int, float)
+                and math.isfinite(latest_updated)
+                and latest_updated > updated
+            ):
+                # A status check may have reconciled payment while the photo
+                # edit delayed this display. Its newer durable state wins;
+                # ephemeral reasons survive only with the original result.
+                outcome = latest
+        await show_alert_feedback(bot, message, outcome)
+    return outcome
+
+
 async def show_alert_feedback(bot, message, outcome):
     """Share durable alert feedback between buttons and notification replies."""
     import photo_cards
@@ -1952,8 +1982,7 @@ async def callback(update, context):
     logger.info("Autobuy tap item=%s search=%s", row["item_id"], row.get("query_id"))
     if previous and previous["state"] not in ("failed_before_payment", "preparing"):
         await photo_cards.answer(query, previous["message"][:190], alert=True)
-        async with photo_cards.lock("vinted", query.message.message_id):
-            await show_feedback(context.bot, query, row, details, card, previous)
+        await show_purchase_feedback(context.bot, query.message, previous)
         return
     # Check local setup BEFORE answering the callback. Telegram must receive the
     # reason as its first answer, not a second popup after an acknowledgement.
@@ -1971,25 +2000,45 @@ async def callback(update, context):
                 {"state": "setup_required", "message": str(exc), "reason": exc.reason},
             )
         return
-    await photo_cards.answer(query, "Preparing your Vinted checkout…")
-    async with photo_cards.lock("vinted", query.message.message_id):
+    async with purchase_lock(query.message.message_id):
+        # Another tap may have completed while this callback waited for the
+        # same alert. Reuse its durable result rather than start buying again.
+        previous = result(row["item_id"])
+        if previous and previous["state"] not in ("failed_before_payment", "preparing"):
+            await photo_cards.answer(query, previous["message"][:190], alert=True)
+            await show_purchase_feedback(context.bot, query.message, previous)
+            return
+        # Telegram acknowledgement is informational, not purchase permission.
+        # Start it alongside the one authorised purchase; a slow popup must not
+        # delay the account/listing checks or retry a payment.
+        acknowledgement = asyncio.create_task(
+            photo_cards.answer(query, "Preparing your Vinted checkout…")
+        )
         try:
-            outcome = await asyncio.to_thread(buy, row)
-        except buyer.BuyerError as exc:
-            outcome = {
-                "state": "setup_required",
-                "message": str(exc),
-                "reason": exc.reason,
-            }
-        except Exception as exc:  # noqa: BLE001 -- never retry an uncertain purchase
-            logger.warning(
-                "Autobuy request failed item=%s error=%s",
-                row["item_id"],
-                type(exc).__name__,
-            )
-            outcome = result(row["item_id"]) or {
-                "state": "unknown",
-                "message": "The purchase result could not be confirmed. Check your Vinted purchases before trying again.",
-            }
-        if outcome:
-            await show_feedback(context.bot, query, row, details, card, outcome)
+            try:
+                outcome = await asyncio.to_thread(buy, row)
+            except buyer.BuyerError as exc:
+                outcome = {
+                    "state": "setup_required",
+                    "message": str(exc),
+                    "reason": exc.reason,
+                }
+            except Exception as exc:  # noqa: BLE001 -- never retry this purchase
+                logger.warning(
+                    "Autobuy request failed item=%s error=%s",
+                    row["item_id"],
+                    type(exc).__name__,
+                )
+                outcome = result(row["item_id"]) or {
+                    "state": "unknown",
+                    "message": "The purchase result could not be confirmed. Check your Vinted purchases before trying again.",
+                }
+            if outcome:
+                await show_purchase_feedback(context.bot, query.message, outcome)
+        finally:
+            try:
+                await acknowledgement
+            except Exception as exc:  # noqa: BLE001 -- UI cannot change purchase state
+                logger.warning(
+                    "Autobuy acknowledgement failed: error=%s", type(exc).__name__
+                )
