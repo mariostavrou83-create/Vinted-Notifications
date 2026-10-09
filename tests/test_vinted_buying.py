@@ -3009,6 +3009,59 @@ class SessionRotationFixture(DatabaseFixture):
 
 
 class SessionRotationPersistenceTests(SessionRotationFixture, unittest.TestCase):
+    def test_bound_native_renewal_keeps_cas_reference_for_next_identity_rotation(self):
+        client = self.connected()
+        before = self.saved()[0]["session"]
+        final_access = "identity-rotated-access-token-0123456789"
+        final_refresh = "identity-rotated-refresh-token-0123456789"
+        identity = self.response({"user": {"id": 99}})
+        for name, value in (
+            ("access_token_web", final_access),
+            ("refresh_token_web", final_refresh),
+        ):
+            identity.cookies.set(
+                name,
+                value,
+                domain=".www.vinted.co.uk",
+                path="/",
+                secure=True,
+                expires=4102444800,
+            )
+        with patch.object(
+            requests.Session,
+            "request",
+            side_effect=[
+                self.response(
+                    text='<meta name="csrf-token" content="renewed-csrf-token-0123456789">'
+                ),
+                self.response({}, rotate=True),
+                identity,
+            ],
+        ) as wire, buyer.exclusive():
+            buyer.renew_saved_client(client)
+            row, renewed = self.saved()
+            self.assertNotEqual(row["session"], before)
+            self.assertEqual(client._verified_session[1], row["session"])
+            self.assertEqual(renewed["cookies"]["refresh_token_web"], self.new_refresh)
+            renewal_seal = row["session"]
+            self.assertEqual(client.identity(), ("99", "99"))
+        self.assertEqual(wire.call_count, 3)
+        renewal = wire.call_args_list[1]
+        self.assertEqual(renewal.args[:2], ("POST", buyer.BASE + "/web/api/auth/refresh"))
+        self.assertIsNone(renewal.kwargs["json"])
+        self.assertIsNone(renewal.kwargs["headers"]["Content-Type"])
+        row, saved = self.saved()
+        self.assertNotEqual(row["session"], renewal_seal)
+        self.assertEqual(client._verified_session[1], row["session"])
+        self.assertEqual(saved["cookies"]["access_token_web"], final_access)
+        self.assertEqual(saved["cookies"]["refresh_token_web"], final_refresh)
+        self.assertEqual((row["user_id"], row["enabled"]), ("99", 1))
+        with closing(search_settings.connection()) as conn:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM vinted_buy_attempts").fetchone()[0],
+                0,
+            )
+
     def test_api_rotation_is_available_for_the_next_native_renewal(self):
         client = self.connected()
         with patch.object(

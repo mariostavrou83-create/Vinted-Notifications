@@ -1801,13 +1801,19 @@ def renew_saved_client(client):
                 stage="renewal",
             ) from None
         raise
-    with closing(connection()) as conn, conn:
-        # Every production caller holds exclusive(). Preserve a rotated token
-        # even if identity later fails, without changing buying permissions.
-        conn.execute(
-            "UPDATE vinted_buyer SET session=? WHERE id=1",
-            (encrypt(client.exported()),),
-        )
+    if client._verified_session is not None:
+        # request() already preserves accepted rotations for a bound client.
+        # Re-encrypting the same session here would change the DB seal while
+        # leaving its compare-and-swap reference stale for the next response.
+        client.persist_session()
+    else:
+        with closing(connection()) as conn, conn:
+            # Preserve an unbound client's accepted rotation even if the
+            # subsequent same-account verification fails. Permissions stay put.
+            conn.execute(
+                "UPDATE vinted_buyer SET session=? WHERE id=1",
+                (encrypt(client.exported()),),
+            )
     logger.info("Vinted renewed session: csrf_present=%s", bool(client.csrf))
     if not client.csrf:
         client.homepage()
