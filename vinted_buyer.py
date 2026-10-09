@@ -2,6 +2,7 @@
 
 import base64
 import fcntl
+import hashlib
 import json
 import logging
 import math
@@ -60,6 +61,7 @@ AUTH_REASONS = {
     "not_confirmed": "Vinted has not confirmed the buyer connection.",
     "endpoint_reached": "The sign-in endpoint accepted the connection and rejected the empty diagnostic request. Your account and password have not been tested.",
     "connected": "Vinted verified the buyer account.",
+    "renewed": "Vinted accepted session renewal. Account verification is reported separately.",
     "verification_code": "Vinted sent a sign-in code. Enter it in the verification box below.",
 }
 
@@ -407,91 +409,236 @@ def redirect_reason(response):
 
 def record_auth(reason, stage="sign_in", status=None):
     # Only fixed labels and numeric HTTP status are persisted or logged.
-    reason = reason if reason in AUTH_REASONS else "not_confirmed"
-    stage = stage if stage in AUTH_STAGES else "request"
-    status = status if isinstance(status, int) and 100 <= status <= 599 else None
+    reason = (
+        reason
+        if isinstance(reason, str) and reason in AUTH_REASONS
+        else "not_confirmed"
+    )
+    stage = stage if isinstance(stage, str) and stage in AUTH_STAGES else "request"
+    status = status if type(status) is int and 100 <= status <= 599 else None
+    checked = time.time()
     with closing(connection()) as conn, conn:
         conn.execute(
             "UPDATE vinted_buyer_access SET checked=?,reason=?,stage=?,http_status=? WHERE id=1",
-            (time.time(), reason, stage, status),
+            (checked, reason, stage, status),
         )
+        if stage == "renewal":
+            _write_auth_event(
+                conn,
+                {
+                    "kind": "renewal",
+                    "reason": reason,
+                    "stage": stage,
+                    "http_status": status,
+                    "checked": checked,
+                },
+            )
     logger.info(
         "Vinted buyer access: stage=%s reason=%s http=%s", stage, reason, status
     )
 
 
+AUTH_RESULT_KINDS = {
+    "buyer_login": "Password sign-in",
+    "buyer_session": "Existing session link",
+    "buyer_verify": "Sign-in code",
+    "renewal": "Saved session renewal",
+}
+AUTH_RESULT_FIELDS = frozenset({"kind", "reason", "stage", "http_status", "checked"})
+
+
+def _auth_event(value):
+    """Accept only non-secret, bounded metadata; never pass provider text through."""
+    if not isinstance(value, dict) or set(value) != AUTH_RESULT_FIELDS:
+        return None
+    kind, reason, stage, checked, status = (
+        value.get("kind"),
+        value.get("reason"),
+        value.get("stage"),
+        value.get("checked"),
+        value.get("http_status"),
+    )
+    if (
+        not isinstance(kind, str)
+        or kind not in AUTH_RESULT_KINDS
+        or not isinstance(reason, str)
+        or reason not in AUTH_REASONS
+        or not isinstance(stage, str)
+        or stage not in AUTH_STAGES
+        or type(checked) not in (int, float)
+        or not 0 <= checked <= 4102444800
+        or not math.isfinite(checked)
+        or (
+            status is not None and (type(status) is not int or not 100 <= status <= 599)
+        )
+        or (kind == "renewal" and stage != "renewal")
+        or (reason == "renewed" and kind != "renewal")
+    ):
+        return None
+    return {
+        "kind": kind,
+        "reason": reason,
+        "stage": stage,
+        "http_status": status,
+        "checked": checked,
+    }
+
+
+def _stored_auth_event(conn, key):
+    row = conn.execute("SELECT value FROM parameters WHERE key=?", (key,)).fetchone()
+    try:
+        return _auth_event(json.loads(row[0])) if row else None
+    except (ValueError, TypeError, RecursionError):
+        return None
+
+
+def _write_auth_event(conn, event):
+    """A delayed old result cannot overwrite a newer result of the same kind."""
+    event = _auth_event(event)
+    if event is None:
+        return False
+    key = "buyer_auth_result_" + event["kind"]
+    old = _stored_auth_event(conn, key)
+    if old and old["checked"] >= event["checked"]:
+        return False
+    conn.execute(
+        "INSERT OR REPLACE INTO parameters(key,value) VALUES (?,?)",
+        (key, json.dumps(event, sort_keys=True, allow_nan=False)),
+    )
+    return True
+
+
+def _public_auth_event(event):
+    event = _auth_event(event)
+    if event is None:
+        return None
+    try:
+        display_zone = ZoneInfo("Europe/London")
+    except ZoneInfoNotFoundError:
+        display_zone = timezone.utc
+    message = AUTH_REASONS[event["reason"]]
+    if event["kind"] == "buyer_login" and event["reason"] == "security_challenge":
+        message = (
+            "Vinted blocked this password sign-in with a security check. "
+            "A CapSolver solution does not establish that Vinted accepted login. "
+            "This does not establish that your password is wrong."
+        )
+    return {
+        "kind": AUTH_RESULT_KINDS[event["kind"]],
+        "kind_code": event["kind"],
+        "reason": event["reason"],
+        "message": message,
+        "stage": AUTH_STAGES[event["stage"]],
+        "stage_code": event["stage"],
+        "http_status": event["http_status"],
+        "checked_at": event["checked"],
+        "checked": datetime.fromtimestamp(event["checked"], display_zone).strftime(
+            "%d %b %Y, %H:%M:%S %Z"
+        ),
+    }
+
+
 def record_connection_result(kind, reason, stage, status):
-    """Keep owner connection attempts separate from later saved-session checks."""
+    """Keep each owner connection method separate from saved-session renewal."""
     if kind not in ("buyer_login", "buyer_session", "buyer_verify"):
         return
     result = {
         "kind": kind,
-        "reason": reason if reason in AUTH_REASONS else "not_confirmed",
-        "stage": stage if stage in AUTH_STAGES else "request",
+        "reason": (
+            reason
+            if isinstance(reason, str) and reason in AUTH_REASONS
+            else "not_confirmed"
+        ),
+        "stage": (
+            stage if isinstance(stage, str) and stage in AUTH_STAGES else "request"
+        ),
         "http_status": status if type(status) is int and 100 <= status <= 599 else None,
         "checked": time.time(),
     }
     with closing(connection()) as conn, conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO parameters(key,value) VALUES ('buyer_connection_result',?)",
-            (json.dumps(result),),
-        )
+        conn.execute("BEGIN IMMEDIATE")
+        _write_auth_event(conn, result)
+        old = _stored_auth_event(conn, "buyer_connection_result")
+        if not old or old["checked"] < result["checked"]:
+            conn.execute(
+                "INSERT OR REPLACE INTO parameters(key,value) VALUES ('buyer_connection_result',?)",
+                (json.dumps(result, allow_nan=False),),
+            )
 
 
 def public_connection_result():
     with closing(connection()) as conn:
-        row = conn.execute(
-            "SELECT value FROM parameters WHERE key='buyer_connection_result'"
-        ).fetchone()
-    try:
-        result = json.loads(row[0]) if row else None
-        if not isinstance(result, dict) or result.get("kind") not in (
-            "buyer_login",
-            "buyer_session",
-            "buyer_verify",
-        ):
-            return None
-        try:
-            display_zone = ZoneInfo("Europe/London")
-        except ZoneInfoNotFoundError:
-            display_zone = timezone.utc
-        reason, stage, checked = (
-            result.get("reason"),
-            result.get("stage"),
-            result.get("checked"),
+        event = _stored_auth_event(conn, "buyer_connection_result")
+    return _public_auth_event(event) if event and event["kind"] != "renewal" else None
+
+
+def public_auth_results():
+    """Render distinct evidence, including legacy records, without credential values."""
+    events = {}
+    with closing(connection()) as conn:
+        for kind in AUTH_RESULT_KINDS:
+            event = _stored_auth_event(conn, "buyer_auth_result_" + kind)
+            if event and event["kind"] == kind:
+                events[kind] = event
+        legacy = _stored_auth_event(conn, "buyer_connection_result")
+        if legacy and legacy["kind"] not in events:
+            events[legacy["kind"]] = legacy
+        row = conn.execute("SELECT * FROM vinted_buyer_access WHERE id=1").fetchone()
+    results = {kind: _public_auth_event(event) for kind, event in events.items()}
+    if row:
+        # This shared row is never evidence of a password sign-in succeeding.
+        access = _auth_event(
+            {
+                "kind": "renewal",
+                "reason": row["reason"],
+                "stage": "renewal",
+                "http_status": row["http_status"],
+                "checked": row["checked"],
+            }
         )
+        if access and row["stage"] == "renewal" and "renewal" not in results:
+            results["renewal"] = _public_auth_event(access)
+        elif access and row["stage"] in ("saved_session", "identity"):
+            access["kind"], access["stage"] = "buyer_session", row["stage"]
+            results["saved_check"] = _public_auth_event(access)
+            results["saved_check"]["kind"] = "Saved account check"
+    return results
+
+
+def import_auth_results_once():
+    """Import observed request metadata once; no login, solver or payment requests."""
+    payload = os.getenv("MSJ_BUYER_AUTH_RESULTS_IMPORT_ON_START", "")
+    if not isinstance(payload, str) or not payload or len(payload) > 16384:
+        return False
+    try:
+        values = json.loads(payload)
+    except (ValueError, TypeError, RecursionError):
+        return False
+    if not isinstance(values, list) or not 1 <= len(values) <= 16:
+        return False
+    events = [event for value in values if (event := _auth_event(value))]
+    if not events:
+        return False
+    canonical = json.dumps(
+        events, sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
+    marker = (
+        "buyer_auth_results_import_" + hashlib.sha256(canonical.encode()).hexdigest()
+    )
+    # Consume before writing metadata, so a restart cannot replay this import.
+    with closing(connection()) as conn, conn:
         if (
-            reason not in AUTH_REASONS
-            or stage not in AUTH_STAGES
-            or type(checked) not in (int, float)
-            or not 0 <= checked <= 4102444800
+            conn.execute(
+                "INSERT OR IGNORE INTO parameters(key,value) VALUES (?, '1')", (marker,)
+            ).rowcount
+            != 1
         ):
-            return None
-        return {
-            "kind": {
-                "buyer_login": "Password sign-in",
-                "buyer_session": "Existing session link",
-                "buyer_verify": "Sign-in code",
-            }[result["kind"]],
-            "reason": reason,
-            "message": (
-                "Vinted blocked this sign-in with a security check. This does not establish that your password is wrong. The saved-account check below tests the previous session separately."
-                if result["kind"] == "buyer_login" and reason == "security_challenge"
-                else AUTH_REASONS[reason]
-            ),
-            "stage": AUTH_STAGES[stage],
-            "http_status": (
-                result.get("http_status")
-                if type(result.get("http_status")) is int
-                and 100 <= result["http_status"] <= 599
-                else None
-            ),
-            "checked": datetime.fromtimestamp(checked, display_zone).strftime(
-                "%d %b, %H:%M %Z"
-            ),
-        }
-    except (ValueError, TypeError, OverflowError):
-        return None
+            return False
+    with closing(connection()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        for event in sorted(events, key=lambda value: value["checked"]):
+            _write_auth_event(conn, event)
+    return True
 
 
 def migrate(conn):
@@ -514,8 +661,9 @@ def migrate(conn):
         item_id TEXT PRIMARY KEY, state TEXT NOT NULL, checkout_id TEXT,
         total INTEGER, message TEXT NOT NULL, updated REAL NOT NULL)""")
     columns = {row[1] for row in conn.execute("PRAGMA table_info(vinted_buy_attempts)")}
-    if "action_url" not in columns:
-        conn.execute("ALTER TABLE vinted_buy_attempts ADD COLUMN action_url TEXT")
+    for column in ("action_url", "buyer_id", "transaction_id"):
+        if column not in columns:
+            conn.execute(f"ALTER TABLE vinted_buy_attempts ADD COLUMN {column} TEXT")
     conn.execute("""CREATE TABLE IF NOT EXISTS vinted_buyer_access (
         id INTEGER PRIMARY KEY CHECK(id=1), last_probe REAL NOT NULL DEFAULT 0,
         checked REAL, reason TEXT, stage TEXT, http_status INTEGER)""")
@@ -1039,6 +1187,8 @@ class Client:
         bootstrap in a separate ordinary session and keep our buyer cookies.
         """
         public = Client()
+        # Renewal and its public bootstrap share one paid challenge allowance.
+        public.solver_attempted = self.solver_attempted
         try:
             public.homepage()
             previous = self.csrf
@@ -1048,6 +1198,7 @@ class Client:
                 "Vinted renewal bootstrap: csrf_changed=%s", previous != self.csrf
             )
         finally:
+            self.solver_attempted = self.solver_attempted or public.solver_attempted
             public.session.close()
 
     def request(self, method, path, body=None, *, allow_challenge=False, params=None):
@@ -1252,6 +1403,8 @@ class Client:
                     method, path, body, allow_challenge=allow_challenge, params=params
                 )
             raise
+        if renewal:
+            record_auth("renewed", "renewal", response.status_code)
         self.persist_session()
         return data
 
@@ -1454,6 +1607,11 @@ def link_session(access_token, refresh_token):
         try:
             client.homepage()
             save_connected(client)
+            import vinted_session_recovery
+
+            recovered = vinted_session_recovery.recover_linked_client(client)
+            if recovered is not None:
+                return vinted_session_recovery.summary(recovered)
             return "Vinted verified your existing session. Autobuy is off; review the account and set spending limits before enabling it."
         except BuyerError as exc:
             record_auth(exc.reason, exc.stage, exc.status)
@@ -1688,9 +1846,12 @@ def connected_client(*, renew_before=0, solve_challenges=True, allow_refresh=Tru
             # A successful identity read may already have rotated the cookies.
             # Claims only schedule renewal; Vinted must verify the same account
             # both before and after any proactive renewal.
-            current = client.exported().get("cookies", {})
-            expiry = token_expiry_timestamp(current.get("access_token_web"))
-            refresh_expiry = token_expiry_timestamp(current.get("refresh_token_web"))
+            from vinted_session_worker import session_cookie_expiry
+
+            current_session = client.exported()
+            current = current_session.get("cookies", {})
+            expiry = session_cookie_expiry(current_session, "access_token_web")
+            refresh_expiry = session_cookie_expiry(current_session, "refresh_token_web")
             if (
                 allow_refresh
                 and renew_before

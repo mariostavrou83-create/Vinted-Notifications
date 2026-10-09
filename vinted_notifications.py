@@ -246,6 +246,10 @@ if __name__ == "__main__":
             backup_path,
         )
 
+    from vinted_buyer import import_auth_results_once
+
+    import_auth_results_once()
+
     # Run db migrations
     current_version = db.get_parameter("version")
     # Check if there is a file that starts with the current version in the migrations folder. We keep comparing until
@@ -317,6 +321,22 @@ if __name__ == "__main__":
     # This process will provide a web interface to control the application
     web_ui_process_instance = multiprocessing.Process(target=web_ui_process)
     web_ui_process_instance.start()
+
+    if os.environ.get("MSJ_PAYMENT_RECONCILE_ON_START"):
+        from vinted_payment_check import run_once as run_payment_check_once
+
+        payment_check_process = multiprocessing.Process(
+            target=run_payment_check_once, name="existing-payment-status-check"
+        )
+        payment_check_process.start()
+
+    if os.environ.get("MSJ_BUYER_RECOVERY_ON_LINK"):
+        from vinted_session_recovery import run_if_ready
+
+        recovery_process = multiprocessing.Process(
+            target=run_if_ready, name="private-session-recovery"
+        )
+        recovery_process.start()
 
     if os.environ.get("MSJ_BUYER_CHECK_ON_START"):
         from vinted_connection_check import run_once

@@ -153,8 +153,8 @@ class MaintenanceTests(buying_tests.SessionRotationFixture, unittest.TestCase):
         self.assertEqual(len(self.calls), 12)
         self.assertEqual(self.controls()[2], [])
 
-    def test_disabled_missing_fresh_or_unknown_session_makes_no_request(self):
-        for change in ({"enabled": 0}, {"verified_at": None}, {"session": None}):
+    def test_missing_unverified_fresh_or_unknown_session_makes_no_request(self):
+        for change in ({"verified_at": None}, {"session": None}):
             row, _ = self.saved()
             with closing(search_settings.connection()) as conn, conn:
                 for key, value in change.items():

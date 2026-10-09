@@ -18,6 +18,99 @@ logger = logging.getLogger(__name__)
 ACCESS_MARGIN = 120
 REFRESH_MARGIN = 2 * 86400
 RETRY_DELAY = 300
+COOKIE_REQUEST_PATHS = {
+    "access_token_web": "/api/v2/users/current",
+    "refresh_token_web": "/web/api/auth/refresh",
+}
+
+
+def _session_cookie_records(saved, name):
+    """Select cookie values applicable to the canonical UK account request.
+
+    Full records are authoritative when present. The legacy cookie dictionary
+    has no metadata and can supply only JWT scheduling information.
+    """
+    if not isinstance(saved, dict) or name not in COOKIE_REQUEST_PATHS:
+        return []
+    records = saved.get("cookie_records")
+    if records is None:
+        cookies = saved.get("cookies", {})
+        value = cookies.get(name) if isinstance(cookies, dict) else None
+        return [{"value": value}] if isinstance(value, str) and value else []
+    if not isinstance(records, list) or len(records) > 200:
+        return []
+    selected = []
+    request_path = COOKIE_REQUEST_PATHS[name]
+    for record in records:
+        if not isinstance(record, dict) or record.get("name") != name:
+            continue
+        value = record.get("value")
+        domain, path = record.get("domain"), record.get("path", "/")
+        expiry = record.get("expires")
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value) > 16384
+            or any(ord(char) < 32 or ord(char) > 126 for char in value)
+            or not isinstance(domain, str)
+            or domain not in buyer.COOKIE_DOMAINS
+            or not isinstance(path, str)
+            or not path.startswith("/")
+            or len(path) > 2048
+            or any(ord(char) <= 32 or ord(char) > 126 for char in path)
+            or type(record.get("secure", True)) is not bool
+            or any(
+                flag in record and type(record[flag]) is not bool
+                for flag in (
+                    "domain_specified",
+                    "domain_initial_dot",
+                    "path_specified",
+                    "discard",
+                )
+            )
+            or (
+                expiry is not None
+                and (type(expiry) is not int or not 0 <= expiry <= 253402300799)
+            )
+        ):
+            continue
+        # Host-only cookies must name this host; parent-domain cookies require
+        # domain scope. All accepted domains otherwise match www.vinted.co.uk.
+        if (
+            record.get("domain_specified", True) is False
+            and domain != "www.vinted.co.uk"
+        ):
+            continue
+        if not (
+            request_path == path
+            or (
+                request_path.startswith(path)
+                and (path.endswith("/") or request_path[len(path) :].startswith("/"))
+            )
+        ):
+            continue
+        selected.append(record)
+    # Ambiguous duplicate credentials are not grounds for a background request.
+    if len({record["value"] for record in selected}) > 1:
+        return []
+    return selected
+
+
+def session_cookie_expiry(saved, name):
+    """Scheduling hint only: prefer JWT exp, then valid UK cookie expiry.
+
+    Expired metadata remains a due hint so maintenance can recover after a
+    restart. It does not authenticate a cookie or permit any buying action.
+    """
+    records = _session_cookie_records(saved, name)
+    claims = [buyer.token_expiry_timestamp(record["value"]) for record in records]
+    known_claims = [expiry for expiry in claims if expiry is not None]
+    if known_claims:
+        return min(known_claims)
+    expiries = [
+        record["expires"] for record in records if record.get("expires") is not None
+    ]
+    return min(expiries) if expiries else None
 
 
 async def run():
@@ -29,14 +122,13 @@ async def run():
 
 
 def due(saved, now):
-    cookies = saved.get("cookies", {})
-    if not isinstance(cookies, dict) or not cookies.get("refresh_token_web"):
+    if not _session_cookie_records(saved, "refresh_token_web"):
         return False
     for name, margin in (
         ("access_token_web", ACCESS_MARGIN),
         ("refresh_token_web", REFRESH_MARGIN),
     ):
-        expiry = buyer.token_expiry_timestamp(cookies.get(name))
+        expiry = session_cookie_expiry(saved, name)
         if expiry is not None and expiry <= now + margin:
             return True
     return False
@@ -49,12 +141,12 @@ def maintain_connection():
             now = time.time()
             with closing(connection()) as conn:
                 row = conn.execute(
-                    "SELECT session,enabled,verified_at FROM vinted_buyer WHERE id=1"
+                    "SELECT session,verified_at FROM vinted_buyer WHERE id=1"
                 ).fetchone()
                 state = conn.execute(
                     "SELECT * FROM vinted_buyer_maintenance WHERE id=1"
                 ).fetchone()
-            if not row[0] or not row[1] or not row[2]:
+            if not row[0] or not row[1]:
                 return "idle"
             fingerprint = hashlib.sha256(row[0]).hexdigest()
             if state["session_fingerprint"] == fingerprint:

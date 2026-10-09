@@ -534,8 +534,12 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         with patch.object(buyer, "connected_client", return_value=self.client):
             saved = buying.check_payment("123")
         self.assertEqual(saved["state"], "paid")
-        self.client.request.assert_called_once_with(
-            "GET", "/api/v2/purchases/checkout-123/checkout/payment"
+        self.assertEqual(
+            [call.args for call in self.client.request.call_args_list],
+            [
+                ("GET", "/api/v2/transactions/456"),
+                ("GET", "/api/v2/purchases/checkout-123/checkout/payment"),
+            ],
         )
         self.client.request.reset_mock()
         self.assertEqual(self.run_buy()["state"], "paid")
@@ -552,8 +556,12 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         ), self.assertRaises(buyer.BuyerError):
             buying.check_payment("123")
         self.assertEqual(buying.result("123"), before)
-        self.client.request.assert_called_once_with(
-            "GET", "/api/v2/purchases/checkout-123/checkout/payment"
+        self.assertEqual(
+            [call.args for call in self.client.request.call_args_list],
+            [
+                ("GET", "/api/v2/transactions/456"),
+                ("GET", "/api/v2/purchases/checkout-123/checkout/payment"),
+            ],
         )
         self.client.session.close.assert_called_once()
 
@@ -567,14 +575,24 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
             ("failure", "payment_failed"),
         ):
             buying.record(
-                "123", "unknown", "Check Vinted", checkout_id="checkout-123", total=1884
+                "123",
+                "unknown",
+                "Check Vinted",
+                checkout_id="checkout-123",
+                total=1884,
+                buyer_id="99",
+                transaction_id="456",
             )
             self.client.request.reset_mock()
             self.payment = {"payment": {"status": status}}
             with patch.object(buyer, "connected_client", return_value=self.client):
                 self.assertEqual(buying.check_payment("123")["state"], state)
-            self.client.request.assert_called_once_with(
-                "GET", "/api/v2/purchases/checkout-123/checkout/payment"
+            self.assertEqual(
+                [call.args for call in self.client.request.call_args_list],
+                [
+                    ("GET", "/api/v2/transactions/456"),
+                    ("GET", "/api/v2/purchases/checkout-123/checkout/payment"),
+                ],
             )
             self.client.request.reset_mock()
             self.assertEqual(self.run_buy()["state"], state)
@@ -1199,6 +1217,15 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         def response(method, path, body=None):
             if path == "/api/v2/items/123":
                 return self.item
+            if path == "/api/v2/transactions/456":
+                return {
+                    "transaction": {
+                        "id": 456,
+                        "buyer_id": 99,
+                        "item_id": 123,
+                        "purchase_id": "checkout-123",
+                    }
+                }
             if path == "/api/v2/conversations":
                 return {"conversation": {"transaction": {"id": 456}}}
             if path == "/api/v2/purchases/checkout/build":
@@ -1755,6 +1782,8 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
     def test_existing_attempt_schema_migrates_bank_actions_idempotently(self):
         with closing(search_settings.connection()) as conn, conn:
             conn.execute("ALTER TABLE vinted_buy_attempts DROP COLUMN action_url")
+            conn.execute("ALTER TABLE vinted_buy_attempts DROP COLUMN buyer_id")
+            conn.execute("ALTER TABLE vinted_buy_attempts DROP COLUMN transaction_id")
             conn.execute(
                 "INSERT INTO vinted_buy_attempts VALUES ('old','unknown','old-checkout',1900,'Check Vinted',1)"
             )
@@ -1768,6 +1797,8 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(saved["state"], "unknown")
         self.assertEqual(saved["checkout_id"], "old-checkout")
         self.assertIsNone(saved["action_url"])
+        self.assertIsNone(saved["buyer_id"])
+        self.assertIsNone(saved["transaction_id"])
 
     def test_final_total_fees_currency_and_missing_fields_all_fail_closed(self):
         bad = []

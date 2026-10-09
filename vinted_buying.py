@@ -43,11 +43,31 @@ def cents(value):
         ) from None
 
 
-def record(item_id, state, message, *, checkout_id=None, total=None, action_url=None):
+def record(
+    item_id,
+    state,
+    message,
+    *,
+    checkout_id=None,
+    total=None,
+    action_url=None,
+    buyer_id=None,
+    transaction_id=None,
+):
     with closing(connection()) as conn, conn:
         conn.execute(
-            "UPDATE vinted_buy_attempts SET state=?,message=?,checkout_id=COALESCE(?,checkout_id),total=COALESCE(?,total),action_url=?,updated=? WHERE item_id=?",
-            (state, message, checkout_id, total, action_url, time.time(), item_id),
+            "UPDATE vinted_buy_attempts SET state=?,message=?,checkout_id=COALESCE(?,checkout_id),total=COALESCE(?,total),action_url=?,buyer_id=COALESCE(?,buyer_id),transaction_id=COALESCE(?,transaction_id),updated=? WHERE item_id=?",
+            (
+                state,
+                message,
+                checkout_id,
+                total,
+                action_url,
+                buyer_id,
+                transaction_id,
+                time.time(),
+                item_id,
+            ),
         )
 
 
@@ -84,10 +104,25 @@ def claim(row, *, recover_preparing=False):
         if saved and saved["state"] not in retryable:
             return False
         conn.execute(
-            "INSERT INTO vinted_buy_attempts(item_id,state,message,updated) VALUES (?,'preparing','Preparing checkout',?) ON CONFLICT(item_id) DO UPDATE SET state='preparing',message='Preparing checkout',checkout_id=NULL,total=NULL,action_url=NULL,updated=excluded.updated",
+            "INSERT INTO vinted_buy_attempts(item_id,state,message,updated) VALUES (?,'preparing','Preparing checkout',?) ON CONFLICT(item_id) DO UPDATE SET state='preparing',message='Preparing checkout',checkout_id=NULL,total=NULL,action_url=NULL,buyer_id=NULL,transaction_id=NULL,updated=excluded.updated",
             (row["item_id"], time.time()),
         )
     return True
+
+
+def guard_new_payment(item_id):
+    """An earlier uncertain submission must be resolved before another item."""
+    with closing(connection()) as conn:
+        uncertain = conn.execute(
+            "SELECT 1 FROM vinted_buy_attempts WHERE item_id<>? AND state IN ('paying','unknown','needs_action') LIMIT 1",
+            (str(item_id),),
+        ).fetchone()
+    if uncertain:
+        raise buyer.BuyerError(
+            "A previous payment still needs confirmation. Check its payment status "
+            "or your Vinted purchases before buying another item. No payment was sent.",
+            reason="earlier_payment_uncertain",
+        )
 
 
 def checkout_item_details(components, summary, *, item_id=None):
@@ -902,6 +937,7 @@ def checkout_item_evidence(items):
 def check_checkout(url, *, prepare_test=False):
     """Load a selected existing checkout; never claim or submit a payment."""
     purchase_id = checkout_link_id(url)
+    transaction_id = parse_qs(urlsplit(url.strip()).query)["order_id"][0]
     with buyer.exclusive():
         with closing(connection()) as conn:
             submitted = conn.execute(
@@ -1021,6 +1057,7 @@ def check_checkout(url, *, prepare_test=False):
             quote = {
                 "purpose": "vinted_checkout_test_v1",
                 "checkout_id": purchase_id,
+                "transaction_id": transaction_id,
                 "item_id": current_item["id"],
                 "buyer_id": current_account["user_id"],
                 "item_price": item,
@@ -1130,6 +1167,8 @@ def buy_checkout_quote(token, *, alert_row=None):
         or not re.fullmatch(r"[0-9]{1,24}", quote["item_id"])
         or not isinstance(quote.get("buyer_id"), str)
         or not re.fullmatch(r"[0-9]{1,24}", quote["buyer_id"])
+        or not isinstance(quote.get("transaction_id"), str)
+        or not re.fullmatch(r"[0-9]{1,24}", quote["transaction_id"])
         or type(quote.get("total")) is not int
         or type(quote.get("item_price")) is not int
         or not 0 < quote["item_price"] <= quote["total"] <= 100000000
@@ -1189,6 +1228,7 @@ def buy_checkout_quote(token, *, alert_row=None):
             raise buyer.BuyerError(
                 "This checkout already has a payment attempt. Check Vinted before doing anything else."
             )
+        guard_new_payment(item_id)
         if not claim({"item_id": item_id}, recover_preparing=True):
             return result(item_id)
         client = None
@@ -1245,11 +1285,14 @@ def buy_checkout_quote(token, *, alert_row=None):
                     "The buyer settings changed or the approval expired before payment. Review again."
                 )
             info = saved_browser_info()
+            guard_new_payment(item_id)
             record(
                 item_id,
                 "paying",
                 "Payment submitted; awaiting Vinted confirmation",
                 total=total,
+                buyer_id=current["user_id"],
+                transaction_id=quote.get("transaction_id"),
             )
             payment_started = True
             phase = "submitting payment"
@@ -1356,6 +1399,7 @@ def buy(row):
     # making the owner tap again. Maintenance itself never waits on a purchase.
     with buyer.exclusive(wait_seconds=45):
         config, limits = ready(row)
+        guard_new_payment(item_id)
         if not claim(row, recover_preparing=True):
             return result(item_id)
         client = None
@@ -1376,7 +1420,7 @@ def buy(row):
                 "transaction"
             ) or {}
             transaction_id = transaction.get("id")
-            if not str(transaction_id).isdigit():
+            if not re.fullmatch(r"[0-9]{1,24}", str(transaction_id)):
                 raise buyer.BuyerError(
                     "Vinted did not prepare a purchase for this item."
                 )
@@ -1437,11 +1481,14 @@ def buy(row):
                 checkout, current_price, limits.total_maximum, item_id=item_id
             )
             info = saved_browser_info()
+            guard_new_payment(item_id)
             record(
                 item_id,
                 "paying",
                 "Payment submitted; awaiting Vinted confirmation",
                 total=total,
+                buyer_id=current["user_id"],
+                transaction_id=str(transaction_id),
             )
             payment_started = True
             phase = "submitting payment"
@@ -1502,34 +1549,135 @@ def buy(row):
         return dict(result(item_id), reason=reason)
 
 
-def check_payment(item_id):
-    """Read a submitted payment once; never create a checkout or submit payment."""
+def reconciliation_unverified(saved, stage):
+    """Keep durable submission state unchanged when a status cannot be bound."""
+    logger.info("Autobuy payment reconciliation: stage=%s outcome=unverified", stage)
+    return dict(
+        saved,
+        message=(
+            "The existing payment result could not be verified for this item and "
+            "buyer. Check your Vinted purchases before doing anything else. "
+            "No payment was submitted again."
+        ),
+        reconciliation_stage=stage,
+        reconciliation_outcome="unverified",
+    )
+
+
+def transaction_binding(transaction, transaction_id, item_id, buyer_id):
+    """Only explicit first-party transaction identities establish order binding."""
+    if not isinstance(transaction, dict):
+        return False
+    owner = transaction.get("buyer")
+    item = transaction.get("item")
+    owners = [
+        value
+        for value in (
+            transaction.get("buyer_id"),
+            owner.get("id") if isinstance(owner, dict) else None,
+        )
+        if value is not None
+    ]
+    items = [
+        value
+        for value in (
+            transaction.get("item_id"),
+            item.get("id") if isinstance(item, dict) else None,
+        )
+        if value is not None
+    ]
+    return (
+        str(transaction.get("id", "")) == transaction_id
+        and bool(owners)
+        and all(
+            type(value) in (str, int) and str(value) == buyer_id for value in owners
+        )
+        and bool(items)
+        and all(type(value) in (str, int) and str(value) == item_id for value in items)
+    )
+
+
+def check_payment(item_id, *, verify_paid=False):
+    """Read an existing bound order/payment; never create or replay payment."""
     with buyer.exclusive():
         saved = result(item_id)
-        if not saved or saved["state"] not in ("paying", "unknown", "needs_action"):
+        checkable = ("paying", "unknown", "needs_action") + (
+            ("paid",) if verify_paid else ()
+        )
+        if not saved or saved["state"] not in checkable:
             return saved
         purchase_id = saved.get("checkout_id")
         if not isinstance(purchase_id, str) or not re.fullmatch(
             r"[A-Za-z0-9_-]{1,100}", purchase_id
         ):
-            return saved
-        client = buyer.connected_client()
+            return reconciliation_unverified(saved, "checkout_reference_missing")
+        transaction_id = saved.get("transaction_id")
+        buyer_id = saved.get("buyer_id")
+        if (
+            not isinstance(transaction_id, str)
+            or not re.fullmatch(r"[0-9]{1,24}", transaction_id)
+            or not isinstance(buyer_id, str)
+            or not re.fullmatch(r"[0-9]{1,24}", buyer_id)
+            or not re.fullmatch(r"[0-9]{1,24}", str(item_id))
+        ):
+            # Legacy attempts did not save this provenance. Do not guess an
+            # order ID or claim that an unrelated payment status is this order.
+            return reconciliation_unverified(saved, "attempt_binding_missing")
+        if buyer.settings()["user_id"] != buyer_id:
+            return reconciliation_unverified(saved, "buyer_account_changed")
+        stage = "buyer_identity"
+        client = buyer.connected_client(solve_challenges=False)
         try:
+            stage = "bound_transaction"
+            data = client.request("GET", "/api/v2/transactions/" + transaction_id)
+            transaction = data.get("transaction")
+            if not transaction_binding(
+                transaction, transaction_id, str(item_id), buyer_id
+            ):
+                return reconciliation_unverified(
+                    saved, "transaction_binding_unverified"
+                )
+            from vinted_telegram_review import existing_checkout_reference
+
+            if existing_checkout_reference(transaction, transaction_id) != purchase_id:
+                return reconciliation_unverified(saved, "checkout_binding_unverified")
+            if transaction.get("is_paid") is True:
+                total = saved.get("total")
+                record(
+                    item_id,
+                    "paid",
+                    (
+                        f"Vinted confirmed this order paid: £{total/100:.2f}. Check your purchases."
+                        if type(total) is int
+                        else "Vinted confirmed this order paid. Check your purchases."
+                    ),
+                )
+                logger.info(
+                    "Autobuy payment reconciliation: stage=bound_transaction outcome=paid"
+                )
+                return dict(
+                    result(item_id),
+                    reconciliation_stage="bound_transaction",
+                    reconciliation_outcome="verified",
+                )
+            stage = "bound_payment"
             data = client.request(
                 "GET", f"/api/v2/purchases/{purchase_id}/checkout/payment"
             )
             payment = data.get("payment")
             if not isinstance(payment, dict):
-                return saved
+                return reconciliation_unverified(saved, "payment_response_unverified")
             status = payment.get("status")
             if status in ("success", "completed"):
+                if transaction.get("is_paid") is False:
+                    return reconciliation_unverified(saved, "payment_order_disagree")
                 total = saved.get("total")
                 record(
                     item_id,
                     "paid",
                     (
                         f"Paid £{total/100:.2f}. Check your Vinted purchases."
-                        if isinstance(total, int)
+                        if type(total) is int
                         else "Vinted confirmed payment. Check your purchases."
                     ),
                 )
@@ -1547,7 +1695,25 @@ def check_payment(item_id):
                     "Payment is awaiting Vinted or bank confirmation. Check again after completing any confirmation; do not buy again.",
                     action_url=action,
                 )
-            return result(item_id)
+            else:
+                return reconciliation_unverified(saved, "payment_status_unverified")
+            logger.info(
+                "Autobuy payment reconciliation: stage=bound_payment outcome=%s",
+                result(item_id)["state"],
+            )
+            return dict(
+                result(item_id),
+                reconciliation_stage="bound_payment",
+                reconciliation_outcome="verified",
+            )
+        except buyer.BuyerError as exc:
+            logger.info(
+                "Autobuy payment reconciliation: stage=%s outcome=unverified http=%s reason=%s",
+                stage,
+                exc.status,
+                exc.reason,
+            )
+            raise
         finally:
             client.session.close()
 

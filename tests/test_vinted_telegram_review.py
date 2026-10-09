@@ -60,6 +60,15 @@ class ReviewTests(DatabaseFixture, unittest.TestCase):
         self.payment = {"payment": {"status": "success"}}
 
         def response(method, path, body=None):
+            if path == "/api/v2/transactions/456":
+                return {
+                    "transaction": {
+                        "id": 456,
+                        "buyer_id": 99,
+                        "item_id": 123,
+                        "purchase_id": "checkout-123",
+                    }
+                }
             if path == "/api/v2/items/123":
                 return {
                     "item": {

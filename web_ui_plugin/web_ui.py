@@ -757,6 +757,7 @@ def create_app(test_config=None):
             photo_controls=__import__("photo_cards").health_summary(),
             buyer=vinted_buyer.settings(),
             buyer_connection_result=vinted_buyer.public_connection_result(),
+            buyer_auth_results=vinted_buyer.public_auth_results(),
             buying=__import__("vinted_buying").history(),
             checkout_test=session.get("buyer_test_quote"),
             telegram_review=__import__("vinted_telegram_review").public_review(),
