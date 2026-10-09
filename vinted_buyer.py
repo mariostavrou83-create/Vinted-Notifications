@@ -21,6 +21,7 @@ from search_settings import connection
 from vinted_http import API_HEADERS, NAVIGATION_HEADERS, BrowserSession
 
 BASE = "https://www.vinted.co.uk"
+PICKUP_BASE = "https://api.vinted.co.uk"
 # Requests preserves Domain=www.vinted.co.uk as .www.vinted.co.uk. Both
 # representations are scoped to the canonical buyer host, not another site.
 COOKIE_DOMAINS = frozenset(
@@ -34,6 +35,7 @@ AUTH_STAGES = {
     "renewal": "Vinted session renewal",
     "identity": "Vinted account verification",
     "request": "Vinted request",
+    "pickup_points": "Vinted pickup points",
 }
 AUTH_REASONS = {
     "saved_session": "The bot could not restore the saved Vinted session. The buyer connection needs attention.",
@@ -979,7 +981,7 @@ class Client:
             body = {}
         pickup_gateway = bool(
             re.fullmatch(
-                r"/web/gateway/shipping-estimation/external/shipping_orders/[0-9]{1,24}/nearby_pickup_points",
+                r"/shipping-estimation/external/shipping_orders/[0-9]{1,24}/nearby_pickup_points",
                 path,
             )
         )
@@ -1002,7 +1004,11 @@ class Client:
                 raise BuyerError("Vinted pickup-point request could not be verified.")
             extra = {
                 "params": params,
-                "headers": {"Platform": "web", "X-Next-App": "marketplace-web"},
+                "headers": {
+                    "Platform": "web",
+                    "X-Next-App": "marketplace-web",
+                    "Sec-Fetch-Site": "same-site",
+                },
             }
         elif params is not None or not path.startswith(("/api/v2/", "/web/api/auth/")):
             raise BuyerError("Unsupported Vinted request.")
@@ -1017,7 +1023,11 @@ class Client:
             else (
                 "sign_in"
                 if path.startswith("/web/api/auth/")
-                else "identity" if path == "/api/v2/users/current" else "request"
+                else (
+                    "identity"
+                    if path == "/api/v2/users/current"
+                    else "pickup_points" if pickup_gateway else "request"
+                )
             )
         )
         if path.endswith("/payment"):
@@ -1056,7 +1066,7 @@ class Client:
                 try:
                     response = self.session.request(
                         method,
-                        BASE + path,
+                        (PICKUP_BASE if pickup_gateway else BASE) + path,
                         json=body,
                         timeout=(4, 12),
                         allow_redirects=False,

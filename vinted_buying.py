@@ -397,7 +397,7 @@ def nearest_pickup(client, components):
         ) from None
     data = client.request(
         "GET",
-        f"/web/gateway/shipping-estimation/external/shipping_orders/{order_id}/nearby_pickup_points",
+        f"/shipping-estimation/external/shipping_orders/{order_id}/nearby_pickup_points",
         params={"country_code": "GB", "latitude": latitude, "longitude": longitude},
     )
     points, rates = data.get("shipping_points"), data.get("shipping_rates")

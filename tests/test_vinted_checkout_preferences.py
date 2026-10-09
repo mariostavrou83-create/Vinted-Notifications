@@ -5,6 +5,7 @@ import copy
 import json
 import time
 import unittest
+import requests
 from contextlib import closing
 from types import SimpleNamespace
 from typing import ClassVar
@@ -659,7 +660,7 @@ class ExistingBuyerMigrationTests(DatabaseFixture, unittest.TestCase):
 
 
 class PickupGatewayTests(DatabaseFixture, unittest.TestCase):
-    path = "/web/gateway/shipping-estimation/external/shipping_orders/300/nearby_pickup_points"
+    path = "/shipping-estimation/external/shipping_orders/300/nearby_pickup_points"
     params: ClassVar = {"country_code": "GB", "latitude": 51.0, "longitude": -0.1}
 
     def test_native_gateway_uses_owned_session_and_exact_first_party_headers(self):
@@ -671,13 +672,52 @@ class PickupGatewayTests(DatabaseFixture, unittest.TestCase):
             )
         request.assert_called_once_with(
             "GET",
-            buyer.BASE + self.path,
+            buyer.PICKUP_BASE + self.path,
             json=None,
             timeout=(4, 12),
             allow_redirects=False,
             params=self.params,
-            headers={"Platform": "web", "X-Next-App": "marketplace-web"},
+            headers={
+                "Platform": "web",
+                "X-Next-App": "marketplace-web",
+                "Sec-Fetch-Site": "same-site",
+            },
         )
+        client.session.close()
+
+    def test_api_host_retains_cookie_scopes_and_rejects_other_destinations(self):
+        client = buyer.Client()
+        client.session.cookies.set(
+            "domain_test", "offline-domain-cookie", domain=".vinted.co.uk", path="/"
+        )
+        client.session.cookies.set(
+            "website_test",
+            "offline-website-cookie",
+            domain="www.vinted.co.uk",
+            path="/",
+        )
+        response = Mock(status_code=200, text="", json=Mock(return_value=pickup_data()))
+        with patch.object(client.session, "request", return_value=response) as request:
+            client.request("GET", self.path, params=self.params)
+            target = request.call_args.args[1]
+            prepared = client.session.prepare_request(requests.Request("GET", target))
+            self.assertIn(
+                "domain_test=offline-domain-cookie", prepared.headers["Cookie"]
+            )
+            self.assertNotIn("website_test", prepared.headers["Cookie"])
+            self.assertEqual(
+                {cookie.name: cookie.domain for cookie in client.session.cookies},
+                {"domain_test": ".vinted.co.uk", "website_test": "www.vinted.co.uk"},
+            )
+            for path in (
+                "https://api.vinted.co.uk" + self.path,
+                "//api.vinted.co.uk" + self.path,
+                "/shipping-estimation/external/shipping_orders/300/other",
+                "/web/gateway" + self.path,
+            ):
+                with self.subTest(path=path), self.assertRaises(buyer.BuyerError):
+                    client.request("GET", path, params=self.params)
+            self.assertEqual(request.call_count, 1)
         client.session.close()
 
 
