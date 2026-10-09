@@ -189,6 +189,119 @@ class CheckoutPreferencesTests(DatabaseFixture, unittest.TestCase):
             if call.args[0] == "POST" and call.args[1].endswith("/payment")
         ]
 
+    def wallet_checkout(self, *, credit="-14.00", payable="4.84"):
+        components = self.checkout["components"]
+        summary = components["order_summary_v2"]
+        summary["subtotal"] = {"price": {"amount": "18.84", "currency_code": "GBP"}}
+        summary["deductions"] = [
+            {
+                "type": "order-summary-wallet-deduction",
+                "price": {"amount": credit, "currency_code": "GBP"},
+            }
+        ]
+        components["pay_button_v2"]["total"]["price"]["amount"] = payable
+        return self.checkout
+
+    def test_balance_and_card_are_quoted_separately_and_full_cost_is_recorded(self):
+        self.wallet_checkout()
+        prepared = self.prepare()
+        self.assertEqual(
+            (prepared["total"], prepared["payment_due"], prepared["wallet_credit"]),
+            (1884, 484, 1400),
+        )
+        self.assertIn("Vinted balance contributes £14.00", prepared["message"])
+        self.assertEqual(self.payments(), [])
+        quote = buyer.decrypt(prepared["token"].encode("ascii"))
+        self.assertEqual(quote["payment_due"] + quote["wallet_credit"], quote["total"])
+        outcome = self.pay(prepared["token"])
+        self.assertEqual((outcome["state"], outcome["total"]), ("paid", 1884))
+        self.assertEqual(len(self.payments()), 1)
+
+    def test_balance_cannot_make_an_over_budget_purchase_look_affordable(self):
+        self.wallet_checkout()
+        with self.assertRaises(buyer.BuyerError) as error:
+            buying.checkout_prices(self.checkout, 1500, 500, item_id="123")
+        self.assertEqual(error.exception.reason, "total_over_budget")
+        self.assertEqual(self.payments(), [])
+
+    def test_full_balance_funding_can_have_zero_remaining_payment(self):
+        self.wallet_checkout(credit="-18.84", payable="0.00")
+        prepared = self.prepare()
+        self.assertEqual(
+            (prepared["total"], prepared["payment_due"], prepared["wallet_credit"]),
+            (1884, 0, 1884),
+        )
+        self.assertEqual(self.payments(), [])
+
+    def test_changed_balance_cannot_increase_the_quoted_card_charge(self):
+        self.wallet_checkout()
+        prepared = self.prepare()
+        self.wallet_checkout(credit="-13.00", payable="5.84")
+        outcome = self.pay(prepared["token"])
+        self.assertEqual(outcome["state"], "failed_before_payment")
+        self.assertEqual(self.payments(), [])
+
+    def test_unknown_or_inconsistent_funding_fails_before_payment(self):
+        valid = copy.deepcopy(self.wallet_checkout())
+        cases = []
+        for value in ("14.00", "NaN", "-14.001", "-1000001.00"):
+            bad = copy.deepcopy(valid)
+            bad["components"]["order_summary_v2"]["deductions"][0]["price"][
+                "amount"
+            ] = value
+            cases.append(bad)
+        for value in ("EUR", None):
+            bad = copy.deepcopy(valid)
+            bad["components"]["order_summary_v2"]["deductions"][0]["price"][
+                "currency_code"
+            ] = value
+            cases.append(bad)
+        for deductions in (
+            [],
+            None,
+            "unknown",
+            [
+                {
+                    "type": "unknown",
+                    "price": {"amount": "-14.00", "currency_code": "GBP"},
+                }
+            ],
+        ):
+            bad = copy.deepcopy(valid)
+            bad["components"]["order_summary_v2"]["deductions"] = deductions
+            cases.append(bad)
+        bad = copy.deepcopy(valid)
+        bad["components"]["order_summary_v2"]["deductions"] *= 2
+        cases.append(bad)
+        for subtotal in (None, {"price": {"amount": "4.84", "currency_code": "GBP"}}):
+            bad = copy.deepcopy(valid)
+            bad["components"]["order_summary_v2"]["subtotal"] = subtotal
+            cases.append(bad)
+        bad = copy.deepcopy(valid)
+        bad["components"]["pay_button_v2"]["order_summary_v2"] = copy.deepcopy(
+            bad["components"]["order_summary_v2"]
+        )
+        bad["components"]["pay_button_v2"]["order_summary_v2"]["deductions"] = []
+        cases.append(bad)
+        for index, bad in enumerate(cases):
+            with self.subTest(case=index), self.assertRaises(buyer.BuyerError):
+                buying.checkout_prices(bad, 1500, 2000, item_id="123")
+        self.assertEqual(self.payments(), [])
+
+    def test_old_or_malformed_quotes_cannot_authorize_wallet_funding(self):
+        self.wallet_checkout()
+        prepared = self.prepare()
+        original = buyer.decrypt(prepared["token"].encode("ascii"))
+        malformed = dict(original, wallet_credit=1401)
+        with self.assertRaises(buyer.BuyerError):
+            self.pay(buyer.encrypt(malformed).decode("ascii"))
+        old = dict(original)
+        old.pop("wallet_credit")
+        old.pop("payment_due")
+        outcome = self.pay(buyer.encrypt(old).decode("ascii"))
+        self.assertEqual(outcome["state"], "failed_before_payment")
+        self.assertEqual(self.payments(), [])
+
     def test_nearest_available_point_wins_over_preferred_and_cheaper_points(self):
         selected = self.configure()
         self.assertEqual(

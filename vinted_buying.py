@@ -166,7 +166,8 @@ def checkout_item_details(components, summary, *, item_id=None):
     }
 
 
-def checkout_prices(checkout, item_price, maximum, *, item_id=None):
+def checkout_amounts(checkout):
+    """Keep the full purchase cost separate from the remaining payment due."""
     if not isinstance(checkout, dict):
         raise buyer.BuyerError("Vinted did not return a valid checkout.")
     components = checkout.get("components") or {}
@@ -185,16 +186,86 @@ def checkout_prices(checkout, item_price, maximum, *, item_id=None):
         summary = pay_button.get("order_summary_v2")
     if not isinstance(summary, dict):
         raise buyer.BuyerError("Vinted did not return a readable checkout total.")
-    # Current web checkout renders the all-in amount from pay_button_v2.total.
-    # order_summary_v2 contains the item subtotal and fee lines, not that total.
+    # The native pay button renders the amount still payable. A documented
+    # wallet deduction can fund part of the purchase without lowering its cost.
     total_part = (pay_button if pay_button is not None else summary).get("total") or {}
-    total = cents(total_part.get("price") if isinstance(total_part, dict) else None)
+    payment_due = cents(
+        total_part.get("price") if isinstance(total_part, dict) else None
+    )
     if pay_button is not None and summary.get("total") is not None:
         old_total = summary["total"]
-        if not isinstance(old_total, dict) or cents(old_total.get("price")) != total:
+        if (
+            not isinstance(old_total, dict)
+            or cents(old_total.get("price")) != payment_due
+        ):
             raise buyer.BuyerError(
                 "Vinted's checkout totals disagree. No payment was sent."
             )
+    summaries = [summary]
+    embedded = pay_button.get("order_summary_v2") if current else None
+    if embedded is not None and embedded is not summary:
+        if not isinstance(embedded, dict):
+            raise buyer.BuyerError("Vinted did not confirm the checkout funding.")
+        summaries.append(embedded)
+    credits = []
+    for source in summaries:
+        deductions = source.get("deductions", [])
+        if not isinstance(deductions, list) or len(deductions) > 20:
+            raise buyer.BuyerError("Vinted did not confirm the checkout funding.")
+        credit = 0
+        wallet_seen = False
+        for deduction in deductions:
+            if (
+                not isinstance(deduction, dict)
+                or deduction.get("type") != "order-summary-wallet-deduction"
+                or wallet_seen
+            ):
+                raise buyer.BuyerError("Vinted did not confirm the checkout funding.")
+            price = deduction.get("price")
+            if not isinstance(price, dict):
+                raise buyer.BuyerError("Vinted did not confirm the checkout funding.")
+            try:
+                amount = Decimal(str(price.get("amount", price.get("value"))))
+                if not amount.is_finite() or amount > 0:
+                    raise ValueError
+            except (InvalidOperation, ValueError, TypeError):
+                raise buyer.BuyerError(
+                    "Vinted did not confirm a valid balance credit."
+                ) from None
+            credit = cents(dict(price, amount=str(-amount)))
+            wallet_seen = True
+        credits.append(credit)
+    if len(set(credits)) != 1:
+        raise buyer.BuyerError("Vinted's checkout balance credits disagree.")
+    wallet_credit = credits[0]
+    total = payment_due + wallet_credit
+    if total > 100000000:
+        raise buyer.BuyerError("Vinted did not confirm the checkout funding.")
+    if wallet_credit:
+        # Never promote an arbitrary subtotal to an all-in total. Accept it
+        # only as an independent check of payable + the explicit wallet credit.
+        for source in summaries:
+            subtotal = source.get("subtotal")
+            if not isinstance(subtotal, dict) or cents(subtotal.get("price")) != total:
+                raise buyer.BuyerError("Vinted's checkout funding amounts disagree.")
+    return {
+        "total": total,
+        "payment_due": payment_due,
+        "wallet_credit": wallet_credit,
+    }
+
+
+def checkout_prices(checkout, item_price, maximum, *, item_id=None):
+    amounts = checkout_amounts(checkout)
+    total = amounts["total"]
+    components = checkout["components"]
+    pay_button = components.get("pay_button_v2")
+    current = pay_button is not None
+    summary = components.get("order_summary_v2")
+    if summary is None:
+        summary = components.get("order_summary")
+    if summary is None and current:
+        summary = pay_button.get("order_summary_v2")
     if total < item_price:
         raise buyer.BuyerError(
             "Autobuy stopped: Vinted's checkout total could not be verified."
@@ -898,8 +969,13 @@ def check_checkout(url, *, prepare_test=False):
             phase = "checking the checkout prices"
             current_item = checkout_item_details(components, summary)
             item = current_item["price"]
-            total = cents(
-                amount_part.get("price") if isinstance(amount_part, dict) else None
+            amounts = checkout_amounts(checkout)
+            total = amounts["total"]
+            logger.info(
+                "Autobuy checkout funding: total=GBP:%s payable=GBP:%s wallet_credit=GBP:%s",
+                total,
+                amounts["payment_due"],
+                amounts["wallet_credit"],
             )
             phase = "checking saved delivery and payment choices"
             try:
@@ -922,6 +998,11 @@ def check_checkout(url, *, prepare_test=False):
                 f"Checkout check passed{target}: item price £{item/100:.2f}; total £{total/100:.2f} including fees and delivery. "
                 "Saved delivery and payment choices passed validation. This check does not authorize payment or change any search budget. No payment was submitted."
             )
+            if amounts["wallet_credit"]:
+                message += (
+                    f" Vinted balance contributes £{amounts['wallet_credit']/100:.2f}; "
+                    f"the remaining payment is £{amounts['payment_due']/100:.2f}."
+                )
             if not prepare_test:
                 return message
             current_account = buyer.settings()
@@ -944,6 +1025,8 @@ def check_checkout(url, *, prepare_test=False):
                 "buyer_id": current_account["user_id"],
                 "item_price": item,
                 "total": total,
+                "payment_due": amounts["payment_due"],
+                "wallet_credit": amounts["wallet_credit"],
                 "created": time.time(),
                 "preferences": choice_preferences(current_account),
                 "choices": choices["signature"],
@@ -954,6 +1037,8 @@ def check_checkout(url, *, prepare_test=False):
                 "item_id": current_item["id"],
                 "item_price": item,
                 "total": total,
+                "payment_due": amounts["payment_due"],
+                "wallet_credit": amounts["wallet_credit"],
                 "pickup_name": choices["pickup_name"],
                 "payment_label": choices["payment_label"],
                 "token": buyer.encrypt(quote).decode("ascii"),
@@ -1052,6 +1137,13 @@ def buy_checkout_quote(token, *, alert_row=None):
         or not 0 <= time.time() - quote["created"] <= 1800
     ):
         raise buyer.BuyerError(message)
+    funding_fields = {"payment_due", "wallet_credit"} & set(quote)
+    if funding_fields and (
+        len(funding_fields) != 2
+        or any(type(quote[key]) is not int or quote[key] < 0 for key in funding_fields)
+        or quote["payment_due"] + quote["wallet_credit"] != quote["total"]
+    ):
+        raise buyer.BuyerError(message)
     item_id, purchase_id = quote["item_id"], quote["checkout_id"]
     with buyer.exclusive(wait_seconds=45):
         config = buyer.settings()
@@ -1130,6 +1222,17 @@ def buy_checkout_quote(token, *, alert_row=None):
             total = checkout_prices(
                 checkout, quote["item_price"], maximum, item_id=item_id
             )
+            funding = checkout_amounts(checkout)
+            if (
+                funding_fields
+                and (
+                    funding["wallet_credit"] != quote["wallet_credit"]
+                    or funding["payment_due"] > quote["payment_due"]
+                )
+            ) or (not funding_fields and funding["wallet_credit"]):
+                raise buyer.BuyerError(
+                    "The balance credit or remaining payment changed. Prepare a fresh checkout before buying. No payment was sent."
+                )
             current = buyer.settings()
             if (
                 not current["connected"]

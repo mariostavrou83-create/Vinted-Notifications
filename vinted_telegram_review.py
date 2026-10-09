@@ -56,9 +56,10 @@ def save_review(review):
         if current:
             previous = buyer.decrypt(current[0].encode("ascii"))
             if previous.get("item_id") != review.get("item_id"):
-                archive_key = ARCHIVE_PREFIX + hashlib.sha256(
-                    current[0].encode("ascii")
-                ).hexdigest()
+                archive_key = (
+                    ARCHIVE_PREFIX
+                    + hashlib.sha256(current[0].encode("ascii")).hexdigest()
+                )
                 # Retain the encrypted transaction and quote before selecting
                 # another item. An archive failure rolls back the selection.
                 conn.execute(
@@ -288,6 +289,8 @@ def review_latest(*, item_id=None):
         result.update(
             item_price=prepared["item_price"],
             total=prepared["total"],
+            payment_due=prepared["payment_due"],
+            wallet_credit=prepared["wallet_credit"],
             payment_method=prepared["payment_label"],
             pickup_name=prepared["pickup_name"],
             delivery_choice=quote["choices"].get("pickup_type")
