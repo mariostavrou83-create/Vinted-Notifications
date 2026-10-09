@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 import os
+import sqlite3
 import time
 import unittest
 from contextlib import ExitStack, closing
@@ -561,6 +562,45 @@ class ReviewTests(DatabaseFixture, unittest.TestCase):
         result = review.review_latest()
         self.assertEqual(result["stage"], "existing_payment")
         self.client.request.assert_not_called()
+
+    def test_selecting_another_alert_preserves_encrypted_previous_transaction(self):
+        previous = {
+            "item_id": "987",
+            "buyer_id": "99",
+            "transaction_id": "654",
+            "checkout_id": None,
+            "build_state": "challenge_blocked",
+            "approved": False,
+            "private_test_value": "offline-old-checkout-secret",
+        }
+        review.save_review(previous)
+        self.quoted()
+        with closing(search_settings.connection()) as conn:
+            rows = conn.execute(
+                "SELECT value FROM parameters WHERE key LIKE ?",
+                (review.ARCHIVE_PREFIX + "%",),
+            ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertNotIn(previous["private_test_value"], rows[0][0])
+        self.assertEqual(buyer.decrypt(rows[0][0].encode("ascii")), previous)
+        self.assertEqual(review.load_review()["item_id"], "123")
+        self.assertFalse(review.load_review()["approved"])
+        self.assertFalse(buyer.settings()["enabled"])
+        self.assertEqual(self.posts("/payment"), [])
+
+    def test_failed_archive_keeps_previous_selected_transaction(self):
+        previous = {"item_id": "987", "transaction_id": "654", "approved": False}
+        review.save_review(previous)
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "CREATE TRIGGER reject_review_archive BEFORE INSERT ON parameters "
+                "WHEN NEW.key LIKE 'buyer_telegram_review_archive:%' "
+                "BEGIN SELECT RAISE(ABORT, 'offline archive failure'); END"
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            review.save_review({"item_id": "123", "transaction_id": "456"})
+        self.assertEqual(review.load_review(), previous)
+        self.assertEqual(self.posts("/payment"), [])
 
     def test_startup_reserves_once_and_approval_is_bound_to_item_and_total(self):
         with patch.dict(

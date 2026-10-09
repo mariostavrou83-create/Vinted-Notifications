@@ -19,6 +19,7 @@ from search_settings import connection
 
 logger = logging.getLogger(__name__)
 REVIEW_KEY = "buyer_telegram_review"
+ARCHIVE_PREFIX = "buyer_telegram_review_archive:"
 MAX_AGE = 1800
 PAYMENT_STATES = ("paying", "unknown", "needs_action", "paid", "payment_failed")
 
@@ -48,6 +49,22 @@ def load_review():
 def save_review(review):
     encrypted = buyer.encrypt(review).decode("ascii")
     with closing(connection()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute(
+            "SELECT value FROM parameters WHERE key=?", (REVIEW_KEY,)
+        ).fetchone()
+        if current:
+            previous = buyer.decrypt(current[0].encode("ascii"))
+            if previous.get("item_id") != review.get("item_id"):
+                archive_key = ARCHIVE_PREFIX + hashlib.sha256(
+                    current[0].encode("ascii")
+                ).hexdigest()
+                # Retain the encrypted transaction and quote before selecting
+                # another item. An archive failure rolls back the selection.
+                conn.execute(
+                    "INSERT OR IGNORE INTO parameters(key,value) VALUES (?,?)",
+                    (archive_key, current[0]),
+                )
         conn.execute(
             "INSERT OR REPLACE INTO parameters(key,value) VALUES (?,?)",
             (REVIEW_KEY, encrypted),
