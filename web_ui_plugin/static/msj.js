@@ -1,12 +1,38 @@
 const filter = document.querySelector('#filter');
-filter?.addEventListener('input', () => {
+const platformFilter = document.querySelector('#platform-filter');
+const statusFilter = document.querySelector('#status-filter');
+function filterSearches() {
   let visible = 0;
+  const text = filter?.value.trim().toLocaleLowerCase() || '';
+  const platform = platformFilter?.value || 'all';
+  const status = statusFilter?.value || 'all';
   document.querySelectorAll('[data-search]').forEach(card => {
-    card.hidden = !card.dataset.search.toLocaleLowerCase().includes(filter.value.trim().toLocaleLowerCase());
+    const matchesPlatform = platform === 'all' || card.dataset.platform === platform
+      || (platform !== 'both' && card.dataset.platform === 'both');
+    card.hidden = !card.dataset.search.toLocaleLowerCase().includes(text)
+      || !matchesPlatform || (status !== 'all' && card.dataset.status !== status);
     if (!card.hidden) visible++;
   });
-  document.querySelector('#no-results').hidden = visible > 0;
-});
+  const empty = document.querySelector('#no-results');
+  if (empty) empty.hidden = visible > 0 || !document.querySelector('[data-search]');
+}
+filter?.addEventListener('input', filterSearches);
+platformFilter?.addEventListener('change', filterSearches);
+statusFilter?.addEventListener('change', filterSearches);
+const searchList = document.querySelector('[data-search-list]');
+if (searchList) {
+  const buttons = [...document.querySelectorAll('[data-search-view]')];
+  function setSearchView(view) {
+    view = view === 'photos' ? 'photos' : 'compact';
+    searchList.classList.toggle('compact-searches', view === 'compact');
+    buttons.forEach(button => button.setAttribute('aria-pressed', String(button.dataset.searchView === view)));
+    try { localStorage.setItem('msj-search-view', view); } catch {}
+  }
+  let savedView;
+  try { savedView = localStorage.getItem('msj-search-view'); } catch {}
+  setSearchView(savedView);
+  buttons.forEach(button => button.addEventListener('click', () => setSearchView(button.dataset.searchView)));
+}
 const photoInput = document.querySelector('#photo');
 if (photoInput) {
   let newPhotos = [], selection = 0, collageUrl;

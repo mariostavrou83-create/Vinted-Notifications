@@ -1,13 +1,13 @@
 <section class="form-card guide-section" id="vinted-buying">
-<h2>Vinted buyer &amp; Autobuy</h2>
-<p>Tap <b>Autobuy</b> on a Vinted alert to buy and pay using your saved Vinted delivery and payment choices. It only runs when you tap; finding a listing never purchases it automatically.</p>
+<h2>Vinted account &amp; buying</h2>
+<p>Tap <b>Autobuy</b>, or reply <b>BUY</b> to the original Vinted alert, to purchase using your saved delivery and payment choices. Finding a listing alone never purchases it.</p>
 <p>Connection: <b>{{buyer.username if buyer.connected else 'Not connected'}}</b> · Autobuy <b>{{'on' if buyer.enabled else 'off'}}</b>.</p>
-<details class="guide-section"><summary><b>Browser, proxy &amp; CapSolver connection</b></summary>
+<details class="guide-section" {{'open' if not buyer.network.proxy}}><summary><b>Proxy &amp; CapSolver settings</b></summary>
 <p>Chrome browser fingerprint support is active. Dedicated proxy: <b>{{'configured' if buyer.network.proxy else 'needed'}}</b>. CapSolver: <b>{{'enabled' if buyer.network.enabled else 'off'}}</b>.</p>
 <p>Use a proxy with a fixed IP for this Vinted account. CapSolver can complete supported Vinted security checks through that same proxy. An unsupported check or blocked IP still stops the connection.</p>
 <form method="post" autocomplete="off"><input type="hidden" name="csrf" value="{{csrf}}">
-<label for="buyer_proxy_url">Dedicated proxy URL</label><input id="buyer_proxy_url" name="buyer_proxy_url" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="2048" placeholder="{{'Configured — leave blank to keep' if buyer.network.proxy else 'Paste your IPRoyal Copy list row'}}">
-<p><small>Use IPRoyal's Copy list button and paste its single host:port:username:password row here. A complete proxy URL also works. Use your actual details; example words are not credentials.</small></p>
+<label for="buyer_proxy_url">Dedicated proxy URL</label><input id="buyer_proxy_url" name="buyer_proxy_url" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="2048" placeholder="{{'Configured — leave blank to keep' if buyer.network.proxy else 'HOST:PORT:USERNAME:PASSWORD'}}">
+<p><small>Paste your provider’s host:port:username:password row, or a complete proxy URL. Use a dedicated fixed UK IP with concurrent password access from Railway and CapSolver.</small></p>
 <label for="buyer_capsolver_key">CapSolver API key</label><input id="buyer_capsolver_key" name="buyer_capsolver_key" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="256" placeholder="{{'Configured — leave blank to keep' if buyer.network.capsolver else 'Enter your CapSolver API key'}}">
 <label class="checkbox"><input type="checkbox" name="buyer_capsolver_enabled" value="yes" {{'checked' if buyer.network.enabled}}> Enable supported security checks using my CapSolver account</label>
 <p><small>Credentials are stored encrypted and these boxes clear after submission. CapSolver tasks may use paid credit. Saving connection settings turns Autobuy off; verify the connection before enabling it again.</small></p>
@@ -47,7 +47,8 @@
 {% if buyer.connected %}
 <form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="buyer_recheck">Check saved buyer connection</button><p><small>Verifies the saved account session without preparing a checkout or sending payment.</small></p></form>
 {% if telegram_review_mode %}
-<div class="guide-section">
+<details class="guide-section" {{'open' if telegram_review and telegram_review.outcome == 'quoted' and not telegram_review.approved}}>
+<summary><b>Initial checkout checks</b></summary>
 <h3>Approve one Telegram Autobuy item</h3>
 <p>Purchases are restricted to the exact reviewed item and approved all-in total. Your search budgets remain saved.</p>
 <form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="buyer_telegram_review_latest">Review the latest Telegram alert without paying</button></form>
@@ -68,7 +69,7 @@
 {% endif %}
 {% endif %}
 {% endif %}
-</div>
+</details>
 {% endif %}
 <details class="guide-section"><summary><b>Check an existing Vinted checkout</b></summary>
 <p>Load the current total for a checkout you already opened on Vinted and apply your delivery/payment preferences below. This does not submit payment or change your spending limits.</p>
@@ -86,17 +87,19 @@
 <form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="buyer_test_quote" value="{{checkout_test.token}}">
 <button class="primary" name="action" value="buyer_checkout_pay" {{'disabled' if not buyer.enabled}}>Buy test item · up to £{{'%.2f'|format(checkout_test.total/100)}}</button></form>
 <p><small>This button submits real payment. A bank may require confirmation. An uncertain payment is never retried automatically.</small></p></div>{% endif %}
+<details class="guide-section"><summary><b>Delivery &amp; payment settings</b></summary>
 <form method="post" data-buyer-settings><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="buyer_browser_info" data-buyer-browser value="">
 <label for="buyer_pickup_mode">Delivery choice</label><select id="buyer_pickup_mode" name="buyer_pickup_mode"><option value="saved" {{'selected' if buyer.pickup_mode=='saved'}}>Use my saved Vinted delivery choice</option><option value="nearest" {{'selected' if buyer.pickup_mode=='nearest'}}>Nearest pickup point to my saved Vinted address</option></select>
 <label for="buyer_card_last4">Saved card ending in</label><input id="buyer_card_last4" name="buyer_card_last4" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" value="{{buyer.preferred_card_last4}}" placeholder="Four ending digits">
 <p><small>Enter only the last four digits of a card already saved in Vinted. That card or an available Vinted balance is used. The bot does not need your full card number.</small></p>
 <p><b>Tap Autobuy on an alert to complete its purchase.</b> A saved “Maximum total including fees &amp; postage” applies to the complete checkout. Without one, Autobuy uses the maximum item price in your search link, with Vinted fees and delivery added. <a href="/">Edit your searches →</a></p>
 <p><small>The item price must be no higher than the price in your alert. If the search link has no price maximum, the alerted item price is the limit, plus verified fees and delivery. Paused, archived or deleted searches cannot buy.</small></p>
-<label class="checkbox"><input type="checkbox" name="buyer_enabled" value="yes" {{'checked' if buyer.enabled}}> Enable payment when I tap Autobuy</label>
+<label class="checkbox"><input type="checkbox" name="buyer_enabled" value="yes" {{'checked' if buyer.enabled}}> Enable payment when I tap Autobuy or reply BUY</label>
 <p><small>Set your address, delivery choice and payment method in Vinted first. A bank may still require confirmation. If the final total or delivery choice cannot be verified, the bot stops before paying. An uncertain payment is never automatically retried.</small></p>
 <button class="primary" name="action" value="buyer_limits">Save buyer settings</button></form>
-<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="buyer_disconnect">Disconnect Vinted buyer</button></form>
+</details>
+<details class="guide-section"><summary>Account maintenance</summary><form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="buyer_disconnect">Disconnect Vinted buyer</button></form></details>
 {% endif %}
 <p><small>A bank may require payment confirmation. Supported security checks use your private proxy and CapSolver settings. Nothing is charged by connecting or saving these settings.</small></p>
-{% if buying %}<h3>Recent purchase attempts</h3><p><small>Check a listing without starting another purchase. A passed check confirms the account, item price, seller and search budget; the final delivery, fees and payment choices are checked when you tap Autobuy.</small></p>{% for attempt in buying %}<div class="guide-section"><b>{{attempt.title or ('Item '+attempt.item_id)}}</b><p>{{attempt.message}}</p>{% if attempt.url %}<a href="{{attempt.url}}" target="_blank" rel="noopener noreferrer">Open Vinted listing ↗</a>{% endif %}{% if buyer.connected and attempt.url %}<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="buyer_item_id" value="{{attempt.item_id}}"><button class="secondary" name="action" value="buyer_listing_check">Check this listing without buying</button></form>{% endif %}{% if buyer.connected and attempt.state in ('paying','unknown','needs_action') %}{% if attempt.action_url %}<a href="{{attempt.action_url}}" target="_blank" rel="noopener noreferrer">Open bank confirmation ↗</a>{% endif %}<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="buyer_item_id" value="{{attempt.item_id}}"><button class="secondary" name="action" value="buyer_payment_check">Check payment status</button></form>{% endif %}</div>{% endfor %}{% endif %}
+{% if buying %}<details class="guide-section" {{'open' if buying|selectattr('state','in',['paying','unknown','needs_action'])|list}}><summary><b>Recent purchase attempts</b></summary><p><small>Check a listing without starting another purchase. A passed check confirms the account, item price, seller and search budget; the final delivery, fees and payment choices are checked when you tap Autobuy.</small></p>{% for attempt in buying %}<div class="guide-section"><b>{{attempt.title or ('Item '+attempt.item_id)}}</b><p>{{attempt.message}}</p>{% if attempt.url %}<a href="{{attempt.url}}" target="_blank" rel="noopener noreferrer">Open Vinted listing ↗</a>{% endif %}{% if buyer.connected and attempt.url %}<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="buyer_item_id" value="{{attempt.item_id}}"><button class="secondary" name="action" value="buyer_listing_check">Check this listing without buying</button></form>{% endif %}{% if buyer.connected and attempt.state in ('paying','unknown','needs_action') %}{% if attempt.action_url %}<a href="{{attempt.action_url}}" target="_blank" rel="noopener noreferrer">Open bank confirmation ↗</a>{% endif %}<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="buyer_item_id" value="{{attempt.item_id}}"><button class="secondary" name="action" value="buyer_payment_check">Check payment status</button></form>{% endif %}</div>{% endfor %}</details>{% endif %}
 </section>

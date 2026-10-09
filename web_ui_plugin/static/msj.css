@@ -21,3 +21,49 @@ select{font:inherit;font-size:13px;width:100%;padding:12px;background:white;colo
 @media(max-width:760px){.connection-grid{grid-template-columns:1fr}.main-nav{flex-wrap:wrap;gap:10px}.main-nav a{white-space:nowrap}}
 
 .reference-slots{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:12px 0}.reference-slot{display:flex;flex-direction:column;gap:6px;border:1px solid #dedbd3;border-radius:10px;padding:8px;margin:0;font-size:12px}.reference-slot img{width:100%;height:110px;object-fit:contain;background:#fff;border-radius:6px}.reference-slot input{width:auto;margin:0 5px 0 0}.reference-slot span{display:flex;align-items:center}.reference-slot.marked-remove img{opacity:.3}.reference-slot.marked-remove span{text-decoration:line-through}.reference-slot .text-button{font-size:12px;padding:4px}
+
+/* Search list and grouped settings keep everyday controls easy to scan. */
+.search-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:24px}
+.search-toolbar>input{flex:1;min-width:190px;width:auto;margin:0}
+.search-toolbar>select{width:auto;max-width:170px;margin:0;padding:11px}
+.search-toolbar .folder-filter{margin:0;gap:8px;flex-wrap:wrap}
+.search-toolbar .folder-filter select{max-width:155px;margin:0;padding:11px}
+.view-switch{display:flex;border:1px solid var(--line);border-radius:5px;overflow:hidden}
+.view-switch button{padding:9px 13px;background:white;border:0;font-size:12px;color:var(--ink)}
+.view-switch button[aria-pressed=true]{background:var(--green);color:white}
+.search-card-controls{margin-top:auto}
+.compact-searches{grid-template-columns:1fr;gap:12px}
+.compact-searches .search-card{display:grid;grid-template-columns:82px minmax(0,1fr)}
+.compact-searches .card-photo{height:auto;min-height:108px;border-bottom:0;border-right:1px solid var(--line)}
+.compact-searches .card-photo .badge,.compact-searches .photo-tag,.compact-searches .photo-empty>span:not(.photo-symbol),.compact-searches .photo-empty small{display:none}
+.compact-searches .card-body{padding:16px 20px;display:grid;grid-template-columns:minmax(180px,1.2fr) minmax(140px,.8fr) auto;gap:20px;align-items:center;min-width:0}
+.compact-searches .card-body h2{font-size:21px;margin:5px 0}
+.compact-searches .reminder,.compact-searches .chips{display:none}
+.compact-searches .buy-guide{font-size:12px;margin:5px 0}
+.compact-searches .buy-guide small{font-size:10px}
+.compact-searches .platform-card-status{border-top:0;border-left:1px solid var(--line);padding:0 0 0 18px}
+.compact-searches .platform-card-status>div{font-size:12px;gap:2px}
+.compact-searches .platform-card-status small{font-size:10px}
+.compact-searches .card-actions{margin-top:8px;padding-top:8px;gap:14px}
+.compact-searches .card-meta{gap:16px}
+.compact-searches .card-actions .secondary{padding:7px 12px}
+.compact-searches .coverage-warning{font-size:11px;max-width:240px}
+.connection-jump{display:flex;flex-wrap:wrap;gap:12px 24px;margin:-8px 0 24px;font-size:13px}
+.connection-jump a{border-bottom:1px solid var(--line);padding-bottom:5px}
+.connection-overview{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:24px}
+.connection-overview>div{display:flex;flex-direction:column;gap:5px;background:white;border:1px solid var(--line);border-radius:7px;padding:18px;min-width:0}
+.connection-overview span{font-size:11px;color:var(--muted)}
+.connection-overview b{font-size:16px;overflow-wrap:anywhere}
+.connection-overview small{font-size:11px;color:var(--muted)}
+.connection-overview small a{color:var(--green);text-decoration:underline}
+.setup-details{border-top:1px solid var(--line);padding-top:18px;margin-top:18px}
+.setup-details>summary{font-weight:600;cursor:pointer;padding:8px 0}
+.setup-details[open]>summary{margin-bottom:18px}
+.connection-grid .form-card{padding:20px}
+#vinted-buying>.guide-section{margin-top:18px;padding-top:18px}
+#monitoring form{max-width:680px}
+#monitoring .primary{margin-top:18px}
+details.how-it-looks>summary{cursor:pointer;font-weight:600}
+details.how-it-looks[open]>summary{margin-bottom:14px}
+@media(max-width:1000px){.compact-searches .card-body{grid-template-columns:minmax(140px,1fr) minmax(130px,.8fr);gap:12px}.compact-searches .search-card-controls{grid-column:1/-1;display:flex;justify-content:space-between;align-items:center;gap:12px}.compact-searches .card-actions{margin:0;padding:0;border:0}.connection-overview{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:600px){.search-toolbar>input{flex-basis:100%;min-width:0}.search-toolbar>select{flex:1;max-width:none;min-width:0}.search-toolbar .folder-filter{flex-basis:100%}.search-toolbar .folder-filter select{flex:1;max-width:none}.compact-searches .search-card{grid-template-columns:58px minmax(0,1fr)}.compact-searches .card-body{padding:13px;grid-template-columns:1fr;gap:10px}.compact-searches .card-body h2{font-size:20px}.compact-searches .platform-card-status{border-left:0;padding:0;gap:10px}.compact-searches .search-card-controls{flex-wrap:wrap}.compact-searches .card-meta{font-size:10px}.compact-searches .card-actions{gap:12px}.connection-overview>div{padding:14px}.connection-overview b{font-size:14px}.connection-jump{gap:12px 18px}main{padding-top:28px}}

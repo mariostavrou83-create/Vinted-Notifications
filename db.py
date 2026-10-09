@@ -1,10 +1,57 @@
 import sqlite3
+import threading
+from contextlib import contextmanager
 from traceback import print_exc
 
 DB_PATH = "./data/vinted_notifications.db"
+_batch_connections = threading.local()
+
+
+class _BatchConnection(sqlite3.Connection):
+    """Helper-owned closes defer to the enclosing batch's final close."""
+
+    held = False
+
+    def close(self):
+        if not self.held:
+            super().close()
+
+
+@contextmanager
+def connection_scope():
+    """Reuse one connection for a short batch, with each helper's own commits.
+
+    No connection survives the batch, crosses threads, or wraps the batch in a
+    write transaction. Existing per-item atomic writes and error handling remain
+    in place. Unfinished work is rolled back before the connection is closed.
+    """
+    existing = getattr(_batch_connections, "connection", None)
+    if existing is not None:
+        yield existing
+        return
+    conn = sqlite3.connect(DB_PATH, timeout=15, factory=_BatchConnection)
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.held = True
+    _batch_connections.connection = conn
+    try:
+        yield conn
+    finally:
+        del _batch_connections.connection
+        conn.held = False
+        try:
+            if conn.in_transaction:
+                conn.rollback()
+        finally:
+            conn.close()
 
 
 def get_db_connection():
+    conn = getattr(_batch_connections, "connection", None)
+    if conn is not None:
+        # Match the default tuple rows expected by legacy database helpers.
+        # search_settings.connection() explicitly requests Row objects as usual.
+        conn.row_factory = None
+        return conn
     conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
@@ -61,7 +108,7 @@ def get_seen_item_ids(item_ids):
 def get_last_timestamp(query_id):
     conn = None
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT last_item FROM queries WHERE id=?", (query_id,))
         result = cursor.fetchone()
@@ -79,7 +126,7 @@ def get_last_timestamp(query_id):
 def update_last_timestamp(query_id, timestamp):
     conn = None
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE queries SET last_item=? WHERE id=?", (timestamp, query_id)
@@ -101,6 +148,9 @@ def add_item_to_db(
         conn.execute("BEGIN IMMEDIATE")
         cursor = conn.cursor()
         if cursor.execute("SELECT 1 FROM items WHERE item=?", (id,)).fetchone():
+            # A borrowed batch connection stays open after this helper returns.
+            # End the duplicate's transaction before another item is recorded.
+            conn.rollback()
             return False
         # Insert into db the id and the query_id related to the item
         cursor.execute(
@@ -334,7 +384,7 @@ def remove_from_allowlist(country):
 def get_allowlist():
     conn = None
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM allowlist")
         # Get list of countries

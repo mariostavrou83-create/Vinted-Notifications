@@ -1,14 +1,19 @@
-{% extends 'msj_base.html' %}{% block content %}
-<div class="page-heading"><div><span class="eyebrow">YOUR TWO TELEGRAM BOTS</span><h1>Connections & usage.</h1><p class="muted">One dashboard. Separate Vinted and eBay notifications.</p>{% if supabase_enabled %}<p><a href="{{url_for('supabase.backup')}}">Manage encrypted Supabase backups →</a></p>{% endif %}</div></div>
-<section class="form-card guide-section"><h2>Activate your eBay production keys</h2>
-<p>If eBay shows “Non Compliant” or “Your keyset is currently disabled”, use <b>Alerts &amp; Notifications → Marketplace Account Deletion</b>. Leave the exemption switch off. Save your notification email there, then copy these two values and save the endpoint.</p>
-{% if deletion.endpoint %}
-<label for="deletion_endpoint">Marketplace account deletion notification endpoint</label><input id="deletion_endpoint" readonly value="{{deletion.endpoint}}">
-<label for="deletion_token">Verification token</label><input id="deletion_token" readonly value="{{deletion.token}}">
-<p>After saving in eBay, select <b>Send Test Notification</b>, then <b>Check eBay access</b> below. No user sign-in token is needed for these searches.</p>
-<p>Verified closure notifications received: <b>{{deletion.received}}</b>. Telegram removals awaiting completion: <b>{{deletion.pending}}</b>.</p>
-{% else %}<p>Set the dashboard HTTPS address before registering the endpoint.</p>{% endif %}
-</section>
+{% extends 'msj_base.html' %}
+{% block content %}
+<div class="page-heading compact">
+<div><span class="eyebrow">MSJ ALERTS</span><h1>Connections</h1><p class="muted">Your accounts, buying settings and checking speed.</p></div><a class="secondary" href="/">Back to searches</a>
+</div>
+<nav class="connection-jump" aria-label="Connection sections"><a href="#vinted-buying">Vinted &amp; buying</a><a href="#ebay-connection">eBay</a><a href="#monitoring">Speed &amp; cost</a><a href="#connection-tools">Tests &amp; backups</a></nav>
+<div class="connection-overview">
+<div><span>Vinted account</span><b>{{buyer.username if buyer.connected else 'Connect an account'}}</b><small>Autobuy {{'on' if buyer.enabled else 'off'}}</small></div>
+<div><span>Buyer proxy</span><b>{{'Saved' if buyer.network.proxy else 'Needs setup'}}</b><small>CapSolver {{'enabled' if buyer.network.enabled else 'off'}}</small></div>
+<div><span>eBay connection</span><b>{{'Needs setup' if info.missing else 'Details saved'}}</b><small>{{info.active}} / {{info.max_live}} live searches · verify access below</small></div>
+<div><span>Vinted speed</span><b>{{resources.mode}}</b><small>~{{resources.cycle}}s per search · <a href="#monitoring">Change mode</a></small></div>
+</div>
+{% include 'msj_buyer.html' %}
+<section class="form-card guide-section" id="ebay-connection">
+<h2>eBay connection</h2><p class="muted">{{info.active}} live searches · estimated cycle {{info.interval}} seconds, plus request time.</p>
+<details class="setup-details" {{'open' if info.missing}}><summary>Edit connection &amp; check access</summary>
 <div class="connection-grid"><section class="form-card">
 <h2>eBay connection</h2><p class="muted">{% if info.missing %}Still needed: {{info.missing|join(', ')}}.{% else %}Details saved. Use the checks below to verify live access.{% endif %}</p>
 <form method="post" autocomplete="off"><input type="hidden" name="csrf" value="{{csrf}}">
@@ -54,14 +59,42 @@
 {% if timing.fallback_timestamps %}<p>{{timing.fallback_timestamps}} records use eBay's fallback creation timestamp; these may not represent the original listing time.</p>{% endif %}
 <small>Latest {{timing.sample_size}} records, up to 1,000 from the past 24 hours. These measurements end at Telegram server acceptance; phone receipt is not exposed by the Bot API. Discovery time includes eBay indexing, polling and network delay. A polling target does not guarantee an alert deadline.</small>
 </div>
-<div class="guide-section"><h2>Vinted</h2><p>Your existing Vinted bot and its connection details stay in use.</p></div></aside></div>
-<section class="form-card guide-section"><h2>Your 10 live eBay searches</h2>
+</aside></div>
+</details>
+<details class="setup-details"><summary>Choose your live eBay searches</summary>
+<h2>Your 10 live eBay searches</h2>
 <p>{{info.active}} / {{info.max_live}} active. Save as many eBay searches as you like; select up to 10 here to run. The others stay on standby and use no search calls. Swapping searches keeps the same shared daily budget.</p>
 <form method="post"><input type="hidden" name="csrf" value="{{csrf}}">
 {% for search in info.selection %}<label class="checkbox"><input type="checkbox" name="live_search" value="{{search.id}}" {{'checked' if search.selected}}> #{{search.id}} · {{search.query_name or 'Untitled'}}{{' (paused)' if search.paused}}</label>{% else %}<p>No eBay searches saved yet. In My searches, edit a search and choose Both or eBay only, then add its eBay keywords and filters.</p>{% endfor %}
 <p><small>A newly selected search records its first results silently, then alerts on new listings. Paused searches do not make requests. Selection changes apply within a few seconds; a request already underway may finish.</small></p>
-<button class="primary" name="action" value="live_searches">Save live eBay searches</button></form></section>
-<section class="form-card guide-section"><h2>Vinted checking speed</h2>
-<p>{{resources.active}} active searches · {{resources.checks}} underlying checks · {% if resources.rate == 0 %}<b>Fast mode: {{resources.cycle}}-second target per search.</b> Checks run concurrently, with no cost-saving throttle. Actual timing depends on response time and any Vinted cooldown.{% else %}Estimated cycle {{resources.cycle}} seconds plus request time. The shared workload ceiling trades speed for lower usage.{% endif %}</p>
-<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><label for="request_rate">Vinted mode</label><select id="request_rate" name="request_rate"><option value="0" {{'selected' if resources.rate==0}}>Fast · approximately 1 second per search</option><option value="10" {{'selected' if resources.rate==10}}>Lower usage · 10 total checks per second</option><option value="5" {{'selected' if resources.rate==5}}>Lowest usage · 5 total checks per second</option>{% if resources.rate not in [0,5,10] %}<option value="{{resources.rate}}" selected>Custom · {{resources.rate}} total checks per second</option>{% endif %}</select><small>Fast mode prioritises alert speed and uses more Railway resources as you add searches. Lower-usage modes spread checks across a longer cycle. Your spending email alert remains in place.</small><button class="primary" name="action" value="vinted_rate">Save Vinted mode</button></form></section>
-<section class="form-card guide-section"><h2>Telegram pictures &amp; buttons</h2><p>Check the actual photo upload and both picture buttons using one labelled test alert. Examples stay separate from listing photos, with your notes as readable text.</p>{% for control in photo_controls %}<div class="guide-section"><h3>{{control.name}}</h3><p>Last confirmed picture switch: {{control.last_success}}{% if control.error %} · {{control.error}}{% endif %}</p><form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="test_{{control.platform}}_photos">Test {{control.name}} photo &amp; buttons</button></form></div>{% endfor %}<small>iPhone previews need a photo in the first message. Telegram does not report what your phone displays; check the new test notification on your lock screen.</small></section>{% include 'msj_buyer.html' %}{% endblock %}
+<button class="primary" name="action" value="live_searches">Save live eBay searches</button></form>
+</details>
+<details class="setup-details"><summary>eBay developer account setup</summary>
+<h2>Activate your eBay production keys</h2>
+<p>If eBay shows “Non Compliant” or “Your keyset is currently disabled”, use <b>Alerts &amp; Notifications → Marketplace Account Deletion</b>. Leave the exemption switch off. Save your notification email there, then copy these two values and save the endpoint.</p>
+{% if deletion.endpoint %}
+<label for="deletion_endpoint">Marketplace account deletion notification endpoint</label><input id="deletion_endpoint" readonly value="{{deletion.endpoint}}">
+<label for="deletion_token">Verification token</label><input id="deletion_token" readonly value="{{deletion.token}}">
+<p>After saving in eBay, select <b>Send Test Notification</b>, then <b>Check eBay access</b> below. No user sign-in token is needed for these searches.</p>
+<p>Verified closure notifications received: <b>{{deletion.received}}</b>. Telegram removals awaiting completion: <b>{{deletion.pending}}</b>.</p>
+{% else %}<p>Set the dashboard HTTPS address before registering the endpoint.</p>{% endif %}
+
+</details>
+</section>
+<section class="form-card guide-section" id="monitoring">
+<h2>Speed &amp; cost</h2><p>{{resources.active}} active Vinted searches · {{resources.checks}} underlying checks.</p>
+<p>Current mode: <b>{{resources.mode}}</b> · approximately <b>{{resources.cycle}} seconds per search</b>, plus request time. Actual timing depends on Vinted responses and cooldowns.</p>
+<form method="post"><input type="hidden" name="csrf" value="{{csrf}}">
+<label for="request_rate">Vinted checking speed</label><select id="request_rate" name="request_rate">
+{% for option in resources.options %}<option value="{{option.rate}}" {{'selected' if resources.rate==option.rate}}>{{option.name}} · ~{{option.cycle}}s per search{{' · lower usage' if option.rate==10 else ' · lowest usage' if option.rate==5 else ' · quickest checks'}}</option>{% endfor %}
+{% if resources.rate not in [0,5,10] %}<option value="{{resources.rate}}" selected>Custom · {{resources.rate}} total checks per second</option>{% endif %}
+</select>
+<small>Fast checks each search as quickly as the service allows. Balanced and Budget make fewer requests and reduce usage, with a longer wait between checks. Adding keywords adds underlying checks. These are checking intervals, not promised notification times or monthly costs.</small>
+<button class="primary" name="action" value="vinted_rate">Save checking speed</button>
+</form>
+</section>
+<details class="form-card guide-section setup-details" id="connection-tools"><summary>Tests &amp; backups</summary>
+<h2>Telegram pictures &amp; buttons</h2><p>Check the actual photo upload and both picture buttons using one labelled test alert. Examples stay separate from listing photos, with your notes as readable text.</p>{% for control in photo_controls %}<div class="guide-section"><h3>{{control.name}}</h3><p>Last confirmed picture switch: {{control.last_success}}{% if control.error %} · {{control.error}}{% endif %}</p><form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="test_{{control.platform}}_photos">Test {{control.name}} photo &amp; buttons</button></form></div>{% endfor %}<small>iPhone previews need a photo in the first message. Telegram does not report what your phone displays; check the new test notification on your lock screen.</small>
+{% if supabase_enabled %}<p><a href="{{url_for('supabase.backup')}}">Manage encrypted Supabase backups →</a></p>{% endif %}
+</details>
+{% endblock %}

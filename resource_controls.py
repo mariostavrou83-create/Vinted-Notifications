@@ -43,9 +43,19 @@ def summary():
     checks = len(vinted_keywords.expand(searches))
     rate = request_rate()
     target = max(1, float(db.get_parameter("query_refresh_delay") or 15))
+    options = [
+        {
+            "rate": value,
+            "name": name,
+            "cycle": round(max(1 if value == 0 else target, checks / value if value else 0), 1),
+        }
+        for value, name in ((0, "Fast"), (10, "Balanced"), (5, "Budget"))
+    ]
     return {
         "active": active,
         "checks": checks,
         "rate": rate,
         "cycle": round(max(target, checks / rate if rate else 0), 1),
+        "mode": {0: "Fast", 10: "Balanced", 5: "Budget"}.get(rate, "Custom"),
+        "options": options,
     }

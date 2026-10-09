@@ -8,6 +8,7 @@ from pathlib import Path
 from queue import Queue
 from time import monotonic, time
 from types import SimpleNamespace
+from contextlib import nullcontext
 from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import parse_qs, urlparse
 
@@ -47,6 +48,7 @@ class AlertTests(unittest.TestCase):
             self.watermark = value
 
         self.db = SimpleNamespace(
+            connection_scope=nullcontext,
             get_parameter=lambda key: {
                 "banwords": "",
                 "message_template": "{title} {price} {brand} {image}",
@@ -82,6 +84,7 @@ class AlertTests(unittest.TestCase):
             "core.py",
             {
                 "clear_item_queue",
+                "_clear_item_queue",
                 "format_alert",
                 "contains_banwords",
                 "get_formatted_query_list",

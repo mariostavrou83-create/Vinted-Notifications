@@ -234,6 +234,27 @@ def active_queries():
             AND COALESCE(s.vinted_enabled,1)=1""")]
 
 
+def processing_states():
+    """Committed per-search frontiers for reusing unchanged catalogue pages.
+
+    A frontier is written only after every item transaction succeeds. Unprimed
+    searches and keyword alternatives must still reach the item extractor.
+    """
+    with closing(connection()) as conn:
+        ordinary = conn.execute("""SELECT q.id AS scheduler_id, q.query AS url,
+            COALESCE(d.revision,0) AS revision,
+            (q.last_item IS NOT NULL AND COALESCE(d.rebaseline,0)=0
+                AND f.query_id IS NOT NULL) AS primed,
+            COALESCE(f.max_item_id,0) AS max_item_id
+            FROM queries q LEFT JOIN search_dashboard d ON d.query_id=q.id
+            LEFT JOIN listing_frontiers f ON f.query_id=q.id""").fetchall()
+        variants = conn.execute("""SELECT -v.id AS scheduler_id, v.url,
+            COALESCE(d.revision,0) AS revision, v.primed, v.max_item_id
+            FROM vinted_keyword_variants v
+            LEFT JOIN search_dashboard d ON d.query_id=v.query_id""").fetchall()
+    return {row["scheduler_id"]: dict(row) for row in (*ordinary, *variants)}
+
+
 def finish_baseline(query_id, url):
     with closing(connection()) as conn, conn:
         conn.execute(

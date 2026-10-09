@@ -302,6 +302,15 @@ def process_items(queue):
 
 
 def clear_item_queue(items_queue, new_items_queue):
+    # Idle checks need no database connection. A successful response shares one
+    # short-lived connection across its reads and independently committed writes.
+    if items_queue.empty():
+        return
+    with db.connection_scope():
+        return _clear_item_queue(items_queue, new_items_queue)
+
+
+def _clear_item_queue(items_queue, new_items_queue):
     """
     Process items from the items_queue.
     This function is scheduled to run frequently.
@@ -406,7 +415,8 @@ def clear_item_queue(items_queue, new_items_queue):
                 continue
             # In case of multiple queries, we need to check if the item is already in the db
             if str(item.id) in seen:
-                watermark = max(watermark or 0, item.raw_timestamp)
+                if item.has_real_timestamp:
+                    watermark = max(watermark or 0, item.raw_timestamp)
                 continue
             # If there's an allowlist and
             # If the user's country is not in the allowlist, we just update the timestamp

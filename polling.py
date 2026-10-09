@@ -102,6 +102,10 @@ class Poller:
         self.shadow = None
         self.request_rate = resource_controls.DEFAULT_REQUESTS_PER_SECOND
         self.next_dispatch = 0.0
+        self.processing_states = {}
+        self.processed_pages = {}
+        self.reused_pages = 0
+        self.health_written = {}
         if os.environ.get("MSJ_DISCOVERY_SHADOW") == "1":
             from discovery_shadow import DiscoveryShadow
 
@@ -115,6 +119,12 @@ class Poller:
         now = time.monotonic()
         if now >= self.config_checked:
             self.queries = vinted_keywords.expand(search_settings.active_queries())
+            self.processing_states = search_settings.processing_states()
+            self.processed_pages = {
+                key: value
+                for key, value in self.processed_pages.items()
+                if key in self.queries
+            }
             self.target = max(1.0, float(db.get_parameter("query_refresh_delay") or 15))
             self.count = int(db.get_parameter("items_per_query") or 96)
             self.request_rate = resource_controls.request_rate()
@@ -162,6 +172,7 @@ class Poller:
             search_url = getattr(future, "search_url", scheduled[1])
             variant_id = scheduled[4] if len(scheduled) > 4 else None
             error = ""
+            was_failing = self.failures.get(query_id, 0) > 0
             try:
                 items = future.result()
                 observed = time.time()
@@ -182,14 +193,15 @@ class Poller:
                         )
                         self.shadow.close()
                         self.shadow = None
-                self.queue.put(
-                    (
-                        [item for item in items if item.is_new_item()],
-                        parent_id,
-                        search_url,
-                        variant_id,
+                if self.process_page(query_id, search_url, items, now):
+                    self.queue.put(
+                        (
+                            [item for item in items if item.is_new_item()],
+                            parent_id,
+                            search_url,
+                            variant_id,
+                        )
                     )
-                )
                 self.failures[query_id] = 0
                 self.successes += 1
             except Exception as exc:  # noqa: BLE001
@@ -203,11 +215,17 @@ class Poller:
             if actual_interval is not None:
                 self.intervals.append(actual_interval)
             self.durations.append(duration)
-            search_settings.record_health(
-                parent_id, wall_start, duration, actual_interval, error
-            )
-            if variant_id:
-                vinted_keywords.health(variant_id, wall_start, actual_interval, error)
+            # Keep success status fresh without committing it for every poll.
+            # Failures and recovery are persisted immediately; speed metrics in
+            # the poller log still include every request.
+            if error or was_failing or now - self.health_written.get(query_id, float("-inf")) >= 5:
+                with db.connection_scope():
+                    search_settings.record_health(
+                        parent_id, wall_start, duration, actual_interval, error
+                    )
+                    if variant_id:
+                        vinted_keywords.health(variant_id, wall_start, actual_interval, error)
+                self.health_written[query_id] = now
             delay = (
                 target
                 if not error
@@ -223,6 +241,7 @@ class Poller:
                 self.next_due.pop(query_id, None)
                 self.previous_start.pop(query_id, None)
                 self.failures.pop(query_id, None)
+                self.health_written.pop(query_id, None)
         for index, query_id in enumerate(queries):
             self.next_due.setdefault(
                 query_id, now + index * target / max(1, len(queries))
@@ -264,7 +283,7 @@ class Poller:
                 )
 
             logger.info(
-                "Poller: %s searches; target %.1fs; %s successes/%s errors in last %.1fs; cooldown %.1fs; interval median %.3fs p95 %.3fs; fetch p95 %.3fs",
+                "Poller: %s searches; target %.1fs; %s successes/%s errors in last %.1fs; cooldown %.1fs; interval median %.3fs p95 %.3fs; fetch p95 %.3fs; %s unchanged pages reused",
                 len(queries),
                 target,
                 self.successes,
@@ -274,11 +293,38 @@ class Poller:
                 percentile(intervals, 0.5),
                 percentile(intervals, 0.95),
                 percentile(durations, 0.95),
+                self.reused_pages,
             )
             self.successes = self.errors = 0
+            self.reused_pages = 0
             self.intervals.clear()
             self.durations.clear()
             self.last_report = now
+
+    def process_page(self, query_id, url, items, now):
+        """Avoid re-sending known pages through IPC and SQLite on every poll.
+
+        Network checks stay at the owner's selected speed. New IDs, changed
+        searches and uncommitted batches always pass through. Ten-second
+        heartbeats retain outage detection and shared freshness checkpoints.
+        """
+        state = self.processing_states.get(query_id)
+        ids = tuple(str(item.id) for item in items)
+        if not state or state["url"] != url or any(not i.isdigit() for i in ids):
+            return True
+        signature = (url, state["revision"], ids)
+        previous = self.processed_pages.get(query_id)
+        if (
+            previous
+            and previous[0] == signature
+            and state["primed"]
+            and max((int(i) for i in ids), default=0) <= state["max_item_id"]
+            and 0 <= now - previous[1] < 10
+        ):
+            self.reused_pages += 1
+            return False
+        self.processed_pages[query_id] = (signature, now)
+        return True
 
     def run(self):
         try:
