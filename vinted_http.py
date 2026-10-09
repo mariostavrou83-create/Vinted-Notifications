@@ -199,6 +199,15 @@ class BrowserSession(requests.Session):
         proxy = select_proxy(request.url, proxies)
         headers = CaseInsensitiveDict(request.headers)
         headers.pop("Cookie", None)
+        if (
+            request.method == "POST"
+            and request.body is None
+            and "Content-Type" not in headers
+        ):
+            # Requests removed this header for a bodyless POST. Preserve that
+            # omission on the wire: curl's None sentinel suppresses libcurl's
+            # automatic application/x-www-form-urlencoded default.
+            headers["Content-Type"] = None
         # A caller override must not make the request differ from the identity
         # supplied to the account's challenge solver or persisted connection.
         headers.update(BROWSER_CLIENT_HINTS)

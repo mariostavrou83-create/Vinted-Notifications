@@ -177,6 +177,26 @@ class BrowserSessionTests(unittest.TestCase):
             self.session.cookies.get("access_token_web"), "old-private-token"
         )
 
+    def test_bodyless_native_post_keeps_libcurl_content_type_default_off(self):
+        self.session.headers["Content-Type"] = "application/json"
+        response = self.session.post(
+            BASE + "/web/api/auth/refresh",
+            headers={"Content-Type": None},
+            allow_redirects=False,
+        )
+        self.assertIsNone(response.request.body)
+        self.assertNotIn("Content-Type", response.request.headers)
+        self.assertIsNone(self.sdk.request.call_args.kwargs["content"])
+        self.assertIsNone(self.sdk.request.call_args.kwargs["headers"]["Content-Type"])
+        self.session.post(
+            BASE + "/web/api/auth/refresh", json={}, allow_redirects=False
+        )
+        self.assertEqual(self.sdk.request.call_args.kwargs["content"], b"{}")
+        self.assertEqual(
+            self.sdk.request.call_args.kwargs["headers"]["Content-Type"],
+            "application/json",
+        )
+
     def test_cookie_deletion_applies_to_session_without_inventing_returned_token(self):
         self.session.cookies.set("access_token_web", "old", domain="www.vinted.co.uk")
         self.sdk.request.return_value = sdk_response(

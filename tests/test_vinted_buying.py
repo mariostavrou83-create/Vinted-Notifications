@@ -769,7 +769,8 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(outcome["reason"], "renewal_failed")
         self.assertNotIn("Reconnect", outcome["message"])
         self.assertIn("needs checking", outcome["message"])
-        self.assertEqual(wire.call_args_list[-1].kwargs["json"], {})
+        self.assertIsNone(wire.call_args_list[-1].kwargs["json"])
+        self.assertIsNone(wire.call_args_list[-1].kwargs["headers"]["Content-Type"])
         self.assertEqual(wire.call_count, 3)
         self.assertTrue(
             all("checkout" not in call.args[1] for call in wire.call_args_list)
@@ -2477,7 +2478,10 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                         ("GET", buyer.BASE + "/api/v2/users/current"),
                     ],
                 )
-                self.assertEqual(request.call_args_list[2].kwargs["json"], {})
+                self.assertIsNone(request.call_args_list[2].kwargs["json"])
+                self.assertIsNone(
+                    request.call_args_list[2].kwargs["headers"]["Content-Type"]
+                )
                 self.assertTrue(
                     all(not c.kwargs["allow_redirects"] for c in request.call_args_list)
                 )
@@ -2570,7 +2574,10 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                         ("GET", buyer.BASE + "/api/v2/users/current"),
                     ],
                 )
-                self.assertEqual(request.call_args_list[2].kwargs["json"], {})
+                self.assertIsNone(request.call_args_list[2].kwargs["json"])
+                self.assertIsNone(
+                    request.call_args_list[2].kwargs["headers"]["Content-Type"]
+                )
                 self.assertTrue(
                     all(
                         not call.kwargs["allow_redirects"]
@@ -3198,7 +3205,8 @@ class NativeCookieTransportTests(SessionRotationFixture, unittest.TestCase):
                 self.assertNotIn(rejected_refresh, cookie)
                 self.assertNotIn(rejected_access, cookie)
                 self.assertNotIn("public-anonymous-id", cookie)
-                self.assertEqual(prepared.body, b"{}")
+                self.assertIsNone(prepared.body)
+                self.assertNotIn("Content-Type", prepared.headers)
                 self.assertNotIn("Authorization", prepared.headers)
                 return self.transport_response(
                     prepared,
@@ -3338,7 +3346,8 @@ class NativeCookieTransportTests(SessionRotationFixture, unittest.TestCase):
                 return self.transport_response(prepared, {"user": {"id": 99}})
             self.assertEqual(path, "/web/api/auth/refresh")
             self.assertEqual(prepared.method, "POST")
-            self.assertEqual(prepared.body, b"{}")
+            self.assertIsNone(prepared.body)
+            self.assertNotIn("Content-Type", prepared.headers)
             self.assertEqual(cookie.count("refresh_token_web="), 1)
             self.assertIn("refresh_token_web=" + refresh, cookie)
             self.assertNotIn("Authorization", prepared.headers)

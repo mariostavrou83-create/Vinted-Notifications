@@ -975,10 +975,6 @@ class Client:
             public.session.close()
 
     def request(self, method, path, body=None, *, allow_challenge=False, params=None):
-        # Send valid JSON when this native web renewal declares application/json.
-        # An empty byte body is not a JSON document.
-        if method == "POST" and path == "/web/api/auth/refresh" and body is None:
-            body = {}
         pickup_gateway = bool(
             re.fullmatch(
                 r"/shipping-estimation/external/shipping_orders/[0-9]{1,24}/nearby_pickup_points",
@@ -1012,6 +1008,11 @@ class Client:
             }
         elif params is not None or not path.startswith(("/api/v2/", "/web/api/auth/")):
             raise BuyerError("Unsupported Vinted request.")
+        elif method == "POST" and path == "/web/api/auth/refresh" and body is None:
+            # Vinted's browser refreshSessionTokens() posts without data.
+            # Axios removes Content-Type for this bodyless renewal. Preserve
+            # explicitly supplied JSON bodies for other supported callers.
+            extra = {"headers": {"Content-Type": None}}
         renewal = path == "/web/api/auth/refresh" or (
             path == "/web/api/auth/oauth"
             and isinstance(body, dict)
@@ -1045,19 +1046,23 @@ class Client:
         previous_refresh = self.session.cookies.get_dict().get("refresh_token_web")
         if renewal:
             prepared = self.session.prepare_request(
-                requests.Request(method, BASE + path, json=body)
+                requests.Request(
+                    method, BASE + path, json=body, headers=extra.get("headers")
+                )
             )
             cookie = prepared.headers.get("Cookie", "")
             names = {part.split("=", 1)[0].strip() for part in cookie.split(";")}
             logger.info(
                 "Vinted web renewal request: csrf=%s refresh_cookie=%s "
-                "access_cookie=%s anon_header=%s bearer=%s json_object=%s method=%s",
+                "access_cookie=%s anon_header=%s bearer=%s json_object=%s bodyless=%s content_type=%s method=%s",
                 bool(prepared.headers.get("X-CSRF-Token")),
                 "refresh_token_web" in names,
                 "access_token_web" in names,
                 bool(prepared.headers.get("X-Anon-Id")),
                 bool(prepared.headers.get("Authorization")),
                 isinstance(body, dict),
+                prepared.body is None,
+                bool(prepared.headers.get("Content-Type")),
                 "oauth" if path == "/web/api/auth/oauth" else "cookie",
             )
         response, data = None, None
