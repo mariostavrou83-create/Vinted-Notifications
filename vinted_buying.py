@@ -1545,9 +1545,14 @@ def feedback_buttons(row, feedback=None):
 
 async def show_feedback(bot, query, row, details, card, outcome):
     """Keep the result on this same alert; callback popups are only transient."""
+    await show_alert_feedback(bot, query.message, outcome)
+
+
+async def show_alert_feedback(bot, message, outcome):
+    """Share durable alert feedback between buttons and notification replies."""
     import photo_cards
 
-    saved = photo_cards.load("vinted", query.message.message_id)
+    saved = photo_cards.load("vinted", message.message_id)
     if not saved:
         return
     row, details, card = saved
@@ -1560,7 +1565,7 @@ async def show_feedback(bot, query, row, details, card, outcome):
         with closing(connection()) as conn, conn:
             conn.execute(
                 "UPDATE telegram_photo_cards SET details=? WHERE platform='vinted' AND message_id=? AND item_id=?",
-                (json.dumps(details), query.message.message_id, row["item_id"]),
+                (json.dumps(details), message.message_id, row["item_id"]),
             )
         # Picture and notes controls re-use these details, preserving buy status.
         view = card.get("view", "listing")
@@ -1573,8 +1578,8 @@ async def show_feedback(bot, query, row, details, card, outcome):
         elif note_page is not None:
             note_page, view = None, "listing"
         kwargs = dict(
-            chat_id=str(query.message.chat.id),
-            message_id=query.message.message_id,
+            chat_id=str(message.chat.id),
+            message_id=message.message_id,
             parse_mode="HTML",
             reply_markup=photo_cards.markup(
                 row, details, view=view, note_page=note_page
@@ -1595,7 +1600,7 @@ async def show_feedback(bot, query, row, details, card, outcome):
         except BadRequest as exc:
             if "message is not modified" not in str(exc).lower():
                 raise
-        photo_cards.after_edit("vinted", query.message.message_id, view=view)
+        photo_cards.after_edit("vinted", message.message_id, view=view)
         photo_cards.control_health("vinted", "success")
     except TelegramError as exc:
         photo_cards.control_health(

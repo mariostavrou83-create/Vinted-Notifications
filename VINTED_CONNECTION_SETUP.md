@@ -65,6 +65,27 @@ browser UA for that connection. A failed or unsupported check stops the request.
 Payment is submitted once; a challenge or uncertain response never causes the
 payment POST to be sent again automatically.
 
+## BUY from a Telegram notification
+
+Hold a listing notification, choose **Reply**, type `BUY`, and send it. The
+reply must reference this bot's original Vinted alert in the owner's private
+chat. Missing reply references, forwarded messages and unrelated messages never
+select a different or newer listing. Telegram controls the native **Reply** label;
+this shortcut does not rename it.
+
+`BUY` is the purchase instruction, using the same flow as the alert's Autobuy
+button. When normal purchasing is enabled, it requires no second confirmation.
+The buyer checks the live item price, delivery/payment choices and checkout total
+against the saved search limits before submitting payment once. An uncertain or
+previously submitted payment is not replayed. The outcome appears on the original
+alert and as a reply notification.
+
+Installing the shortcut does not enable Autobuy or change the saved buyer
+session. While the proxy/checkout tests are pending, purchases stay off and the
+existing temporary one-item test controls remain in force. Native iPhone replies
+still need a phone test: if Telegram omits the original alert's reply reference,
+the bot asks for a reply to that alert rather than guessing an item.
+
 ## Supabase
 
 Follow [SUPABASE_SETUP.md](SUPABASE_SETUP.md) to create the free project and apply

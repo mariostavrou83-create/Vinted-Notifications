@@ -3,9 +3,9 @@
 import asyncio
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-from telegram import Bot
+from telegram import Bot, Message, Update
 from telegram.ext import Application, ApplicationBuilder
 from telegram.request import BaseRequest
 from test_search_controls import DatabaseFixture
@@ -153,6 +153,43 @@ class TelegramLifecycleTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(maintenance.cancelled())
         self.assertTrue(worker.photo_cancelled)
         self.assertEqual(worker.close_calls, 1)
+
+    async def test_real_ptb_routes_plain_buy_replies_to_buyer_controls(self):
+        import photo_cards
+        import vinted_buyer as buyer
+        import vinted_buying as buying
+
+        update = Update.de_json(
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 900,
+                    "date": 1,
+                    "chat": {"id": 123, "type": "private"},
+                    "from": {"id": 123, "is_bot": False, "first_name": "Owner"},
+                    "text": "  bUy  ",
+                    "reply_to_message": {
+                        "message_id": 777,
+                        "date": 1,
+                        "chat": {"id": 123, "type": "private"},
+                        "from": {"id": 123456, "is_bot": True, "first_name": "Offline bot"},
+                        "text": "Original Vinted alert",
+                    },
+                },
+            },
+            self.app.bot,
+        )
+        with patch.object(
+            photo_cards, "recover", return_value=({"item_id": "123"}, {}, {})
+        ) as recover, patch.object(
+            buying, "ready", side_effect=buyer.BuyerError("Autobuy is off.", reason="disabled")
+        ), patch.object(buying, "buy") as buy, patch.object(
+            buying, "show_alert_feedback", new_callable=AsyncMock
+        ), patch.object(Message, "reply_text", new_callable=AsyncMock) as status:
+            await self.app.process_update(update)
+        recover.assert_called_once_with("vinted", update.message.reply_to_message)
+        buy.assert_not_called()
+        self.assertIn("Autobuy is off", status.call_args.args[0])
 
 
 if __name__ == "__main__":

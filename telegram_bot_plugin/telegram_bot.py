@@ -69,10 +69,22 @@ class LeRobot:
                 CallbackQueryHandler(buy_callback, pattern=r"^buy:(click|status)$")
             )
 
-            # Telegram is notifications-only; old editing commands no longer mutate data.
+            # BUY replies use the same private alert and purchase controls.
             from telegram.ext import MessageHandler, filters
+            from vinted_buy_reply import BUY_REPLY, reply_buy
 
+            self.app.add_handler(
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & filters.Regex(BUY_REPLY),
+                    reply_buy,
+                )
+            )
+
+            # Old editing commands no longer mutate search data.
             self.app.add_handler(MessageHandler(filters.COMMAND, self.open_dashboard))
+            logger.info(
+                "Telegram BUY reply shortcut ready; exact alert and saved purchase limits required"
+            )
 
             # Telegram remembers allowed_updates across deployments. Explicitly
             # subscribe to callbacks, including when the previous bot was commands-only.
