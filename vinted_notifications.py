@@ -358,6 +358,7 @@ if __name__ == "__main__":
         os.environ.get("MSJ_TELEGRAM_REVIEW_ON_START")
         or os.environ.get("MSJ_TELEGRAM_ITEM_APPROVAL_ON_START")
         or os.environ.get("MSJ_TELEGRAM_RECONCILE_ON_START")
+        or os.environ.get("MSJ_TELEGRAM_ENABLE_ON_START")
     ):
         from vinted_telegram_review import run_once as run_telegram_review_once
 

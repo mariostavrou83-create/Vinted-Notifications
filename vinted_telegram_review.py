@@ -1,4 +1,4 @@
-"""Owner-selected checkout review and one-item permission for a Telegram tap."""
+"""Owner-controlled Telegram buying and optional one-item checkout review."""
 
 import hashlib
 import json
@@ -711,6 +711,9 @@ def approved_token(row):
 
 
 def run_once():
+    enabled = run_enable_once()
+    if enabled is not None:
+        return enabled
     reconciled = run_reconciliation_once()
     if reconciled is not None:
         return reconciled
@@ -759,6 +762,101 @@ def run_once():
             "Vinted Telegram review startup: outcome=unverified stage=reservation"
         )
         return None
+
+
+def enable_buyer():
+    """Enable owner BUY taps after verification; never create or pay a checkout."""
+    result = {
+        "outcome": "unverified",
+        "stage": "configuration",
+        "autobuy_on": False,
+        "explicit_buy_required": True,
+        "checkout_created": False,
+        "payment_submitted": False,
+    }
+    try:
+        with buyer.exclusive(wait_seconds=45):
+            with closing(connection()) as conn, conn:
+                conn.execute("UPDATE vinted_buyer SET enabled=0 WHERE id=1")
+            if restricted():
+                result["stage"] = "review_mode_enabled"
+                return result
+            initial = buyer.settings()
+            if not initial["connected"] or not initial["user_id"]:
+                result["stage"] = "buyer_not_connected"
+                return result
+            signature = network_signature()
+            preferences = buying.choice_preferences(initial)
+            browser_info = buying.saved_browser_info()
+        result["stage"] = "connection_check"
+        checked = vinted_network_check.check_connection()
+        if checked.get("outcome") != "verified":
+            return result
+        with buyer.exclusive(wait_seconds=45):
+            current = buyer.settings()
+            if (
+                restricted()
+                or not current["connected"]
+                or current["user_id"] != initial["user_id"]
+                or buying.choice_preferences(current) != preferences
+                or network_signature() != signature
+                or buying.saved_browser_info() != browser_info
+            ):
+                result["stage"] = "settings_changed"
+                return result
+            with closing(connection()) as conn, conn:
+                conn.execute("UPDATE vinted_buyer SET enabled=1 WHERE id=1")
+                enabled = conn.execute(
+                    "SELECT enabled FROM vinted_buyer WHERE id=1"
+                ).fetchone()[0]
+            if enabled != 1:
+                result["stage"] = "enable_unverified"
+                return result
+            result.update(
+                outcome="enabled",
+                stage="complete",
+                autobuy_on=True,
+                same_buyer_account=True,
+                connection_verified=True,
+                delivery_and_payment_preferences_preserved=True,
+            )
+        return result
+    except (buyer.BuyerError, OSError, sqlite3.Error, ValueError, TypeError):
+        return result
+    finally:
+        logger.info(
+            "Vinted Telegram Autobuy activation: %s", json.dumps(result, sort_keys=True)
+        )
+
+
+def run_enable_once():
+    value = os.environ.get("MSJ_TELEGRAM_ENABLE_ON_START", "")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", value) or value.lower() in (
+        "off",
+        "false",
+        "0",
+    ):
+        return None
+    try:
+        with closing(connection()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            previous = conn.execute(
+                "SELECT value FROM parameters WHERE key='telegram_enabled_release'"
+            ).fetchone()
+            if previous and previous[0] == value:
+                return None
+            # Consume before verification. A restart must never override a
+            # later owner disable or repeat this explicit activation request.
+            conn.execute(
+                "INSERT OR REPLACE INTO parameters(key,value) VALUES ('telegram_enabled_release',?)",
+                (value,),
+            )
+        return enable_buyer()
+    except (OSError, sqlite3.Error):
+        logger.info(
+            "Vinted Telegram Autobuy startup: outcome=unverified stage=reservation"
+        )
+        return {"outcome": "unverified", "stage": "reservation", "autobuy_on": False}
 
 
 def run_reconciliation_once():

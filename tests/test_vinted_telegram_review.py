@@ -38,6 +38,7 @@ class ReviewTests(DatabaseFixture, unittest.TestCase):
                     "MSJ_TELEGRAM_REVIEW_ON_START": "",
                     "MSJ_TELEGRAM_ITEM_APPROVAL_ON_START": "",
                     "MSJ_TELEGRAM_RECONCILE_ON_START": "",
+                    "MSJ_TELEGRAM_ENABLE_ON_START": "",
                 },
             )
         )
@@ -617,6 +618,180 @@ class ReviewTests(DatabaseFixture, unittest.TestCase):
             self.assertEqual(review.run_once()["outcome"], "approved")
             self.assertIsNone(review.run_once())
         self.assertEqual(self.posts("/payment"), [])
+
+    def test_enable_preserves_saved_session_searches_and_previous_attempts(self):
+        review.save_review({"item_id": "987", "approved": False})
+        buying.claim({"item_id": "987"})
+        buying.record("987", "unknown", "Previous payment is unconfirmed.")
+        with closing(search_settings.connection()) as conn:
+            original = dict(conn.execute("SELECT * FROM vinted_buyer").fetchone())
+            limits = [
+                tuple(row)
+                for row in conn.execute("SELECT * FROM vinted_search_budgets")
+            ]
+        with patch.dict(os.environ, {"MSJ_TELEGRAM_REVIEW_ONLY": "0"}):
+            result = review.enable_buyer()
+        self.assertEqual(result["outcome"], "enabled", result)
+        self.assertTrue(result["autobuy_on"])
+        self.assertTrue(result["explicit_buy_required"])
+        self.assertFalse(result["checkout_created"])
+        self.assertFalse(result["payment_submitted"])
+        self.assertTrue(buyer.settings()["enabled"])
+        self.network.assert_called_once()
+        self.client.request.assert_not_called()
+        self.assertEqual(review.load_review(), {"item_id": "987", "approved": False})
+        self.assertEqual(buying.result("987")["state"], "unknown")
+        with closing(search_settings.connection()) as conn:
+            current = dict(conn.execute("SELECT * FROM vinted_buyer").fetchone())
+            self.assertEqual(
+                {key: value for key, value in current.items() if key != "enabled"},
+                {key: value for key, value in original.items() if key != "enabled"},
+            )
+            self.assertEqual(
+                [
+                    tuple(row)
+                    for row in conn.execute("SELECT * FROM vinted_search_budgets")
+                ],
+                limits,
+            )
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM queries").fetchone()[0], 44
+            )
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM alert_outbox").fetchone()[0], 1
+            )
+
+    def test_enable_refuses_review_mode_missing_session_or_browser_settings(self):
+        for change, stage in (
+            (None, "review_mode_enabled"),
+            ("session=NULL", "buyer_not_connected"),
+            ("browser_info='{}'", "configuration"),
+        ):
+            with self.subTest(stage=stage):
+                with closing(search_settings.connection()) as conn, conn:
+                    saved = conn.execute(
+                        "SELECT session,browser_info FROM vinted_buyer"
+                    ).fetchone()
+                    conn.execute("UPDATE vinted_buyer SET enabled=1 WHERE id=1")
+                    if change:
+                        conn.execute(
+                            "UPDATE vinted_buyer SET " + change + " WHERE id=1"
+                        )
+                with patch.dict(
+                    os.environ,
+                    {"MSJ_TELEGRAM_REVIEW_ONLY": "1" if change is None else "0"},
+                ):
+                    result = review.enable_buyer()
+                self.assertEqual(result["outcome"], "unverified")
+                self.assertEqual(result["stage"], stage)
+                self.assertFalse(buyer.settings()["enabled"])
+                with closing(search_settings.connection()) as conn, conn:
+                    conn.execute(
+                        "UPDATE vinted_buyer SET session=?,browser_info=? WHERE id=1",
+                        tuple(saved),
+                    )
+        self.network.assert_not_called()
+        self.client.request.assert_not_called()
+
+    def test_enable_failed_connection_stays_off_and_consumes_startup_request(self):
+        self.network.return_value = {"outcome": "unverified"}
+        with patch.dict(
+            os.environ,
+            {
+                "MSJ_TELEGRAM_REVIEW_ONLY": "0",
+                "MSJ_TELEGRAM_ENABLE_ON_START": "offline-failed-enable",
+            },
+        ):
+            result = review.run_once()
+            self.assertEqual(result["outcome"], "unverified")
+            self.assertEqual(result["stage"], "connection_check")
+            self.network.return_value = {"outcome": "verified"}
+            self.assertIsNone(review.run_once())
+        self.assertFalse(buyer.settings()["enabled"])
+        self.network.assert_called_once()
+        self.client.request.assert_not_called()
+
+    def test_enable_refuses_settings_changed_during_verification(self):
+        for change in (
+            "user_id='101'",
+            "preferred_card_last4='9999'",
+            "browser_info='{}'",
+            "session=NULL",
+            "network=NULL",
+        ):
+            with self.subTest(change=change):
+                with closing(search_settings.connection()) as conn:
+                    initial = conn.execute(
+                        "SELECT user_id,preferred_card_last4,browser_info,session,network FROM vinted_buyer"
+                    ).fetchone()
+
+                def changed():
+                    with closing(search_settings.connection()) as conn, conn:
+                        conn.execute(
+                            "UPDATE vinted_buyer SET " + change + " WHERE id=1"
+                        )
+                    return {"outcome": "verified"}
+
+                self.network.side_effect = changed
+                with patch.dict(os.environ, {"MSJ_TELEGRAM_REVIEW_ONLY": "0"}):
+                    result = review.enable_buyer()
+                self.assertEqual(result["outcome"], "unverified")
+                self.assertFalse(buyer.settings()["enabled"])
+                with closing(search_settings.connection()) as conn, conn:
+                    conn.execute(
+                        "UPDATE vinted_buyer SET user_id=?,preferred_card_last4=?,browser_info=?,session=?,network=? WHERE id=1",
+                        tuple(initial),
+                    )
+        self.client.request.assert_not_called()
+
+    def test_enable_once_does_not_override_later_owner_disable(self):
+        with patch.dict(
+            os.environ,
+            {
+                "MSJ_TELEGRAM_REVIEW_ONLY": "0",
+                "MSJ_TELEGRAM_ENABLE_ON_START": "offline-owner-enable",
+            },
+        ):
+            self.assertEqual(review.run_once()["outcome"], "enabled")
+            with closing(search_settings.connection()) as conn, conn:
+                conn.execute("UPDATE vinted_buyer SET enabled=0 WHERE id=1")
+            self.assertIsNone(review.run_once())
+        self.assertFalse(buyer.settings()["enabled"])
+        self.network.assert_called_once()
+        self.client.request.assert_not_called()
+
+    def test_disabled_or_invalid_enable_flag_has_no_effect(self):
+        for flag in ("", "off", "false", "0", "invalid value"):
+            with self.subTest(flag=flag), patch.dict(
+                os.environ, {"MSJ_TELEGRAM_ENABLE_ON_START": flag}
+            ), patch.object(review, "enable_buyer") as enable:
+                self.assertIsNone(review.run_once())
+                enable.assert_not_called()
+        self.network.assert_not_called()
+
+    def test_general_enable_allows_original_owner_callback_without_item_review(self):
+        import photo_cards
+
+        query = SimpleNamespace(
+            data="buy:click",
+            from_user=SimpleNamespace(id=123),
+            message=SimpleNamespace(chat=SimpleNamespace(id=123), message_id=777),
+        )
+        update = SimpleNamespace(callback_query=query)
+        context = SimpleNamespace(bot=Mock())
+        with patch.dict(os.environ, {"MSJ_TELEGRAM_REVIEW_ONLY": "0"}), patch.object(
+            photo_cards, "recover", return_value=(self.row, {}, {})
+        ), patch.object(photo_cards, "answer", new_callable=AsyncMock), patch.object(
+            buying, "show_feedback", new_callable=AsyncMock
+        ):
+            self.assertEqual(review.enable_buyer()["outcome"], "enabled")
+            self.assertEqual(self.posts("/payment"), [])
+            asyncio.run(buying.callback(update, context))
+            asyncio.run(buying.callback(update, context))
+        self.assertEqual(buying.result("123")["state"], "paid")
+        self.assertEqual(buying.result("123")["total"], 1884)
+        self.assertEqual(len(self.posts("/payment")), 1)
+        self.assertIsNone(review.load_review())
 
 
 class PrivateRoutesTests(DatabaseFixture, unittest.TestCase):
