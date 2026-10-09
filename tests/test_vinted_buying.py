@@ -3672,6 +3672,105 @@ class BuyerDashboardTests(DatabaseFixture, unittest.TestCase):
         response = self.client.get(response.headers["Location"])
         self.assertNotIn(b"private-password", response.data)
 
+    def test_password_block_remains_visible_after_old_session_renewal_fails(self):
+        self.owner()
+        with patch.object(
+            buyer,
+            "start_login",
+            side_effect=buyer.BuyerError(
+                buyer.AUTH_REASONS["security_challenge"],
+                403,
+                reason="security_challenge",
+                stage="sign_in",
+            ),
+        ) as login:
+            response = self.client.post(
+                "/connections",
+                data={
+                    "csrf": "offline-csrf",
+                    "action": "buyer_login",
+                    "buyer_email": "owner@example.test",
+                    "buyer_password": "private-password",
+                },
+            )
+        self.assertEqual(response.status_code, 303)
+        login.assert_called_once()
+        # A separate saved-account check must not overwrite this owner attempt.
+        buyer.record_auth("renewal_failed", "renewal", 400)
+        response = self.client.get("/connections")
+        self.assertIn(b"Last account connection attempt", response.data)
+        self.assertIn(
+            b"This does not establish that your password is wrong", response.data
+        )
+        self.assertIn(b"HTTP 403", response.data)
+        self.assertIn(b"Saved account check", response.data)
+        self.assertIn(b"HTTP 400", response.data)
+        self.assertEqual(
+            buyer.public_connection_result()["reason"], "security_challenge"
+        )
+        self.assertFalse(buyer.settings()["enabled"])
+        with closing(search_settings.connection()) as conn:
+            saved = conn.execute(
+                "SELECT value FROM parameters WHERE key='buyer_connection_result'"
+            ).fetchone()[0]
+            self.assertEqual(
+                set(json.loads(saved)),
+                {"kind", "reason", "stage", "http_status", "checked"},
+            )
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM queries").fetchone()[0], 44
+            )
+        for secret in ("owner@example.test", "private-password"):
+            self.assertNotIn(secret.encode(), response.data)
+            self.assertNotIn(secret, saved)
+
+    def test_successful_password_connection_replaces_previous_block(self):
+        self.owner()
+        buyer.record_connection_result(
+            "buyer_login", "security_challenge", "sign_in", 403
+        )
+        with patch.object(buyer, "Client") as client:
+            client.return_value.request.return_value = {}
+            client.return_value.identity.return_value = ("99", "owner")
+            client.return_value.exported.return_value = {
+                "cookies": {"access_token_web": "offline-private-token"}
+            }
+            response = self.client.post(
+                "/connections",
+                data={
+                    "csrf": "offline-csrf",
+                    "action": "buyer_login",
+                    "buyer_email": "owner@example.test",
+                    "buyer_password": "private-password",
+                },
+            )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(buyer.public_connection_result()["reason"], "connected")
+        self.assertTrue(buyer.settings()["connected"])
+        self.assertFalse(buyer.settings()["enabled"])
+        response = self.client.get("/connections")
+        self.assertNotIn(b"Vinted blocked this sign-in", response.data)
+        self.assertNotIn(b"private-password", response.data)
+        self.assertNotIn(b"offline-private-token", response.data)
+
+    def test_connection_result_whitelists_diagnostics_without_secret_values(self):
+        buyer.record_connection_result(
+            "buyer_login", "private-password", "private-token", True
+        )
+        result = buyer.public_connection_result()
+        self.assertEqual(result["reason"], "not_confirmed")
+        self.assertEqual(result["stage"], "Vinted request")
+        self.assertIsNone(result["http_status"])
+        self.assertNotIn("private", json.dumps(result))
+        with patch.object(buyer, "ZoneInfo", side_effect=buyer.ZoneInfoNotFoundError):
+            self.assertIn("UTC", buyer.public_connection_result()["checked"])
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE parameters SET value=? WHERE key='buyer_connection_result'",
+                ('{"kind":"private-password"}',),
+            )
+        self.assertIsNone(buyer.public_connection_result())
+
     def test_session_link_is_owner_csrf_protected_and_never_repopulates_secrets(self):
         data = {
             "csrf": "offline-csrf",

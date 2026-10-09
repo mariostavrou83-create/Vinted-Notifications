@@ -708,6 +708,20 @@ def create_app(test_config=None):
                     from ebay_connections import test_connection
 
                     flash(test_connection(action), "success")
+                if action in ("buyer_login", "buyer_session", "buyer_verify"):
+                    # These actions return only after account verification or
+                    # an explicit pending code. A concurrent saved-session
+                    # check must not replace this attempt's own result.
+                    needs_code = (
+                        action == "buyer_login"
+                        and vinted_buyer.settings()["pending_code"]
+                    )
+                    vinted_buyer.record_connection_result(
+                        action,
+                        "verification_code" if needs_code else "connected",
+                        "sign_in" if needs_code else "identity",
+                        401 if needs_code else 200,
+                    )
                 return redirect(
                     url_for("connections"),
                     code=(
@@ -723,6 +737,14 @@ def create_app(test_config=None):
                     ),
                 )
             except ValueError as exc:
+                if action in (
+                    "buyer_login",
+                    "buyer_session",
+                    "buyer_verify",
+                ) and isinstance(exc, vinted_buyer.BuyerError):
+                    vinted_buyer.record_connection_result(
+                        action, exc.reason, exc.stage, exc.status
+                    )
                 flash(str(exc), "error")
                 if action.startswith("buyer_"):
                     # Refreshing an error page must never resubmit credentials.
@@ -734,6 +756,7 @@ def create_app(test_config=None):
             deletion=ebay_privacy.setup_values(),
             photo_controls=__import__("photo_cards").health_summary(),
             buyer=vinted_buyer.settings(),
+            buyer_connection_result=vinted_buyer.public_connection_result(),
             buying=__import__("vinted_buying").history(),
             checkout_test=session.get("buyer_test_quote"),
             telegram_review=__import__("vinted_telegram_review").public_review(),

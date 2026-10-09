@@ -10,8 +10,10 @@ import re
 import time
 from contextlib import closing, contextmanager
 from copy import copy
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 from cryptography.fernet import Fernet, InvalidToken
@@ -416,6 +418,80 @@ def record_auth(reason, stage="sign_in", status=None):
     logger.info(
         "Vinted buyer access: stage=%s reason=%s http=%s", stage, reason, status
     )
+
+
+def record_connection_result(kind, reason, stage, status):
+    """Keep owner connection attempts separate from later saved-session checks."""
+    if kind not in ("buyer_login", "buyer_session", "buyer_verify"):
+        return
+    result = {
+        "kind": kind,
+        "reason": reason if reason in AUTH_REASONS else "not_confirmed",
+        "stage": stage if stage in AUTH_STAGES else "request",
+        "http_status": status if type(status) is int and 100 <= status <= 599 else None,
+        "checked": time.time(),
+    }
+    with closing(connection()) as conn, conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO parameters(key,value) VALUES ('buyer_connection_result',?)",
+            (json.dumps(result),),
+        )
+
+
+def public_connection_result():
+    with closing(connection()) as conn:
+        row = conn.execute(
+            "SELECT value FROM parameters WHERE key='buyer_connection_result'"
+        ).fetchone()
+    try:
+        result = json.loads(row[0]) if row else None
+        if not isinstance(result, dict) or result.get("kind") not in (
+            "buyer_login",
+            "buyer_session",
+            "buyer_verify",
+        ):
+            return None
+        try:
+            display_zone = ZoneInfo("Europe/London")
+        except ZoneInfoNotFoundError:
+            display_zone = timezone.utc
+        reason, stage, checked = (
+            result.get("reason"),
+            result.get("stage"),
+            result.get("checked"),
+        )
+        if (
+            reason not in AUTH_REASONS
+            or stage not in AUTH_STAGES
+            or type(checked) not in (int, float)
+            or not 0 <= checked <= 4102444800
+        ):
+            return None
+        return {
+            "kind": {
+                "buyer_login": "Password sign-in",
+                "buyer_session": "Existing session link",
+                "buyer_verify": "Sign-in code",
+            }[result["kind"]],
+            "reason": reason,
+            "message": (
+                "Vinted blocked this sign-in with a security check. This does not establish that your password is wrong. The saved-account check below tests the previous session separately."
+                if result["kind"] == "buyer_login" and reason == "security_challenge"
+                else AUTH_REASONS[reason]
+            ),
+            "stage": AUTH_STAGES[stage],
+            "http_status": (
+                result.get("http_status")
+                if type(result.get("http_status")) is int
+                and 100 <= result["http_status"] <= 599
+                else None
+            ),
+            "checked": datetime.fromtimestamp(checked, display_zone).strftime(
+                "%d %b, %H:%M %Z"
+            ),
+        }
+    except (ValueError, TypeError, OverflowError):
+        return None
 
 
 def migrate(conn):
