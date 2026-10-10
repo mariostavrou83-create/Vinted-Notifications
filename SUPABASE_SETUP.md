@@ -45,7 +45,7 @@ application takes a consistent SQLite snapshot, removes Supabase web sessions
 from the copy, compresses it and encrypts the entire snapshot before uploading.
 Vinted session values are already encrypted locally and never appear as raw
 Supabase columns. The latest backup replaces the previous backup for this owner.
-Uploads are manual; there is no automatic restore. The snapshot limit is 32 MB
+Uploads are manual; there is no automatic restore. The snapshot limit is 32 MiB
 before compression; larger deployments should use the hosting provider's volume
 backup instead. A Supabase free project can pause after inactivity, so keep a
 separate volume backup for recovery.
@@ -57,13 +57,20 @@ and owner-scoped cloud download. The check reads existing private keys only,
 validates the snapshot header, bounds decompression, checks a separate read-only
 temporary SQLite file, and then deletes that file. It reports safe counts,
 backup timestamp and whether saved settings/buyer records match live data;
-it never restores the live database or exports keys. A missing key, corrupt
-snapshot, absent example reference or search count other than 44 is reported
-as unverified. This diagnostic is scoped to the current 44-search deployment.
-The original search check counts every `queries` row, including archives.
-Failures expose that total, the expected 44 and separate saved/archived counts
-when the dashboard table is present. This reports the mismatch without changing
-the check, replacing the saved backup or claiming the remaining checks passed.
+it never restores the live database or exports keys. The dashboard and service
+checks bind the expected non-archived search count to the current live database,
+so increasing the saved list to 250 does not retain an obsolete 44-search gate.
+Counts report all `queries` rows, saved searches and archives separately. One
+read-only live transaction compares saved and archived search definitions,
+preferences, guides, folders, platform selection, keywords, buyer records and
+photo references; routine polling watermarks and health are excluded from the
+configuration comparison. A same-count but stale definition remains unverified.
+Missing keys, corrupt snapshots, absent examples or any remaining live-match
+failure also remain unverified. Verification never replaces the saved backup.
+The standalone offline helper retains its explicit default of 44 saved searches;
+callers can supply an expected count or use `expected_searches=None` with a live
+database. Readable encrypted buyer records alone do not establish a usable,
+current Vinted session.
 
 The application creates `supabase-backup.key` beside the live SQLite database on
 its first backup, with owner-only file permissions. Keep that key **separately**

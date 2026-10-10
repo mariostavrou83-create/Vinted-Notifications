@@ -260,6 +260,16 @@ backups, concurrent WAL edits, corrupt/missing live databases and caller rejecti
 of remaining mismatches. No cloud backup or live key/session was read or changed
 by this code investigation. The existing thirty-two-MiB backup bound remains.
 
+A later read-only aggregate inspection at 08:53:54 UTC on 10 October found one
+stored `sqlite-v1` encrypted backup: 10,216,204 ciphertext bytes (9.74 MiB),
+last saved on 8 October at 18:10:48 UTC. Only counts, byte lengths and the saved
+timestamp were returned. The compressed encrypted file's stored size does not
+establish raw SQLite size, decryptability, matching current settings or current
+purchase/session state. The snapshot predates the recent releases and owner
+tests. Save and verify a fresh backup through the private owner dashboard before
+relying on recovery for the larger workload; this audit did not create or restore
+one. Production raw database/media size remains uninspected.
+
 ## Railway costs and GitHub delivery
 
 Published Railway container rates checked on 10 October 2026:
@@ -290,6 +300,16 @@ tested lock-file review later; the pinned browser transport is not changed.
 
 No extra service, replica, database, deployment schedule or proxy plan was
 created to solve this workload. The protected main service was not changed.
+
+The final code release is commit `66089b00`, deployed successfully as
+`b636b728-ad90-49c0-939c-3b1d399ad158` on 10 October at 08:54:24 UTC.
+Both Python 3.11 and 3.12 GitHub jobs passed for that commit. Runtime startup
+included the Telegram application, twelve Vinted workers and the existing
+session-maintenance worker; subsequent polling reported 44 searches, zero recent
+errors and no cooldown. Startup itself is not a fresh buyer verification.
+No new owner purchase was observed with this release, so a 5–10-second outcome
+remains unproven. This documentation follow-up is saved separately from the
+deployment branch and does not require another live restart.
 
 ## Next decisions requiring evidence
 
