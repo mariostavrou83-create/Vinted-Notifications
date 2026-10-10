@@ -33,6 +33,10 @@ from search_settings import connection
 logger = get_logger(__name__)
 
 
+class ListingCancelled(Exception):
+    """The current owner rules cancelled this exact unsent delivery lease."""
+
+
 def acknowledge_listing(conn, row, message_id, *, now=None):
     """Save a known native send in the same transaction as its photo controls.
 
@@ -150,17 +154,28 @@ def finish(
         if failure is None:
             extra = "" if photo else ",telegram_message_id=?,sent_at=?"
             args = [] if photo else [message_id, now]
+            guard = (
+                "AND status='sent' AND photo_status='pending'"
+                if photo
+                else "AND (status='pending' OR (status='sent' AND telegram_message_id=?))"
+            )
+            guard_args = [] if photo else [message_id]
             conn.execute(
                 f"""UPDATE alert_outbox SET {prefix}status='sent', {prefix}error='',
                 {prefix}attempts={prefix}attempts+1, lease_token=NULL,leased_until=0 {extra}
-                WHERE item_id=? AND lease_token=?""",
-                (*args, row["item_id"], row["lease_token"]),
+                WHERE item_id=? AND lease_token=? {guard}""",
+                (*args, row["item_id"], row["lease_token"], *guard_args),
             )
         else:
+            guard = (
+                "AND status='sent' AND photo_status='pending'"
+                if photo
+                else "AND status='pending'"
+            )
             conn.execute(
                 f"""UPDATE alert_outbox SET {prefix}status=?,{prefix}error=?,
                 {prefix}attempts={prefix}attempts+1,{prefix}next_attempt=?,lease_token=NULL,leased_until=0
-                WHERE item_id=? AND lease_token=?""",
+                WHERE item_id=? AND lease_token=? {guard}""",
                 (
                     "failed" if permanent else "pending",
                     failure,
@@ -202,6 +217,8 @@ class DeliveryWorker:
                 ).fetchone():
                     return True
         photo = row["kind"] == "photo"
+        if not photo and not self.prepare_listing(row):
+            return True
         media = None
         try:
             if photo:
@@ -257,6 +274,10 @@ class DeliveryWorker:
                     max(0, time.time() - row["found_at"]),
                     time.monotonic() - send_started,
                 )
+        except ListingCancelled:
+            # The validator already cancelled the bound pending lease. Calling
+            # finish would risk reviving an old cancelled job after a rule edit.
+            return True
         except RetryAfter as exc:
             delay = (
                 exc.retry_after.total_seconds()
@@ -302,6 +323,7 @@ class DeliveryWorker:
         return True
 
     async def send_listing(self, row):
+        self.require_listing(row)
         extra = {}
         if self.platform == "ebay" or self.disable_previews:
             # The clickable listing must not depend on an external image fetch.
@@ -327,6 +349,19 @@ class DeliveryWorker:
             connect_timeout=5,
             pool_timeout=5,
         )
+
+    def prepare_listing(self, row, details=None):
+        if self.platform == "ebay":
+            from ebay_alerts import prepare_listing
+
+            return prepare_listing(row)
+        from vinted_alerts import prepare_listing
+
+        return prepare_listing(row, details)
+
+    def require_listing(self, row, details=None):
+        if not self.prepare_listing(row, details):
+            raise ListingCancelled
 
     def cache_photo(self, media_id, file_id):
         if self.platform == "vinted":
@@ -449,6 +484,7 @@ class VintedDeliveryWorker(EbayDeliveryWorker):
                 while delay := self.send_slot_delay():
                     await asyncio.sleep(delay)
                 self.last_send_started = time.monotonic()
+                self.require_listing(row, details)
 
             return await photo_cards.send_initial(
                 self.bot, self.chat_id, row, details, reserve_photo_slot
@@ -457,6 +493,7 @@ class VintedDeliveryWorker(EbayDeliveryWorker):
             from vinted_alerts import send_text
 
             self.last_send_started = time.monotonic()
+            self.require_listing(row, details)
             return await send_text(self.bot, self.chat_id, row, details)
         if not details or not details.get("native_photo"):
             return await super().send_listing(row)
@@ -465,6 +502,7 @@ class VintedDeliveryWorker(EbayDeliveryWorker):
             while delay := self.send_slot_delay():
                 await asyncio.sleep(delay)
             self.last_send_started = time.monotonic()
+            self.require_listing(row, details)
 
         return await send_initial(self.bot, self.chat_id, row, details, reserve_slot)
 

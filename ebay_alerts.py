@@ -12,6 +12,72 @@ import vinted_native
 from search_settings import connection
 
 
+def cancel_excluded_pending(conn, query_id, phrases):
+    """Cancel newly blocked unsent finds without resetting discovery or history."""
+    if not phrases:
+        return 0
+    from search_settings import excluded_by
+
+    pending = conn.execute(
+        "SELECT item_id,title FROM alert_outbox WHERE query_id=? AND platform='ebay' AND status='pending'",
+        (query_id,),
+    ).fetchall()
+    blocked = [row["item_id"] for row in pending if excluded_by(row["title"], phrases)]
+    for item_id in blocked:
+        conn.execute(
+            """UPDATE alert_outbox SET status='cancelled',error='Blocked by current exclusions',
+            lease_token=NULL,leased_until=0 WHERE item_id=? AND platform='ebay' AND status='pending'""",
+            (item_id,),
+        )
+    return len(blocked)
+
+
+def prepare_listing(row):
+    """Recheck an unsent leased find against current owner rules before sending.
+
+    Criteria/budget edits already cancel pending jobs transactionally. Verify
+    their status and the exact lease again, including after download/pacing
+    awaits. Exclusion-only edits keep the baseline, so check their latest value
+    here too. Accepted messages and their later photo edits remain untouched.
+    """
+    if row.get("platform") != "ebay" or row.get("kind") != "listing":
+        return True
+    from ebay_store import live_ids
+    from search_settings import excluded_by
+
+    with closing(connection()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute(
+            "SELECT * FROM alert_outbox WHERE item_id=? AND platform='ebay'",
+            (row["item_id"],),
+        ).fetchone()
+        if (
+            not current
+            or current["status"] != "pending"
+            or not row.get("lease_token")
+            or current["lease_token"] != row["lease_token"]
+        ):
+            return False
+        rules = conn.execute(
+            """SELECT COALESCE(p.exclusions,'[]') AS exclusions FROM queries q
+            LEFT JOIN search_preferences p ON p.query_id=q.id WHERE q.id=?""",
+            (current["query_id"],),
+        ).fetchone()
+        reason = ""
+        if not rules or current["query_id"] not in live_ids(conn):
+            reason = "Search no longer active for eBay"
+        elif excluded_by(current["title"], json.loads(rules["exclusions"])):
+            reason = "Blocked by current exclusions"
+        if reason:
+            conn.execute(
+                """UPDATE alert_outbox SET status='cancelled',error=?,lease_token=NULL,
+                leased_until=0 WHERE item_id=? AND platform='ebay' AND status='pending' AND lease_token=?""",
+                (reason, row["item_id"], row["lease_token"]),
+            )
+            return False
+        return True
+
+
 def track_preview(row):
     """Register preview delivery, including a deletion racing the Telegram call."""
     from ebay_privacy import queue_redaction

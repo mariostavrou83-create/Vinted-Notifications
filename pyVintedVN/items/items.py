@@ -136,6 +136,24 @@ class Items:
         # Parse the query parameters from the URL
         queries = parse_qsl(urlparse(url).query)
 
+        def attributes(name, legacy_key):
+            legacy = [value for key, value in queries if key == legacy_key]
+            direct = [
+                value for key, value in queries if key == f"attribute_ids[{name}]"
+            ]
+            if not direct:
+                return ",".join(legacy)
+            # Direct keys already name the same outbound API attributes. A URL
+            # can contain both forms or repeated/comma-separated direct values;
+            # preserve the complete union without dropping either filter list.
+            values = dict.fromkeys(
+                part.strip()
+                for value in (*legacy, *direct)
+                for part in value.split(",")
+                if part.strip()
+            )
+            return ",".join(values)
+
         # Construct the parameters dictionary. The id filters were renamed to
         # attribute_ids[<singular>] with the September 2026 API move; the old
         # *_ids names are still accepted but silently ignored, which returns
@@ -144,34 +162,15 @@ class Items:
             "search_text": "+".join(
                 map(str, [tpl[1] for tpl in queries if tpl[0] == "search_text"])
             ),
-            "attribute_ids[video_game_platform]": ",".join(
-                map(
-                    str,
-                    [
-                        tpl[1]
-                        for tpl in queries
-                        if tpl[0] == "video_game_platform_ids[]"
-                    ],
-                )
+            "attribute_ids[video_game_platform]": attributes(
+                "video_game_platform", "video_game_platform_ids[]"
             ),
-            "attribute_ids[catalog]": ",".join(
-                map(str, [tpl[1] for tpl in queries if tpl[0] == "catalog[]"])
-            ),
-            "attribute_ids[color]": ",".join(
-                map(str, [tpl[1] for tpl in queries if tpl[0] == "color_ids[]"])
-            ),
-            "attribute_ids[brand]": ",".join(
-                map(str, [tpl[1] for tpl in queries if tpl[0] == "brand_ids[]"])
-            ),
-            "attribute_ids[size]": ",".join(
-                map(str, [tpl[1] for tpl in queries if tpl[0] == "size_ids[]"])
-            ),
-            "attribute_ids[material]": ",".join(
-                map(str, [tpl[1] for tpl in queries if tpl[0] == "material_ids[]"])
-            ),
-            "attribute_ids[status]": ",".join(
-                map(str, [tpl[1] for tpl in queries if tpl[0] == "status_ids[]"])
-            ),
+            "attribute_ids[catalog]": attributes("catalog", "catalog[]"),
+            "attribute_ids[color]": attributes("color", "color_ids[]"),
+            "attribute_ids[brand]": attributes("brand", "brand_ids[]"),
+            "attribute_ids[size]": attributes("size", "size_ids[]"),
+            "attribute_ids[material]": attributes("material", "material_ids[]"),
+            "attribute_ids[status]": attributes("status", "status_ids[]"),
             # country and city have no working attribute_ids equivalent: the new
             # names are accepted but match nothing, so zeroing a query is worse
             # than the old names simply being ignored.

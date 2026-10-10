@@ -359,7 +359,7 @@ def _clear_item_queue(items_queue, new_items_queue):
         )
         if is_first_run:
             logger.info(
-                f"First run for query {query_id}: recording {len(data)} item(s) "
+                f"First run for query {query_id}: baselining {len(data)} item(s) "
                 f"without notifying, so the existing catalogue is not replayed."
             )
 
@@ -431,25 +431,29 @@ def _clear_item_queue(items_queue, new_items_queue):
                 watermark = max(watermark or 0, item.raw_timestamp)
                 continue
 
+            if is_first_run:
+                # A quiet baseline belongs to this search or keyword, not every
+                # overlapping search. Its frontier prevents replay; globally
+                # recording the item here would consume another live search's
+                # genuinely new hit without ever creating an alert.
+                watermark = max(watermark or 0, item.raw_timestamp)
+                continue
+
             # Being recorded is what stops an item coming back next run, so every
             # item that reaches this point is written to the db whether or not it
             # ends up being announced.
             from vinted_alerts import snapshot
 
-            details = None if is_first_run else snapshot(item, search)
-            alert = (
-                None
-                if is_first_run
-                else {
-                    "content": format_alert(
-                        item, search, db.get_parameter("message_template"), details
-                    ),
-                    "url": item.url,
-                    "search_name": search["query_name"] or f"Search #{query_id}",
-                    "reference_id": search.get("reference_id"),
-                    "vinted_details": details,
-                }
-            )
+            details = snapshot(item, search)
+            alert = {
+                "content": format_alert(
+                    item, search, db.get_parameter("message_template"), details
+                ),
+                "url": item.url,
+                "search_name": search["query_name"] or f"Search #{query_id}",
+                "reference_id": search.get("reference_id"),
+                "vinted_details": details,
+            }
             seen.add(str(item.id))
             watermark = max(watermark or 0, item.raw_timestamp)
             recorded = db.add_item_to_db(

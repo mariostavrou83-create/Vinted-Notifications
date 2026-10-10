@@ -89,11 +89,18 @@ def save(conn, query_id, url, words):
                     (query_id, position, word, effective_url),
                 ).lastrowid
             )
-    marks = ",".join("?" for _ in keep) or "NULL"
-    conn.execute(
-        f"DELETE FROM vinted_keyword_variants WHERE query_id=? AND id NOT IN ({marks})",
-        (query_id, *keep),
-    )
+    if keep:
+        marks = ",".join("?" for _ in keep)
+        conn.execute(
+            f"DELETE FROM vinted_keyword_variants WHERE query_id=? AND id NOT IN ({marks})",
+            (query_id, *keep),
+        )
+    else:
+        # NOT IN (NULL) matches no rows in SQLite. An empty alternatives field
+        # must remove the old variants so polling returns to the base filters.
+        conn.execute(
+            "DELETE FROM vinted_keyword_variants WHERE query_id=?", (query_id,)
+        )
 
 
 def expand(queries):

@@ -2,12 +2,14 @@
 
 import unittest
 from contextlib import closing
+from queue import Queue
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 from test_search_controls import DatabaseFixture
 
 import dashboard_store as store
+import db
 import search_settings
 import vinted_budget
 import vinted_keywords
@@ -137,6 +139,64 @@ class SharedAlertStore(DatabaseFixture, unittest.TestCase):
             search_settings.get_search(identity)["ebay_generation"],
         )
 
+    def test_shared_create_and_edit_round_trip_through_dashboard_routes(self):
+        from web_ui_plugin.web_ui import create_app
+
+        app = create_app({"TESTING": True, "SESSION_COOKIE_SECURE": False})
+        client = app.test_client()
+        with closing(search_settings.connection()) as conn, conn:
+            # Authentication and password validation have separate coverage;
+            # this request fixture represents an already signed-in owner.
+            conn.execute(
+                "UPDATE dashboard_auth SET password_hash='offline-owner-fixture'"
+            )
+        with client.session_transaction() as session:
+            session["owner"] = True
+            session["csrf"] = "offline-csrf"
+        new = client.get("/search/new")
+        self.assertEqual(new.status_code, 200)
+        self.assertIn(b'name="shared_keywords"', new.data)
+        self.assertNotIn(b'name="vinted_keywords"', new.data)
+        self.assertNotIn(b'name="vinted_postage_estimate"', new.data)
+
+        response = client.post("/search/new", data=self.form(csrf="offline-csrf"))
+        self.assertEqual((response.status_code, response.location), (302, "/"))
+        with closing(search_settings.connection()) as conn:
+            identity = conn.execute("SELECT MAX(id) FROM queries").fetchone()[0]
+        created = search_settings.get_search(identity)
+        rendered = client.get(f"/search/{identity}").get_data(as_text=True)
+        self.assertIn("fur\nsherpa\nfur hood", rendered)
+        self.assertIn("teddy", rendered)
+        self.assertIn("Resale aim £60; check &lt;fur&gt; trim &amp; cuffs", rendered)
+        self.assertNotIn('name="ebay_keywords"', rendered)
+
+        response = client.post(
+            f"/search/{identity}",
+            data=self.form(
+                csrf="offline-csrf",
+                query=created["query"],
+                ebay_search_url=created["ebay"]["search_url"],
+                revision=str(created["revision"]),
+                shared_keywords="lined, fur hood",
+                exclusions="teddy\nfaux fur",
+                vinted_max_total="25.00",
+                reminder="Resell £70; check hood & label",
+            ),
+        )
+        self.assertEqual((response.status_code, response.location), (302, "/"))
+        saved = search_settings.get_search(identity)
+        self.assertEqual(saved["shared_keywords"], ["lined", "fur hood"])
+        self.assertEqual(saved["vinted_keywords"], saved["shared_keywords"])
+        self.assertEqual(saved["ebay"]["keywords"], '(lined,"fur hood")')
+        self.assertEqual(saved["exclusions"], ["teddy", "faux fur"])
+        self.assertEqual(saved["vinted_max_total"], 2500)
+        self.assertEqual(saved["ebay"]["max_price"], 2500)
+        self.assertEqual(saved["reminder"], "Resell £70; check hood & label")
+        params = parse_qs(urlsplit(saved["query"]).query)
+        self.assertEqual(params["brand_ids[]"], ["111"])
+        self.assertEqual(params["size_ids[]"], ["4"])
+        self.assertEqual(saved["ebay"]["category"], "57988")
+
     def test_invalid_shared_save_is_atomic(self):
         tables = (
             "queries",
@@ -155,6 +215,53 @@ class SharedAlertStore(DatabaseFixture, unittest.TestCase):
             with self.assertRaises(ValueError):
                 store.save_search(None, self.form(**changes), photos=[])
             self.assertEqual(before, {t: self.table_rows(t) for t in tables})
+
+    def test_clearing_shared_keywords_switches_both_platforms_to_filter_links(self):
+        identity = store.save_search(None, self.form(), photos=[])
+        original = search_settings.get_search(identity)
+        removed = original["vinted_variants"][0]
+        buyer = self.table_rows("vinted_buyer")
+        attempts = self.table_rows("vinted_buy_attempts")
+        store.save_search(
+            identity,
+            self.form(
+                query=original["query"],
+                ebay_search_url=original["ebay"]["search_url"],
+                revision=str(original["revision"]),
+                shared_keywords="",
+            ),
+            photos=[],
+        )
+        updated = search_settings.get_search(identity)
+        self.assertEqual(updated["shared_keywords"], [])
+        self.assertEqual(updated["vinted_variants"], [])
+        self.assertEqual(updated["ebay"]["keywords"], "")
+        self.assertEqual(updated["exclusions"], original["exclusions"])
+        self.assertEqual(updated["reminder"], original["reminder"])
+        self.assertEqual(updated["vinted_max_total"], 2000)
+        self.assertEqual(updated["ebay"]["max_price"], 2000)
+        for params in (
+            parse_qs(urlsplit(updated["query"]).query),
+            parse_qs(urlsplit(updated["ebay"]["search_url"]).query),
+        ):
+            self.assertNotIn("search_text", params)
+            self.assertNotIn("_nkw", params)
+        expanded = vinted_keywords.expand(search_settings.active_queries())
+        self.assertEqual(expanded[identity][1], updated["query"])
+        self.assertNotIn(-removed["id"], expanded)
+
+        # An already-running old keyword response must be dropped. The new
+        # filters baseline quietly before notifying genuinely new results.
+        source, output = Queue(), Queue()
+        stale = SimpleNamespace(id=1001)
+        source.put(([stale], identity, removed["url"], removed["id"]))
+        self.core.clear_item_queue(source, output)
+        self.assertTrue(output.empty())
+        self.assertFalse(db.is_item_in_db_by_id(1001))
+        self.assertEqual(self.batch(identity, [1002], title="Cotton jacket"), [])
+        self.assertEqual(len(self.batch(identity, [1003], title="Cotton jacket")), 1)
+        self.assertEqual(buyer, self.table_rows("vinted_buyer"))
+        self.assertEqual(attempts, self.table_rows("vinted_buy_attempts"))
 
 
 class SharedVintedEstimate(unittest.TestCase):

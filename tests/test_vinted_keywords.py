@@ -1,6 +1,7 @@
 """Grouped searches keep separate baselines, filters and shared deduplication."""
 
 import unittest
+from contextlib import closing
 from queue import Queue
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -107,6 +108,32 @@ class KeywordTests(DatabaseFixture, unittest.TestCase):
         fur = self.save("fur", exclusions="cardigan")[0]
         self.variant_batch(fur, [])
         self.assertEqual(self.variant_batch(fur, [501]), [])
+
+    def test_clearing_all_keywords_removes_only_this_search_and_primes_base(self):
+        fur = self.save("fur")[0]
+        self.assertEqual(self.variant_batch(fur, [500]), [])
+        with closing(search_settings.connection()) as conn, conn:
+            keywords.save(conn, 2, db.get_queries()[1][1], ["lined"])
+        unrelated = keywords.rows(2)
+
+        self.assertEqual(self.save(""), [])
+        self.assertEqual(keywords.rows(2), unrelated)
+        search = search_settings.get_search(1)
+        self.assertEqual(search["vinted_keywords"], [])
+        self.assertEqual(search["rebaseline"], 1)
+        self.assertEqual(
+            parse_qs(urlsplit(search["query"]).query)["search_text"], ["old"]
+        )
+        expanded = keywords.expand(search_settings.active_queries())
+        self.assertEqual(expanded[1][1], search["query"])
+        self.assertNotIn(-fur["id"], expanded)
+
+        # A response to the removed keyword cannot notify or mark its item seen.
+        self.assertEqual(self.variant_batch(fur, [501]), [])
+        self.assertFalse(db.is_item_in_db_by_id(501))
+        self.assertEqual(self.batch(1, [600]), [])
+        self.assertEqual(search_settings.get_search(1)["rebaseline"], 0)
+        self.assertEqual(len(self.batch(1, [601])), 1)
 
     def test_too_many_keywords_rejected_atomically(self):
         before = db.get_queries()

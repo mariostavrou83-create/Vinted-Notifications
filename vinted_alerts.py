@@ -4,6 +4,7 @@ import json
 from contextlib import closing
 from html import escape
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 from telegram import InputFile, InputMediaPhoto, LinkPreviewOptions
@@ -25,6 +26,105 @@ def enabled():
         Path(db.DB_PATH).is_file()
         and db.get_parameter("vinted_single_message_alerts") == "1"
     )
+
+
+def prepare_listing(row, details=None):
+    """Bind an unsent delivery to its lease and the owner's current rules.
+
+    The alert's supplied price remains an estimate; this performs no listing,
+    session or checkout requests. Preserve a known protection-inclusive price
+    from legacy snapshots instead of inventing a new Vinted fee quote.
+    """
+    if row.get("platform", "vinted") != "vinted" or row.get("kind") != "listing":
+        return True
+    from search_settings import excluded_by
+
+    with closing(connection()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute(
+            "SELECT * FROM alert_outbox WHERE item_id=? AND platform='vinted'",
+            (row["item_id"],),
+        ).fetchone()
+        if (
+            not current
+            or current["status"] != "pending"
+            or not row.get("lease_token")
+            or current["lease_token"] != row["lease_token"]
+        ):
+            return False
+        rules = conn.execute(
+            """SELECT COALESCE(p.exclusions,'[]') AS exclusions,
+            COALESCE(d.paused,0) AS paused,COALESCE(d.archived,0) AS archived,
+            COALESCE(s.vinted_enabled,1) AS vinted_enabled,
+            COALESCE(s.ebay_config,'{}') AS platform_config,
+            b.max_total AS vinted_max_total,
+            COALESCE(b.postage_estimate,220) AS vinted_postage_estimate
+            FROM queries q LEFT JOIN search_preferences p ON p.query_id=q.id
+            LEFT JOIN search_dashboard d ON d.query_id=q.id
+            LEFT JOIN search_platforms s ON s.query_id=q.id
+            LEFT JOIN vinted_search_budgets b ON b.query_id=q.id WHERE q.id=?""",
+            (current["query_id"],),
+        ).fetchone()
+        reason, estimate = "", None
+        if (
+            not rules
+            or rules["paused"]
+            or rules["archived"]
+            or not rules["vinted_enabled"]
+        ):
+            reason = "Search no longer active for Vinted"
+        elif excluded_by(current["title"], json.loads(rules["exclusions"])):
+            reason = "Blocked by current exclusions"
+        elif rules["vinted_max_total"] is not None:
+            search = dict(rules)
+            search["shared_alert_version"] = json.loads(search["platform_config"]).get(
+                "shared_alert_version", 0
+            )
+            saved = conn.execute(
+                "SELECT payload FROM vinted_alert_details WHERE item_id=?",
+                (row["item_id"],),
+            ).fetchone()
+            saved_details = json.loads(saved[0]) if saved else {}
+            old_budget = saved_details.get("budget") or {}
+            raw = {}
+            price = vinted_budget.money(
+                {"amount": current["price"], "currency_code": current["currency"]}
+            )
+            if (
+                price is not None
+                and old_budget.get("buyer_protection_estimated") is False
+                and old_budget.get("item") == price
+                and type(old_budget.get("buyer_protection")) is int
+                and old_budget["buyer_protection"] >= 0
+            ):
+                raw["total_item_price"] = {
+                    "amount": f"{(price + old_budget['buyer_protection']) // 100}.{(price + old_budget['buyer_protection']) % 100:02d}",
+                    "currency_code": "GBP",
+                }
+            estimate = vinted_budget.estimate(
+                SimpleNamespace(
+                    price=current["price"], currency=current["currency"], raw_data=raw
+                ),
+                search,
+            )
+            if not estimate or not estimate["within_budget"]:
+                reason = "Outside current estimated total budget"
+            elif saved:
+                saved_details["budget"] = estimate
+                conn.execute(
+                    "UPDATE vinted_alert_details SET payload=? WHERE item_id=?",
+                    (json.dumps(saved_details, ensure_ascii=False), row["item_id"]),
+                )
+                if details is not None:
+                    details["budget"] = estimate
+        if reason:
+            conn.execute(
+                """UPDATE alert_outbox SET status='cancelled',error=?,lease_token=NULL,
+                leased_until=0 WHERE item_id=? AND platform='vinted' AND status='pending' AND lease_token=?""",
+                (reason, row["item_id"], row["lease_token"]),
+            )
+            return False
+        return True
 
 
 def snapshot(item, search):

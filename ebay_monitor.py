@@ -6,6 +6,7 @@ and exclusions run locally, so reducing an old item's price cannot make it new.
 
 import asyncio
 import json
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -14,7 +15,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from email.utils import parsedate_to_datetime
 from html import escape
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import requests
 from telegram import Bot
@@ -233,6 +234,22 @@ class BrowseClient:
             raise EbayError("eBay search connection failed; will retry.") from None
 
 
+def listing_url_matches(parsed, item_id):
+    """Require the listing link to name the same item as the API record.
+
+    Preserve eBay's title slugs and tracking parameters. The older ViewItem
+    route is accepted only when its explicit item argument has one value.
+    """
+    match = re.fullmatch(r"/itm/(?:[^/]+/)?([0-9]+)/?", parsed.path)
+    if match:
+        return match[1] == item_id
+    if parsed.path not in ("/ws/eBayISAPI.dll", "/itm/ws/eBayISAPI.dll"):
+        return False
+    params = parse_qs(parsed.query, keep_blank_values=True)
+    view_item = "ViewItem" in params or params.get("cmd") == ["ViewItem"]
+    return view_item and params.get("item") == [item_id]
+
+
 def parse_item(raw, config, now, *, fresh_only=True):
     """Return eligible data only. Unknown dates/prices never qualify as fresh bargains."""
     if not isinstance(raw, dict):
@@ -245,6 +262,12 @@ def parse_item(raw, config, now, *, fresh_only=True):
         parts = str(raw["itemId"]).split("|")
         item_id = parts[1] if len(parts) == 3 else ""
     url = raw.get("itemWebUrl", "")
+    if (
+        not isinstance(url, str)
+        or len(url) > 4096
+        or re.search(r"[\x00-\x20\x7f]", url)
+    ):
+        return None
     try:
         parsed = urlparse(url)
         if parsed.username or parsed.password or parsed.port not in (None, 443):
@@ -256,6 +279,7 @@ def parse_item(raw, config, now, *, fresh_only=True):
         or parsed.scheme != "https"
         or parsed.hostname
         not in ("www.ebay.co.uk", "www.ebay.com", "ebay.co.uk", "ebay.com")
+        or not listing_url_matches(parsed, item_id)
     ):
         return None
     public = raw.get("_dateSource") == "publicSearchMinute"

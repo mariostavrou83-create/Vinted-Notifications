@@ -44,6 +44,23 @@ def normalize_url(value):
     )
 
 
+def _vinted_filter_settings(url):
+    """The saved criteria, excluding price bounds rechecked before delivery."""
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query)
+    params.pop("price_from", None)
+    params.pop("price_to", None)
+    # UK catalogue searches default to GBP even before a dashboard budget
+    # adds its explicit currency. Adding a budget alone is not a new category.
+    params.setdefault("currency", ["GBP"])
+    return (
+        parsed.scheme,
+        parsed.netloc,
+        parsed.path,
+        tuple(sorted((key, tuple(sorted(values))) for key, values in params.items())),
+    )
+
+
 def normalize_photo(stream):
     from PIL import Image, ImageOps, UnidentifiedImageError
 
@@ -227,6 +244,18 @@ def save_search(query_id, form, photo=None, *, photos=None):
             DO UPDATE SET reminder=excluded.reminder, exclusions=excluded.exclusions""",
             (query_id, reminder, exclusions),
         )
+        from ebay_alerts import cancel_excluded_pending
+
+        cancel_excluded_pending(conn, query_id, json.loads(exclusions))
+        if old and (
+            _vinted_filter_settings(old["query"]) != _vinted_filter_settings(url)
+            or {word.casefold() for word in previous_keywords}
+            != {word.casefold() for word in keywords}
+        ):
+            conn.execute(
+                "UPDATE alert_outbox SET status='cancelled',error='Vinted search filters changed',lease_token=NULL,leased_until=0 WHERE query_id=? AND platform='vinted' AND status='pending'",
+                (query_id,),
+            )
         conn.execute(
             """INSERT INTO search_buying_guide VALUES (?,?,?,?,?,?) ON CONFLICT(query_id)
             DO UPDATE SET max_buy=excluded.max_buy,resale_low=excluded.resale_low,
@@ -477,13 +506,20 @@ def change_state(query_id, action, revision):
             f"UPDATE search_dashboard SET {changes[action]}, revision=revision+1 WHERE query_id=?",
             (query_id,),
         )
+        if action == "resume":
+            # Each alternative has its own frontier and must quietly baseline
+            # independently; the parent rebaseline flag covers ordinary URLs.
+            conn.execute(
+                "UPDATE vinted_keyword_variants SET primed=0 WHERE query_id=?",
+                (query_id,),
+            )
         conn.execute(
             "UPDATE search_platforms SET ebay_generation=ebay_generation+1 WHERE query_id=?",
             (query_id,),
         )
         conn.execute("DELETE FROM ebay_state WHERE query_id=?", (query_id,))
         conn.execute(
-            "UPDATE alert_outbox SET status='cancelled',error='Search paused or reset' WHERE query_id=? AND platform='ebay' AND status='pending'",
+            "UPDATE alert_outbox SET status='cancelled',error='Search paused or reset',lease_token=NULL,leased_until=0 WHERE query_id=? AND platform IN ('vinted','ebay') AND status='pending'",
             (query_id,),
         )
 

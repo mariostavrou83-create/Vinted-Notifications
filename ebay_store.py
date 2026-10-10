@@ -210,16 +210,20 @@ def save_platforms(conn, query_id, vinted, ebay, config):
         conn.execute(
             "UPDATE search_dashboard SET rebaseline=1 WHERE query_id=?", (query_id,)
         )
+        conn.execute(
+            "UPDATE vinted_keyword_variants SET primed=0 WHERE query_id=?",
+            (query_id,),
+        )
     if changed:
         conn.execute("DELETE FROM ebay_state WHERE query_id=?", (query_id,))
     if changed or not ebay:
         conn.execute(
-            "UPDATE alert_outbox SET status='cancelled',error='Search changed or disabled' WHERE query_id=? AND platform='ebay' AND status='pending'",
+            "UPDATE alert_outbox SET status='cancelled',error='Search changed or disabled',lease_token=NULL,leased_until=0 WHERE query_id=? AND platform='ebay' AND status='pending'",
             (query_id,),
         )
     if not vinted:
         conn.execute(
-            "UPDATE alert_outbox SET status='cancelled',error='Vinted disabled for search' WHERE query_id=? AND platform='vinted' AND status='pending'",
+            "UPDATE alert_outbox SET status='cancelled',error='Vinted disabled for search',lease_token=NULL,leased_until=0 WHERE query_id=? AND platform='vinted' AND status='pending'",
             (query_id,),
         )
 
@@ -275,7 +279,7 @@ def save_live_selection(values):
             )
             conn.execute("DELETE FROM ebay_state WHERE query_id=?", (query_id,))
             conn.execute(
-                """UPDATE alert_outbox SET status='cancelled',error='Live eBay selection changed'
+                """UPDATE alert_outbox SET status='cancelled',error='Live eBay selection changed',lease_token=NULL,leased_until=0
                 WHERE query_id=? AND platform='ebay' AND status='pending'""",
                 (query_id,),
             )
@@ -404,7 +408,7 @@ def save_configuration(form):
             )
             conn.execute("DELETE FROM ebay_state")
             conn.execute(
-                "UPDATE alert_outbox SET status='cancelled',error='eBay source changed' WHERE platform='ebay' AND status='pending'"
+                "UPDATE alert_outbox SET status='cancelled',error='eBay source changed',lease_token=NULL,leased_until=0 WHERE platform='ebay' AND status='pending'"
             )
         conn.executemany(
             "INSERT OR REPLACE INTO parameters(key,value) VALUES (?,?)", values.items()

@@ -4,11 +4,11 @@ import ast
 import html
 import logging
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from queue import Queue
 from time import monotonic, time
 from types import SimpleNamespace
-from contextlib import nullcontext
 from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import parse_qs, urlparse
 
@@ -39,6 +39,7 @@ class AlertTests(unittest.TestCase):
         self.addCleanup(settings_patch.stop)
         self.seen = set()
         self.watermark = None
+        self.frontier = 0
 
         def add(**item):
             self.seen.add(item["id"])
@@ -77,8 +78,12 @@ class AlertTests(unittest.TestCase):
             filtered_ids=lambda q, ids: set(),
             excluded_by=lambda title, phrases: None,
             remember_filtered=lambda q, ids: None,
-            listing_cutoff=lambda q, ids, now: 0,
-            remember_listing_frontier=lambda q, ids, now: None,
+            listing_cutoff=lambda q, ids, now: self.frontier,
+            remember_listing_frontier=lambda q, ids, now: setattr(
+                self,
+                "frontier",
+                max([self.frontier] + [int(identity) for identity in ids]),
+            ),
         )
         self.ns = functions(
             "core.py",
