@@ -264,21 +264,38 @@ class ConnectionRotationRecoveryTests(
         replacement = self.replacement()
         self.new_access = token(self.now + 3600, "accepted-fresh-identity-access")
         self.responses = [self.identity()]
-        real_encrypt = buyer.encrypt
-        encryption_count = 0
+        real_connection = buyer.connection
+        replace = self.replace
+        replacements = []
 
-        def encrypt(data):
-            nonlocal encryption_count
-            encryption_count += 1
-            if encryption_count == 2:
-                self.replace(replacement)
-            return real_encrypt(data)
+        class Connection:
+            def __init__(self):
+                self.conn = real_connection()
+
+            def __enter__(self):
+                self.conn.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.conn.__exit__(*args)
+
+            def __getattr__(self, name):
+                return getattr(self.conn, name)
+
+            def execute(self, statement, parameters=()):
+                if "SET session=?,verified_at=?" in statement:
+                    # Inject at the actual final verification write. Reusing an
+                    # unchanged seal intentionally no longer re-encrypts here.
+                    replace(replacement)
+                    replacements.append(replacement)
+                return self.conn.execute(statement, parameters)
 
         with (
-            patch.object(buyer, "encrypt", side_effect=encrypt),
+            patch.object(buyer, "connection", side_effect=Connection),
             self.assertRaises(buyer.BuyerError) as failure,
         ):
             self.connect()
+        self.assertEqual(replacements, [replacement])
         self.assertEqual(failure.exception.reason, "saved_session")
         self.assertEqual(self.saved()[0]["session"], replacement)
         self.assertEqual(self.saved()[0]["verified_at"], 1)

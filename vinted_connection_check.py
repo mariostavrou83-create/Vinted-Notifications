@@ -35,7 +35,7 @@ def diagnose_latest_listing():
 
 
 def diagnose_bootstrap():
-    """One ordinary page/identity read; no renewal, settings change or purchase."""
+    """Read page/identity and keep verified rotations; no renewal or purchase."""
     import vinted_buyer
 
     client = None
@@ -48,9 +48,40 @@ def diagnose_bootstrap():
             if not saved:
                 return
             client = vinted_buyer.Client(saved)
+            # Bind the original saved buyer before either response can rotate
+            # cookies. The identity request then rejects another account before
+            # adopting its response credentials. The binding stays unverified
+            # until this read confirms the same buyer, so a rejected homepage or
+            # identity response cannot write any diagnostic cookies to storage.
+            client._loaded_session_reference = (row[1], row[0], client.exported())
             old_csrf = client.csrf
             client.homepage()
             user_id, _ = client.identity()
+            if user_id != row[1]:
+                raise vinted_buyer.BuyerError(
+                    vinted_buyer.AUTH_REASONS["account_changed"],
+                    reason="account_changed",
+                    stage="identity",
+                )
+            client.bind_verified_session(*client._loaded_session_reference)
+            client.persist_session()
+            expected_user, expected_sealed, _ = client._verified_session
+            current = conn.execute(
+                "SELECT session,user_id FROM vinted_buyer WHERE id=1"
+            ).fetchone()
+            # persist_session may make no update when the responses leave the
+            # payload unchanged. Even then, a replacement connection must not
+            # be reported as the account just checked by this older client.
+            if (
+                not current
+                or current[0] != expected_sealed
+                or current[1] != expected_user
+            ):
+                raise vinted_buyer.BuyerError(
+                    vinted_buyer.AUTH_REASONS["saved_session"],
+                    reason="saved_session",
+                    stage="saved_session",
+                )
             logger.info(
                 "Startup buyer bootstrap: csrf_changed=%s matched_account=%s; "
                 "no settings change, checkout or payment",

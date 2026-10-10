@@ -8,6 +8,7 @@ Uses MSJ's current UK transport, encryption and cross-process buyer lock.
 import asyncio
 import hashlib
 import logging
+import math
 import time
 from contextlib import closing
 
@@ -15,7 +16,9 @@ import vinted_buyer as buyer
 from search_settings import connection
 
 logger = logging.getLogger(__name__)
-ACCESS_MARGIN = 120
+# Start early enough for the longest normal cooldown and next 60-second tick
+# to leave additional headroom for account requests before access expires.
+ACCESS_MARGIN = 20 * 60
 REFRESH_MARGIN = 2 * 86400
 RETRY_DELAY = 300
 AMBIGUOUS_RENEWAL_DELAY = 900
@@ -115,7 +118,13 @@ def session_cookie_expiry(saved, name):
 
 async def run():
     """Owned by Telegram's lifecycle; no buyer lock in the forking parent."""
-    logger.info("Vinted session maintenance: worker started; interval=60s")
+    logger.info(
+        "Vinted session maintenance: worker started; interval=60s "
+        "access_margin_seconds=%s network_retry_seconds=%s renewal_retry_seconds=%s",
+        ACCESS_MARGIN,
+        RETRY_DELAY,
+        AMBIGUOUS_RENEWAL_DELAY,
+    )
     while True:
         await asyncio.to_thread(maintain_connection)
         await asyncio.sleep(60)
@@ -204,8 +213,22 @@ def maintain_connection():
                     return "blocked"
                 if state["retry_at"] > now:
                     return "cooldown"
-            if not due(buyer.decrypt(row[0]), now):
+            saved = buyer.decrypt(row[0])
+            if not due(saved, now):
                 return "fresh"
+            access_expiry = session_cookie_expiry(saved, "access_token_web")
+            refresh_expiry = session_cookie_expiry(saved, "refresh_token_web")
+            logger.info(
+                "Vinted session maintenance: due access_remaining_seconds=%s "
+                "refresh_due=%s access_margin_seconds=%s",
+                (
+                    math.floor(access_expiry - now)
+                    if access_expiry is not None
+                    else "null"
+                ),
+                refresh_expiry is not None and refresh_expiry <= now + REFRESH_MARGIN,
+                ACCESS_MARGIN,
+            )
             # Reserve before contacting Vinted so a restart cannot repeat a
             # network failure immediately. Only a hash of encrypted data is saved.
             with closing(connection()) as conn, conn:

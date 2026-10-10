@@ -1957,8 +1957,12 @@ def connected_client(*, renew_before=0, solve_challenges=True, allow_refresh=Tru
             client.bind_verified_session(*client._loaded_session_reference)
             client.persist_session()
         saved = client.exported()
-        sealed = encrypt(saved)
-        previous_sealed = client._verified_session[1]
+        _, previous_sealed, previous_saved = client._verified_session
+        # A fresh identity confirmation must not make an unchanged session look
+        # like a replacement login. Maintenance binds its cooldown to the seal;
+        # retain that seal when accepted response persistence already saved this
+        # exact payload, while still compare-and-swapping the verification time.
+        sealed = previous_sealed if saved == previous_saved else encrypt(saved)
         with closing(connection()) as conn, conn:
             updated = conn.execute(
                 "UPDATE vinted_buyer SET session=?,verified_at=? WHERE id=1 AND user_id=? AND session=?",

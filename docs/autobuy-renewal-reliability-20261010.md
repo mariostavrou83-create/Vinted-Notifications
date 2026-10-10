@@ -74,3 +74,59 @@ protected main service are outside this change.
 If the exact live saved-account check remains rejected, retain the encrypted
 session and report its precise stage/reason/status. Do not cycle request
 formats, force password login, clear payment history, or replay an item.
+
+## Follow-up: replacement connection and retry headroom
+
+The owner attempted password sign-in at 19:52 UTC (20:52 BST). Vinted returned
+a security challenge and HTTP 403 after the solver result; this did not prove
+the password was wrong or that sign-in succeeded. The owner privately linked
+a replacement session at 19:53 UTC. It verified the saved buyer with HTTP 200.
+An independent saved-account check at 19:55:50 UTC persisted an accepted
+rotation and again verified the same buyer with HTTP 200. The previous renewal
+HTTP 400 belonged to the old connection, not that later check.
+
+Reconnecting intentionally leaves Autobuy off. An actual owner tap for item
+`10323110719` at 19:58:30 UTC stopped with reason `disabled`; no checkout or
+payment was started. Session maintenance is independent of buying permission
+and still runs while buying is off.
+
+The 120-second access-expiry margin was shorter than both the 300-second
+network cooldown and the 900-second ambiguous-renewal/rate-limit cooldown.
+One temporary failure therefore scheduled its next attempt after the existing
+access credential's expiry. Move background maintenance to a 1,200-second
+margin, retaining the same 60-second cadence, durable cooldowns, request
+format, buyer lock and account checks. This gives an ordinary recovery attempt
+room before expiry; lock contention or prolonged upstream errors can still
+exhaust that room. A normal one-hour credential renews approximately every
+40 minutes rather than 58, about 45% more maintenance cycles. Search polling,
+foreground purchase requests and paid challenge limits are unchanged. A
+successful short-lived rotation still observes the 300-second reservation,
+preventing a one-minute renewal loop when its new expiry remains in the margin.
+
+The optional bootstrap diagnostic had another rotation-loss path: it restored
+the saved session and read the homepage and account without retaining accepted
+credentials. Bind its original saved version for account validation, and save
+the diagnostic's accepted rotations only after the same buyer is verified.
+Compare-and-swap must reject a concurrent replacement. This diagnostic is
+opt-in; no live evidence establishes that it caused the incident above.
+
+An additional offline reproduction showed that a successful account check
+with unchanged credentials still re-encrypted the identical saved payload.
+That changed its fingerprint and bypassed a pending 900-second cooldown on
+the next worker tick. Reuse the already persisted encrypted seal for identical
+payloads while updating `verified_at` under the same compare-and-swap guard.
+Real accepted rotations still create a new saved version. A concurrent owner
+replacement remains protected at the final verification write.
+
+Observing worker startup or a verified connection does not prove renewal of
+the replacement session. Live expiry-driven maintenance must separately show
+accepted credentials, committed persistence and same-buyer verification.
+Vinted can revoke sessions or require the owner's security verification, so
+these changes do not promise permanent login.
+
+Follow-up validation: all 997 regression tests passed in 86.362 seconds.
+Independent integration review passed 82 targeted tests and the three native
+identity/cooldown tests. Eight changed Python files passed Black, Ruff and
+diff checks. Recovery tests use fictional upstream responses and verify the
+unchanged full-cost budgets, buying permission, card/delivery choices and
+purchase history; no real checkout or payment is used.

@@ -137,6 +137,65 @@ class MaintenanceTests(buying_tests.SessionRotationFixture, unittest.TestCase):
         self.assertEqual(self.run_cycle(self.now + 300), "fresh")
         self.assertEqual(len(self.calls), 4)
 
+    def test_longest_cooldown_recovers_before_the_original_access_cookie_expires(self):
+        self.old_access = "offline-opaque-access-still-valid-0123456789"
+        self.new_access = token(self.now + 7200, "longer-renewed-access")
+        _, saved = self.saved()
+        for cookie in saved["cookie_records"]:
+            if cookie["name"] == "access_token_web":
+                cookie.update(value=self.old_access, expires=self.now + 1200)
+                saved["cookies"][cookie["name"]] = self.old_access
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_buyer SET session=?", (buyer.encrypt(saved),))
+        before = self.controls()
+        present_on_identity_reads = []
+        native = self.native
+
+        def record_account_cookie(adapter, prepared, **kwargs):
+            if prepared.url.endswith("/api/v2/users/current"):
+                present_on_identity_reads.append(
+                    self.old_access in prepared.headers.get("Cookie", "")
+                )
+            return native(adapter, prepared, **kwargs)
+
+        self.native = record_account_cookie
+        self.renew_status = 400
+        with self.assertLogs("vinted_session_worker", level="INFO") as logs:
+            self.assertEqual(self.run_cycle(), "cooldown")
+        due_line = next(line for line in logs.output if "due access_remaining" in line)
+        self.assertIn("access_remaining_seconds=1200", due_line)
+        self.assertIn("refresh_due=False", due_line)
+        self.assertIn("access_margin_seconds=1200", due_line)
+        self.assertNotIn(self.old_access, due_line)
+        self.assertNotIn(self.old_refresh, due_line)
+        self.assertEqual(self.run_cycle(self.now + 899), "cooldown")
+        self.assertEqual(len(self.calls), 3)
+        self.renew_status = 200
+        self.assertEqual(self.run_cycle(self.now + 900), "verified")
+        # Both pre-renewal identity reads genuinely sent the still-valid original
+        # cookie; the final identity read authenticated with its accepted rotation.
+        self.assertEqual(present_on_identity_reads, [True, True, False])
+        self.assertEqual(self.controls(), before)
+        self.assertEqual(self.run_cycle(self.now + 1200), "fresh")
+        self.assertEqual(len(self.calls), 7)
+
+    def test_short_lived_accepted_credentials_do_not_trigger_each_60_second_tick(self):
+        self.new_access = token(self.now + 900, "short-lived-renewed-access")
+        before = self.controls()
+        self.assertEqual(self.run_cycle(), "verified")
+        self.assertLess(
+            worker.session_cookie_expiry(self.saved()[1], "access_token_web"),
+            self.now + worker.ACCESS_MARGIN,
+        )
+        for elapsed in (60, 120, 240, 299):
+            self.assertEqual(self.run_cycle(self.now + elapsed), "cooldown")
+        self.assertEqual(len(self.calls), 4)
+        self.new_access = token(self.now + 7200, "long-lived-next-access")
+        self.assertEqual(self.run_cycle(self.now + 300), "verified")
+        self.assertEqual(self.run_cycle(self.now + 600), "fresh")
+        self.assertEqual(len(self.calls), 8)
+        self.assertEqual(self.controls(), before)
+
     def test_unknown_400_cools_down_across_ticks_then_retries_the_same_session(self):
         self.renew_status = 400
         original = self.saved()[0]["session"]
@@ -324,10 +383,18 @@ class MaintenanceTests(buying_tests.SessionRotationFixture, unittest.TestCase):
             worker.asyncio, "to_thread", side_effect=thread_call
         ), patch.object(worker.asyncio, "sleep", side_effect=sleep), self.assertRaises(
             asyncio.CancelledError
-        ):
+        ), self.assertLogs(
+            "vinted_session_worker", level="INFO"
+        ) as logs:
             asyncio.run(worker.run())
         self.assertEqual(events, ["verified", "sleep"])
         self.assertEqual(len(self.calls), 4)
+        startup = next(line for line in logs.output if "worker started" in line)
+        self.assertIn("interval=60s", startup)
+        self.assertIn("access_margin_seconds=1200", startup)
+        self.assertIn("network_retry_seconds=300", startup)
+        self.assertIn("renewal_retry_seconds=900", startup)
+        self.assertNotIn(saved["cookies"]["access_token_web"], startup)
 
     def test_startup_does_not_clear_an_existing_terminal_block(self):
         fingerprint = hashlib.sha256(self.saved()[0]["session"]).hexdigest()
@@ -429,7 +496,7 @@ class MaintenanceTests(buying_tests.SessionRotationFixture, unittest.TestCase):
         self.new_refresh = token(self.now + 8 * 86400, "second-refresh")
         self.assertEqual(self.run_cycle(self.now + 1800), "verified")
         self.assertNotEqual(self.saved()[1]["cookies"]["refresh_token_web"], first)
-        self.assertEqual(self.run_cycle(self.now + 3300), "fresh")
+        self.assertEqual(self.run_cycle(self.now + 2100), "fresh")
         self.new_access = token(self.now + 5700, "third-access")
         self.new_refresh = token(self.now + 9 * 86400, "third-refresh")
         self.assertEqual(self.run_cycle(self.now + 3600), "verified")

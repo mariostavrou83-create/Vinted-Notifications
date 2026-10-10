@@ -121,6 +121,24 @@ class CookieExpiryTests(unittest.TestCase):
         session["cookie_records"][1]["expires"] = self.now + 700000
         self.assertTrue(worker.due(session, self.now))
 
+    def test_access_margin_covers_the_longest_retry_and_leaves_earlier_sessions_fresh(
+        self,
+    ):
+        session = saved(
+            records=[
+                record("access_token_web", "opaque-access", self.now + 1201),
+                record("refresh_token_web", "opaque-refresh", self.now + 700000),
+            ]
+        )
+        self.assertEqual(worker.ACCESS_MARGIN, 1200)
+        self.assertFalse(worker.due(session, self.now))
+        session["cookie_records"][0]["expires"] = self.now + 1200
+        self.assertTrue(worker.due(session, self.now))
+        self.assertGreater(
+            worker.ACCESS_MARGIN,
+            worker.AMBIGUOUS_RENEWAL_DELAY + 60 + 4 * (4 + 12) + 60,
+        )
+
     def test_canonical_domain_and_request_path_scope_are_required(self):
         for metadata in (
             {"domain": "www.vinted.fr"},
@@ -407,6 +425,47 @@ class DisabledMaintenanceTests(buying_tests.SessionRotationFixture, unittest.Tes
         self.assertEqual(len(self.calls), 3)
         self.renew_status = 200
         self.assertEqual(self.run_cycle(self.now + 300), "verified")
+        self.assertFalse(self.saved()[0]["enabled"])
+
+    def test_disabled_buyer_recovers_before_expiry_after_400_or_503(self):
+        for status, delay in ((400, 900), (503, 300)):
+            with self.subTest(status=status):
+                self.calls.clear()
+                self.store_opaque_expiries(self.now + 1200, self.now + 7 * 86400)
+                before = self.controls()
+                self.renew_status = status
+                self.assertEqual(self.run_cycle(), "cooldown")
+                self.assertEqual(self.run_cycle(self.now + delay - 1), "cooldown")
+                self.assertEqual(len(self.calls), 3)
+                self.renew_status = 200
+                self.assertEqual(self.run_cycle(self.now + delay), "verified")
+                self.assertLess(self.now + delay, self.now + 1200)
+                self.assertEqual(self.controls(), before)
+                self.assertFalse(self.saved()[0]["enabled"])
+                self.assertEqual(self.run_cycle(self.now + delay + 300), "fresh")
+                self.assertEqual(len(self.calls), 7)
+
+    def test_disabled_fresh_access_cookie_is_not_renewed_before_the_margin(self):
+        self.store_opaque_expiries(self.now + 1201, self.now + 7 * 86400)
+        before = self.controls()
+        with patch.object(worker.logger, "info") as log:
+            self.assertEqual(self.run_cycle(), "fresh")
+        log.assert_not_called()
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.controls(), before)
+
+    def test_due_logging_uses_null_for_unknown_access_expiry_and_never_credentials(
+        self,
+    ):
+        self.store_opaque_expiries(None, self.now + worker.REFRESH_MARGIN)
+        with self.assertLogs("vinted_session_worker", level="INFO") as logs:
+            self.assertEqual(self.run_cycle(), "verified")
+        due_line = next(line for line in logs.output if "due access_remaining" in line)
+        self.assertIn("access_remaining_seconds=null", due_line)
+        self.assertIn("refresh_due=True", due_line)
+        self.assertIn("access_margin_seconds=1200", due_line)
+        self.assertNotIn(self.old_access, due_line)
+        self.assertNotIn(self.old_refresh, due_line)
         self.assertFalse(self.saved()[0]["enabled"])
 
     def test_unverified_account_is_not_maintained_even_with_due_metadata(self):
