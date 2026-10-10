@@ -150,6 +150,97 @@ class PurchasePageDataTests(unittest.TestCase):
         self.assertFalse(data["can_buy"])
         self.assertTrue(data["is_reserved"])
 
+    def test_absent_optional_status_is_not_invented(self):
+        data = page.parse_purchase_item(next_data(purchase_item(can_buy=False)), "123")
+        self.assertFalse(data["can_buy"])
+        self.assertNotIn("is_sold", data)
+        self.assertNotIn("is_closed", data)
+
+    def test_explicit_sold_and_closed_status_stays_with_the_complete_target_item(self):
+        for status in ("is_sold", "is_closed"):
+            for value in (True, False):
+                with self.subTest(status=status, value=value):
+                    data = page.parse_purchase_item(
+                        next_data(purchase_item(can_buy=False, **{status: value})),
+                        "123",
+                    )
+                    self.assertEqual(data["id"], "123")
+                    self.assertEqual(data["user_id"], "456")
+                    self.assertEqual(
+                        data["price"], {"amount": "15.00", "currency_code": "GBP"}
+                    )
+                    self.assertIs(data[status], value)
+                    self.assertFalse(data["can_buy"])
+
+    def test_optional_status_can_resolve_a_strict_boolean_flight_reference(self):
+        data = page.parse_purchase_item(
+            flight(
+                [
+                    ("1", purchase_item(can_buy=False, is_sold="$2", is_closed="$3")),
+                    ("2", True),
+                    ("3", False),
+                ]
+            ),
+            "123",
+        )
+        self.assertTrue(data["is_sold"])
+        self.assertFalse(data["is_closed"])
+        self.assertFalse(data["can_buy"])
+
+    def test_malformed_optional_status_cannot_supply_purchase_evidence(self):
+        for status in ("is_sold", "is_closed"):
+            for value in (
+                None,
+                0,
+                1,
+                "true",
+                "false",
+                [],
+                {},
+                "$undefined",
+                "$missing",
+            ):
+                with self.subTest(status=status, value=value):
+                    self.assertIsNone(
+                        page.parse_purchase_item(
+                            next_data(purchase_item(**{status: value})), "123"
+                        )
+                    )
+
+    def test_conflicting_complete_optional_status_records_remain_ambiguous(self):
+        for status in ("is_sold", "is_closed"):
+            for first in (purchase_item(), purchase_item(**{status: False})):
+                second = purchase_item(**{status: True})
+                for records in ([first, second], [second, first]):
+                    with self.subTest(status=status, records=records):
+                        self.assertIsNone(
+                            page.parse_purchase_item(next_data(records), "123")
+                        )
+
+    def test_neighbor_or_independent_status_plugin_cannot_mark_target_sold(self):
+        data = page.parse_purchase_item(
+            next_data(
+                {
+                    "item": purchase_item(can_buy=False),
+                    "neighbor": purchase_item(id="999", is_sold=True, is_closed=True),
+                    "plugins": [
+                        {
+                            "name": "status",
+                            "data": {
+                                "item_id": "123",
+                                "is_sold": True,
+                                "is_closed": True,
+                            },
+                        }
+                    ],
+                }
+            ),
+            "123",
+        )
+        self.assertFalse(data["can_buy"])
+        self.assertNotIn("is_sold", data)
+        self.assertNotIn("is_closed", data)
+
     def test_traversal_and_payload_bounds_fail_closed_before_conflicting_data(self):
         html = next_data(
             {

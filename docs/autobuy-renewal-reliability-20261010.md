@@ -130,3 +130,49 @@ identity/cooldown tests. Eight changed Python files passed Black, Ruff and
 diff checks. Recovery tests use fictional upstream responses and verify the
 unchanged full-cost budgets, buying permission, card/delivery choices and
 purchase history; no real checkout or payment is used.
+
+## Deployed continuity fix and subsequent owner tap
+
+Commit `7850a20e353932edcd22b8f39435452bf666d254` completed deployment
+`c8d80c1e-5b9a-47ef-bda0-d07a08ab569f` successfully at 20:10:43 UTC
+(21:10 BST). The worker's startup log confirms the 1,200-second margin,
+300-second transient retry and 900-second renewal retry. Startup is not
+proof of an accepted renewal.
+
+The owner's tap for item `10323110719`, search 7, at 20:11:04 UTC passed
+same-buyer identity with HTTP 200 at 20:11:05 UTC and persisted accepted
+session changes. It reached and parsed the exact listing with HTTP 200,
+then stopped at the `can_buy=False` guard. Its final result was
+`failed_before_payment`. No checkout or payment was submitted. This proves
+the tap passed buyer verification with Autobuy enabled; it does not prove
+the item was sold or that an expiry-driven renewal occurred.
+
+An independent follow-up review passed ten focused session tests. A due
+worker can verify the buyer after an accepted identity rotation extends
+expiry, without issuing a renewal POST. Therefore `result=verified` alone
+is not renewal proof. Owner taps reload the latest saved version under the
+same buyer lock; prolonged upstream errors, a revoked connection, required
+security verification or a maintenance operation exceeding the 45-second
+foreground lock wait can still prevent a tap from proceeding.
+
+## Precise listing status without another request
+
+The purchase parser previously discarded optional `is_sold` and `is_closed`
+fields even when the exact complete target record supplied them. Preserve
+them only as explicit booleans from that same record, including resolved
+Flight references. Missing flags remain absent; malformed values or
+conflicting complete records cannot establish purchase eligibility. Foreign
+items and independent status plugins cannot supply the target's status.
+
+The existing listing guards can now explain an explicit sold/closed result
+instead of collapsing it into generic unavailability. No route, request,
+checkout, payment, limit, permission or retry guard is added or bypassed.
+The earlier owner's item remains `can_buy=False` with no established sold
+reason; this correction does not relabel its historical result.
+
+Final validation including this status correction: all 1,009 regression tests
+passed in 87.841 seconds. Independent parser and native transport/purchase
+preflight review passed 42 focused tests, including explicit sold/closed
+responses that cannot reach conversation, checkout or payment. Black, Ruff
+and diff checks passed for the three changed Python files. All new upstream
+responses are fictional; no live purchase is used to validate this correction.

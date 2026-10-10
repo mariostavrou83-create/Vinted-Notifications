@@ -343,7 +343,14 @@ def parse_purchase_item(html, item_id):
             seller = _item_id(_resolve(value["seller_id"], rows))
             flags = {
                 key: _resolve(value[key], rows)
-                for key in ("can_buy", "is_reserved", "is_hidden")
+                for key in (
+                    "can_buy",
+                    "is_reserved",
+                    "is_hidden",
+                    "is_sold",
+                    "is_closed",
+                )
+                if key in value
             }
             if (
                 not seller
@@ -362,6 +369,9 @@ def parse_purchase_item(html, item_id):
                 },
                 **flags,
             }
+            # Sold/closed can explain an otherwise generic can_buy=False, but
+            # only an explicit boolean in this same complete target record is
+            # evidence. Optional status must also agree across duplicate records.
             if candidates and candidate != candidates[0]:
                 return None
             candidates.append(candidate)
