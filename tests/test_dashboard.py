@@ -2,7 +2,9 @@
 
 import io
 import sqlite3
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
@@ -275,6 +277,169 @@ class PhotoDeliveryTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         )
 
 
+class ReferencePhotoTransactionTests(DatabaseFixture, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.photo = store.normalize_photo(io.BytesIO(photo_bytes()))
+
+    def form(self):
+        saved = search_settings.get_search(1)
+        return {
+            "query_name": "Updated search",
+            "query": saved["query"],
+            "revision": str(saved["revision"]),
+            "reminder": "Updated reminder",
+        }
+
+    def database_state(self):
+        with closing(sqlite3.connect(db.DB_PATH)) as conn:
+            tables = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+                )
+            ]
+            return {
+                table: conn.execute(
+                    f'SELECT * FROM "{table}" ORDER BY rowid'
+                ).fetchall()
+                for table in tables
+            }
+
+    def test_independent_writer_commits_while_collage_is_paused(self):
+        import alert_images
+
+        entered, release = threading.Event(), threading.Event()
+        original = alert_images.collage
+
+        def paused(images):
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError("Offline collage test was not released")
+            return original(images)
+
+        form = self.form()
+        with (
+            patch.object(alert_images, "collage", side_effect=paused),
+            ThreadPoolExecutor(max_workers=1) as executor,
+        ):
+            future = executor.submit(store.save_search, 1, form, photos=[self.photo])
+            try:
+                self.assertTrue(entered.wait(5))
+                with closing(sqlite3.connect(db.DB_PATH, timeout=0.1)) as conn, conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute(
+                        "UPDATE queries SET query_name='Other writer' WHERE id=2"
+                    )
+            finally:
+                release.set()
+            self.assertEqual(future.result(timeout=5), 1)
+        self.assertEqual(search_settings.get_search(2)["query_name"], "Other writer")
+        self.assertEqual(len(store.reference_photos(1)), 1)
+
+    def test_photo_membership_reference_and_search_revision_races_are_rejected(self):
+        import alert_images
+
+        store.save_search(1, self.form(), photos=[self.photo])
+        original = alert_images.collage
+        mutations = (
+            "UPDATE search_reference_photos SET position=3 WHERE query_id=1",
+            (
+                "UPDATE dashboard_media SET image=X'72616365' WHERE id IN "
+                "(SELECT media_id FROM search_reference_photos WHERE query_id=1)"
+            ),
+            "UPDATE search_dashboard SET reference_id=NULL WHERE query_id=1",
+            "UPDATE search_dashboard SET revision=revision+1 WHERE query_id=1",
+            "DELETE FROM queries WHERE id=1",
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                before = self.database_state()
+                form = self.form()
+                raced = []
+
+                def concurrent_edit(images, mutation=mutation, raced=raced):
+                    with closing(search_settings.connection()) as conn, conn:
+                        if mutation == "DELETE FROM queries WHERE id=1":
+                            conn.execute("DELETE FROM items WHERE query_id=1")
+                        conn.execute(mutation)
+                    raced.append(self.database_state())
+                    return original(images)
+
+                # Replace the original example, so even a concurrent corrupt
+                # example cannot be decoded before the race is revalidated.
+                form["remove_photo"] = "yes"
+                with (
+                    patch.object(alert_images, "collage", side_effect=concurrent_edit),
+                    self.assertRaises(ValueError),
+                ):
+                    store.save_search(1, form, photos=[self.photo])
+                self.assertEqual(self.database_state(), raced[0])
+                self.assertNotEqual(raced[0], before)
+                # Restore only the local fixture for the next independent case.
+                with closing(sqlite3.connect(db.DB_PATH)) as conn, conn:
+                    conn.execute("PRAGMA foreign_keys=OFF")
+                    for table, rows in before.items():
+                        conn.execute(f'DELETE FROM "{table}"')
+                        if rows:
+                            placeholders = ",".join("?" for _ in rows[0])
+                            conn.executemany(
+                                f'INSERT INTO "{table}" VALUES ({placeholders})', rows
+                            )
+
+    def test_failed_invalid_or_over_capacity_photos_leave_every_saved_value_intact(
+        self,
+    ):
+        import alert_images
+
+        store.save_search(1, self.form(), photos=[self.photo])
+        before = self.database_state()
+        form = self.form()
+        form.update(query_name="Must not persist", reminder="Must not persist")
+        with (
+            patch.object(
+                alert_images, "collage", side_effect=OSError("offline failure")
+            ),
+            self.assertRaises(OSError),
+        ):
+            store.save_search(1, form, photos=[self.photo])
+        self.assertEqual(self.database_state(), before)
+        with self.assertRaises((OSError, ValueError)):
+            store.save_search(1, form, photos=[b"invalid image"])
+        self.assertEqual(self.database_state(), before)
+        with self.assertRaises(ValueError):
+            store.save_search(1, form, photos=[self.photo] * 4)
+        self.assertEqual(self.database_state(), before)
+        invalid = dict(form, remove_reference=["3"])
+        with self.assertRaises(ValueError):
+            store.save_search(1, invalid, photos=[])
+        self.assertEqual(self.database_state(), before)
+
+        # Capacity must be checked against current storage inside the atomic
+        # write, and a late capacity failure must roll back the whole save.
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "INSERT INTO dashboard_media(id,image,created) VALUES ('full',zeroblob(?),?)",
+                (50 * 1024 * 1024, 10**12),
+            )
+        full = self.database_state()
+        with self.assertRaisesRegex(ValueError, "storage is full"):
+            store.save_search(1, form, photos=[self.photo])
+        self.assertEqual(self.database_state(), full)
+
+    def test_noop_photo_save_skips_collage_and_preserves_photo_bytes_and_order(self):
+        import alert_images
+
+        store.save_search(1, self.form(), photos=[self.photo] * 4)
+        references = store.reference_photos(1)
+        media = self.database_state()["dashboard_media"]
+        with patch.object(alert_images, "collage") as collage:
+            store.save_search(1, self.form(), photos=[])
+        collage.assert_not_called()
+        self.assertEqual(store.reference_photos(1), references)
+        self.assertEqual(self.database_state()["dashboard_media"], media)
+
+
 class ScaledDashboardReadTests(DatabaseFixture, unittest.TestCase):
     def setUp(self):
         super().setUp()
@@ -348,9 +513,10 @@ class ScaledDashboardReadTests(DatabaseFixture, unittest.TestCase):
             )
             raise sqlite3.OperationalError("interrupted read")
 
-        with patch(
-            "ebay_store.platform_details", side_effect=interrupted
-        ), self.assertRaises(sqlite3.OperationalError):
+        with (
+            patch("ebay_store.platform_details", side_effect=interrupted),
+            self.assertRaises(sqlite3.OperationalError),
+        ):
             store.list_searches()
         self.assertIsNone(db.get_parameter("unfinished_dashboard_test"))
         self.assertEqual(store.list_searches(), expected)

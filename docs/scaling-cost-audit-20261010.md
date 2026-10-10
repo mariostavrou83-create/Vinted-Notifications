@@ -28,6 +28,12 @@ The read-only Railway inspection found one replica in `iad`, an attached
 | --- | ---: | ---: | ---: |
 | CPU usage, vCPU | 0.204 | 0.571 | 0.723 |
 | Memory, GB | 0.662 | 0.647 | 1.084 |
+| Service disk usage, GB | 20.98036736 | 20.9743614 | 21.2384773 |
+
+The disk metric has 145 samples over twelve hours, with a minimum of
+20.7996336 GB. It is a service-level metric, not an inspected SQLite/database-media
+size or a verified billable-volume breakdown. No database backup size, storage
+fullness or volume cost is inferred from it.
 
 Network RX/TX samples were available, but their aggregation semantics were not
 verified for a monthly forecast. No monthly traffic or bill has been inferred
@@ -110,6 +116,53 @@ await, mixed platform/keyword dashboard value parity, fresh rename/archive reads
 and failed-read rollback. The five polling/eBay/quota/resource suites passed 63
 tests; the two new dashboard cases also passed. Full release checks and deployment
 are reported separately.
+
+### Follow-up transaction audit
+
+Earlier deployment logs show `sqlite3.OperationalError: database is locked` at
+03:57–03:58 UTC on 10 October, including a diagnostic health write that stopped
+the Vinted poller. The existing watchdog restarted it three times; actual polling
+recovered by 03:59:31 UTC. Those traces identify blocked writes, not the writer
+holding the lock. The underlying incident cause remains unproved.
+
+A concrete avoidable writer-lifetime risk was found in dashboard photo saves:
+`save_search` previously built a reference collage after `BEGIN IMMEDIATE`.
+The follow-up prepares immutable photo bytes from a closed, consistent read
+snapshot and builds the collage before taking the write transaction. Inside the
+atomic save it rechecks target existence, revision, the compiled reference ID and
+the exact ordered original-source photo IDs and bytes. Compiled media remains
+immutable and content-addressed in the application; its BLOB is not separately
+snapshotted. A concurrent change rejects the stale save. Capacity checks, cleanup,
+photo ordering and all search-setting writes remain in the same transaction;
+an unchanged photo plan skips collage and media work. This addresses a
+demonstrated lock risk without attributing the
+overnight incident to a dashboard edit.
+
+Payment/session writes were reviewed separately: their SQLite transactions close
+before external Vinted requests. The durable `paying` marker must still commit
+before payment submission, and uncertain payments remain blocked. No payment
+guard, SQLite durability setting, busy timeout or health-write policy was changed.
+The existing extraction connection scope can span a country lookup or queue wait,
+but its item writes commit independently; an open connection alone is not proof
+that it holds SQLite's writer lock. eBay page processing and privacy erasure also
+perform bounded/local or history-dependent work within write transactions; their
+runtime lock duration was not measured and no incident attribution is established.
+
+Actual logs after the main progress/audit release show automatic maintenance at
+08:47:43–44 UTC on 10 October: usable matching changed access/refresh credentials,
+accepted HTTP 200 renewal, committed session save, same-buyer identity HTTP 200
+and worker `verified` without a purchase. Polling then showed 44 searches at the
+one-second target with zero recent errors and no cooldown. This verifies observed
+maintenance health, not a new owner purchase or the photo follow-up's deployment.
+
+Local follow-up validation on 10 October passed 41 dashboard, collage,
+eBay-dashboard and keyword tests, then all 888 tests in the full Python 3.12
+suite (85.199 seconds), with Ruff, Black and diff checks clean. New
+cases exercise an independent SQLite writer committing while collage work is
+paused; racing original-source bytes, position, reference and revision changes;
+target deletion; failed/invalid/over-capacity photos; all-table rollback; and a
+four-photo no-op save. These are offline checks, not a live dashboard edit or a
+measurement of the overnight writer's lock duration.
 
 ## eBay expansion after quota approval
 

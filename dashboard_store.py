@@ -7,6 +7,7 @@ import re
 import time
 import warnings
 from contextlib import closing
+from dataclasses import dataclass
 from decimal import Decimal
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
@@ -125,6 +126,11 @@ def save_search(query_id, form, photo=None, *, photos=None):
     must_have = form.get("must_have", "").strip()
     if len(must_have) > 400:
         raise ValueError("Keep must-have details to 400 characters.")
+    photo_plan = (
+        _prepare_reference_photos(query_id, form, photos)
+        if photos is not None
+        else None
+    )
     with closing(connection()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
         folder_id = form.get("folder_id") or None
@@ -136,7 +142,7 @@ def save_search(query_id, form, photo=None, *, photos=None):
         ):
             raise ValueError("Choose an existing folder, or leave this search unfiled.")
         old = conn.execute(
-            """SELECT q.*, COALESCE(d.revision,0) revision FROM queries q
+            """SELECT q.*, COALESCE(d.revision,0) revision,d.reference_id FROM queries q
             LEFT JOIN search_dashboard d ON d.query_id=q.id WHERE q.id=?""",
             (query_id,),
         ).fetchone()
@@ -146,6 +152,14 @@ def save_search(query_id, form, photo=None, *, photos=None):
             if str(old["revision"]) != form.get("revision"):
                 raise ValueError(
                     "This search changed in another tab. Reload it before saving again."
+                )
+            if photo_plan is not None and (
+                old["revision"] != photo_plan.revision
+                or old["reference_id"] != photo_plan.reference_id
+                or _reference_photo_snapshot(conn, query_id) != photo_plan.existing
+            ):
+                raise ValueError(
+                    "The saved photos changed. Reload before editing them."
                 )
             # Preserve byte-for-byte URLs when their meaning is unchanged.
             if old["query"] and normalize_url(old["query"]) == url:
@@ -201,8 +215,8 @@ def save_search(query_id, form, photo=None, *, photos=None):
             (query_id, maximum, postage),
         )
         ebay_store.save_platforms(conn, query_id, vinted, ebay, ebay_config)
-        if photos is not None:
-            _save_reference_photos(conn, query_id, form, photos)
+        if photo_plan is not None:
+            _save_reference_photos(conn, query_id, photo_plan)
         elif photo:
             digest = _store_media(conn, photo)
             conn.execute(
@@ -267,16 +281,50 @@ def reference_photos(query_id):
         ]
 
 
-def _save_reference_photos(conn, query_id, form, photos):
-    from alert_images import collage
+@dataclass(frozen=True)
+class _ReferencePhotoPlan:
+    existing: tuple[tuple[int, str, bytes], ...]
+    revision: int | None
+    reference_id: str | None
+    kept_ids: tuple[str, ...]
+    uploads: tuple[bytes, ...]
+    compiled: bytes | None
+    changed: bool
 
-    existing = list(
-        conn.execute(
+
+def _reference_photo_snapshot(conn, query_id):
+    return tuple(
+        tuple(row)
+        for row in conn.execute(
             """SELECT p.position,p.media_id,m.image FROM search_reference_photos p
-        JOIN dashboard_media m ON m.id=p.media_id WHERE query_id=? ORDER BY position""",
+        LEFT JOIN dashboard_media m ON m.id=p.media_id WHERE query_id=? ORDER BY position""",
             (query_id,),
         )
     )
+
+
+def _prepare_reference_photos(query_id, form, photos):
+    """Close a consistent read snapshot before any image decoding or encoding."""
+    from alert_images import collage
+
+    uploads = tuple(bytes(raw) for raw in photos)
+    with closing(connection()) as conn, conn:
+        conn.execute("BEGIN")
+        search = conn.execute(
+            """SELECT COALESCE(d.revision,0) revision,d.reference_id FROM queries q
+        LEFT JOIN search_dashboard d ON d.query_id=q.id WHERE q.id=?""",
+            (query_id,),
+        ).fetchone()
+        existing = _reference_photo_snapshot(conn, query_id)
+    if query_id is not None:
+        if search is None:
+            raise ValueError("This search no longer exists.")
+        if str(search["revision"]) != form.get("revision"):
+            raise ValueError(
+                "This search changed in another tab. Reload it before saving again."
+            )
+    if any(raw is None for _position, _media_id, raw in existing):
+        raise ValueError("The saved photos changed. Reload before editing them.")
     removals = (
         form.getlist("remove_reference")
         if hasattr(form, "getlist")
@@ -284,25 +332,37 @@ def _save_reference_photos(conn, query_id, form, photos):
     )
     if isinstance(removals, str):
         removals = [removals]
-    if set(removals) - {str(row["position"]) for row in existing}:
+    if set(removals) - {str(row[0]) for row in existing}:
         raise ValueError("The saved photos changed. Reload before editing them.")
     keep = (
         []
         if form.get("remove_photo") == "yes"
-        else [row for row in existing if str(row["position"]) not in removals]
+        else [row for row in existing if str(row[0]) not in removals]
     )
-    if len(keep) + len(photos) > 4:
+    if len(keep) + len(uploads) > 4:
         raise ValueError(
             "Keep up to four example photos in total. Remove a saved photo to make room."
         )
-    if not photos and len(keep) == len(existing):
+    changed = bool(uploads) or len(keep) != len(existing)
+    originals = [row[2] for row in keep] + list(uploads)
+    compiled = collage(originals) if changed and originals else None
+    return _ReferencePhotoPlan(
+        existing=existing,
+        revision=search["revision"] if search else None,
+        reference_id=search["reference_id"] if search else None,
+        kept_ids=tuple(row[1] for row in keep),
+        uploads=uploads,
+        compiled=compiled,
+        changed=changed,
+    )
+
+
+def _save_reference_photos(conn, query_id, plan):
+    """Apply prepared bytes only after the surrounding save revalidates its read."""
+    if not plan.changed:
         return
-    originals = [row["image"] for row in keep] + list(photos)
-    compiled = collage(originals) if originals else None
-    ids = [row["media_id"] for row in keep] + [
-        _store_media(conn, raw) for raw in photos
-    ]
-    digest = _store_media(conn, compiled) if compiled else None
+    ids = list(plan.kept_ids) + [_store_media(conn, raw) for raw in plan.uploads]
+    digest = _store_media(conn, plan.compiled) if plan.compiled else None
     conn.execute("DELETE FROM search_reference_photos WHERE query_id=?", (query_id,))
     conn.executemany(
         "INSERT INTO search_reference_photos VALUES (?,?,?)",
