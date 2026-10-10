@@ -31,6 +31,29 @@ COUNT_TABLES = {
     "web_sessions": "supabase_dashboard_sessions",
 }
 
+# Compare every saved and archived definition, without treating routine poller
+# watermarks/health as owner configuration. Optional tables must have matching
+# schemas and contents when either side contains them.
+SEARCH_DEFINITION_TABLES = {
+    "queries": {"last_item"},
+    "search_dashboard": {"rebaseline"},
+    "search_preferences": set(),
+    "search_buying_guide": set(),
+    "search_folders": set(),
+    "search_platforms": {"ebay_generation"},
+    "vinted_keyword_variants": {
+        "primed",
+        "last_item",
+        "max_item_id",
+        "last_check",
+        "last_attempt",
+        "last_success",
+        "actual_interval",
+        "failures",
+        "error",
+    },
+}
+
 
 class RecoveryError(SupabaseError):
     def __init__(self, stage, *, observed=None):
@@ -56,10 +79,57 @@ def existing_cipher(path, label):
         raise RecoveryError(label + "_unavailable") from None
 
 
+def _saved_search_count(conn):
+    tables = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    if "search_dashboard" in tables:
+        return conn.execute(
+            "SELECT COUNT(*) FROM queries q "
+            "LEFT JOIN search_dashboard d ON d.query_id=q.id "
+            "WHERE COALESCE(d.archived,0)=0"
+        ).fetchone()[0]
+    return conn.execute("SELECT COUNT(*) FROM queries").fetchone()[0]
+
+
+def _search_definitions_match(snapshot, live):
+    for table, runtime_columns in SEARCH_DEFINITION_TABLES.items():
+        columns = []
+        for database in (snapshot, live):
+            columns.append(
+                [
+                    row[1]
+                    for row in database.execute(f'PRAGMA table_info("{table}")')
+                    if row[1] not in runtime_columns
+                ]
+            )
+        if columns[0] != columns[1]:
+            return False
+        if not columns[0]:
+            continue
+        # Column names come from an untrusted recovered file; quote them before
+        # use and only read the fixed table names above.
+        names = ",".join('"' + name.replace('"', '""') + '"' for name in columns[0])
+        query = f'SELECT {names} FROM "{table}" ORDER BY {names}'
+        if snapshot.execute(query).fetchall() != live.execute(query).fetchall():
+            return False
+    return True
+
+
 def verify_snapshot(encrypted, directory, *, live_database=None, expected_searches=44):
-    """Return fixed checks/counts only, after deleting a private temporary copy."""
+    """Read an isolated copy; None binds counts and definitions to live settings.
+
+    The standalone/default 44-search recovery criterion remains available.
+    Only trusted callers with a live database can select the dynamic criterion.
+    """
     if not isinstance(encrypted, bytes) or len(encrypted) > MAX_CIPHERTEXT_BYTES:
         raise RecoveryError("ciphertext_validation")
+    if expected_searches is None:
+        if live_database is None:
+            raise RecoveryError("live_database_required")
+    elif type(expected_searches) is not int or expected_searches < 0:
+        raise RecoveryError("expected_searches_validation")
     directory = Path(directory)
     keys = {
         label: existing_cipher(directory / filename, label + "_key")
@@ -133,7 +203,10 @@ def verify_snapshot(encrypted, directory, *, live_database=None, expected_search
                     )
                 observed["counts"] = counts
                 stage = "expected_searches"
-                if counts["saved_searches"] != expected_searches:
+                if (
+                    expected_searches is not None
+                    and counts["saved_searches"] != expected_searches
+                ):
                     raise RecoveryError(stage)
                 stage = "example_photo_references"
                 invalid_refs = conn.execute(
@@ -158,7 +231,7 @@ def verify_snapshot(encrypted, directory, *, live_database=None, expected_search
                         value = json.loads(keys["buyer"].decrypt(record))
                         if not isinstance(value, dict) or not value:
                             raise RecoveryError(stage)
-                settings_match = buyer_match = refs_match = None
+                settings_match = buyer_match = refs_match = searches_match = None
                 if live_database is not None:
                     stage = "live_comparison"
                     live_uri = (
@@ -169,7 +242,27 @@ def verify_snapshot(encrypted, directory, *, live_database=None, expected_search
                     with closing(
                         sqlite3.connect(live_uri, uri=True, timeout=5)
                     ) as live:
+                        live.set_progress_handler(
+                            lambda: time.monotonic() > deadline, 1000
+                        )
+                        live.execute("PRAGMA trusted_schema=OFF")
                         live.execute("PRAGMA query_only=ON")
+                        # All live comparisons refer to one consistent read.
+                        # A concurrent edit cannot supply a count from one
+                        # version and search/settings rows from another.
+                        live.execute("BEGIN")
+                        if expected_searches is None:
+                            stage = "live_search_count"
+                            counts["expected_searches"] = _saved_search_count(live)
+                            stage = "expected_searches"
+                            if counts["saved_searches"] != counts["expected_searches"]:
+                                raise RecoveryError(stage)
+                        stage = "live_search_definitions"
+                        searches_match = _search_definitions_match(conn, live)
+                        observed["search_definitions_match_live"] = searches_match
+                        if not searches_match:
+                            raise RecoveryError(stage)
+                        stage = "live_comparison"
                         compare_tables = ("parameters", "vinted_search_budgets")
                         settings_match = all(
                             conn.execute(
@@ -205,6 +298,7 @@ def verify_snapshot(encrypted, directory, *, live_database=None, expected_search
             "settings_match_live": settings_match,
             "buyer_records_match_live": buyer_match,
             "photo_references_match_live": refs_match,
+            "search_definitions_match_live": searches_match,
         }
     except RecoveryError as exc:
         exc.observed.update(observed)

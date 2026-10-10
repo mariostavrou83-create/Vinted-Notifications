@@ -10,6 +10,7 @@ import photo_cards
 import vinted_buyer as buyer
 import vinted_buying as buying
 from logger import get_logger
+from vinted_telegram_progress import TelegramProgress
 
 logger = get_logger(__name__)
 BUY_REPLY = re.compile(r"\A\s*buy\s*\Z", re.IGNORECASE)
@@ -21,6 +22,18 @@ async def send_status(message, text):
     except TelegramError as exc:
         # A missing status notification must never replay a purchase.
         logger.warning("BUY reply status failed: %s", type(exc).__name__)
+
+
+async def stop_preparation(preparation):
+    """Drain the informational reply before displaying the saved result."""
+    if not preparation.done():
+        preparation.cancel()
+    try:
+        await preparation
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:  # noqa: BLE001 -- no UI-based replay
+        logger.warning("BUY preparation status failed: error=%s", type(exc).__name__)
 
 
 async def reply_buy(update, context):
@@ -67,6 +80,7 @@ async def reply_buy(update, context):
         row, _, _ = saved
         photo_cards.control_health("vinted", "click")
         previous = buying.result(row["item_id"])
+        progress = None
         if previous and previous["state"] not in ("failed_before_payment", "preparing"):
             outcome = previous
             text = previous["message"] + "\nNo payment was sent again."
@@ -77,11 +91,12 @@ async def reply_buy(update, context):
                 # This reply is purchase permission; Telegram status delivery
                 # must not postpone the existing account and listing checks.
                 preparation = asyncio.create_task(
-                    send_status(message, "Preparing your Vinted checkout…")
+                    send_status(message, "Checking your buyer account…")
                 )
+                progress = TelegramProgress(context.bot, source, row["item_id"])
                 # BUY is the purchase instruction. The existing buyer rechecks
                 # live prices and limits, and retains the temporary test gates.
-                outcome = await asyncio.to_thread(buying.buy, row)
+                outcome = await progress.execute(buying.buy, row)
             except buyer.BuyerError as exc:
                 outcome = {
                     "state": "setup_required",
@@ -102,29 +117,34 @@ async def reply_buy(update, context):
                     ),
                 }
             finally:
-                if preparation:
-                    # Finish the informational message before the final result
-                    # so a delayed "Preparing" cannot arrive after "Paid".
-                    if not preparation.done():
-                        preparation.cancel()
-                    try:
-                        await preparation
-                    except asyncio.CancelledError:
-                        pass
-                    except Exception as exc:  # noqa: BLE001 -- no UI-based replay
-                        logger.warning(
-                            "BUY preparation status failed: error=%s",
-                            type(exc).__name__,
-                        )
+                try:
+                    if progress:
+                        await progress.finish()
+                finally:
+                    if preparation:
+                        # Finish the initial informational reply before the
+                        # final result; it must never arrive after "Paid".
+                        cleanup = stop_preparation(preparation)
+                        if progress:
+                            await progress.settle(cleanup)
+                        else:
+                            await cleanup
             text = (outcome or {}).get(
                 "message"
             ) or "Check the status on your Vinted alert."
         if outcome:
-            outcome = await buying.show_purchase_feedback(context.bot, source, outcome)
+            feedback = buying.show_purchase_feedback(context.bot, source, outcome)
+            outcome = await progress.settle(feedback) if progress else await feedback
             text = outcome.get("message") or text
             if previous and previous["state"] not in (
                 "failed_before_payment",
                 "preparing",
             ):
                 text += "\nNo payment was sent again."
-        await send_status(message, text)
+        notification = send_status(message, text)
+        if progress:
+            await progress.settle(notification)
+        else:
+            await notification
+        if progress and progress.cancelled:
+            raise asyncio.CancelledError

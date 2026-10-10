@@ -10,6 +10,7 @@ from contextlib import closing
 from decimal import Decimal
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
+import db
 from search_settings import connection, parse_exclusions
 
 
@@ -314,6 +315,13 @@ def _save_reference_photos(conn, query_id, form, photos):
 
 
 def list_searches(archived=False):
+    # Keep every existing read fresh while reusing one short connection across
+    # search, platform and keyword rows. No connection reaches the web response.
+    with db.connection_scope():
+        return _list_searches(archived)
+
+
+def _list_searches(archived=False):
     with closing(connection()) as conn:
         rows = [
             dict(row)

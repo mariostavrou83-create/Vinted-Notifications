@@ -1742,7 +1742,9 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                     SimpleNamespace(callback_query=query), SimpleNamespace(bot=Mock())
                 )
             )
-        buy.assert_called_once_with(self.row)
+        buy.assert_called_once()
+        self.assertEqual(buy.call_args.args, (self.row,))
+        self.assertTrue(callable(buy.call_args.kwargs["progress"]))
 
     def test_failed_unknown_and_action_payment_states_never_recover_preparing(self):
         buying.claim(self.row)

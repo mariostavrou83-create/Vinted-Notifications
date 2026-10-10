@@ -1,6 +1,7 @@
 """Dashboard integration tests: real SQLite, Flask requests and mocked Telegram transport."""
 
 import io
+import sqlite3
 import unittest
 from contextlib import closing
 from pathlib import Path
@@ -47,7 +48,7 @@ class DashboardTests(DatabaseFixture, unittest.TestCase):
             exclusions="teddy coat",
             revision="0",
             csrf="offline-csrf",
-            **kwargs
+            **kwargs,
         )
 
     def test_every_private_route_and_legacy_config_is_protected(self):
@@ -272,6 +273,87 @@ class PhotoDeliveryTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             robot.bot.send_photo.await_args.kwargs["photo"], "cached-photo"
         )
+
+
+class ScaledDashboardReadTests(DatabaseFixture, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        with closing(search_settings.connection()) as conn, conn:
+            conn.executemany(
+                "INSERT INTO queries VALUES (?,?,100,?)",
+                [
+                    (
+                        i,
+                        f"https://www.vinted.co.uk/catalog?search_text=test{i}",
+                        f"Search {i}",
+                    )
+                    for i in range(45, 251)
+                ],
+            )
+        for query_id, mode, keywords in ((1, "both", "fur,sherpa"), (2, "ebay", "")):
+            saved = search_settings.get_search(query_id)
+            store.save_search(
+                query_id,
+                {
+                    "query_name": f"Mixed search {query_id}",
+                    "query": saved["query"],
+                    "revision": str(saved["revision"]),
+                    "platform_mode": mode,
+                    "ebay_keywords": "bench jacket",
+                    "vinted_keywords": keywords,
+                },
+            )
+
+    def test_250_search_values_match_unbatched_reads_with_one_closed_connection(self):
+        expected = store._list_searches()
+        self.assertEqual(len(expected), 250)
+        opened = []
+        connect = sqlite3.connect
+
+        def counted_connect(*args, **kwargs):
+            conn = connect(*args, **kwargs)
+            opened.append(conn)
+            return conn
+
+        with patch.object(db.sqlite3, "connect", side_effect=counted_connect):
+            actual = store.list_searches()
+        self.assertEqual(actual, expected)
+        self.assertEqual(len(opened), 1)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            opened[0].execute("SELECT 1")
+        mixed = {row["id"]: row for row in actual}
+        self.assertEqual(mixed[1]["platform_mode"], "both")
+        self.assertEqual(mixed[1]["vinted_keywords"], ["fur", "sherpa"])
+        self.assertEqual(mixed[2]["platform_mode"], "ebay")
+        self.assertEqual(mixed[250]["platform_mode"], "vinted")
+
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE queries SET query_name='Changed now' WHERE id=1")
+            conn.execute("INSERT OR IGNORE INTO search_dashboard(query_id) VALUES (2)")
+            conn.execute("UPDATE search_dashboard SET archived=1 WHERE query_id=2")
+        fresh = store.list_searches()
+        self.assertEqual(len(fresh), 249)
+        self.assertEqual(
+            next(row for row in fresh if row["id"] == 1)["query_name"], "Changed now"
+        )
+        self.assertEqual([row["id"] for row in store.list_searches(archived=True)], [2])
+
+    def test_failed_read_rolls_back_unfinished_work_and_next_read_remains_fresh(self):
+        expected = store.list_searches()
+
+        def interrupted(_query_id):
+            conn = db.get_db_connection()
+            conn.execute(
+                "INSERT INTO parameters VALUES ('unfinished_dashboard_test','discard')"
+            )
+            raise sqlite3.OperationalError("interrupted read")
+
+        with patch(
+            "ebay_store.platform_details", side_effect=interrupted
+        ), self.assertRaises(sqlite3.OperationalError):
+            store.list_searches()
+        self.assertIsNone(db.get_parameter("unfinished_dashboard_test"))
+        self.assertEqual(store.list_searches(), expected)
 
 
 if __name__ == "__main__":

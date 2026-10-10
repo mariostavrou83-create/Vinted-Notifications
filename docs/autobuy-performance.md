@@ -89,6 +89,80 @@ This does not measure Railway volume latency, but it gives no basis for weakenin
 durable commits. The service's observed CPU and memory usage also did not approach
 its configured limits.
 
+## Owner tests after deployment
+
+The owner made two further purchases after release `46b1b887` was live. No
+purchase was created to collect these measurements. Both flows returned `paid`
+from the payment POST, with no logged challenge; neither result has been
+independently reconciled to its exact order by this investigation.
+
+| Item | Bot tap UTC | Payment response | Purchase work | Paid display |
+| --- | --- | ---: | ---: | ---: |
+| 10310139265 | 22:17:52.846 | 10.402 s | 10.419 s | 10.848 s |
+| 10309895153 | 22:18:50.702 | 11.292 s | 11.310 s | 11.735 s |
+
+| Network stage | First purchase | Second purchase |
+| --- | ---: | ---: |
+| Buyer identity | 588 ms | 579 ms |
+| Canonical listing | 1,153 ms | 1,126 ms |
+| Conversation | 1,283 ms | 442 ms |
+| Checkout build | 1,925 ms | 1,184 ms |
+| Initial component load | 1,016 ms | 1,993 ms |
+| Fresh nearby pickup lookup | 561 ms | 598 ms |
+| Combined delivery/payment choice update | Already correct; skipped | 1,542 ms |
+| Payment POST | 3,619 ms | 3,576 ms |
+
+Session commits took roughly 8–16 ms. The existing connection was reused for the
+later Vinted-host requests. Different items, selected choices and upstream
+response times prevent attributing the whole improvement to this patch. Both
+display timings are about 4–5 seconds below the previous 15.646-second trace, but
+the requested 5–10-second purchase target is still not demonstrated. Reducing a
+timeout or reporting success before the payment response would not make payment
+complete sooner.
+
+## Live Telegram stages
+
+Telegram's callback toast is the initial acknowledgement; it is not a reliable
+editable progress surface. The original alert now receives fixed stages for
+waiting, account verification, listing availability, checkout creation, loading
+choices, checking delivery/payment/total and sending payment. A real security
+task temporarily shows its own stage and then restores the preceding operation.
+Success and failure come from the existing saved purchase outcome, with actual
+failure reasons retained.
+
+The synchronous buyer publishes only a fixed stage and timestamp into a coalesced
+event-loop worker. It performs no Telegram request or progress database write.
+Edits use the existing alert lock and reload the exact item/card; newer saved
+outcomes win over stale stages. While this purchase is active, the status button
+shows its current stage instead of launching a competing payment-status request.
+The final display follows any in-flight progress edit, without delaying the
+payment itself. UI errors never retry a purchase.
+
+Caller cancellation does not launch another buyer or release the alert purchase
+lock early. The same authorised buyer completes, pending stage edits drain, and
+durable final feedback is attempted before cancellation propagates. Delayed
+status/setup messages reload the saved result under the card-edit lock so a newer
+payment result wins. This covers Telegram button taps and BUY replies.
+
+## Optional checkout-build evidence
+
+After the unchanged initial component load and exact checkout-ID check, an
+optional observer compares private snapshots of the build and loaded responses.
+It logs only fixed boolean fields for completeness, required components, exact
+item matching, checkout/shipping/address agreement, selected choices and checksum
+change. No identifiers, prices, addresses, credentials or checkout bodies appear
+in this observer's logs. Missing or unreadable values produce false evidence.
+
+The comparison cannot influence a purchase decision: its return is ignored, and
+snapshot/import/observer failures cannot block or replay payment. The initial
+load, fresh pickup lookup, choices and full-cost checks remain in place. Eleven
+integration cases exercise identical request sequences and payment checks for
+true/false evidence, faults and mutation. An offline 4,000-iteration synthetic
+benchmark measured 0.196 ms median/0.340 ms p95 including snapshots, excluding
+external log I/O. This is instrumentation, not a demonstrated checkout saving.
+
+## Remaining experiments
+
 The current UK browser source distinguishes checkout build from initial component
 loading. Build completeness is unproven; keep the initial load. Nearby pickup
 rates belong to the current shipping order and cannot be reused across purchases.

@@ -973,13 +973,16 @@ class Client:
         if not challenge:
             return False
         self.solver_attempted = True
-        result = solve_datadome(
-            challenge,
-            proxy=self.network["proxy"],
-            api_key=self.network["api_key"],
-            user_agent=BROWSER_USER_AGENT,
-            enabled=True,
-        )
+        from vinted_progress import temporary_stage
+
+        with temporary_stage("security_check"):
+            result = solve_datadome(
+                challenge,
+                proxy=self.network["proxy"],
+                api_key=self.network["api_key"],
+                user_agent=BROWSER_USER_AGENT,
+                enabled=True,
+            )
         public_result = getattr(result, "public", None)
         diagnostics = public_result() if callable(public_result) else None
         self.solver_diagnostics = diagnostics if isinstance(diagnostics, dict) else {}

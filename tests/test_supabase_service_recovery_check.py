@@ -1,7 +1,10 @@
 """Authorized in-service reads reuse owner verification and existing keys."""
 
+import gzip
 import hashlib
 import json
+import sqlite3
+import tempfile
 import time
 import unittest
 from contextlib import closing
@@ -92,7 +95,7 @@ class ServiceRecoveryTests(DatabaseFixture, unittest.TestCase):
         )
         return result, verify
 
-    def test_counts_exposed_through_fresh_owner_verification_without_changing_criterion(
+    def test_counts_exposed_through_fresh_owner_verification_with_live_bound_criterion(
         self,
     ):
         result, verify = self.execute()
@@ -103,7 +106,7 @@ class ServiceRecoveryTests(DatabaseFixture, unittest.TestCase):
         self.client.download_backup.assert_called_once_with(
             self.tokens["access_token"], with_metadata=True
         )
-        self.assertNotIn("expected_searches", verify.call_args.kwargs)
+        self.assertIsNone(verify.call_args.kwargs["expected_searches"])
         self.assertEqual(result["backup_timestamp"], "2026-10-08T18:10:48+00:00")
 
     def test_missing_backup_key_is_reported_and_never_recreated(self):
@@ -116,6 +119,67 @@ class ServiceRecoveryTests(DatabaseFixture, unittest.TestCase):
         self.client.verify_owner.assert_not_called()
         self.client.download_backup.assert_not_called()
         verify.assert_not_called()
+
+    def test_authorized_service_verifies_real_250_search_snapshot_and_rejects_staleness(
+        self,
+    ):
+        buyer = Fernet(self.keys["vinted-buyer.key"]).encrypt(
+            json.dumps({"cookies": "fictional-session"}).encode()
+        )
+        with closing(search_settings.connection()) as conn, conn:
+            conn.executemany(
+                "INSERT INTO queries(id,query,last_item,query_name) VALUES (?,?,?,?)",
+                [
+                    (i, f"https://example.test/?q={i}", 100, f"Fictional search {i}")
+                    for i in range(45, 251)
+                ],
+            )
+            conn.execute("UPDATE vinted_buyer SET session=? WHERE id=1", (buyer,))
+            conn.execute(
+                "INSERT INTO dashboard_media(id,image,created) VALUES ('fictional-photo',x'01',0)"
+            )
+            conn.execute(
+                "INSERT INTO search_reference_photos VALUES (1,0,'fictional-photo')"
+            )
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshot = Path(temporary) / "snapshot.sqlite"
+            with closing(search_settings.connection()) as source, closing(
+                sqlite3.connect(snapshot)
+            ) as destination:
+                source.backup(destination)
+                with destination:
+                    destination.execute("DELETE FROM supabase_dashboard_sessions")
+            encrypted = Fernet(self.keys["supabase-backup.key"]).encrypt(
+                backend.SNAPSHOT_MAGIC + gzip.compress(snapshot.read_bytes())
+            )
+        self.client.download_backup.return_value = (
+            encrypted,
+            "2026-10-10T08:00:00+00:00",
+        )
+        with patch.dict("os.environ", SETTINGS), patch.object(
+            check, "Client", return_value=self.client
+        ), patch.object(backend, "_private_cipher") as create, self.assertLogs(
+            check.logger, level="INFO"
+        ) as logs:
+            result = check.check_recovery()
+            self.assertEqual(result["outcome"], "verified")
+            self.assertEqual(result["counts"]["expected_searches"], 250)
+            self.assertTrue(result["search_definitions_match_live"])
+            with closing(search_settings.connection()) as conn, conn:
+                conn.execute(
+                    "UPDATE parameters SET value='Changed setting' WHERE key='query_refresh_delay'"
+                )
+            stale = check.check_recovery()
+        create.assert_not_called()
+        self.assertEqual(stale["outcome"], "unverified")
+        self.assertEqual(stale["stage"], "remaining_checks")
+        self.assertFalse(stale["settings_match_live"])
+        self.assertNotIn("fictional-session", str(logs.output))
+        self.assertNotIn("Changed setting", str(logs.output))
+        self.assertEqual(
+            {path.name: path.read_bytes() for path in self.directory.glob("*.key")},
+            self.keys,
+        )
 
     def test_rejected_owner_or_other_stored_owner_cannot_download(self):
         self.client.verify_owner.side_effect = backend.SupabaseError(

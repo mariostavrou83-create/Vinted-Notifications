@@ -68,7 +68,12 @@ def check_recovery():
                 tokens["access_token"], with_metadata=True
             )
             result["stage"] = "isolated_recovery"
-            result = verify_snapshot(encrypted, database.parent, live_database=database)
+            result = verify_snapshot(
+                encrypted,
+                database.parent,
+                live_database=database,
+                expected_searches=None,
+            )
         result["stage"] = "complete"
         if any(
             result.get(key) is not True
@@ -77,6 +82,7 @@ def check_recovery():
                 "settings_match_live",
                 "buyer_records_match_live",
                 "photo_references_match_live",
+                "search_definitions_match_live",
             )
         ):
             result.update(outcome="unverified", stage="remaining_checks")

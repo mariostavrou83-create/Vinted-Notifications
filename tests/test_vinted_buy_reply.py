@@ -19,6 +19,7 @@ import vinted_alerts
 import vinted_buyer as buyer
 import vinted_buying as buying
 from vinted_buy_reply import reply_buy
+from vinted_progress import STAGE_LABELS
 
 
 class BuyReplyTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
@@ -133,17 +134,50 @@ class BuyReplyTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             "No payment was sent again", self.message.reply_text.call_args.args[0]
         )
 
+    async def test_cancelled_final_reply_finishes_without_repeating_payment(self):
+        final_started = asyncio.Event()
+        release_final = asyncio.Event()
+        delivered = []
+
+        async def status(text, **kwargs):
+            if "Paid" in text:
+                final_started.set()
+                await release_final.wait()
+                delivered.append(text)
+
+        self.message.reply_text.side_effect = status
+        task = asyncio.create_task(self.send_buy())
+        try:
+            await asyncio.wait_for(final_started.wait(), 2)
+            for _ in range(2):
+                task.cancel()
+                await asyncio.sleep(0)
+                self.assertFalse(task.done())
+            self.assertTrue(buying.purchase_lock(777).locked())
+            self.assertEqual(buying.result("123")["state"], "paid")
+        finally:
+            release_final.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 2)
+        await self.send_buy()
+        self.assertEqual(len(self.payments()), 1)
+        self.assertTrue(delivered)
+        self.assertTrue(all("Paid" in text for text in delivered))
+        self.assertEqual(
+            photo_cards.load("vinted", 777)[1]["buy_feedback"]["state"], "paid"
+        )
+
     async def test_mixed_autobuy_tap_and_buy_reply_share_one_purchase(self):
         loop = asyncio.get_running_loop()
         purchase_started = asyncio.Event()
         release_purchase = threading.Event()
         original_buy = buying.buy
 
-        def purchase(row):
+        def purchase(row, *, progress=None):
             loop.call_soon_threadsafe(purchase_started.set)
             if not release_purchase.wait(2):
                 raise AssertionError("Purchase was not released")
-            return original_buy(row)
+            return original_buy(row, progress=progress)
 
         query = SimpleNamespace(
             data="buy:click",
@@ -210,6 +244,56 @@ class BuyReplyTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             photo_cards.load("vinted", 777)[1]["buy_feedback"]["state"], "paid"
         )
 
+    async def test_buy_reply_uses_live_stage_ui_without_waiting_to_submit_payment(self):
+        loop = asyncio.get_running_loop()
+        edit_started = threading.Event()
+        release_edit = asyncio.Event()
+        payment_started = asyncio.Event()
+        original = self.client.request.side_effect
+
+        async def edit(**kwargs):
+            if STAGE_LABELS["loading_choices"] in kwargs["text"]:
+                edit_started.set()
+                await release_edit.wait()
+
+        def response(method, path, body=None):
+            if (
+                method == "PUT"
+                and path.endswith("/checkout")
+                and not edit_started.wait(1)
+            ):
+                raise AssertionError("The live delivery stage did not start")
+            if method == "POST" and path.endswith("/checkout/payment"):
+                self.assertFalse(release_edit.is_set())
+                self.assertEqual(buying.result("123")["state"], "paying")
+                loop.call_soon_threadsafe(payment_started.set)
+            return original(method, path, body)
+
+        self.bot.edit_message_text.side_effect = edit
+        self.client.request.side_effect = response
+        # Disable the coalescing interval only for this deterministic race test.
+        from vinted_telegram_progress import TelegramProgress
+
+        def bridge(*args):
+            return TelegramProgress(*args, interval=0)
+
+        with patch("vinted_buy_reply.TelegramProgress", side_effect=bridge):
+            task = asyncio.create_task(self.send_buy())
+            try:
+                await asyncio.wait_for(payment_started.wait(), 2)
+                self.assertFalse(task.done())
+            finally:
+                release_edit.set()
+                await asyncio.wait_for(task, 2)
+        self.assertEqual(len(self.payments()), 1)
+        self.assertEqual(buying.result("123")["state"], "paid")
+        self.assertIn("Paid", self.message.reply_text.call_args.args[0])
+        self.assertEqual(
+            photo_cards.load("vinted", 777)[1]["buy_feedback"]["state"], "paid"
+        )
+        await self.send_buy()
+        self.assertEqual(len(self.payments()), 1)
+
     async def test_slow_preparation_status_does_not_delay_the_single_payment(self):
         loop = asyncio.get_running_loop()
         preparation_started = asyncio.Event()
@@ -218,7 +302,7 @@ class BuyReplyTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         preparation_finished = asyncio.Event()
 
         async def status(text, **kwargs):
-            if text == "Preparing your Vinted checkout…":
+            if text == "Checking your buyer account…":
                 preparation_started.set()
                 await release_preparation.wait()
                 preparation_finished.set()
@@ -255,7 +339,7 @@ class BuyReplyTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_preparation_status_failure_cannot_change_or_repeat_payment(self):
         async def status(text, **kwargs):
-            if text == "Preparing your Vinted checkout…":
+            if text == "Checking your buyer account…":
                 raise ValueError("Private Telegram error detail")
 
         self.message.reply_text.side_effect = status
@@ -277,7 +361,7 @@ class BuyReplyTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         purchase_finished = asyncio.Event()
         release_purchase = threading.Event()
 
-        def purchase(row):
+        def purchase(row, *, progress=None):
             self.assertTrue(buying.claim(row))
             buying.record(row["item_id"], "paying", "Awaiting Vinted confirmation.")
             loop.call_soon_threadsafe(purchase_started.set)
@@ -291,26 +375,46 @@ class BuyReplyTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
 
         with patch.object(buying, "buy", side_effect=purchase) as buy:
             task = asyncio.create_task(self.send_buy())
+            duplicate = None
             try:
                 await asyncio.wait_for(purchase_started.wait(), 1)
                 task.cancel()
-                with self.assertRaises(asyncio.CancelledError):
-                    await task
+                await asyncio.sleep(0)
+                self.assertFalse(task.done())
                 self.assertEqual(buying.result("123")["state"], "paying")
-                await self.send_buy()
+                duplicate = asyncio.create_task(self.send_buy())
+                await asyncio.sleep(0)
                 buy.assert_called_once()
-                self.assertIn(
-                    "No payment was sent again",
-                    self.message.reply_text.call_args.args[0],
+                self.assertTrue(buying.purchase_lock(777).locked())
+                status = SimpleNamespace(
+                    data="buy:status",
+                    answer=AsyncMock(),
+                    from_user=SimpleNamespace(id=123),
+                    message=self.source,
                 )
+                with patch.object(buying, "check_payment") as check:
+                    await buying.callback(
+                        SimpleNamespace(callback_query=status),
+                        SimpleNamespace(bot=self.bot),
+                    )
+                check.assert_not_called()
+                self.assertIn("payment", status.answer.call_args.args[0].lower())
             finally:
                 release_purchase.set()
                 await asyncio.wait_for(purchase_finished.wait(), 2)
-                if not task.done():
+                with self.assertRaises(asyncio.CancelledError):
                     await asyncio.wait_for(task, 2)
+                if duplicate:
+                    await asyncio.wait_for(duplicate, 2)
+            self.assertIn(
+                "No payment was sent again", self.message.reply_text.call_args.args[0]
+            )
             await self.send_buy()
         buy.assert_called_once()
         self.assertEqual(buying.result("123")["state"], "paid")
+        self.assertEqual(
+            photo_cards.load("vinted", 777)[1]["buy_feedback"]["state"], "paid"
+        )
 
     async def test_off_reply_never_connects_and_preserves_session_and_searches(self):
         with closing(search_settings.connection()) as conn, conn:

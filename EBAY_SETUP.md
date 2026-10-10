@@ -49,7 +49,14 @@ variables override database values: `EBAY_SOURCE` (`public` or `browse`),
 `EBAY_TELEGRAM_TOKEN`, `EBAY_CHAT_ID`, `EBAY_DAILY_BUDGET`, `EBAY_TARGET_INTERVAL`.
 If an environment override is in use, change it through the hosting settings.
 
-## 100+ searches and a 15-second target
+## Current live limits and future search capacity
+
+The running implementation has **at most 10 live eBay searches** and **two
+concurrent search workers**. Other saved eBay searches remain on standby until
+selected in Connections. A higher approved API allowance does not remove this
+live-search cap or increase the worker count. The examples for 100+ searches
+below are capacity calculations for a future separately validated expansion,
+not a claim that this version already runs that many live eBay searches.
 
 The alert target is **15 seconds from listing**, not a 15-second refresh cycle.
 Polling now defaults to **5 seconds per search**, leaving some time for eBay
@@ -58,11 +65,13 @@ target, not a verified guarantee. A listing that eBay has not exposed cannot be
 discovered by polling faster. Telegram server acceptance also does not prove
 that a phone received its push notification.
 
-The scheduler uses up to 64 concurrent request workers. Public search has a local
+The scheduler uses two concurrent request workers. Public search has a local
 ceiling of 10 request starts/second, shared across all searches. That is a local
-load bound, not permission from eBay or a guarantee of sustained access. At 100
-distinct queries it implies at least a 10-second start cycle, plus request time;
-network delay or rate limiting can exceed the 15-second goal. Identical remote criteria share one request even
+load bound, not permission from eBay or a guarantee of sustained access. Worker
+occupancy can impose a lower rate: two workers cannot sustain 10 requests/second
+if average fetch time exceeds 0.2 seconds. For a future 100-query expansion,
+the public ceiling alone would imply at least a 10-second start cycle, with
+additional delay when workers are busy or requests fail. Identical remote criteria share one request even
 when their local price limits, notes or exclusions differ. Distinct queries are
 not broadened or combined in ways that change their meaning.
 
@@ -73,7 +82,14 @@ daily search calls = G * 86,400 / T
 configured allowance with 10% headroom = ceil(daily search calls / 0.9)
 ```
 
-For 100 distinct searches at 5 seconds, that is **1,728,000 search calls/day**,
+For the current maximum of 10 distinct searches at 5 seconds, that is
+**172,800 search calls/day**, requiring **192,000 approved calls/day** with
+headroom before item lookups or diagnostics. With the default configured
+5,000/day budget, those ten groups have a capacity-supported start cycle of
+at least 192 seconds. This is a configured scheduler calculation, not an
+observation of the owner's granted quota.
+
+For a future 100 distinct searches at 5 seconds, that is **1,728,000 search calls/day**,
 requiring about **1,920,000 approved calls/day** with headroom. For 150 distinct
 searches it is 2,592,000 search calls/day, or 2,880,000 with headroom. At a
 15-second polling interval, the earlier 100-search estimate was 576,000 calls,
@@ -92,7 +108,8 @@ timings and discloses fallback creation timestamps. No measurements means
 it does not prove that every listing was found.
 
 Changing the allowance field does **not** grant more quota.
-eBay's published default Browse allowance is 5,000/day. A higher limit requires
+eBay's [published default Browse allowance](https://developer.ebay.com/develop/api/buy/api_call_limits)
+is 5,000/day. A higher limit requires
 an [Application Growth Check](https://developer.ebay.com/grow/application-growth-check).
 Additional keysets are also subject to eBay approval; this implementation does
 not create accounts, multiply quotas, or rotate identities after a rate limit.

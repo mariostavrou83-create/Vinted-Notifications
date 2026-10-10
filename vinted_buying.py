@@ -18,6 +18,7 @@ import vinted_budget
 import vinted_buyer as buyer
 from logger import get_logger
 from search_settings import connection
+from vinted_progress import bind_progress, report
 from vinted_timing import timed_operation
 
 logger = get_logger(__name__)
@@ -1181,6 +1182,7 @@ def buy_checkout_quote(token, *, alert_row=None):
     ):
         raise buyer.BuyerError(message)
     item_id, purchase_id = quote["item_id"], quote["checkout_id"]
+    report("waiting")
     with buyer.exclusive(wait_seconds=45):
         config = buyer.settings()
         limits = None
@@ -1232,6 +1234,7 @@ def buy_checkout_quote(token, *, alert_row=None):
         payment_started = False
         phase = "checking your buyer account"
         try:
+            report("checking_account")
             client = buyer.connected_client()
             record(
                 item_id,
@@ -1240,11 +1243,13 @@ def buy_checkout_quote(token, *, alert_row=None):
                 checkout_id=purchase_id,
             )
             phase = "checking the quoted checkout"
+            report("loading_choices")
             data = client.request("PUT", f"/api/v2/purchases/{purchase_id}/checkout")
             checkout = data.get("checkout")
             if not isinstance(checkout, dict) or str(checkout.get("id")) != purchase_id:
                 raise buyer.BuyerError("Vinted did not confirm the selected checkout.")
             phase = "confirming your delivery and payment preferences"
+            report("selecting_delivery")
             checkout = configure_checkout_choices(client, checkout, config)
             if checkout_choice_details(checkout)["signature"] != quote.get("choices"):
                 raise buyer.BuyerError(
@@ -1293,6 +1298,7 @@ def buy_checkout_quote(token, *, alert_row=None):
             )
             payment_started = True
             phase = "submitting payment"
+            report("submitting_payment")
             paid = client.request(
                 "POST",
                 f"/api/v2/purchases/{purchase_id}/checkout/payment",
@@ -1384,7 +1390,13 @@ def check_listing(item_id):
 
 
 @timed_operation("purchase")
-def buy(row):
+def buy(row, *, progress=None):
+    """Run the unchanged authorised purchase once with optional stage feedback."""
+    with bind_progress(progress):
+        return _buy(row)
+
+
+def _buy(row):
     item_id = str(row["item_id"])
     host = urlsplit(row["url"]).hostname
     if not item_id.isdigit() or host != "www.vinted.co.uk" or row["currency"] != "GBP":
@@ -1395,6 +1407,7 @@ def buy(row):
         return buy_checkout_quote(approved_token(row), alert_row=row)
     # Keep a Telegram tap queued during a bounded session renewal, rather than
     # making the owner tap again. Maintenance itself never waits on a purchase.
+    report("waiting")
     with buyer.exclusive(wait_seconds=45):
         config, limits = ready(row)
         guard_new_payment(item_id)
@@ -1405,10 +1418,13 @@ def buy(row):
         phase = "checking your buyer account"
         reason = None
         try:
+            report("checking_account")
             client = buyer.connected_client()
             phase = "checking the listing"
+            report("checking_item")
             current_price, seller = verified_listing(client, row, config, limits)
             phase = "preparing the purchase"
+            report("opening_checkout")
             conversation = client.request(
                 "POST",
                 "/api/v2/conversations",
@@ -1439,6 +1455,7 @@ def buy(row):
                 checkout_id=purchase_id,
             )
             phase = "loading delivery and payment choices"
+            report("loading_choices")
             updated = client.request(
                 "PUT",
                 f"/api/v2/purchases/{purchase_id}/checkout",
@@ -1457,11 +1474,28 @@ def buy(row):
                 raise buyer.BuyerError(
                     "Vinted returned a different checkout. No payment was sent."
                 )
+            try:
+                from copy import deepcopy
+
+                from vinted_checkout_diagnostics import observe_build
+
+                # Observe isolated snapshots only; optional evidence never
+                # removes this load or changes the live payment checksum.
+                observe_build(
+                    deepcopy(built.get("checkout")),
+                    deepcopy(checkout),
+                    item_id=item_id,
+                    item_price=current_price,
+                    maximum=limits.total_maximum,
+                )
+            except Exception:  # noqa: BLE001,S110 -- diagnostics cannot affect buying
+                pass
             phase = "checking the final total and delivery choice"
             # Read the current controls again immediately before payment.
             config = buyer.settings()
             if not config["enabled"] or not config["connected"]:
                 raise buyer.BuyerError("Autobuy was disabled before payment.")
+            report("selecting_delivery")
             checkout = configure_checkout_choices(client, checkout, config)
             current = buyer.settings()
             if (
@@ -1490,6 +1524,7 @@ def buy(row):
             )
             payment_started = True
             phase = "submitting payment"
+            report("submitting_payment")
             paid = client.request(
                 "POST",
                 f"/api/v2/purchases/{purchase_id}/checkout/payment",
@@ -1722,6 +1757,7 @@ def feedback_buttons(row, feedback=None):
     state = feedback.get("state")
     reason = feedback.get("reason")
     label = {
+        "in_progress": "Autobuy running · latest stage",
         "setup_required": "Autobuy needs setup · see why",
         "failed_before_payment": "Autobuy stopped · see why",
         "paid": "Paid ✓ · details",
@@ -1757,6 +1793,9 @@ def feedback_buttons(row, feedback=None):
             "unexpected_error": "Checkout error · details",
         }.get(reason, label)
     buttons = [[InlineKeyboardButton(label, callback_data="buy:status")]]
+    if state == "in_progress":
+        # Live stages are informational, with no resume or payment action.
+        return buttons
     if state == "preparing":
         buttons.append(
             [InlineKeyboardButton("Check / resume Autobuy", callback_data="buy:click")]
@@ -1831,11 +1870,18 @@ async def show_purchase_feedback(bot, message, outcome):
     async with photo_cards.lock("vinted", message.message_id):
         saved = photo_cards.load("vinted", message.message_id)
         updated = outcome.get("updated")
-        if saved and type(updated) in (int, float) and math.isfinite(updated):
+        if saved:
             latest = result(saved[0]["item_id"])
             latest_updated = latest.get("updated") if latest else None
             if (
-                type(latest_updated) in (int, float)
+                outcome.get("state") == "setup_required"
+                and latest
+                and latest.get("state")
+                in ("paying", "unknown", "needs_action", "paid", "payment_failed")
+            ) or (
+                type(updated) in (int, float)
+                and math.isfinite(updated)
+                and type(latest_updated) in (int, float)
                 and math.isfinite(latest_updated)
                 and latest_updated > updated
             ):
@@ -1921,6 +1967,7 @@ async def show_alert_feedback(bot, message, outcome):
 
 async def callback(update, context):
     import photo_cards
+    from vinted_telegram_progress import TelegramProgress, active_status
 
     query = update.callback_query
     chat_id = str(db.get_parameter("telegram_chat_id") or "").strip()
@@ -1944,9 +1991,13 @@ async def callback(update, context):
             alert=True,
         )
         return
-    row, details, card = saved
+    row, details, _card = saved
     previous = result(row["item_id"])
     if getattr(query, "data", "") == "buy:status":
+        stage = active_status(query.message.message_id, row["item_id"], previous)
+        if stage:
+            await photo_cards.answer(query, stage[:190], alert=True)
+            return
         if previous and previous["state"] in ("paying", "unknown", "needs_action"):
             await photo_cards.answer(query, "Checking the payment already submitted…")
             try:
@@ -1960,10 +2011,9 @@ async def callback(update, context):
                     previous,
                     message="Payment status could not be checked. Check your Vinted purchases before retrying.",
                 )
-            async with photo_cards.lock("vinted", query.message.message_id):
-                await show_feedback(
-                    context.bot, query, row, details, card, refreshed or previous
-                )
+            await show_purchase_feedback(
+                context.bot, query.message, refreshed or previous
+            )
             return
         feedback = (
             previous
@@ -1990,15 +2040,11 @@ async def callback(update, context):
         ready(row)
     except buyer.BuyerError as exc:
         await photo_cards.answer(query, str(exc)[:190], alert=True)
-        async with photo_cards.lock("vinted", query.message.message_id):
-            await show_feedback(
-                context.bot,
-                query,
-                row,
-                details,
-                card,
-                {"state": "setup_required", "message": str(exc), "reason": exc.reason},
-            )
+        await show_purchase_feedback(
+            context.bot,
+            query.message,
+            {"state": "setup_required", "message": str(exc), "reason": exc.reason},
+        )
         return
     async with purchase_lock(query.message.message_id):
         # Another tap may have completed while this callback waited for the
@@ -2012,11 +2058,12 @@ async def callback(update, context):
         # Start it alongside the one authorised purchase; a slow popup must not
         # delay the account/listing checks or retry a payment.
         acknowledgement = asyncio.create_task(
-            photo_cards.answer(query, "Preparing your Vinted checkout…")
+            photo_cards.answer(query, "Checking your buyer account…")
         )
+        progress = TelegramProgress(context.bot, query.message, row["item_id"])
         try:
             try:
-                outcome = await asyncio.to_thread(buy, row)
+                outcome = await progress.execute(buy, row)
             except buyer.BuyerError as exc:
                 outcome = {
                     "state": "setup_required",
@@ -2033,12 +2080,19 @@ async def callback(update, context):
                     "state": "unknown",
                     "message": "The purchase result could not be confirmed. Check your Vinted purchases before trying again.",
                 }
+            finally:
+                await progress.finish()
             if outcome:
-                await show_purchase_feedback(context.bot, query.message, outcome)
+                await progress.settle(
+                    show_purchase_feedback(context.bot, query.message, outcome)
+                )
         finally:
+            progress.close()
             try:
                 await acknowledgement
             except Exception as exc:  # noqa: BLE001 -- UI cannot change purchase state
                 logger.warning(
                     "Autobuy acknowledgement failed: error=%s", type(exc).__name__
                 )
+        if progress.cancelled:
+            raise asyncio.CancelledError

@@ -347,8 +347,11 @@ BACKUP_PAGE = """<!doctype html><html lang="en"><meta charset="utf-8">
 {% if verification.integrity %}<p>SQLite integrity: {{ verification.integrity }}.</p>{% endif %}
 {% if verification.outcome == 'verified' %}
 <p>SQLite integrity: {{ verification.integrity }}. Expected searches and photo references: passed. Encrypted buyer session: readable. Dashboard sessions in backup: 0.</p>
-<p>Saved settings match live: {{ verification.settings_match_live }}. Buyer records match live: {{ verification.buyer_records_match_live }}.</p>{% endif %}{% endif %}
-{% if verification.stage == 'expected_searches' %}<p>The current check compares every search row with 44. Saved and archived counts are shown separately for review; the check and saved backup have not been changed. Remaining recovery checks have not passed.</p>{% endif %}
+{% endif %}
+{% if verification.settings_match_live is defined %}<p>Search definitions match live: {{ verification.search_definitions_match_live }}. Saved settings match live: {{ verification.settings_match_live }}. Buyer records match live: {{ verification.buyer_records_match_live }}. Photo references match live: {{ verification.photo_references_match_live }}.</p>{% endif %}{% endif %}
+{% if verification.stage == 'expected_searches' %}<p>The saved search count differs from your current saved searches. Archived searches are counted separately. Save a fresh cloud backup, then verify it again.</p>{% endif %}
+{% if verification.stage == 'live_search_definitions' %}<p>The saved search settings differ from your current searches. Save a fresh cloud backup, then verify it again.</p>{% endif %}
+{% if verification.stage == 'remaining_checks' %}<p>The backup passed its structural checks but some saved settings, buyer records or photo references differ from the current database. Save a fresh cloud backup, then verify it again.</p>{% endif %}
 <p>The temporary copy was deleted. Your live database was not replaced.</p>{% endif %}
 <p><a href="{{ url_for('supabase.download') }}">Download saved encrypted backup</a></p>
 <p><a href="{{ url_for('dashboard') }}">Back to dashboard</a></p></main></body></html>"""
@@ -645,10 +648,26 @@ class DashboardIntegration:
                 stage = "isolated_recovery"
                 database = Path(self.database_path()).resolve()
                 result = verify_snapshot(
-                    encrypted, database.parent, live_database=database
+                    encrypted,
+                    database.parent,
+                    live_database=database,
+                    expected_searches=None,
                 )
                 result.update(stage="complete", backup_timestamp=timestamp)
                 message = "Saved cloud backup recovery verified."
+                if any(
+                    result.get(key) is not True
+                    for key in (
+                        "buyer_session_decryptable",
+                        "settings_match_live",
+                        "buyer_records_match_live",
+                        "photo_references_match_live",
+                        "search_definitions_match_live",
+                    )
+                ):
+                    result.update(outcome="unverified", stage="remaining_checks")
+                    message = "The saved cloud backup could not be verified."
+                    status = 422
             except SupabaseError as exc:
                 result = {
                     **getattr(exc, "observed", {}),

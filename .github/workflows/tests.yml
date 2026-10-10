@@ -2,11 +2,15 @@ name: Finder regression tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/vinted-browser-capsolver-supabase-20261008]
   pull_request:
 
 permissions:
   contents: read
+
+concurrency:
+  group: finder-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   tests:

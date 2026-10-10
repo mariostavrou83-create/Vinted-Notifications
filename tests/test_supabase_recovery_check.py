@@ -86,8 +86,219 @@ class Fixture:
             raw = self.database.read_bytes()
         return self.keys["backup"].encrypt(prefix + gzip.compress(raw))
 
+    def search_definitions(self, saved=250):
+        """Fictional stable configuration and runtime state for scale checks."""
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.executemany(
+                "INSERT INTO queries VALUES (?)", [(i,) for i in range(45, saved + 1)]
+            )
+            conn.execute("ALTER TABLE queries ADD COLUMN query TEXT")
+            conn.execute("ALTER TABLE queries ADD COLUMN query_name TEXT")
+            conn.execute("ALTER TABLE queries ADD COLUMN last_item REAL")
+            conn.execute(
+                "UPDATE queries SET query='https://example.test/?q='||id,"
+                "query_name='Fictional search '||id,last_item=100"
+            )
+            conn.execute(
+                "CREATE TABLE search_dashboard(query_id INTEGER PRIMARY KEY,"
+                "archived INTEGER,paused INTEGER,rebaseline INTEGER,revision INTEGER)"
+            )
+            conn.execute("INSERT INTO search_dashboard VALUES (1,0,0,0,1)")
+            conn.execute(
+                "CREATE TABLE search_preferences(query_id INTEGER PRIMARY KEY,"
+                "reminder TEXT,exclusions TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO search_preferences VALUES (1,'fictional-note','[]')"
+            )
+            conn.execute(
+                "CREATE TABLE search_buying_guide(query_id INTEGER PRIMARY KEY,"
+                "max_buy INTEGER,must_have TEXT,folder_id INTEGER)"
+            )
+            conn.execute("INSERT INTO search_buying_guide VALUES (1,900,'fictional',1)")
+            conn.execute(
+                "CREATE TABLE search_folders(id INTEGER PRIMARY KEY,name TEXT)"
+            )
+            conn.execute("INSERT INTO search_folders VALUES (1,'Fictional folder')")
+            conn.execute(
+                "CREATE TABLE search_platforms(query_id INTEGER PRIMARY KEY,"
+                "vinted_enabled INTEGER,ebay_enabled INTEGER,ebay_config TEXT,"
+                "ebay_generation INTEGER)"
+            )
+            conn.execute("INSERT INTO search_platforms VALUES (1,1,0,'{}',2)")
+            conn.execute(
+                "CREATE TABLE vinted_keyword_variants(id INTEGER PRIMARY KEY,"
+                "query_id INTEGER,position INTEGER,keyword TEXT,url TEXT,"
+                "primed INTEGER,last_item REAL,max_item_id INTEGER,last_check REAL,"
+                "last_attempt REAL,last_success REAL,actual_interval REAL,"
+                "failures INTEGER,error TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO vinted_keyword_variants VALUES "
+                "(1,1,0,'fictional','https://example.test/variant',1,100,10,100,100,100,1,0,'')"
+            )
+
 
 class SnapshotTests(Fixture, unittest.TestCase):
+    def verify_live(self, encrypted=None):
+        return recovery.verify_snapshot(
+            self.encrypted() if encrypted is None else encrypted,
+            self.directory,
+            live_database=self.database,
+            expected_searches=None,
+        )
+
+    def test_live_bound_250_searches_verify_without_changing_live_data_or_keys(self):
+        self.search_definitions()
+        before = self.database.read_bytes()
+        keys = {p.name: p.read_bytes() for p in self.directory.glob("*.key")}
+        result = self.verify_live()
+        self.assertEqual(result["outcome"], "verified")
+        self.assertEqual(result["counts"]["expected_searches"], 250)
+        self.assertEqual(result["counts"]["saved_searches"], 250)
+        self.assertTrue(result["search_definitions_match_live"])
+        self.assertEqual(before, self.database.read_bytes())
+        self.assertEqual(
+            keys, {p.name: p.read_bytes() for p in self.directory.glob("*.key")}
+        )
+        self.assertNotIn("fictional-note", json.dumps(result))
+        self.assertNotIn("example.test", json.dumps(result))
+        # Standalone/default and explicit baseline checks retain the old bound.
+        for kwargs in ({}, {"expected_searches": 44}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(
+                recovery.RecoveryError
+            ) as error:
+                recovery.verify_snapshot(self.encrypted(), self.directory, **kwargs)
+            self.assertEqual(error.exception.stage, "expected_searches")
+
+    def test_live_bound_check_rejects_stale_44_search_backup_at_250(self):
+        encrypted = self.encrypted()
+        self.search_definitions()
+        with self.assertRaises(recovery.RecoveryError) as error:
+            self.verify_live(encrypted)
+        self.assertEqual(error.exception.stage, "expected_searches")
+        self.assertEqual(error.exception.observed["counts"]["saved_searches"], 44)
+        self.assertEqual(error.exception.observed["counts"]["expected_searches"], 250)
+
+    def test_same_count_changed_definitions_are_rejected_including_archived_rows(self):
+        self.search_definitions()
+        changes = (
+            "UPDATE queries SET query='https://example.test/changed' WHERE id=1",
+            "UPDATE queries SET query_name='Changed name' WHERE id=1",
+            "UPDATE search_preferences SET exclusions='[\"fictional exclusion\"]'",
+            "UPDATE search_dashboard SET paused=1",
+            "UPDATE search_buying_guide SET max_buy=800",
+            "UPDATE search_folders SET name='Changed folder'",
+            "UPDATE search_platforms SET ebay_config='{\"fictional\":true}'",
+            "UPDATE vinted_keyword_variants SET keyword='Changed word'",
+            "UPDATE vinted_keyword_variants SET url='https://example.test/changed'",
+        )
+        for change in changes:
+            encrypted = self.encrypted()
+            with closing(sqlite3.connect(self.database)) as conn, conn:
+                conn.execute(change)
+            with self.subTest(change=change), self.assertRaises(
+                recovery.RecoveryError
+            ) as error:
+                self.verify_live(encrypted)
+            self.assertEqual(error.exception.stage, "live_search_definitions")
+            self.assertFalse(error.exception.observed["search_definitions_match_live"])
+            self.assertEqual(
+                error.exception.observed["counts"]["expected_searches"], 250
+            )
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute(
+                "INSERT INTO queries VALUES (251,'archived URL','Archived',100)"
+            )
+            conn.execute("INSERT INTO search_dashboard VALUES (251,1,0,0,1)")
+        encrypted = self.encrypted()
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute("UPDATE queries SET query_name='Edited archived' WHERE id=251")
+        with self.assertRaises(recovery.RecoveryError) as error:
+            self.verify_live(encrypted)
+        self.assertEqual(error.exception.stage, "live_search_definitions")
+        self.assertEqual(error.exception.observed["counts"]["archived_searches"], 1)
+
+    def test_live_bound_definition_check_ignores_only_routine_polling_state(self):
+        self.search_definitions()
+        encrypted = self.encrypted()
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute("UPDATE queries SET last_item=200")
+            conn.execute("UPDATE search_dashboard SET rebaseline=1")
+            conn.execute("UPDATE search_platforms SET ebay_generation=3")
+            conn.execute(
+                "UPDATE vinted_keyword_variants SET primed=0,last_item=200,"
+                "max_item_id=20,last_check=200,last_attempt=200,last_success=200,"
+                "actual_interval=2,failures=1,error='fictional retry'"
+            )
+        result = self.verify_live(encrypted)
+        self.assertTrue(result["search_definitions_match_live"])
+
+    def test_live_count_and_comparisons_use_one_consistent_read_transaction(self):
+        self.search_definitions()
+        encrypted = self.encrypted()
+        with closing(sqlite3.connect(self.database)) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+        original = recovery._saved_search_count
+
+        def read_then_edit(live):
+            self.assertTrue(live.in_transaction)
+            count = original(live)
+            with closing(sqlite3.connect(self.database)) as writer, writer:
+                writer.execute(
+                    "UPDATE queries SET query_name='Concurrent edit' WHERE id=1"
+                )
+            return count
+
+        with patch.object(recovery, "_saved_search_count", side_effect=read_then_edit):
+            result = self.verify_live(encrypted)
+        self.assertEqual(result["outcome"], "verified")
+        self.assertTrue(result["search_definitions_match_live"])
+        # A later verification observes the committed edit and rejects it.
+        with self.assertRaises(recovery.RecoveryError) as error:
+            self.verify_live(encrypted)
+        self.assertEqual(error.exception.stage, "live_search_definitions")
+
+    def test_live_count_fails_closed_for_missing_database_or_schema(self):
+        encrypted = self.encrypted()
+        missing = self.directory / "missing.sqlite"
+        with self.assertRaises(recovery.RecoveryError) as error:
+            recovery.verify_snapshot(
+                encrypted, self.directory, live_database=missing, expected_searches=None
+            )
+        self.assertEqual(error.exception.stage, "live_comparison")
+        self.assertFalse(missing.exists())
+        empty = self.directory / "empty.sqlite"
+        with closing(sqlite3.connect(empty)):
+            pass
+        with self.assertRaises(recovery.RecoveryError) as error:
+            recovery.verify_snapshot(
+                encrypted, self.directory, live_database=empty, expected_searches=None
+            )
+        self.assertEqual(error.exception.stage, "live_search_count")
+        with self.assertRaises(recovery.RecoveryError) as error:
+            recovery.verify_snapshot(encrypted, self.directory, expected_searches=None)
+        self.assertEqual(error.exception.stage, "live_database_required")
+
+    def test_live_definition_schema_and_read_errors_fail_closed(self):
+        self.search_definitions()
+        encrypted = self.encrypted()
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute(
+                "ALTER TABLE search_preferences ADD COLUMN future_setting TEXT"
+            )
+        with self.assertRaises(recovery.RecoveryError) as error:
+            self.verify_live(encrypted)
+        self.assertEqual(error.exception.stage, "live_search_definitions")
+        with patch.object(
+            recovery,
+            "_search_definitions_match",
+            side_effect=sqlite3.OperationalError("fictional SQL"),
+        ), self.assertRaises(recovery.RecoveryError) as error:
+            self.verify_live(encrypted)
+        self.assertEqual(error.exception.stage, "live_search_definitions")
+        self.assertNotIn("fictional SQL", str(error.exception))
+
     def test_roundtrip_counts_settings_buyer_and_live_file_unchanged(self):
         before = self.database.read_bytes()
         keys = {p.name: p.read_bytes() for p in self.directory.glob("*.key")}
@@ -322,9 +533,11 @@ class EndpointTests(Fixture, unittest.TestCase):
         self.provider.download_backup.assert_not_called()
 
     def test_search_count_failure_reports_only_completed_checks_and_counts(self):
+        original = self.database.read_bytes()
         with closing(sqlite3.connect(self.database)) as conn, conn:
             conn.execute("DELETE FROM queries WHERE id=44")
         self.provider.download_backup.return_value = (self.encrypted(), STAMP)
+        self.database.write_bytes(original)
         csrf = self.login()
         before = self.database.read_bytes()
         with self.assertLogs(self.app.logger, level="INFO") as logs:
@@ -338,6 +551,79 @@ class EndpointTests(Fixture, unittest.TestCase):
         self.assertNotIn("fictional-buyer-secret", " ".join(logs.output))
         self.assertNotIn(b"fictional-owner-access", result.data)
         self.assertEqual(before, self.database.read_bytes())
+
+    def test_owner_endpoint_verifies_250_current_searches(self):
+        self.search_definitions()
+        self.provider.download_backup.return_value = (self.encrypted(), STAMP)
+        csrf = self.login()
+        with self.assertLogs(self.app.logger, level="INFO"):
+            result = self.web.post("/supabase/backup/verify", data={"csrf": csrf})
+        self.assertEqual(result.status_code, 200)
+        self.assertIn(b"recovery verified", result.data)
+        self.assertIn(b"<td>expected searches</td><td>250</td>", result.data)
+        self.assertIn(b"Search definitions match live: True", result.data)
+
+    def test_owner_endpoint_rejects_changed_same_count_search_with_specific_reason(
+        self,
+    ):
+        self.search_definitions()
+        self.provider.download_backup.return_value = (self.encrypted(), STAMP)
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute("UPDATE queries SET query_name='Changed search' WHERE id=1")
+        csrf = self.login()
+        with self.assertLogs(self.app.logger, level="INFO") as logs:
+            result = self.web.post("/supabase/backup/verify", data={"csrf": csrf})
+        self.assertEqual(result.status_code, 422)
+        self.assertIn(b"Result: unverified", result.data)
+        self.assertIn(b"saved search settings differ", result.data)
+        self.assertNotIn("Changed search", str(logs.output))
+
+    def test_stale_settings_buyer_or_photo_record_never_reports_endpoint_verified(self):
+        csrf = self.login()
+        for comparison in ("settings", "buyer_records", "photo_references"):
+            encrypted = self.encrypted()
+            # Cloud snapshots intentionally exclude owner dashboard sessions.
+            with closing(sqlite3.connect(self.database)) as conn, conn:
+                if comparison == "settings":
+                    conn.execute("UPDATE parameters SET value='Changed setting'")
+                elif comparison == "buyer_records":
+                    rotated = self.keys["buyer"].encrypt(
+                        json.dumps({"cookies": "fictional-rotated-session"}).encode()
+                    )
+                    conn.execute("UPDATE vinted_buyer SET session=?", (rotated,))
+                else:
+                    conn.execute(
+                        "INSERT INTO dashboard_media VALUES ('other-photo',x'04')"
+                    )
+                    conn.execute(
+                        "UPDATE search_reference_photos SET media_id='other-photo'"
+                    )
+            # Build the older, session-free cloud copy without altering live.
+            with tempfile.TemporaryDirectory() as temporary:
+                snapshot = Path(temporary) / "snapshot.sqlite"
+                payload = self.keys["backup"].decrypt(encrypted)
+                snapshot.write_bytes(
+                    gzip.decompress(payload[len(backend.SNAPSHOT_MAGIC) :])
+                )
+                with closing(sqlite3.connect(snapshot)) as backup, backup:
+                    backup.execute("DELETE FROM supabase_dashboard_sessions")
+                cloud = self.encrypted(raw=snapshot.read_bytes())
+            self.provider.download_backup.return_value = (cloud, STAMP)
+            with self.subTest(comparison=comparison), self.assertLogs(
+                self.app.logger, level="INFO"
+            ) as logs:
+                result = self.web.post("/supabase/backup/verify", data={"csrf": csrf})
+            self.assertEqual(result.status_code, 422)
+            self.assertIn(b"Result: unverified", result.data)
+            self.assertIn(b"Stage: remaining_checks", result.data)
+            label = {
+                "settings": "Saved settings",
+                "buyer_records": "Buyer records",
+                "photo_references": "Photo references",
+            }[comparison]
+            self.assertIn((label + " match live: False").encode(), result.data)
+            self.assertNotIn(b"Saved cloud backup recovery verified", result.data)
+            self.assertNotIn("fictional-rotated-session", str(logs.output))
 
     def test_non_owner_server_verification_denies_request(self):
         csrf = self.login()

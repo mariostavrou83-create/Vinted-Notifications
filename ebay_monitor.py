@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 import requests
 from telegram import Bot
 
+import db
 import ebay_store as store
 from logger import get_logger
 from search_settings import connection, excluded_by, get_search
@@ -654,8 +655,12 @@ async def run_delivery():
     from alert_delivery import EbayPhotoDeliveryWorker
 
     while True:
-        config = store.configuration()
-        if store.missing_configuration(config):
+        # Fresh reads share a short connection; no connection is held while
+        # Telegram, delivery or a sleep yields to another coroutine.
+        with db.connection_scope():
+            config = store.configuration()
+            missing = store.missing_configuration(config)
+        if missing:
             await asyncio.sleep(5)
             continue
         try:
@@ -672,11 +677,13 @@ async def run_delivery():
                 )
                 try:
                     while True:
-                        latest = store.configuration()
-                        if any(
-                            latest[k] != config[k]
-                            for k in ("telegram_token", "chat_id")
-                        ) or store.missing_configuration(latest):
+                        with db.connection_scope():
+                            latest = store.configuration()
+                            changed = any(
+                                latest[k] != config[k]
+                                for k in ("telegram_token", "chat_id")
+                            ) or store.missing_configuration(latest)
+                        if changed:
                             break
                         if not await worker.tick():
                             await asyncio.sleep(0.05)

@@ -192,7 +192,12 @@ def buy_status_text(details):
     feedback = details.get("buy_feedback") or {}
     if details.get("platform") == "ebay" or not feedback.get("message"):
         return ""
-    return "<b>Autobuy result</b>\n" + escape(short(feedback["message"], 360))
+    heading = (
+        "Autobuy progress"
+        if feedback.get("state") == "in_progress"
+        else "Autobuy result"
+    )
+    return f"<b>{heading}</b>\n" + escape(short(feedback["message"], 360))
 
 
 def captions(row, details):

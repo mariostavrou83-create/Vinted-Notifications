@@ -1,6 +1,8 @@
 """Real outbox leases and controlled Telegram uploads; no live messages."""
 
 import asyncio
+import os
+import sqlite3
 import time
 import unittest
 from contextlib import closing
@@ -11,6 +13,8 @@ from telegram.error import RetryAfter
 from test_ebay_monitor import EbayFixture, item
 
 import alert_delivery as delivery
+import db
+import ebay_monitor
 import search_settings
 
 
@@ -123,6 +127,85 @@ class PhotoDeliveryTests(EbayFixture, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.row(124)["status"], "sent")
             self.assertIsNone(self.worker.photo_task)
             self.assertGreater(self.row(123)["leased_until"], 1104)
+
+
+class DeliveryConfigurationBatchTests(EbayFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_live_token_change_restarts_bot_without_holding_reads_across_awaits(
+        self,
+    ):
+        settings = [
+            ("ebay_client_id", "test-app"),
+            ("ebay_client_secret", "test-cert"),
+            ("ebay_telegram_token", "200:old"),
+            ("ebay_chat_id", "123"),
+            ("telegram_token", "100:other"),
+        ]
+        with closing(search_settings.connection()) as conn, conn:
+            conn.executemany("INSERT OR REPLACE INTO parameters VALUES (?,?)", settings)
+
+        opened, tokens, workers = [], [], []
+        connect = sqlite3.connect
+        test = self
+
+        def assert_closed_reads():
+            for conn in opened:
+                with test.assertRaises(sqlite3.ProgrammingError):
+                    conn.execute("SELECT 1")
+
+        def counted_connect(*args, **kwargs):
+            conn = connect(*args, **kwargs)
+            opened.append(conn)
+            return conn
+
+        class FakeBot:
+            def __init__(self, token):
+                tokens.append(token)
+
+            async def __aenter__(self):
+                assert_closed_reads()
+                if len(tokens) == 2:
+                    raise asyncio.CancelledError
+                return self
+
+            async def __aexit__(self, *_args):
+                assert_closed_reads()
+
+        class FakeWorker:
+            def __init__(self, *_args, **_kwargs):
+                self.closed = False
+                workers.append(self)
+
+            async def tick(self):
+                assert_closed_reads()
+                # A real committed owner edit must be read on the next loop.
+                with closing(connect(db.DB_PATH)) as conn, conn:
+                    conn.execute(
+                        "UPDATE parameters SET value='200:new' WHERE key='ebay_telegram_token'"
+                    )
+                return False
+
+            async def close(self):
+                assert_closed_reads()
+                self.closed = True
+
+        async def callbacks(*_args):
+            await asyncio.Event().wait()
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            db.sqlite3, "connect", side_effect=counted_connect
+        ), patch.object(ebay_monitor, "Bot", FakeBot), patch.object(
+            delivery, "EbayPhotoDeliveryWorker", FakeWorker
+        ), patch(
+            "photo_cards.poll_ebay_callbacks", callbacks
+        ), self.assertRaises(
+            asyncio.CancelledError
+        ):
+            await ebay_monitor.run_delivery()
+        self.assertEqual(tokens, ["200:old", "200:new"])
+        self.assertEqual(len(workers), 1)
+        self.assertTrue(workers[0].closed)
+        # Initial, first loop, changed loop, then reopened config: one each.
+        self.assertEqual(len(opened), 4)
 
 
 if __name__ == "__main__":

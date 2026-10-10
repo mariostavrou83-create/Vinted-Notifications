@@ -16,6 +16,7 @@ import search_settings
 import vinted_alerts
 import vinted_buyer as buyer
 import vinted_buying as buying
+from vinted_progress import STAGE_LABELS
 
 
 class FeedbackTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
@@ -168,7 +169,7 @@ class FeedbackTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             acknowledgement_started.set()
             await release_acknowledgement.wait()
 
-        def purchase(row):
+        def purchase(row, *, progress=None):
             loop.call_soon_threadsafe(purchase_started.set)
             self.assertFalse(release_acknowledgement.is_set())
             self.assertTrue(buying.claim(row))
@@ -202,7 +203,7 @@ class FeedbackTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.enable()
         self.query.answer.side_effect = NetworkError("Offline Telegram")
 
-        def purchase(row):
+        def purchase(row, *, progress=None):
             self.assertTrue(buying.claim(row))
             buying.record(row["item_id"], "unknown", "Check Vinted before retrying.")
             return buying.result(row["item_id"])
@@ -227,7 +228,7 @@ class FeedbackTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         async def feedback(**kwargs):
             feedback_saved.set()
 
-        def purchase(row):
+        def purchase(row, *, progress=None):
             self.assertTrue(buying.claim(row))
             buying.record(row["item_id"], "paid", "Paid. Check Vinted.")
             return buying.result(row["item_id"])
@@ -258,7 +259,7 @@ class FeedbackTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         purchase_started = asyncio.Event()
         release_purchase = threading.Event()
 
-        def purchase(row):
+        def purchase(row, *, progress=None):
             loop.call_soon_threadsafe(purchase_started.set)
             if not release_purchase.wait(2):
                 raise AssertionError("Purchase was not released")
@@ -315,7 +316,7 @@ class FeedbackTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         async def acknowledgement(*args, **kwargs):
             acknowledgement_started.set()
 
-        def purchase(row):
+        def purchase(row, *, progress=None):
             self.assertFalse(release_image.is_set())
             self.assertTrue(buying.claim(row))
             buying.record("110", "paid", "Paid. Check Vinted.")
@@ -408,6 +409,134 @@ class FeedbackTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             "total_over_budget",
         )
 
+    async def test_slow_live_stage_edit_cannot_delay_payment_or_overwrite_final_paid(
+        self,
+    ):
+        self.enable()
+        loop = asyncio.get_running_loop()
+        edit_started = threading.Event()
+        release_edit = asyncio.Event()
+        purchase_saved = asyncio.Event()
+
+        async def edit(**kwargs):
+            if STAGE_LABELS["checking_item"] in kwargs["caption"]:
+                edit_started.set()
+                await release_edit.wait()
+
+        def purchase(row, *, progress):
+            self.assertTrue(buying.claim(row))
+            progress("checking_item")
+            if not edit_started.wait(1):
+                raise AssertionError("The live stage edit did not start")
+            self.assertFalse(release_edit.is_set())
+            buying.record("110", "paying", "Waiting for Vinted.")
+            progress("submitting_payment")
+            buying.record("110", "paid", "Paid final result.")
+            loop.call_soon_threadsafe(purchase_saved.set)
+            return buying.result("110")
+
+        self.bot.edit_message_caption.side_effect = edit
+        with patch.object(buying, "buy", side_effect=purchase) as buy:
+            task = asyncio.create_task(self.tap())
+            try:
+                await asyncio.wait_for(purchase_saved.wait(), 2)
+                self.assertEqual(buying.result("110")["state"], "paid")
+                self.assertFalse(task.done())
+            finally:
+                release_edit.set()
+                await asyncio.wait_for(task, 2)
+            await self.tap()
+        buy.assert_called_once()
+        self.query.answer.assert_awaited()
+        self.assertEqual(
+            self.query.answer.await_args_list[0].args[0], "Checking your buyer account…"
+        )
+        self.assertEqual(
+            photo_cards.load("vinted", 42)[1]["buy_feedback"]["state"], "paid"
+        )
+        self.assertIn(
+            "Paid final result.",
+            self.bot.edit_message_caption.call_args.kwargs["caption"],
+        )
+        self.bot.send_message.assert_not_awaited()
+
+    async def test_active_payment_status_shows_stage_without_an_order_read(self):
+        self.enable()
+        loop = asyncio.get_running_loop()
+        payment_started = asyncio.Event()
+        release_payment = threading.Event()
+
+        def purchase(row, *, progress):
+            self.assertTrue(buying.claim(row))
+            buying.record("110", "paying", "Waiting for Vinted.")
+            progress("submitting_payment")
+            loop.call_soon_threadsafe(payment_started.set)
+            if not release_payment.wait(2):
+                raise AssertionError("The payment was not released")
+            buying.record("110", "paid", "Paid final result.")
+            return buying.result("110")
+
+        status_query = SimpleNamespace(
+            **dict(vars(self.query), data="buy:status", answer=AsyncMock())
+        )
+        with patch.object(buying, "buy", side_effect=purchase) as buy, patch.object(
+            buying, "check_payment"
+        ) as check:
+            task = asyncio.create_task(self.tap())
+            try:
+                await asyncio.wait_for(payment_started.wait(), 1)
+                await buying.callback(
+                    SimpleNamespace(callback_query=status_query), self.context
+                )
+                check.assert_not_called()
+                self.assertIn("payment", status_query.answer.call_args.args[0].lower())
+                self.assertTrue(status_query.answer.call_args.kwargs["show_alert"])
+            finally:
+                release_payment.set()
+                await asyncio.wait_for(task, 2)
+        buy.assert_called_once()
+        self.assertEqual(buying.result("110")["state"], "paid")
+
+    async def test_cancelled_callback_retains_single_attempt_before_durable_claim(self):
+        self.enable()
+        loop = asyncio.get_running_loop()
+        purchase_started = asyncio.Event()
+        release_purchase = threading.Event()
+
+        def purchase(row, *, progress):
+            progress("waiting")
+            loop.call_soon_threadsafe(purchase_started.set)
+            if not release_purchase.wait(2):
+                raise AssertionError("The authorised attempt was not released")
+            self.assertTrue(buying.claim(row))
+            buying.record("110", "paid", "Paid final result.")
+            return buying.result("110")
+
+        with patch.object(buying, "buy", side_effect=purchase) as buy:
+            first = asyncio.create_task(self.tap())
+            second = None
+            try:
+                await asyncio.wait_for(purchase_started.wait(), 1)
+                first.cancel()
+                await asyncio.sleep(0)
+                self.assertFalse(first.done())
+                self.assertIsNone(buying.result("110"))
+                self.assertTrue(buying.purchase_lock(42).locked())
+                second = asyncio.create_task(self.tap())
+                await asyncio.sleep(0)
+                buy.assert_called_once()
+            finally:
+                release_purchase.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(first, 2)
+                if second:
+                    await asyncio.wait_for(second, 2)
+        buy.assert_called_once()
+        self.assertEqual(buying.result("110")["state"], "paid")
+        self.assertEqual(
+            photo_cards.load("vinted", 42)[1]["buy_feedback"]["state"], "paid"
+        )
+
     async def test_paid_or_uncertain_purchase_never_gets_a_retry_payment_button(self):
         self.enable()
         buying.claim(self.row)
@@ -444,6 +573,82 @@ class FeedbackTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertIn("Only your private", self.query.answer.call_args.args[0])
         self.bot.edit_message_caption.assert_not_awaited()
 
+    async def test_cancelled_final_feedback_finishes_once_before_cancelling_handler(
+        self,
+    ):
+        self.enable()
+        final_started = asyncio.Event()
+        release_final = asyncio.Event()
+        displayed = []
+
+        async def edit(**kwargs):
+            final_started.set()
+            await release_final.wait()
+            displayed.append(kwargs["caption"])
+
+        def purchase(row, *, progress=None):
+            self.assertTrue(buying.claim(row))
+            buying.record(row["item_id"], "paid", "Paid. Check Vinted.")
+            return buying.result(row["item_id"])
+
+        self.bot.edit_message_caption.side_effect = edit
+        with patch.object(buying, "buy", side_effect=purchase) as buy:
+            task = asyncio.create_task(self.tap())
+            try:
+                await asyncio.wait_for(final_started.wait(), 1)
+                for _ in range(2):
+                    task.cancel()
+                    await asyncio.sleep(0)
+                    self.assertFalse(task.done())
+                self.assertTrue(buying.purchase_lock(42).locked())
+                self.assertEqual(buying.result("110")["state"], "paid")
+            finally:
+                release_final.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, 2)
+            await self.tap()
+        buy.assert_called_once()
+        self.assertTrue(all("Paid. Check Vinted." in text for text in displayed))
+        self.assertEqual(
+            photo_cards.load("vinted", 42)[1]["buy_feedback"]["state"], "paid"
+        )
+
+    async def test_delayed_status_failure_cannot_overwrite_newer_paid_feedback(self):
+        buying.claim(self.row)
+        buying.record("110", "unknown", "Check Vinted", checkout_id="checkout-123")
+        self.query.data = "buy:status"
+        read_started = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        ui_lock = photo_cards.lock("vinted", 42)
+        await ui_lock.acquire()
+
+        def failed_read(item_id):
+            loop.call_soon_threadsafe(read_started.set)
+            raise buyer.BuyerError("Status temporarily unavailable", reason="network")
+
+        with patch.object(
+            buying, "check_payment", side_effect=failed_read
+        ), patch.object(buying, "buy") as buy:
+            task = asyncio.create_task(self.tap())
+            try:
+                await asyncio.wait_for(read_started.wait(), 1)
+                await asyncio.sleep(0)
+                buying.record("110", "paid", "Paid after independent status read.")
+                await buying.show_alert_feedback(
+                    self.bot, self.query.message, buying.result("110")
+                )
+            finally:
+                ui_lock.release()
+                await asyncio.wait_for(task, 2)
+        buy.assert_not_called()
+        self.assertEqual(
+            photo_cards.load("vinted", 42)[1]["buy_feedback"]["state"], "paid"
+        )
+        self.assertIn(
+            "Paid after independent status read.",
+            self.bot.edit_message_caption.call_args.kwargs["caption"],
+        )
+
     async def test_status_rechecks_existing_payment_and_updates_same_alert_without_buying(
         self,
     ):
@@ -469,6 +674,36 @@ class FeedbackTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("buy:click", [b.callback_data for b in self.buttons()])
         self.bot.send_message.assert_not_awaited()
+
+    async def test_queued_setup_failure_cannot_replace_a_saved_payment_result(self):
+        buying.claim(self.row)
+        answer_started = asyncio.Event()
+        original_answer = self.query.answer
+
+        async def answer(*args, **kwargs):
+            await original_answer(*args, **kwargs)
+            answer_started.set()
+
+        self.query.answer = AsyncMock(side_effect=answer)
+        ui_lock = photo_cards.lock("vinted", 42)
+        await ui_lock.acquire()
+        with patch.object(
+            buying,
+            "ready",
+            side_effect=buyer.BuyerError("Autobuy is off", reason="disabled"),
+        ), patch.object(buying, "buy") as buy:
+            task = asyncio.create_task(self.tap())
+            try:
+                await asyncio.wait_for(answer_started.wait(), 1)
+                buying.record("110", "paid", "The original purchase completed.")
+            finally:
+                ui_lock.release()
+                await asyncio.wait_for(task, 2)
+        buy.assert_not_called()
+        self.assertEqual(
+            photo_cards.load("vinted", 42)[1]["buy_feedback"]["state"], "paid"
+        )
+        self.assertNotIn("buy:click", [b.callback_data for b in self.buttons()])
 
     async def test_repeated_identical_status_is_success_not_a_telegram_error(self):
         self.bot.edit_message_caption.side_effect = BadRequest(
