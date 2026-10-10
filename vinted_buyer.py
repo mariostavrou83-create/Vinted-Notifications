@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import re
+import sqlite3
 import time
 from contextlib import closing, contextmanager
 from copy import copy
@@ -875,6 +876,7 @@ class Client:
         )
         self.csrf = ""
         self._verified_session = None
+        self._loaded_session_reference = None
         if saved:
             try:
                 self.csrf = saved.get("csrf", "")
@@ -1351,6 +1353,26 @@ class Client:
                     # Never adopt token fields from an explicit error response or let a
                     # nominal status turn that response into an accepted checkout.
                     raise response_error(response, data, stage)
+                if stage == "identity":
+                    # Requests may already have merged Set-Cookie. Reject an
+                    # unusable or different identity while the rollback context
+                    # is still active, before adopting or saving any rotation.
+                    user = data.get("user") or {}
+                    if (
+                        not isinstance(user, dict)
+                        or not str(user.get("id", "")).isdigit()
+                    ):
+                        raise BuyerError(
+                            "Vinted did not verify the buying account.",
+                            stage="identity",
+                        )
+                    reference = self._verified_session or self._loaded_session_reference
+                    if reference is not None and str(user["id"]) != reference[0]:
+                        raise BuyerError(
+                            AUTH_REASONS["account_changed"],
+                            reason="account_changed",
+                            stage="identity",
+                        )
                 access_updated = self.update_tokens(response, data)
                 if renewal:
                     # HTTP 200 can still contain an OAuth error or no usable token.
@@ -1825,13 +1847,28 @@ def renew_saved_client(client):
         # leaving its compare-and-swap reference stale for the next response.
         client.persist_session()
     else:
+        current = client.exported()
+        sealed = encrypt(current)
+        reference = client._loaded_session_reference
         with closing(connection()) as conn, conn:
             # Preserve an unbound client's accepted rotation even if the
             # subsequent same-account verification fails. Permissions stay put.
-            conn.execute(
-                "UPDATE vinted_buyer SET session=? WHERE id=1",
-                (encrypt(client.exported()),),
-            )
+            if reference is None:
+                conn.execute("UPDATE vinted_buyer SET session=? WHERE id=1", (sealed,))
+            else:
+                user_id, previous_sealed, _ = reference
+                updated = conn.execute(
+                    "UPDATE vinted_buyer SET session=? WHERE id=1 AND user_id=? AND session=?",
+                    (sealed, user_id, previous_sealed),
+                ).rowcount
+                if updated != 1:
+                    raise BuyerError(
+                        AUTH_REASONS["saved_session"],
+                        reason="saved_session",
+                        stage="saved_session",
+                    )
+        if reference is not None:
+            client._loaded_session_reference = (user_id, sealed, current)
     logger.info("Vinted renewed session: csrf_present=%s", bool(client.csrf))
     if not client.csrf:
         client.homepage()
@@ -1849,6 +1886,10 @@ def connected_client(*, renew_before=0, solve_challenges=True, allow_refresh=Tru
         if not saved:
             raise BuyerError("Connect your Vinted buyer account in Connections first.")
         client = Client(saved)
+        # The restored in-memory view is canonical even for legacy flat-cookie
+        # saves. Compare response rotations against it, so a refused renewal
+        # does not rewrite a session merely to add restoration metadata.
+        client._loaded_session_reference = (row[1], row[0], client.exported())
         if not solve_challenges:
             # Status reconciliation must not create a paid solver task or replay
             # a challenged request. The saved network configuration is unchanged.
@@ -1868,6 +1909,17 @@ def connected_client(*, renew_before=0, solve_challenges=True, allow_refresh=Tru
             renew_saved_client(client)
             user_id, _ = client.identity()
         else:
+            if user_id != row[1]:
+                raise BuyerError(
+                    AUTH_REASONS["account_changed"],
+                    reason="account_changed",
+                    stage="identity",
+                )
+            # A verified identity read can rotate credentials before a proactive
+            # renewal. Save that accepted rotation now: a later bootstrap or
+            # renewal failure must not leave the database with obsolete tokens.
+            client.bind_verified_session(*client._loaded_session_reference)
+            client.persist_session()
             # A successful identity read may already have rotated the cookies.
             # Claims only schedule renewal; Vinted must verify the same account
             # both before and after any proactive renewal.
@@ -1894,19 +1946,61 @@ def connected_client(*, renew_before=0, solve_challenges=True, allow_refresh=Tru
                 user_id, _ = client.identity()
         if user_id != row[1]:
             raise BuyerError(
-                "The connected Vinted account changed. Reconnect it before buying."
+                AUTH_REASONS["account_changed"],
+                reason="account_changed",
+                stage="identity",
             )
+        if client._verified_session is None:
+            # Expired-session recovery keeps accepted renewal credentials before
+            # its identity read. Bind their CAS reference only after Vinted has
+            # verified the original buyer, then save any identity rotation too.
+            client.bind_verified_session(*client._loaded_session_reference)
+            client.persist_session()
         saved = client.exported()
         sealed = encrypt(saved)
+        previous_sealed = client._verified_session[1]
         with closing(connection()) as conn, conn:
-            conn.execute(
-                "UPDATE vinted_buyer SET session=?,verified_at=? WHERE id=1",
-                (sealed, time.time()),
+            updated = conn.execute(
+                "UPDATE vinted_buyer SET session=?,verified_at=? WHERE id=1 AND user_id=? AND session=?",
+                (sealed, time.time(), user_id, previous_sealed),
+            ).rowcount
+        if updated != 1:
+            raise BuyerError(
+                AUTH_REASONS["saved_session"],
+                reason="saved_session",
+                stage="saved_session",
             )
         client.bind_verified_session(user_id, sealed, saved)
         record_auth("connected", "identity", 200)
         return client
     except BuyerError as exc:
+        # A bounded recovery must refer to the exact session used by this
+        # failed client. Never adopt a newer connection which replaced it while
+        # the rejected request was in flight.
+        exc.session_fingerprint = None
+        reference = (
+            client._verified_session or client._loaded_session_reference
+            if client
+            else None
+        )
+        if reference is not None:
+            expected_user, expected_sealed, _ = reference
+            try:
+                with closing(connection()) as conn:
+                    current = conn.execute(
+                        "SELECT session,user_id FROM vinted_buyer WHERE id=1"
+                    ).fetchone()
+                if (
+                    current
+                    and current[0] == expected_sealed
+                    and current[1] == expected_user
+                ):
+                    exc.session_fingerprint = hashlib.sha256(
+                        expected_sealed
+                    ).hexdigest()
+            except (sqlite3.Error, OSError):
+                # Optional recovery metadata must not obscure the auth failure.
+                pass
         record_auth(exc.reason, exc.stage, exc.status)
         if client:
             client.session.close()

@@ -1110,6 +1110,9 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
         with closing(search_settings.connection()) as conn, conn:
             conn.execute("UPDATE vinted_buyer SET session=?", (buyer.encrypt(saved),))
         private = Mock()
+        private._verified_session = None
+        private._loaded_session_reference = None
+        private.exported.return_value = saved
         private.identity.side_effect = buyer.BuyerError(
             "expired", 401, reason="credentials"
         )
@@ -2442,6 +2445,16 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
             ("forbidden", 403, False),
         ]:
             client = Mock()
+            client._verified_session = None
+            client._loaded_session_reference = None
+            # Exercise the real binding and CAS persistence contract while the
+            # transport and explicit identity outcomes remain offline mocks.
+            client.bind_verified_session.side_effect = (
+                buyer.Client.bind_verified_session.__get__(client)
+            )
+            client.persist_session.side_effect = buyer.Client.persist_session.__get__(
+                client
+            )
             client.identity.side_effect = [
                 buyer.BuyerError(
                     buyer.AUTH_REASONS[reason], status, reason=reason, stage="identity"
@@ -2462,6 +2475,12 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
                         "POST", "/web/api/auth/refresh"
                     )
                     self.assertEqual(buyer.settings()["access"]["http_status"], 200)
+                    with closing(search_settings.connection()) as conn:
+                        sealed = conn.execute(
+                            "SELECT session FROM vinted_buyer WHERE id=1"
+                        ).fetchone()[0]
+                    self.assertEqual(client._verified_session[0], "99")
+                    self.assertEqual(client._verified_session[1], sealed)
                 else:
                     with self.assertRaises(buyer.BuyerError):
                         buyer.connected_client()

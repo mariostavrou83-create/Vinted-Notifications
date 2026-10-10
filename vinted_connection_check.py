@@ -106,6 +106,27 @@ def run_once():
             exc.reason if exc.reason in vinted_buyer.AUTH_REASONS else "not_confirmed",
             exc.status if isinstance(exc.status, int) else None,
         )
+        # This is an explicitly requested, once-only connection check. A fresh
+        # ambiguous renewal refusal may replace a legacy permanent block with
+        # the normal bounded cooldown, only for the exact session just checked.
+        # Definite credential/account refusals and replacement sessions stay put.
+        from vinted_session_worker import note_ambiguous_failure
+
+        try:
+            deferred = note_ambiguous_failure(
+                exc, session_fingerprint=getattr(exc, "session_fingerprint", None)
+            )
+        except Exception as error:  # noqa: BLE001 -- keep the original check result
+            deferred = False
+            logger.warning(
+                "Startup buyer recovery scheduling unavailable: %s",
+                type(error).__name__,
+            )
+        if deferred:
+            logger.info(
+                "Startup buyer diagnosis: renewal recovery deferred; "
+                "retry_after_seconds=900; no checkout or payment"
+            )
         if (
             os.environ.get("MSJ_BUYER_BOOTSTRAP_CHECK_ON_START") == "1"
             and exc.status in (400, 401)

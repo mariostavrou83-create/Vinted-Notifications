@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 ACCESS_MARGIN = 120
 REFRESH_MARGIN = 2 * 86400
 RETRY_DELAY = 300
+AMBIGUOUS_RENEWAL_DELAY = 900
 COOKIE_REQUEST_PATHS = {
     "access_token_web": "/api/v2/users/current",
     "refresh_token_web": "/web/api/auth/refresh",
@@ -97,7 +98,7 @@ def _session_cookie_records(saved, name):
 
 
 def session_cookie_expiry(saved, name):
-    """Scheduling hint only: prefer JWT exp, then valid UK cookie expiry.
+    """Scheduling hint only: use the earliest valid claim or cookie expiry.
 
     Expired metadata remains a due hint so maintenance can recover after a
     restart. It does not authenticate a cookie or permit any buying action.
@@ -105,20 +106,19 @@ def session_cookie_expiry(saved, name):
     records = _session_cookie_records(saved, name)
     claims = [buyer.token_expiry_timestamp(record["value"]) for record in records]
     known_claims = [expiry for expiry in claims if expiry is not None]
-    if known_claims:
-        return min(known_claims)
     expiries = [
         record["expires"] for record in records if record.get("expires") is not None
     ]
-    return min(expiries) if expiries else None
+    known_expiries = known_claims + expiries
+    return min(known_expiries) if known_expiries else None
 
 
 async def run():
     """Owned by Telegram's lifecycle; no buyer lock in the forking parent."""
     logger.info("Vinted session maintenance: worker started; interval=60s")
     while True:
-        await asyncio.sleep(60)
         await asyncio.to_thread(maintain_connection)
+        await asyncio.sleep(60)
 
 
 def due(saved, now):
@@ -134,14 +134,64 @@ def due(saved, now):
     return False
 
 
+def _ambiguous_renewal_failure(error):
+    """An unexplained 400 is not proof that the refresh credential is invalid."""
+    return (
+        isinstance(error, buyer.BuyerError)
+        and error.reason == "renewal_failed"
+        and error.stage == "renewal"
+        and type(error.status) is int
+        and error.status == 400
+    )
+
+
+def note_ambiguous_failure(error, *, session_fingerprint):
+    """Adopt one freshly observed failure without clearing a newer session.
+
+    An explicit connection check captures the failed session's fingerprint
+    while holding the buyer lock. Its caller may invoke this after that lock
+    closes; re-acquiring it and comparing the seal prevents a concurrent new
+    login from inheriting an old failure. This helper makes no network request
+    and never clears legacy blocks merely because the process restarted.
+    """
+    if (
+        not _ambiguous_renewal_failure(error)
+        or not isinstance(session_fingerprint, str)
+        or len(session_fingerprint) != 64
+        or any(char not in "0123456789abcdef" for char in session_fingerprint)
+    ):
+        return False
+    try:
+        with buyer.exclusive(), closing(connection()) as conn, conn:
+            row = conn.execute(
+                "SELECT session,verified_at FROM vinted_buyer WHERE id=1"
+            ).fetchone()
+            if (
+                not row
+                or not row[0]
+                or not row[1]
+                or hashlib.sha256(row[0]).hexdigest() != session_fingerprint
+            ):
+                return False
+            conn.execute(
+                "UPDATE vinted_buyer_maintenance SET session_fingerprint=?,retry_at=?,blocked=0 WHERE id=1",
+                (session_fingerprint, time.time() + AMBIGUOUS_RENEWAL_DELAY),
+            )
+        return True
+    except buyer.BuyerError as exc:
+        if exc.reason == "busy":
+            return False
+        raise
+
+
 def maintain_connection():
-    """No purchases: re-read under lock, renew only when due, stop on refusal."""
+    """No purchases: renew only when due, cool down ambiguous failures."""
     try:
         with buyer.exclusive():
             now = time.time()
             with closing(connection()) as conn:
                 row = conn.execute(
-                    "SELECT session,verified_at FROM vinted_buyer WHERE id=1"
+                    "SELECT session,verified_at,user_id FROM vinted_buyer WHERE id=1"
                 ).fetchone()
                 state = conn.execute(
                     "SELECT * FROM vinted_buyer_maintenance WHERE id=1"
@@ -167,16 +217,27 @@ def maintain_connection():
             blocked = False
             outcome = "verified"
             delay = RETRY_DELAY
+            result_fingerprint = None
             try:
                 client = buyer.connected_client(renew_before=ACCESS_MARGIN)
+                # A successful connection can advance the saved seal more than
+                # once. Attribute maintenance only to its final verified seal.
+                reference = client._verified_session
+                if reference is not None and reference[0] == row[2]:
+                    result_fingerprint = hashlib.sha256(reference[1]).hexdigest()
             except buyer.BuyerError as exc:
-                transient = exc.reason in ("network", "rate_limited") or (
-                    isinstance(exc.status, int) and exc.status >= 500
+                # connected_client binds this to its last known saved seal, or
+                # None if another connection superseded it during the request.
+                result_fingerprint = getattr(exc, "session_fingerprint", fingerprint)
+                transient = (
+                    exc.reason in ("network", "rate_limited")
+                    or (isinstance(exc.status, int) and exc.status >= 500)
+                    or _ambiguous_renewal_failure(exc)
                 )
                 blocked = not transient
                 outcome = "blocked" if blocked else "cooldown"
-                if exc.reason == "rate_limited":
-                    delay = 900
+                if exc.reason == "rate_limited" or _ambiguous_renewal_failure(exc):
+                    delay = AMBIGUOUS_RENEWAL_DELAY
                 logger.info(
                     "Vinted session maintenance: result=%s stage=%s reason=%s http=%s",
                     outcome,
@@ -189,16 +250,26 @@ def maintain_connection():
                     client.session.close()
                 with closing(connection()) as conn, conn:
                     current = conn.execute(
-                        "SELECT session FROM vinted_buyer WHERE id=1"
-                    ).fetchone()[0]
-                    conn.execute(
-                        "UPDATE vinted_buyer_maintenance SET session_fingerprint=?,retry_at=?,blocked=? WHERE id=1",
-                        (
-                            hashlib.sha256(current).hexdigest() if current else None,
-                            now + delay,
-                            int(blocked),
-                        ),
-                    )
+                        "SELECT session,user_id FROM vinted_buyer WHERE id=1"
+                    ).fetchone()
+                    if (
+                        result_fingerprint is not None
+                        and current
+                        and current[0]
+                        and current[1] == row[2]
+                        and hashlib.sha256(current[0]).hexdigest() == result_fingerprint
+                    ):
+                        conn.execute(
+                            "UPDATE vinted_buyer_maintenance SET session_fingerprint=?,retry_at=?,blocked=? WHERE id=1",
+                            (result_fingerprint, now + delay, int(blocked)),
+                        )
+                    else:
+                        # Keep the original reservation on its original seal.
+                        # Its failure must not block a replacement connection.
+                        outcome = "session_changed"
+                        logger.info(
+                            "Vinted session maintenance: result=session_changed; no purchase"
+                        )
             if outcome == "verified":
                 logger.info("Vinted session maintenance: result=verified; no purchase")
             return outcome

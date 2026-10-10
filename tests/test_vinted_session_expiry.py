@@ -56,7 +56,7 @@ class CookieExpiryTests(unittest.TestCase):
             worker.session_cookie_expiry(session, "access_token_web"), self.now + 60
         )
 
-    def test_jwt_expiry_has_priority_over_cookie_expiry(self):
+    def test_scheduling_uses_earlier_cookie_or_jwt_expiry(self):
         value = token(self.now + 3600, "access")
         session = saved(
             value,
@@ -66,9 +66,15 @@ class CookieExpiryTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            worker.session_cookie_expiry(session, "access_token_web"), self.now + 3600
+            worker.session_cookie_expiry(session, "access_token_web"), self.now + 60
         )
-        self.assertFalse(worker.due(session, self.now))
+        self.assertTrue(worker.due(session, self.now))
+        session["cookie_records"][0]["value"] = token(self.now + 30, "access")
+        session["cookie_records"][0]["expires"] = self.now + 3600
+        self.assertEqual(
+            worker.session_cookie_expiry(session, "access_token_web"), self.now + 30
+        )
+        self.assertTrue(worker.due(session, self.now))
 
     def test_invalid_jwt_claims_fall_back_to_valid_cookie_metadata(self):
         for value in (
@@ -280,6 +286,11 @@ class DisabledMaintenanceTests(buying_tests.SessionRotationFixture, unittest.Tes
                 record("refresh_token_web", self.old_refresh, refresh_expiry),
             ],
         )
+        client = buyer.Client(session)
+        try:
+            session = client.exported()
+        finally:
+            client.session.close()
         with closing(search_settings.connection()) as conn, conn:
             conn.execute(
                 "UPDATE vinted_buyer SET session=?,enabled=0", (buyer.encrypt(session),)
@@ -375,13 +386,17 @@ class DisabledMaintenanceTests(buying_tests.SessionRotationFixture, unittest.Tes
         self.assertEqual(self.calls, [])
         self.assertFalse(self.saved()[0]["enabled"])
 
-    def test_refused_renewal_is_terminal_until_session_changes_and_never_enables(self):
+    def test_ambiguous_renewal_retries_after_cooldown_and_never_enables(self):
         self.renew_status = 400
         original = self.saved()[0]["session"]
-        self.assertEqual(self.run_cycle(), "blocked")
-        self.assertEqual(self.run_cycle(self.now + 3600), "blocked")
+        self.assertEqual(self.run_cycle(), "cooldown")
+        self.assertEqual(self.run_cycle(self.now + 899), "cooldown")
         self.assertEqual(len(self.calls), 3)
         self.assertEqual(self.saved()[0]["session"], original)
+        self.assertFalse(self.saved()[0]["enabled"])
+        self.assertEqual(self.controls()[2], [])
+        self.renew_status = 200
+        self.assertEqual(self.run_cycle(self.now + 900), "verified")
         self.assertFalse(self.saved()[0]["enabled"])
         self.assertEqual(self.controls()[2], [])
 

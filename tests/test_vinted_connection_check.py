@@ -182,6 +182,48 @@ class StartupDiagnosisTests(DatabaseFixture, unittest.TestCase):
             vinted_connection_check.run_once()
             check.assert_not_called()
 
+    def test_fresh_ambiguous_renewal_uses_only_its_checked_session_cooldown(self):
+        error = vinted_buyer.BuyerError(
+            "private-failure", 400, reason="renewal_failed", stage="renewal"
+        )
+        error.session_fingerprint = "a" * 64
+        with patch.dict(
+            os.environ, {"MSJ_BUYER_CHECK_ON_START": "ambiguous-renewal-check"}
+        ), patch("vinted_buyer.settings", return_value={"connected": True}), patch(
+            "vinted_buyer.check_saved_connection", side_effect=error
+        ) as check, patch(
+            "vinted_session_worker.note_ambiguous_failure", return_value=True
+        ) as defer, self.assertLogs(
+            "vinted_connection_check", level="INFO"
+        ) as logs:
+            vinted_connection_check.run_once()
+            vinted_connection_check.run_once()
+        check.assert_called_once()
+        defer.assert_called_once_with(error, session_fingerprint="a" * 64)
+        self.assertIn("retry_after_seconds=900", " ".join(logs.output))
+        self.assertNotIn(error.session_fingerprint, " ".join(logs.output))
+        self.assertNotIn("private-failure", " ".join(logs.output))
+
+    def test_recovery_schedule_error_keeps_original_sanitised_check_result(self):
+        error = vinted_buyer.BuyerError(
+            "private-failure", 400, reason="renewal_failed", stage="renewal"
+        )
+        with patch.dict(
+            os.environ, {"MSJ_BUYER_CHECK_ON_START": "schedule-error-check"}
+        ), patch("vinted_buyer.settings", return_value={"connected": True}), patch(
+            "vinted_buyer.check_saved_connection", side_effect=error
+        ), patch(
+            "vinted_session_worker.note_ambiguous_failure",
+            side_effect=RuntimeError("private-scheduling-failure"),
+        ), self.assertLogs(
+            "vinted_connection_check", level="INFO"
+        ) as logs:
+            vinted_connection_check.run_once()
+        output = " ".join(logs.output)
+        self.assertIn("stage=renewal reason=renewal_failed http=400", output)
+        self.assertIn("scheduling unavailable: RuntimeError", output)
+        self.assertNotIn("private-", output)
+
 
 class ProcessShutdownTests(unittest.TestCase):
     def test_stuck_child_is_killed_after_bounded_grace(self):
