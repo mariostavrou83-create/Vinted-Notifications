@@ -73,6 +73,13 @@ def sections(row, details):
     price_line = f"{'Current bid' if ebay and details.get('auction') else 'Item'}: <b>{escape(price)}</b>"
     if not ebay:
         price_line += vinted_budget.alert_lines(details.get("budget"))
+    elif (
+        details.get("shared_alert_version") == 1
+        and details.get("estimated_total") is not None
+    ):
+        price_line += f"\nEstimated total: <b>£{details['estimated_total'] / 100:.2f}</b> (fees & postage)"
+        if details.get("buyer_fee_estimate"):
+            price_line += "\nIncludes a conservative buyer-fee allowance; check eBay's final total."
     listing = (
         f"<b>{escape(row['title'][:500])}</b>\n{price_line}"
         f"\n{escape(details.get('brand_label', 'Brand'))}: {escape(details['brand'])}"

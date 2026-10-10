@@ -116,15 +116,181 @@ def guard_new_payment(item_id):
     """An earlier uncertain submission must be resolved before another item."""
     with closing(connection()) as conn:
         uncertain = conn.execute(
-            "SELECT 1 FROM vinted_buy_attempts WHERE item_id<>? AND state IN ('paying','unknown','needs_action') LIMIT 1",
+            "SELECT item_id,state FROM vinted_buy_attempts WHERE item_id<>? AND state IN ('paying','unknown','needs_action') LIMIT 1",
             (str(item_id),),
         ).fetchone()
     if uncertain:
+        identity = str(uncertain["item_id"])
+        item = (
+            "Vinted item " + identity
+            if re.fullmatch(r"[0-9]{1,24}", identity)
+            else "a saved Vinted item"
+        )
+        state = {
+            "paying": "awaits confirmation",
+            "unknown": "remains unconfirmed",
+            "needs_action": "needs payment or bank confirmation",
+        }[uncertain["state"]]
         raise buyer.BuyerError(
-            "A previous payment still needs confirmation. Check its payment status "
-            "or your Vinted purchases before buying another item. No payment was sent.",
+            f"A previous payment for {item} {state}. Check that item in Vinted "
+            "Purchases before buying another item. No new payment was sent.",
             reason="earlier_payment_uncertain",
         )
+
+
+def resolve_failed(item_id, expected_updated):
+    """Record an owner's explicit failed-payment decision, never retry payment."""
+    with buyer.exclusive():
+        return _resolve_failed(item_id, expected_updated)
+
+
+def _resolve_failed(item_id, expected_updated):
+    """Recheck the exact durable attempt while holding the buyer lock."""
+    if not isinstance(item_id, str) or not re.fullmatch(r"[0-9]{1,24}", item_id):
+        raise buyer.BuyerError(
+            "Choose the exact existing Vinted attempt to resolve.",
+            reason="resolution_invalid",
+        )
+    if not isinstance(expected_updated, str):
+        raise buyer.BuyerError(
+            "Reload the saved payment attempt before confirming its result.",
+            reason="resolution_stale",
+        )
+    try:
+        version = float(expected_updated)
+        if (
+            not math.isfinite(version)
+            or version <= 0
+            or str(version) != expected_updated
+        ):
+            raise ValueError
+    except (ValueError, OverflowError):
+        raise buyer.BuyerError(
+            "Reload the saved payment attempt before confirming its result.",
+            reason="resolution_stale",
+        ) from None
+    with closing(connection()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        saved = conn.execute(
+            "SELECT * FROM vinted_buy_attempts WHERE item_id=?", (item_id,)
+        ).fetchone()
+        if not saved:
+            raise buyer.BuyerError(
+                "This saved payment attempt no longer exists.",
+                reason="resolution_invalid",
+            )
+        conn.execute("""CREATE TABLE IF NOT EXISTS vinted_payment_resolutions (
+                id INTEGER PRIMARY KEY,
+                item_id TEXT NOT NULL,
+                operation TEXT NOT NULL CHECK(operation='owner_confirmed_failed'),
+                original_state TEXT NOT NULL CHECK(original_state IN ('unknown','needs_action')),
+                original_updated REAL NOT NULL,
+                original_attempt TEXT NOT NULL,
+                resolved_at REAL NOT NULL,
+                UNIQUE(item_id,operation,original_updated)
+            )""")
+        if (
+            saved["state"] == "payment_failed"
+            and conn.execute(
+                "SELECT 1 FROM vinted_payment_resolutions WHERE item_id=? "
+                "AND operation='owner_confirmed_failed' AND original_updated=?",
+                (item_id, version),
+            ).fetchone()
+        ):
+            return dict(saved)
+        if saved["state"] not in ("unknown", "needs_action"):
+            raise buyer.BuyerError(
+                "Only an unconfirmed existing payment can be resolved this way. "
+                "No saved payment state was changed.",
+                reason="resolution_not_allowed",
+            )
+        if str(float(saved["updated"])) != expected_updated:
+            raise buyer.BuyerError(
+                "This payment attempt changed. Reload it and check Vinted "
+                "Purchases before confirming its result.",
+                reason="resolution_stale",
+            )
+        snapshot = {
+            key: saved[key]
+            for key in (
+                "item_id",
+                "state",
+                "message",
+                "checkout_id",
+                "total",
+                "buyer_id",
+                "transaction_id",
+                "updated",
+            )
+        }
+        resolved_at = time.time()
+        conn.execute(
+            "INSERT INTO vinted_payment_resolutions "
+            "(item_id,operation,original_state,original_updated,original_attempt,resolved_at) "
+            "VALUES (?,'owner_confirmed_failed',?,?,?,?)",
+            (
+                item_id,
+                saved["state"],
+                saved["updated"],
+                json.dumps(snapshot, sort_keys=True, allow_nan=False),
+                resolved_at,
+            ),
+        )
+        changed = conn.execute(
+            "UPDATE vinted_buy_attempts SET state='payment_failed',message=?,updated=? "
+            "WHERE item_id=? AND state=? AND updated=?",
+            (
+                "Owner confirmed this attempt failed; no payment resubmitted.",
+                resolved_at,
+                item_id,
+                saved["state"],
+                saved["updated"],
+            ),
+        )
+        if changed.rowcount != 1:
+            raise buyer.BuyerError(
+                "This payment attempt changed. No saved payment state was changed.",
+                reason="resolution_stale",
+            )
+        outcome = dict(
+            conn.execute(
+                "SELECT * FROM vinted_buy_attempts WHERE item_id=?", (item_id,)
+            ).fetchone()
+        )
+    logger.info("Autobuy owner resolution item=%s outcome=confirmed_failed", item_id)
+    return outcome
+
+
+def log_setup_block(row, exc, *, source):
+    """Record fixed blocker labels, never exception text or private values."""
+    reason = (
+        exc.reason
+        if isinstance(exc.reason, str)
+        and exc.reason
+        in {
+            "not_connected",
+            "disabled",
+            "search_inactive",
+            "budget_invalid",
+            "url_limit_invalid",
+            "earlier_payment_uncertain",
+            "item_approval_required",
+            "busy",
+        }
+        else "not_confirmed"
+    )
+    identity = str(row.get("item_id", ""))
+    item = identity if re.fullmatch(r"[0-9]{1,24}", identity) else "invalid"
+    status = (
+        exc.status if type(exc.status) is int and 100 <= exc.status <= 599 else None
+    )
+    logger.info(
+        "Autobuy blocked source=%s item=%s reason=%s http=%s",
+        source if source in ("callback", "reply") else "unknown",
+        item,
+        reason,
+        status,
+    )
 
 
 def checkout_item_details(components, summary, *, item_id=None):
@@ -1785,6 +1951,7 @@ def feedback_buttons(row, feedback=None):
             "item_over_url_limit": "Item exceeds URL price limit · details",
             "url_limit_invalid": "Check search URL price limit · details",
             "budget_invalid": "Check saved total budget · details",
+            "earlier_payment_uncertain": "Earlier payment unconfirmed · details",
             "unreadable": "Vinted response unreadable · details",
             "network": "Vinted connection error · details",
             "security_challenge": "Vinted security check required · details",
@@ -1804,6 +1971,7 @@ def feedback_buttons(row, feedback=None):
         "item_sold",
         "item_closed",
         "security_challenge",
+        "earlier_payment_uncertain",
     ):
         buttons.append(
             [InlineKeyboardButton("Retry Autobuy", callback_data="buy:click")]
@@ -2039,6 +2207,7 @@ async def callback(update, context):
     try:
         ready(row)
     except buyer.BuyerError as exc:
+        log_setup_block(row, exc, source="callback")
         await photo_cards.answer(query, str(exc)[:190], alert=True)
         await show_purchase_feedback(
             context.bot,
@@ -2065,6 +2234,7 @@ async def callback(update, context):
             try:
                 outcome = await progress.execute(buy, row)
             except buyer.BuyerError as exc:
+                log_setup_block(row, exc, source="callback")
                 outcome = {
                     "state": "setup_required",
                     "message": str(exc),

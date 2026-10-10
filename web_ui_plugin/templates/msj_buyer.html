@@ -109,5 +109,31 @@
 <details class="guide-section"><summary>Account maintenance</summary><form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="buyer_disconnect">Disconnect Vinted buyer</button></form></details>
 {% endif %}
 <p><small>A bank may require payment confirmation. Supported security checks use your private proxy and CapSolver settings. Nothing is charged by connecting or saving these settings.</small></p>
-{% if buying %}<details class="guide-section" {{'open' if buying|selectattr('state','in',['paying','unknown','needs_action'])|list}}><summary><b>Recent purchase attempts</b></summary><p><small>Check a listing without starting another purchase. A passed check confirms the account, item price, seller and search budget; the final delivery, fees and payment choices are checked when you tap Autobuy.</small></p>{% for attempt in buying %}<div class="guide-section"><b>{{attempt.title or ('Item '+attempt.item_id)}}</b><p>{{attempt.message}}</p>{% if attempt.url %}<a href="{{attempt.url}}" target="_blank" rel="noopener noreferrer">Open Vinted listing ↗</a>{% endif %}{% if buyer.connected and attempt.url %}<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="buyer_item_id" value="{{attempt.item_id}}"><button class="secondary" name="action" value="buyer_listing_check">Check this listing without buying</button></form>{% endif %}{% if buyer.connected and attempt.state in ('paying','unknown','needs_action') %}{% if attempt.action_url %}<a href="{{attempt.action_url}}" target="_blank" rel="noopener noreferrer">Open bank confirmation ↗</a>{% endif %}<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="buyer_item_id" value="{{attempt.item_id}}"><button class="secondary" name="action" value="buyer_payment_check">Check payment status</button></form>{% endif %}</div>{% endfor %}</details>{% endif %}
+{% if buying %}
+<details class="guide-section" {{'open' if buying|selectattr('state','in',['paying','unknown','needs_action'])|list}}>
+<summary><b>Recent purchase attempts</b></summary>
+<p><small>Check a listing without starting another purchase. The final delivery, fees and payment choices are checked when you tap Autobuy.</small></p>
+{% for attempt in buying %}
+<div class="guide-section">
+<b>{{attempt.title or ('Item '+attempt.item_id)}}</b><p><small>Item {{attempt.item_id}}</small></p><p>{{attempt.message}}</p>
+{% if attempt.url %}<a href="{{attempt.url}}" target="_blank" rel="noopener noreferrer">Open Vinted listing ↗</a>{% endif %}
+{% if buyer.connected and attempt.url %}<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="buyer_item_id" value="{{attempt.item_id}}"><button class="secondary" name="action" value="buyer_listing_check">Check this listing without buying</button></form>{% endif %}
+{% if buyer.connected and attempt.state in ('paying','unknown','needs_action') %}
+{% if attempt.action_url %}<a href="{{attempt.action_url}}" target="_blank" rel="noopener noreferrer">Open bank confirmation ↗</a>{% endif %}
+<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="buyer_item_id" value="{{attempt.item_id}}"><button class="secondary" name="action" value="buyer_payment_check">Check payment status</button></form>
+{% endif %}
+{% if attempt.state in ('unknown','needs_action') %}
+<form method="post" data-owner-failed-payment="{{attempt.item_id}}">
+<input type="hidden" name="csrf" value="{{csrf}}">
+<input type="hidden" name="buyer_item_id" value="{{attempt.item_id}}">
+<input type="hidden" name="buyer_attempt_updated" value="{{attempt.updated}}">
+<label class="checkbox"><input type="checkbox" name="buyer_failed_confirm" value="yes" required> I confirmed item {{attempt.item_id}} was not purchased and this payment failed.</label>
+<small>Only confirm after checking Vinted Purchases and any pending bank payment. This records your confirmation and releases this attempt's block on other items. It does not submit or retry a payment.</small>
+<button class="secondary" name="action" value="buyer_payment_failed">Record failed purchase &amp; unblock other items</button>
+</form>
+{% endif %}
+</div>
+{% endfor %}
+</details>
+{% endif %}
 </section>

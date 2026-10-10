@@ -63,6 +63,8 @@ def platform_details(query_id):
         else "ebay" if result["ebay_enabled"] else "vinted"
     )
     result["ebay_url"] = search_url(result["ebay"])
+    result["shared_alert_version"] = result["ebay"].get("shared_alert_version", 0)
+    result["shared_keywords"] = result["ebay"].get("shared_keywords", [])
     return result
 
 
@@ -137,6 +139,49 @@ def parse_form(form, previous=None):
         and config["min_price"] > config["max_price"]
     ):
         raise ValueError("The eBay price range must start with the lower price.")
+    return int(mode != "ebay"), int(mode != "vinted"), config
+
+
+def parse_shared_form(form, previous=None, maximum=None):
+    """New shared alerts use only platform URLs and one dashboard total budget."""
+    from ebay_search_link import parse_link, shared_keyword_query
+    from vinted_keywords import parse
+
+    previous = previous or {}
+    saved = previous.get("ebay", {})
+    vinted_url = form.get("query", "").strip()
+    ebay_url = form.get("ebay_search_url", saved.get("search_url", "")).strip()
+    mode = form.get("platform_mode") or (
+        "both" if vinted_url and ebay_url else "ebay" if ebay_url else "vinted"
+    )
+    if mode not in ("vinted", "ebay", "both"):
+        raise ValueError("Choose Vinted only, eBay only, or both.")
+    if type(maximum) is not int or not 100 <= maximum <= 100000:
+        raise ValueError("Set one maximum total budget between £1 and £1,000.")
+    words = parse(
+        form.get("shared_keywords", "\n".join(saved.get("shared_keywords", [])))
+    )
+    if mode == "vinted":
+        config = dict(DEFAULTS)
+    else:
+        if configuration()["source"] != "browse":
+            raise ValueError(
+                "Search-link filters require Browse API mode in Connections."
+            )
+        if not ebay_url:
+            raise ValueError("Add an eBay filter link for this alert.")
+        config = parse_link(
+            ebay_url,
+            keywords=shared_keyword_query(words),
+            ignore_prices=True,
+        )
+    config.update(
+        shared_alert_version=1,
+        shared_keywords=words,
+        min_price=None,
+        max_price=maximum,
+        include_shipping=True,
+    )
     return int(mode != "ebay"), int(mode != "vinted"), config
 
 

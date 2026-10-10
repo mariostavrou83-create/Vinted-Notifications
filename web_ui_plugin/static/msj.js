@@ -105,7 +105,30 @@ document.querySelectorAll('[data-confirm]').forEach(form => form.addEventListene
 }));
 
 const platformMode = document.querySelector('#platform_mode');
-if (platformMode) {
+const sharedAlert = document.querySelector('[data-shared-alert]');
+if (platformMode && sharedAlert) {
+  const sharedKeywords = document.querySelector('#shared_keywords');
+  function updateSharedKeywords() {
+    const values = sharedKeywords.value.split(/[,\n\r]+/).map(value => value.trim().replace(/\s+/g, ' ')).filter(Boolean);
+    const words = [...new Map(values.map(word => [word.toLocaleLowerCase(), word])).values()];
+    document.querySelector('#shared-keyword-summary').textContent = words.length
+      ? `${words.length} keyword alternatives: ${words.join(' OR ')}. Shared by your enabled platforms.`
+      : 'Use the filters in your links without search text.';
+    sharedKeywords.setCustomValidity(words.length > 20 ? 'Use up to 20 keyword alternatives.' : '');
+  }
+  function updateSharedPlatforms() {
+    for (const platform of ['vinted', 'ebay']) {
+      const enabled = platformMode.value === 'both' || platformMode.value === platform;
+      document.querySelector(platform === 'vinted' ? '#query' : '#ebay_search_url').required = enabled;
+      sharedAlert.querySelector('[data-shared-disabled=' + platform + ']').hidden = enabled;
+    }
+    updateSharedKeywords();
+  }
+  platformMode.addEventListener('change', updateSharedPlatforms);
+  sharedKeywords.addEventListener('input', updateSharedKeywords);
+  updateSharedPlatforms();
+}
+if (platformMode && !sharedAlert) {
   const tabs = [...document.querySelectorAll('[data-platform-tab]')];
   function showPlatform(platform, focus = false) {
     tabs.forEach(tab => {
@@ -185,8 +208,9 @@ const previewEbay = document.querySelector('#preview-ebay-link');
 let ebayPreviewVersion = 0;
 document.querySelector('#ebay_search_url')?.addEventListener('input', () => {
   ebayPreviewVersion++;
-  document.querySelector('#ebay-import-summary').replaceChildren();
-  document.querySelector('#ebay-import-feedback').textContent = 'Link changed. Preview again to review its filters.';
+  document.querySelector('#ebay-import-summary')?.replaceChildren();
+  const feedback = document.querySelector('#ebay-import-feedback');
+  if (feedback) feedback.textContent = 'Link changed. Preview again to review its filters.';
 });
 previewEbay?.addEventListener('click', async () => {
   const version = ++ebayPreviewVersion;

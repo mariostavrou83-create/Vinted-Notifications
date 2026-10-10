@@ -98,6 +98,7 @@ async def reply_buy(update, context):
                 # live prices and limits, and retains the temporary test gates.
                 outcome = await progress.execute(buying.buy, row)
             except buyer.BuyerError as exc:
+                buying.log_setup_block(row, exc, source="reply")
                 outcome = {
                     "state": "setup_required",
                     "message": str(exc),

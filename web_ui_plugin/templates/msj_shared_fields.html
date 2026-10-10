@@ -1,0 +1,40 @@
+<div class="guide-section platform-editor" data-shared-alert>
+<input type="hidden" name="shared_alert_version" value="1">
+<h2>Where to search</h2>
+<label for="platform_mode">Platforms for this search</label>
+<select id="platform_mode" name="platform_mode">
+{% for mode,label in [('vinted','Vinted only'),('ebay','eBay only'),('both','Vinted + eBay')] %}<option value="{{mode}}" {{'selected' if row.platform_mode==mode}}>{{label}}</option>{% endfor %}
+</select>
+<p class="shared-note">Two links. One set of keywords, exclusions, budget, notes and example photos.</p>
+
+<label for="query">Vinted search link</label>
+<textarea id="query" name="query" rows="3" maxlength="6000" placeholder="https://www.vinted.co.uk/catalog?…" {{'required' if row.platform_mode in ('vinted','both')}}>{{row.query}}</textarea>
+<small>Choose brand, category, sizes and condition on Vinted, leave its search box empty, then paste the results link. Set your price below.</small>
+<p class="platform-disabled" data-shared-disabled="vinted" {{'hidden' if row.platform_mode in ('vinted','both')}}>Vinted is off for this search. Its link is optional until you enable it.</p>
+
+<label for="ebay_search_url">eBay search link</label>
+<textarea id="ebay_search_url" name="ebay_search_url" rows="3" maxlength="6000" placeholder="https://www.ebay.co.uk/sch/i.html?…" {{'required' if row.platform_mode in ('ebay','both')}}>{{row.ebay.search_url}}</textarea>
+<small>Choose the eBay UK category, brand, sizes, condition and listing type, leave its search box empty, then copy the full search-results link. Unsupported filters block saving so they are not silently dropped.</small>
+<p class="platform-disabled" data-shared-disabled="ebay" {{'hidden' if row.platform_mode in ('ebay','both')}}>eBay is off for this search. Its link is optional until you enable it.</p>
+{% if ebay_connection.missing %}<small>To receive eBay alerts, <a href="/connections" target="_blank" rel="noopener">set up the eBay connection ↗</a>.</small>{% endif %}
+
+<label for="shared_keywords">Keyword alternatives <span>optional</span></label>
+<textarea id="shared_keywords" name="shared_keywords" rows="3" maxlength="2000" placeholder="fur, sherpa, fur hood">{{row.shared_keywords|default([])|join('\n')}}</textarea>
+<small>Separate alternatives with commas or new lines. The same alternatives apply to both platforms and replace search text in both links. Multiword phrases stay together. Leave blank to use your link filters without search text. Up to 20 alternatives; the combined eBay query must fit 100 characters.</small>
+<p id="shared-keyword-summary" class="shared-note" aria-live="polite"></p>
+<small>New searches start with a quiet first check. A matching item alerts once per platform. After saving, select this search in Connections → Your live eBay searches to run eBay checks.</small>
+
+<label for="exclusions">Words or phrases to exclude <span>optional</span></label>
+<textarea id="exclusions" name="exclusions" rows="3" placeholder="teddy&#10;cropped&#10;faux leather">{{row.exclusions|join('\n')}}</textarea>
+<small>One phrase per line. Applies to listing titles on both platforms.</small>
+
+<label for="vinted_max_total">Maximum total including fees &amp; postage (£)</label>
+<input id="vinted_max_total" name="vinted_max_total" type="number" min="1" max="1000" step="0.01" inputmode="decimal" value="{{prices.vinted_max_total}}" placeholder="e.g. 20.00" required>
+<small>One maximum for both platforms and all your keywords. This replaces price limits in both links.</small>
+<small>Vinted alert estimate: item price + 5% + £2.20 postage. Autobuy checks the actual complete checkout total before payment and stops if it exceeds your maximum.</small>
+<small>eBay alert estimate: listing price + supplied postage, with a conservative Buyer Protection allowance for private or unconfirmed seller types. This can overestimate API prices that already include the fee and skip borderline items. Listings with unknown postage are skipped. Auction prices can rise.</small>
+
+<label for="reminder">Buying &amp; resale notes <span>optional</span></label>
+<textarea id="reminder" name="reminder" rows="4" maxlength="800" placeholder="Aim to resell for £50–£65. Look for a full fur hood, fitted waist and the older label.">{{row.reminder}}</textarea>
+<small>Put your resale aim, must-have details and anything to look out for here. These same notes appear in both Telegram bots.</small>
+</div>

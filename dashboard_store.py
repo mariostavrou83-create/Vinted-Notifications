@@ -89,9 +89,13 @@ def save_search(query_id, form, photo=None, *, photos=None):
     import ebay_store
 
     previous = ebay_store.platform_details(query_id) if query_id is not None else None
-    vinted, ebay, ebay_config = ebay_store.parse_form(form, previous)
-    raw_url = form.get("query", "").strip()
-    url = normalize_url(raw_url) if raw_url or vinted else ""
+    # A saved marker, rather than a submitted hidden field, selects the editor
+    # for an existing search. Old searches cannot silently change pricing rules.
+    shared = (
+        previous.get("shared_alert_version") == 1
+        if previous is not None
+        else form.get("shared_alert_version") == "1"
+    )
     import vinted_budget
 
     with closing(connection()) as conn:
@@ -100,30 +104,61 @@ def save_search(query_id, form, photo=None, *, photos=None):
             (query_id,),
         ).fetchone()
     saved_budget = dict(saved_budget) if saved_budget else {}
-    maximum, postage = vinted_budget.parse_form(form, saved_budget)
-    if maximum is not None and not url:
+    if shared:
+        raw_maximum = form.get("vinted_max_total")
+        maximum = (
+            saved_budget.get("vinted_max_total")
+            if raw_maximum is None
+            else vinted_budget.parse_amount(raw_maximum, 1, 1000, "Maximum buy total")
+        )
+        if maximum is None:
+            raise ValueError("Set a maximum buy total including fees and postage.")
+        postage = vinted_budget.DEFAULT_POSTAGE
+        vinted, ebay, ebay_config = ebay_store.parse_shared_form(
+            form, previous, maximum=maximum
+        )
+        if vinted and maximum <= postage:
+            raise ValueError(
+                "Your maximum must exceed the fixed £2.20 Vinted postage estimate."
+            )
+    else:
+        vinted, ebay, ebay_config = ebay_store.parse_form(form, previous)
+        maximum, postage = vinted_budget.parse_form(form, saved_budget)
+    raw_url = form.get("query", "").strip()
+    url = normalize_url(raw_url) if raw_url or vinted else ""
+    if shared and not vinted:
+        url = ""
+    if maximum is not None and not url and not shared:
         raise ValueError("Add a Vinted filter link before setting a Vinted budget.")
     url = vinted_budget.search_url(url, maximum, saved_budget.get("vinted_max_total"))
     import vinted_keywords
 
     previous_keywords = [r["keyword"] for r in vinted_keywords.rows(query_id)]
-    keywords = vinted_keywords.parse(
-        form.get("vinted_keywords", "\n".join(previous_keywords))
+    keywords = (
+        (ebay_config["shared_keywords"] if vinted else [])
+        if shared
+        else vinted_keywords.parse(
+            form.get("vinted_keywords", "\n".join(previous_keywords))
+        )
     )
     if keywords and not url:
         raise ValueError("Add a Vinted filter link before adding Vinted keywords.")
-    if keywords:
+    if keywords or shared:
         url = vinted_keywords.with_keyword(url)
     exclusions = json.dumps(
         parse_exclusions(form.get("exclusions", "")), ensure_ascii=False
     )
-    prices = [
-        parse_money(form.get(key, ""))
-        for key in ("max_buy", "resale_low", "resale_high")
-    ]
+    prices = (
+        [None, None, None]
+        if shared
+        else [
+            parse_money(form.get(key, ""))
+            for key in ("max_buy", "resale_low", "resale_high")
+        ]
+    )
     if prices[1] is not None and prices[2] is not None and prices[1] > prices[2]:
         raise ValueError("The resale range must start with the lower price.")
-    must_have = form.get("must_have", "").strip()
+    must_have = "" if shared else form.get("must_have", "").strip()
     if len(must_have) > 400:
         raise ValueError("Keep must-have details to 400 characters.")
     photo_plan = (

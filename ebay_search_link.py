@@ -115,7 +115,8 @@ def aspect_filter(config):
     return ",".join(parts)
 
 
-def parse_link(link):
+def parse_link(link, *, keywords=None, ignore_prices=False):
+    """Import supported filters; explicit shared-form overrides leave legacy intact."""
     from dashboard_store import parse_money
     from ebay_store import DEFAULTS
 
@@ -159,6 +160,12 @@ def parse_link(link):
             + ", ".join(unsupported)
             + ". Remove them on eBay and copy the updated link. Nothing has been saved."
         )
+    if keywords is not None:
+        params["_nkw"] = keywords
+    if ignore_prices:
+        # The dashboard's complete budget replaces both URL item-price limits.
+        params.pop("_udlo", None)
+        params.pop("_udhi", None)
     config = dict(DEFAULTS, filter_mode="url", buying="both", uk_only=False)
     config["keywords"] = params.get("_nkw", "")
     if len(config["keywords"]) > 100:
@@ -247,6 +254,32 @@ def parse_link(link):
         sorted(canonical.items())
     )
     return config
+
+
+def shared_keyword_query(words):
+    """One bounded OR query, with each multiword alternative kept as a phrase.
+
+    Browse silently truncates q after 100 characters. Reject rather than lose a
+    saved alternative, and prohibit user input from introducing query operators.
+    """
+    if not words:
+        return ""
+    for word in words:
+        if (
+            re.search(r'[()\[\]{}*"\\:<>|]', word)
+            or any(part.startswith("-") for part in word.split())
+            or any(ord(char) < 32 for char in word)
+        ):
+            raise ValueError(
+                "Use plain words or phrases for shared keywords, without eBay search operators."
+            )
+    terms = ['"' + word + '"' if " " in word else word for word in words]
+    query = terms[0] if len(terms) == 1 else "(" + ",".join(terms) + ")"
+    if len(query) > 100:
+        raise ValueError(
+            "These alternatives exceed eBay's 100-character search limit. Shorten them or split them into another alert."
+        )
+    return query
 
 
 def describe(config):

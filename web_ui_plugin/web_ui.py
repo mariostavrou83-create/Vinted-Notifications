@@ -361,6 +361,8 @@ def create_app(test_config=None):
         )
         if not original:
             row.update(ebay_store.platform_details(None))
+            row["shared_alert_version"] = 1
+            row["shared_keywords"] = []
         prices = {
             key: "" if row[key] is None else f"{row[key]/100:.2f}"
             for key in (
@@ -395,6 +397,8 @@ def create_app(test_config=None):
                     row[key] = request.form.get(key, "")
                 row["exclusions"] = request.form.get("exclusions", "").splitlines()
                 row["vinted_keywords"] = [request.form.get("vinted_keywords", "")]
+                if row.get("shared_alert_version") == 1:
+                    row["shared_keywords"] = [request.form.get("shared_keywords", "")]
                 prices = {key: request.form.get(key, "") for key in prices}
                 row["platform_mode"] = request.form.get(
                     "platform_mode", row["platform_mode"]
@@ -633,6 +637,19 @@ def create_app(test_config=None):
                         outcome["message"],
                         "success" if outcome["state"] == "paid" else "error",
                     )
+                    return redirect(url_for("connections"), code=303)
+                elif action == "buyer_payment_failed":
+                    import vinted_buying
+
+                    if request.form.get("buyer_failed_confirm") != "yes":
+                        raise ValueError(
+                            "Confirm this exact purchase failed before releasing its block."
+                        )
+                    outcome = vinted_buying.resolve_failed(
+                        request.form.get("buyer_item_id", ""),
+                        request.form.get("buyer_attempt_updated", ""),
+                    )
+                    flash(outcome["message"], "success")
                     return redirect(url_for("connections"), code=303)
                 elif action == "buyer_payment_check":
                     import vinted_buying

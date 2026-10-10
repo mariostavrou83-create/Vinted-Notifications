@@ -70,6 +70,30 @@ def money(value):
         return None
 
 
+def buyer_protection_allowance(raw, price, *, public=False):
+    """Conservative UK private-seller allowance, never a verified checkout fee.
+
+    Website/public prices already include Buyer Protection. Browse summaries do
+    not expose that breakdown; this may overestimate an already-inclusive API
+    price. Allow for it unless the seller is a business. Browse search summaries
+    do not expose the account's registration country; physical item location and
+    seller contact/legal addresses cannot establish the non-UK exemption.
+    """
+    if public:
+        return 0
+    seller = raw.get("seller")
+    seller = seller if isinstance(seller, dict) else {}
+    if seller.get("sellerAccountType") == "BUSINESS":
+        return 0
+    # Inclusive-of-UK-VAT schedule; round up once to avoid understating pennies.
+    hundredths = (
+        min(price, 2000) * 7
+        + min(max(price - 2000, 0), 28000) * 4
+        + min(max(price - 30000, 0), 370000) * 2
+    )
+    return 10 + (hundredths + 99) // 100
+
+
 def search_params(config):
     filters = ["deliveryCountry:GB"]
     if config["uk_only"]:
@@ -285,6 +309,14 @@ def parse_item(raw, config, now, *, fresh_only=True):
         if shipping is None:
             return None
         compare += shipping
+    shared = config.get("shared_alert_version") == 1
+    allowance = buyer_protection_allowance(raw, price, public=public) if shared else 0
+    if shared:
+        # Shared total budgets always need a supplied delivery amount. Unknown
+        # postage cannot become free just because a saved config is incomplete.
+        if shipping is None:
+            return None
+        compare = price + shipping + allowance
     if config["min_price"] is not None and compare < config["min_price"]:
         return None
     if config["max_price"] is not None and compare > config["max_price"]:
@@ -300,7 +332,7 @@ def parse_item(raw, config, now, *, fresh_only=True):
         brands = config.get("aspects", {}).get("Brand", [])
         if len(brands) == 1:
             brand, label = brands[0], "Brand filter"
-    return {
+    result = {
         "item_id": "ebay:" + item_id,
         "title": title,
         "price": price,
@@ -318,6 +350,13 @@ def parse_item(raw, config, now, *, fresh_only=True):
         "public": public,
         "listed_label": str(raw.get("_listedLabel", ""))[:40],
     }
+    if shared:
+        result.update(
+            shared_alert_version=1,
+            estimated_total=compare,
+            buyer_fee_estimate=allowance,
+        )
+    return result
 
 
 def format_alert(item, search):
@@ -327,11 +366,19 @@ def format_alert(item, search):
         if item["shipping"] is not None
         else "check listing"
     )
+    price_line = (
+        f"{price_label}: <b>£{item['price'] / 100:.2f}</b> · Postage: {postage}"
+    )
+    if item.get("shared_alert_version") == 1:
+        price_line = (
+            f"{price_label}: <b>£{item['price'] / 100:.2f}</b> · "
+            f"Estimated total: <b>£{item['estimated_total'] / 100:.2f}</b> (fees & postage)"
+        )
     lines = [
         f"🔎 <b>eBay · #{search['id']} · {escape(search['query_name'][:100])}</b>",
         "",
         f"<b>{escape(item['title'])}</b>",
-        f"{price_label}: <b>£{item['price'] / 100:.2f}</b> · Postage: {postage}",
+        price_line,
         escape(item["condition"]),
         (
             ("Listed (eBay): " + escape(item["listed_label"]) + " · minute precision")
@@ -344,6 +391,10 @@ def format_alert(item, search):
     ]
     if item["auction"]:
         lines.append("Auction — final price may rise.")
+    if item.get("shared_alert_version") == 1 and item.get("buyer_fee_estimate"):
+        lines.append(
+            "Includes a conservative buyer-fee allowance; check eBay's final total."
+        )
     for label, key in [("Buying reminder", "reminder"), ("Must have", "must_have")]:
         if search.get(key):
             lines += ["", "<b>" + label + "</b>", escape(search[key])]

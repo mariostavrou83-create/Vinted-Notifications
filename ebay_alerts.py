@@ -53,6 +53,12 @@ def snapshot(item, search):
         brand_label=item.get("brand_label", "Brand"),
         description=item.get("description", ""),
     )
+    if item.get("shared_alert_version") == 1:
+        details.update(
+            shared_alert_version=1,
+            estimated_total=item.get("estimated_total"),
+            buyer_fee_estimate=item.get("buyer_fee_estimate", 0),
+        )
     return details
 
 

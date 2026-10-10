@@ -250,6 +250,13 @@ if __name__ == "__main__":
 
     import_auth_results_once()
 
+    # Only an explicit owner-attestation marker can resolve an uncertain saved
+    # attempt. This local operation sends no marketplace or payment request.
+    if os.environ.get("MSJ_OWNER_FAILED_PAYMENT_ON_START"):
+        from vinted_owner_payment_resolution import run_once as resolve_owner_failure
+
+        resolve_owner_failure()
+
     # Run db migrations
     current_version = db.get_parameter("version")
     # Check if there is a file that starts with the current version in the migrations folder. We keep comparing until
