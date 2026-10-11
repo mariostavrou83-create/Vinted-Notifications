@@ -14,6 +14,8 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 import db
 from search_settings import connection, parse_exclusions
 
+SHARED_NOTES_LIMIT = 4000
+
 
 def normalize_url(value):
     value = value.strip()
@@ -99,7 +101,7 @@ def save_search(query_id, form, photo=None, *, photos=None):
         form.get("query_name", "").strip(),
         form.get("reminder", "").strip(),
     )
-    if not name or len(name) > 100 or len(reminder) > 800:
+    if not name or len(name) > 100:
         raise ValueError(
             "Give your search a name (up to 100 characters) and a reminder of up to 800 characters."
         )
@@ -113,6 +115,12 @@ def save_search(query_id, form, photo=None, *, photos=None):
         if previous is not None
         else form.get("shared_alert_version") == "1"
     )
+    if len(reminder) > (SHARED_NOTES_LIMIT if shared else 800):
+        raise ValueError(
+            "Keep buying and resale notes to 4,000 characters."
+            if shared
+            else "Give your search a name (up to 100 characters) and a reminder of up to 800 characters."
+        )
     import vinted_budget
 
     with closing(connection()) as conn:

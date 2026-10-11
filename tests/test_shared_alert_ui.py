@@ -169,6 +169,13 @@ class SharedFormRendering(unittest.TestCase):
         self.assertIn('role="tablist"', html)
         self.assertIn("Copy keywords &amp; prices", html)
 
+    def test_shared_notes_accept_catalogue_text_while_legacy_keeps_its_limit(self):
+        for version, limit in ((1, "4000"), (0, "800")):
+            fields = Fields(
+                self.render("msj_edit.html", self.row(version=version))
+            ).fields
+            self.assertEqual(fields["reminder"][0]["maxlength"], limit)
+
     def test_shared_card_shows_budget_even_for_ebay_only_and_legacy_stays_separate(
         self,
     ):

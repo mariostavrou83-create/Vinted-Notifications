@@ -22,13 +22,17 @@ search's literal keywords, budget, exclusions, baseline and delivery ownership.
   each member with the current item parser and literal keyword matcher, and
   returns observations. Unread seller descriptions stay unverified. It does
   not enqueue, change baselines, or write search/ownership state.
+- New shared-search notes accept up to 4,000 characters. Both platform
+  snapshots preserve those notes for the existing Full notes pages; the
+  previous snapshot truncated them at 800 characters. Legacy reminder limits
+  remain 800. Notes-only edits retain keywords, budgets and baselines.
 - A full results page without overlap is a coverage gap. The adapter returns
   no match report until additional pages or a narrower pool restore observed
   coverage. Overlap is a practical pagination signal, not a proof against
   delayed indexing, removals, or late-arriving listings.
 
 The planner and shadow adapter are not wired into the live poller. The current
-dashboard Browse-only save gate is retained. This branch does not change source
+dashboard Browse-only save gate and ten-live-search limit are retained. This branch does not change source
 selection, live search selection, purchasing, sessions or payments.
 
 ## Access and capacity
@@ -63,6 +67,42 @@ separate in this proposal. Extra pages, details, diagnostics and retries use
 additional calls. Thirty seconds describes checking frequency, not guaranteed
 publication-to-Telegram latency.
 
+## Actual future definitions
+
+A read-only check of version 3 of `MSJ_NEWVINTED_Form_Format.xlsx` used the
+existing shared-form parser and this planner. It made no marketplace requests.
+Of the 582 definitions, 579 pass the current keyword and filter parsing rules;
+the Top 250 contains 248 of those valid definitions. The complete Top 250
+can be planned after the following proposed keyword corrections:
+
+| Search ID | Keyword alternatives to use |
+| --- | --- |
+| S114 | mesh, top, Save the Queen |
+| S440 | mesh dress, mesh, Save the Queen |
+| S584 | mesh, racing |
+
+The first two remove wildcard punctuation while preserving the local
+whole-word matching tokens. S584 removes an instructional placeholder that
+was accidentally included as an alternative. The source workbook is unchanged.
+
+| Workload | Exact existing discovery groups | Proposed shared pools | Calls/day at 30 seconds | Allowance with 10% headroom |
+| --- | ---: | ---: | ---: | ---: |
+| Top 250, with those keyword corrections | 248 | 94 | 270,720 | 300,800 |
+| All 582, with those keyword corrections | 577 | 122 | 351,360 | 390,400 |
+
+At the assumed 5,000/day allowance, 94 one-page pools require at least
+1,805 seconds between full rounds before extra detail, page and retry calls.
+This is a forecast from saved filter combinations, not observed throughput.
+API acceptance of each brand/category value and live coverage still need a
+bounded shadow trial. The supplied links do not select UK-only seller
+location; discovery preserves that choice. The current dashboard continues to
+limit live eBay selection to ten searches.
+
+The same check found 241 of the 582 notes, including 140 in the Top 250,
+exceeded the previous 800-character form limit. The longest is 2,584
+characters. The draft's 4,000-character shared-note limit fits all supplied
+notes and preserves complete text through both platforms' Full notes pages.
+
 The allowance calculation uses the previously observed/default 5,000/day,
 not a fresh live account measurement. The dashboard session reached the owner
 sign-in page when attempting a fresh quota read. No credentials were exported.
@@ -81,7 +121,7 @@ Primary references:
 
 ## Verification and next action
 
-All 1,163 offline regression tests passed (89.199 seconds), including 31 new
+All 1,167 offline regression tests passed (90.456 seconds), including 35 new
 checks. Changed Python files pass Black and Ruff, and `git diff --check` passes.
 New offline tests cover captured filter controls, native brand encoding,
 unsupported-search isolation, quota refusal, pool separation, per-search
@@ -89,6 +129,12 @@ matching, coverage gaps, quiet first checks, and real SQLite ingestion through
 the current alert rules with duplicate prevention. All delivery/network
 interactions in these tests are mocked; no live Telegram message or purchase
 was made.
+
+The original 1,163-test prototype also passed GitHub's Python 3.11 and 3.12
+regression jobs. Repository-wide Ruff has 26 findings on both the deployed
+baseline and the draft, with no added findings. Its CI job therefore remains
+red; Black and dependency audit were skipped by that job after Ruff failed.
+The changed Python files pass the same Ruff 0.17.0 version used by CI.
 
 Before enabling pooled discovery, run a finite Browse shadow using the owner's
 actual future definitions and current quota counters. Measure pool count,

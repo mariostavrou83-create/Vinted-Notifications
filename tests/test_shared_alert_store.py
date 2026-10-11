@@ -139,6 +139,113 @@ class SharedAlertStore(DatabaseFixture, unittest.TestCase):
             search_settings.get_search(identity)["ebay_generation"],
         )
 
+    def test_long_shared_notes_round_trip_without_changing_rules_or_buyer_state(self):
+        notes = ("Check <label> & cuffs. 🧵\n" * 160)[:3999] + "Z"
+        notes += "Z" * (4000 - len(notes))
+        old_searches = [search_settings.get_search(i) for i in range(1, 45)]
+        buyer = self.table_rows("vinted_buyer")
+        identity = store.save_search(None, self.form(reminder=notes))
+        search = search_settings.get_search(identity)
+        self.assertEqual(search["reminder"], notes)
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE vinted_keyword_variants SET primed=1,max_item_id=123,last_item=123 WHERE query_id=?",
+                (identity,),
+            )
+        variants = vinted_keywords.rows(identity)
+        changed_notes = "Updated notes\n" + notes[14:]
+        form = self.form(
+            query=search["query"],
+            ebay_search_url=search["ebay"]["search_url"],
+            revision=str(search["revision"]),
+            reminder=changed_notes,
+        )
+        form.pop("shared_alert_version")
+        store.save_search(identity, form)
+        updated = search_settings.get_search(identity)
+        self.assertEqual(updated["reminder"], changed_notes)
+        for field in (
+            "query",
+            "ebay",
+            "ebay_generation",
+            "shared_keywords",
+            "vinted_max_total",
+        ):
+            self.assertEqual(updated[field], search[field], field)
+        self.assertEqual(vinted_keywords.rows(identity), variants)
+        self.assertEqual(buyer, self.table_rows("vinted_buyer"))
+        self.assertEqual(
+            old_searches, [search_settings.get_search(i) for i in range(1, 45)]
+        )
+
+    def test_note_limits_reject_atomically_and_cannot_convert_a_legacy_search(self):
+        before = self.table_rows("queries")
+        with self.assertRaisesRegex(ValueError, "4,000"):
+            store.save_search(None, self.form(reminder="x" * 4001))
+        self.assertEqual(self.table_rows("queries"), before)
+        old = search_settings.get_search(1)
+        with self.assertRaisesRegex(ValueError, "800"):
+            store.save_search(
+                1,
+                self.form(
+                    query=old["query"],
+                    revision=str(old["revision"]),
+                    reminder="x" * 801,
+                ),
+            )
+        self.assertEqual(search_settings.get_search(1), old)
+
+    def test_complete_shared_notes_reach_both_photo_cards_and_legacy_stays_bounded(
+        self,
+    ):
+        import ebay_alerts
+        import photo_cards
+        import vinted_alerts
+
+        notes = ("Check <label> & 🧵 cuffs.\n" * 160)[:3979] + "END OF COMPLETE NOTES"
+        identity = store.save_search(None, self.form(reminder=notes))
+        search = search_settings.get_search(identity)
+        source = SimpleNamespace(photo=None, brand_title="Hollister", raw_data={})
+        snapshots = [
+            vinted_alerts.snapshot(source, search),
+            ebay_alerts.snapshot(
+                {
+                    "title": "Hollister fur jacket",
+                    "brand": "Hollister",
+                    "auction": False,
+                    "shipping": 300,
+                },
+                search,
+            ),
+        ]
+        row = {
+            "query_id": identity,
+            "search_name": search["query_name"],
+            "title": "Hollister fur jacket",
+            "price": "15.00",
+            "currency": "GBP",
+            "url": "https://www.ebay.co.uk/itm/123",
+        }
+        for details in snapshots:
+            self.assertEqual(photo_cards.plain(details["reminder"]), notes)
+            caption, pages = photo_cards.captions(row, details)
+            self.assertLessEqual(photo_cards.units(photo_cards.plain(caption)), 1024)
+            self.assertIn(notes, "".join(pages))
+            for index in range(len(pages)):
+                self.assertLessEqual(
+                    photo_cards.units(
+                        photo_cards.plain(
+                            photo_cards.notes_caption(details, index, pages)
+                        )
+                    ),
+                    1024,
+                )
+        legacy = dict(search, shared_alert_version=0)
+        self.assertEqual(
+            photo_cards.plain(vinted_alerts.snapshot(source, legacy)["reminder"]),
+            notes[:800],
+        )
+
     def test_shared_create_and_edit_round_trip_through_dashboard_routes(self):
         from web_ui_plugin.web_ui import create_app
 
