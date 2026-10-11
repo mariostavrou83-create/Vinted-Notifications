@@ -15,6 +15,7 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit
 
 import requests
 
+from ebay_public import response_diagnostic
 from ebay_search_link import ASPECTS, FIELDS, IGNORED, clean, parse_link
 
 MAX_BYTES = 4 * 1024 * 1024
@@ -110,7 +111,11 @@ def fetch_page(link):
                 session.cookies.clear()
                 with session.get(
                     current,
-                    headers={"Accept": "text/html", "Accept-Language": "en-GB"},
+                    headers={
+                        "Accept": "text/html",
+                        "Accept-Language": "en-GB",
+                        "User-Agent": "MSJ-Marketplace-Monitor/0.1 (public filter import)",
+                    },
                     stream=True,
                     allow_redirects=False,
                     timeout=(3, min(8, max(0.1, deadline - time.monotonic()))),
@@ -124,6 +129,16 @@ def fetch_page(link):
                         current = _validated_url(urljoin(current, location)).geturl()
                         continue
                     if response.status_code != 200:
+                        diagnostic = response_diagnostic(response, deadline - DEADLINE)
+                        if diagnostic["page_kind"] in {
+                            "human-verification",
+                            "automated-traffic",
+                        }:
+                            raise ValueError(
+                                "eBay requires verification before it will provide "
+                                "this page's filters to the dashboard. Nothing has "
+                                "been saved. Its category link cannot currently be read."
+                            )
                         raise ValueError(
                             "eBay could not provide this page's filters "
                             f"(HTTP {response.status_code}). Nothing has been saved. "

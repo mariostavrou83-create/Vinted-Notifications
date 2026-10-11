@@ -420,6 +420,7 @@ def fake_response(url=BROWSE, *, status=200, headers=None, chunks=None):
             {"Content-Type": "text/html; charset=utf-8"} if headers is None else headers
         ),
         url=url,
+        history=[],
         encoding="utf-8",
         apparent_encoding="utf-8",
         iter_content=lambda *args, **kwargs: iter([data] if chunks is None else chunks),
@@ -447,6 +448,16 @@ class BrowseTransportTests(CacheIsolation, unittest.TestCase):
         self.assertTrue(kwargs["stream"])
         self.assertFalse(kwargs["allow_redirects"])
         self.assertEqual(kwargs["timeout"], (3, 8))
+        self.assertEqual(
+            kwargs["headers"]["User-Agent"],
+            "MSJ-Marketplace-Monitor/0.1 (public filter import)",
+        )
+
+    def test_site_verification_response_is_reported_without_response_text(self):
+        self.session(fake_response(status=403, chunks=[b"Verify you are human secret"]))
+        with self.assertRaisesRegex(ValueError, "requires verification") as caught:
+            browse.fetch_page(BROWSE)
+        self.assertNotIn("secret", str(caught.exception))
 
     def test_external_redirect_is_rejected_before_second_request(self):
         session = self.session(
