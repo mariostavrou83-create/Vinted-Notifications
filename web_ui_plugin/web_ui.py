@@ -9,7 +9,6 @@ import time
 from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from flask import (
@@ -427,24 +426,6 @@ def create_app(test_config=None):
             row.update(ebay_store.platform_details(None))
             row["shared_alert_version"] = 1
             row["shared_keywords"] = []
-            if request.method == "GET" and "ebay_import" in request.args:
-                from ebay_search_link import parse_link
-
-                try:
-                    row["ebay"] = parse_link(request.args["ebay_import"])
-                    row["platform_mode"] = "both"
-                    row["ebay_enabled"] = True
-                    flash(
-                        "eBay filters copied into this new form. Add your Vinted "
-                        "link, shared keywords and budget, then save. Nothing has "
-                        "been saved yet.",
-                        "success",
-                    )
-                except ValueError as exc:
-                    flash(
-                        "The copied eBay filters were not accepted: " + str(exc),
-                        "error",
-                    )
         prices = {
             key: "" if row[key] is None else f"{row[key]/100:.2f}"
             for key in (
@@ -554,16 +535,6 @@ def create_app(test_config=None):
             }
         except ValueError as exc:
             return {"error": str(exc)}, 400
-
-    @app.get("/ebay/link-helper")
-    def ebay_link_helper():
-        source = (
-            Path(__file__).parent / "static" / "ebay_filter_bookmarklet.js"
-        ).read_text(encoding="utf-8")
-        return render_template(
-            "msj_ebay_link_helper.html",
-            bookmarklet="javascript:" + quote(source, safe=""),
-        )
 
     @app.post("/search/<int:query_id>/check-ebay")
     def check_saved_ebay_search(query_id):
