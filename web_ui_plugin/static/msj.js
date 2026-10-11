@@ -230,10 +230,35 @@ checkEbay?.addEventListener('click', async () => {
   try {
     const result = await ebayFormRequest(checkEbay.dataset.url, {});
     output.replaceChildren();
-    const lines = [result.message, `${result.active ? 'Live monitoring selected' : 'Standby — select this search in Connections to start monitoring'}. First-check baseline: ${result.baseline}.`, `${result.results} API results; ${result.dated} have listing dates. ${result.eligible} pass the saved price/exclusion/date rules within the last hour.`, `Delivery history: ${Object.entries(result.delivery).map(([status, count]) => `${count} ${status}`).join(', ') || 'no live alerts yet'}.`];
+    const lines = [result.message, `${result.active ? 'Live monitoring selected' : 'Standby — select this search in Connections to start monitoring'}. First-check baseline: ${result.baseline}.`, `${result.results} API results; ${result.dated} have listing dates. ${result.matched} match local filters (${result.eligible} within the last hour); ${result.rejected} rejected by local checks. These counts do not mean new notifications.`, `Delivery history: ${Object.entries(result.delivery).map(([status, count]) => `${count} ${status}`).join(', ') || 'no live alerts yet'}.`];
+    if (result.criteria) {
+      const criteria = result.criteria;
+      lines.push(`Saved eBay request: ${Object.entries(criteria.parameters).map(([key, value]) => `${key}=${value}`).join(' · ')}.`);
+      lines.push(`Title exclusions: ${criteria.exclusions.join(', ') || 'none'}.${criteria.maximum_total ? ` Maximum estimated total including fees and postage: ${criteria.maximum_total}.` : ''}`);
+    }
     if (result.warning) lines.push(result.warning);
     lines.forEach(line => { const p = document.createElement('p'); p.textContent = line; output.append(p); });
-    result.samples.forEach(item => { const p = document.createElement('p'), a = document.createElement('a'); a.textContent = `${item.title} — ${item.price}${item.categories?.length ? ` · ${item.categories.join(" / ")}` : ""}`; a.href = item.url; a.target = '_blank'; a.rel = 'noopener noreferrer'; p.append(a); output.append(p); });
+    function catalogueSamples(label, samples) {
+      const heading = document.createElement('h3'); heading.textContent = label; output.append(heading);
+      if (!samples.length) { const p = document.createElement('p'); p.textContent = 'None in this API response.'; output.append(p); return; }
+      samples.forEach(item => {
+        const p = document.createElement('p');
+        const title = `${item.item_id || 'Unverified listing data'} · ${item.title}${item.price ? ` — item ${item.price}` : ''}`;
+        if (item.url) { const a = document.createElement('a'); a.textContent = title; a.href = item.url; a.target = '_blank'; a.rel = 'noopener noreferrer'; p.append(a); }
+        else { const span = document.createElement('span'); span.textContent = title; p.append(span); }
+        const evidence = document.createElement('span');
+        const costs = [`Postage: ${item.shipping || 'unknown'}`];
+        if (item.buyer_fee_estimate) costs.push(`buyer-fee allowance: ${item.buyer_fee_estimate}`);
+        if (item.estimated_total) costs.push(`estimated total: ${item.estimated_total} (fees & postage)`);
+        if (item.categories?.length) costs.push(`categories: ${item.categories.join(' / ')}`);
+        if (item.category_ids?.length) costs.push(`category IDs: ${item.category_ids.join(', ')}`);
+        if (item.reasons?.length) costs.push(...item.reasons);
+        else costs.push(item.recent ? 'recent catalogue sample; this check sends no alert' : 'older catalogue sample; this check sends no alert');
+        evidence.textContent = ` · ${costs.join(' · ')}`; p.append(evidence); output.append(p);
+      });
+    }
+    catalogueSamples('Matches saved local rules · up to 5 catalogue samples', result.samples);
+    catalogueSamples('Rejected by saved local rules · up to 5 catalogue samples', result.rejected_samples || []);
   } catch (error) { output.textContent = error.message; }
   finally { checkEbay.disabled = false; }
 });

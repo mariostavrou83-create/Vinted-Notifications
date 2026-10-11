@@ -2,7 +2,7 @@
 
 import time
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import requests
 
@@ -99,11 +99,124 @@ def test_connection(kind):
     raise ValueError("Unknown connection check.")
 
 
+def _catalogue_sample(raw, item, saved, reasons, *, recent=False):
+    """Expose public, bounded evidence; only parser-bound items get a link/cost."""
+    categories = raw.get("categories") or [] if isinstance(raw, dict) else []
+    categories = categories if isinstance(categories, list) else []
+    category_rows = [c for c in categories if isinstance(c, dict)][:10]
+    result = {
+        "item_id": item["item_id"] if item else None,
+        "title": (
+            item["title"]
+            if item
+            else (
+                str(raw.get("title", "Unreadable listing"))[:500]
+                if isinstance(raw, dict)
+                else "Unreadable listing"
+            )
+        ),
+        "url": item["url"] if item else None,
+        "categories": [
+            str(c.get("categoryName") or c.get("categoryId") or "")[:160]
+            for c in category_rows
+        ],
+        "category_ids": [str(c.get("categoryId") or "")[:20] for c in category_rows],
+        "reasons": reasons,
+        "recent": recent,
+        "price": f"£{item['price'] / 100:.2f}" if item else None,
+        "shipping": (
+            f"£{item['shipping'] / 100:.2f}"
+            if item and item["shipping"] is not None
+            else None
+        ),
+        "estimated_total": None,
+        "buyer_fee_estimate": None,
+    }
+    # A partial response with unknown postage never becomes a complete total.
+    if (
+        item
+        and saved.get("shared_alert_version") == 1
+        and item.get("shared_alert_version") == 1
+    ):
+        result["estimated_total"] = f"£{item['estimated_total'] / 100:.2f}"
+        result["buyer_fee_estimate"] = f"£{item['buyer_fee_estimate'] / 100:.2f}"
+    return result
+
+
+def _inspect_catalogue_item(raw, search, now):
+    """Explain this one read without changing the authoritative live parser."""
+    from ebay_monitor import parse_item
+    from search_settings import excluded_by
+
+    saved = search["ebay"]
+    item = parse_item(raw, saved, now, fresh_only=False)
+    if item:
+        phrase = excluded_by(item["title"], search["exclusions"])
+        reasons = [f"Excluded title phrase: {phrase}."] if phrase else []
+        return not reasons, _catalogue_sample(
+            raw, item, saved, reasons, recent=parse_item(raw, saved, now) is not None
+        )
+
+    # Diagnose failed local criteria using the same parser with only those
+    # criteria relaxed. Identity/link/date/currency/listing-type checks remain.
+    unbounded = dict(saved, min_price=None, max_price=None)
+    cost_item = parse_item(raw, dict(unbounded, category=""), now, fresh_only=False)
+    structural = cost_item or parse_item(
+        raw,
+        dict(unbounded, category="", include_shipping=False, shared_alert_version=0),
+        now,
+        fresh_only=False,
+    )
+    reasons = []
+    if structural:
+        if (
+            saved["category"]
+            and parse_item(
+                raw,
+                dict(unbounded, include_shipping=False, shared_alert_version=0),
+                now,
+                fresh_only=False,
+            )
+            is None
+        ):
+            reasons.append("Outside the saved eBay category.")
+        phrase = excluded_by(structural["title"], search["exclusions"])
+        if phrase:
+            reasons.append(f"Excluded title phrase: {phrase}.")
+        if cost_item:
+            compared = cost_item.get("estimated_total", cost_item["price"])
+            if saved.get("shared_alert_version") != 1 and saved["include_shipping"]:
+                compared += cost_item["shipping"]
+            label = (
+                "Estimated total"
+                if saved.get("shared_alert_version") == 1
+                else "Saved price basis"
+            )
+            if saved["max_price"] is not None and compared > saved["max_price"]:
+                reasons.append(
+                    f"{label} £{compared / 100:.2f} exceeds the saved maximum £{saved['max_price'] / 100:.2f}."
+                )
+            if saved["min_price"] is not None and compared < saved["min_price"]:
+                reasons.append(
+                    f"{label} £{compared / 100:.2f} is below the saved minimum £{saved['min_price'] / 100:.2f}."
+                )
+        elif structural["shipping"] is None and (
+            saved["include_shipping"] or saved.get("shared_alert_version") == 1
+        ):
+            reasons.append(
+                "Postage is missing or unreadable; it cannot be treated as free."
+            )
+    if not reasons:
+        reasons.append(
+            "Listing response failed current link, item ID, date, price or listing-type checks."
+        )
+    return False, _catalogue_sample(raw, cost_item or structural, saved, reasons)
+
+
 def check_saved_search(search):
     """One budgeted API read, never a baseline reset or a Telegram send."""
-    from ebay_monitor import parse_item, timestamp
+    from ebay_monitor import search_params, timestamp
     from ebay_store import active_searches
-    from search_settings import excluded_by
 
     config = configuration()
     if config["source"] != "browse":
@@ -116,8 +229,9 @@ def check_saved_search(search):
         raise ValueError(
             f"The next shared API request slot is in {max(1, int(wait - now))} seconds. Try again then."
         )
+    client = BrowseClient(config)
     try:
-        items, warning = BrowseClient(config).search(search["ebay"])
+        items, warning = client.search(search["ebay"])
     except EbayError as exc:
         if exc.global_cooldown:
             with closing(connection()) as conn, conn:
@@ -126,32 +240,41 @@ def check_saved_search(search):
                     (time.time() + exc.retry_after,),
                 )
         raise ValueError(str(exc)) from None
+    finally:
+        client.session.close()
     now = time.time()
-    samples, eligible, dated = [], 0, 0
+    samples, rejected_samples = [], []
+    eligible, dated, matched, rejected = 0, 0, 0, 0
     for raw in items:
-        if not isinstance(raw, dict):
-            continue
-        created = timestamp(raw.get("itemOriginDate")) or timestamp(
-            raw.get("itemCreationDate")
+        created = (
+            (
+                timestamp(raw.get("itemOriginDate"))
+                or timestamp(raw.get("itemCreationDate"))
+            )
+            if isinstance(raw, dict)
+            else None
         )
         dated += int(created is not None)
-        item = parse_item(raw, search["ebay"], now, fresh_only=False)
-        if not item or excluded_by(item["title"], search["exclusions"]):
-            continue
-        eligible += int(parse_item(raw, search["ebay"], now) is not None)
-        if len(samples) < 5:
-            samples.append(
-                {
-                    "title": item["title"],
-                    "price": f"£{item['price'] / 100:.2f}",
-                    "url": item["url"],
-                    "categories": [
-                        c.get("categoryName", c.get("categoryId", ""))
-                        for c in raw.get("categories", [])
-                        if isinstance(c, dict)
-                    ],
-                }
-            )
+        accepted, sample = _inspect_catalogue_item(raw, search, now)
+        if accepted:
+            matched += 1
+            eligible += int(sample["recent"])
+            if len(samples) < 5:
+                samples.append(sample)
+        else:
+            rejected += 1
+            if len(rejected_samples) < 5:
+                rejected_samples.append(sample)
+            elif any(
+                r.startswith("Excluded title phrase:") for r in sample["reasons"]
+            ) and not any(
+                r.startswith("Excluded title phrase:")
+                for previous in rejected_samples
+                for r in previous["reasons"]
+            ):
+                # Preserve actual exclusion evidence when earlier budget/data
+                # failures filled the five-sample diagnostic window.
+                rejected_samples[-1] = sample
     with closing(connection()) as conn:
         delivery = dict(
             conn.execute(
@@ -166,15 +289,25 @@ def check_saved_search(search):
         "results": len(items),
         "dated": dated,
         "eligible": eligible,
+        "matched": matched,
+        "rejected": rejected,
         "samples": samples,
+        "rejected_samples": rejected_samples,
+        "criteria": {
+            "parameters": search_params(search["ebay"]),
+            "exclusions": search["exclusions"],
+            "maximum_total": (
+                f"£{search['ebay']['max_price'] / 100:.2f}"
+                if search["ebay"].get("shared_alert_version") == 1
+                else None
+            ),
+        },
         "warning": warning,
         "baseline": (
-            datetime.fromtimestamp(baseline, timezone.utc).strftime(
-                "%d %b %Y %H:%M:%S UTC"
-            )
+            datetime.fromtimestamp(baseline, UTC).strftime("%d %b %Y %H:%M:%S UTC")
             if baseline
             else "Not established yet"
         ),
         "delivery": delivery,
-        "message": "Saved filters checked using one API call. Samples below show matching results, including older listings, so you can review the filters. Live alerts require a recent listing newly discovered after the baseline. This check sends no alerts.",
+        "message": "Saved filters checked using one API call. These are existing catalogue samples, including older listings, not live alerts. eBay applies the saved keyword/brand/size filters; local checks validate listing data, category, estimated budget and title exclusions. Live alerts require a recent listing newly discovered after the baseline. This check sends no alerts and does not reset the baseline. Estimated totals are not eBay checkout quotes.",
     }

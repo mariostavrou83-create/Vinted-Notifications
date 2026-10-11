@@ -23,6 +23,7 @@
 <small>Separate alternatives with commas or new lines. The same alternatives apply to both platforms and replace search text in both links. Multiword phrases stay together. Leave blank to use your link filters without search text. Up to 20 alternatives; the combined eBay query must fit 100 characters.</small>
 <p id="shared-keyword-summary" class="shared-note" aria-live="polite"></p>
 <small>New searches start with a quiet first check. A matching item alerts once per platform. After saving, select this search in Connections → Your live eBay searches to run eBay checks.</small>
+{% if row.id and row.ebay_enabled %}<div class="guide-section"><button type="button" class="secondary" id="check-saved-ebay" data-url="/search/{{row.id}}/check-ebay">Check saved eBay search</button><small>Uses one API call. Tests saved links, keywords, exclusions and budget, not unsaved changes. Shows existing catalogue samples and rejection reasons; sends no Telegram alerts.</small><div id="ebay-check-result" role="status"></div></div>{% endif %}
 
 <label for="exclusions">Words or phrases to exclude <span>optional</span></label>
 <textarea id="exclusions" name="exclusions" rows="3" placeholder="teddy&#10;cropped&#10;faux leather">{{row.exclusions|join('\n')}}</textarea>
