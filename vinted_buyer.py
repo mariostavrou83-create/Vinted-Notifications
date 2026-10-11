@@ -2378,6 +2378,7 @@ def connected_client(*, renew_before=0, solve_challenges=True, allow_refresh=Tru
         # A bounded recovery must refer to the exact session used by this
         # failed client. Never adopt a newer connection which replaced it while
         # the rejected request was in flight.
+        failure_checked_at = time.time()
         exc.session_fingerprint = None
         reference = (
             client._verified_session or client._loaded_session_reference
@@ -2403,6 +2404,9 @@ def connected_client(*, renew_before=0, solve_challenges=True, allow_refresh=Tru
                 # Optional recovery metadata must not obscure the auth failure.
                 pass
         record_auth(exc.reason, exc.stage, exc.status)
+        from vinted_connection_notices import record_failure
+
+        record_failure(exc, exc.session_fingerprint, checked_at=failure_checked_at)
         if client:
             client.session.close()
         raise

@@ -57,6 +57,33 @@ Playwright's request transport, so upstream security compatibility needs a real 
 before claiming successful phone/desktop reconnection. No permanent login can be
 promised if Vinted or Supabase revokes a session.
 
+## Telegram connection warnings
+
+The existing session worker observes fixed saved-account failure metadata every
+60 seconds after its normal maintenance tick. It sends only to the configured
+Vinted Telegram chat, with the reason, operation, numeric HTTP status, timestamp
+and a validated HTTPS Connections link. No additional Vinted requests, login,
+renewal or purchase are initiated by warning delivery.
+
+Failures are recorded only with the exact current encrypted-session fingerprint.
+Password sign-in errors, failures belonging to a replaced session and failures
+older than a fresh same-buyer verification cannot create a warning. An unexplained
+renewal HTTP 400 warns that renewal is unconfirmed and maintenance will retry;
+it does not assert that the login expired. Temporary network/rate-limit/server
+errors warn only after 15 minutes without a later successful account check.
+
+SQLite stores delivery leases and the warning level for the unresolved episode.
+Ordinary repeated ticks and process restarts do not repeat an accepted warning;
+confirmed credential rejection can escalate an earlier attention warning once.
+A fresh same-account verification closes the episode. Telegram delivery failures
+retry with a cooldown and never stop maintenance; a lost delivery acknowledgement
+can still produce a duplicate on retry. Immediate upstream logout detection is
+not promised: Vinted account requests remain expiry-driven or owner-initiated.
+
+An authenticated, CSRF-protected dashboard button sends one clearly labelled
+connection-warning delivery test with a five-minute cooldown. The test makes no
+Vinted request and does not consume, fabricate or clear a real failure episode.
+
 ## eBay validation
 
 The combined regression uses discovery, retained keyword candidates, exact-item

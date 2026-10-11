@@ -733,6 +733,13 @@ def create_app(test_config=None):
                         ),
                         "success",
                     )
+                elif action == "buyer_connection_notice_test":
+                    import asyncio
+
+                    from vinted_connection_notices import send_test
+
+                    flash(asyncio.run(send_test()), "success")
+                    return redirect(url_for("connections"), code=303)
                 elif action == "buyer_login":
                     flash(
                         vinted_buyer.start_login(

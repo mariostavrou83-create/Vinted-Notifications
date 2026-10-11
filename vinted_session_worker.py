@@ -116,7 +116,7 @@ def session_cookie_expiry(saved, name):
     return min(known_expiries) if known_expiries else None
 
 
-async def run():
+async def run(notifier=None):
     """Owned by Telegram's lifecycle; no buyer lock in the forking parent."""
     logger.info(
         "Vinted session maintenance: worker started; interval=60s "
@@ -125,8 +125,14 @@ async def run():
         RETRY_DELAY,
         AMBIGUOUS_RENEWAL_DELAY,
     )
+    if notifier is not None:
+        logger.info(
+            "Vinted connection warnings enabled; stored-failure checks every 60s"
+        )
     while True:
         await asyncio.to_thread(maintain_connection)
+        if notifier is not None:
+            await notifier.check()
         await asyncio.sleep(60)
 
 
@@ -213,7 +219,13 @@ def maintain_connection():
                     return "blocked"
                 if state["retry_at"] > now:
                     return "cooldown"
-            saved = buyer.decrypt(row[0])
+            try:
+                saved = buyer.decrypt(row[0])
+            except buyer.BuyerError as exc:
+                from vinted_connection_notices import record_failure
+
+                record_failure(exc, fingerprint)
+                raise
             if not due(saved, now):
                 return "fresh"
             access_expiry = session_cookie_expiry(saved, "access_token_web")
@@ -268,6 +280,9 @@ def maintain_connection():
                     exc.reason if exc.reason in buyer.AUTH_REASONS else "not_confirmed",
                     exc.status if isinstance(exc.status, int) else None,
                 )
+                from vinted_connection_notices import record_failure
+
+                record_failure(exc, result_fingerprint)
             finally:
                 if client:
                     client.session.close()
