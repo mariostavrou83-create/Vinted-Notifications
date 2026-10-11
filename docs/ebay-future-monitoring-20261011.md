@@ -152,3 +152,8 @@ See [Resolving the public-page failure](ebay-public-access-resolution-20261011.m
 for the distinction between filter repairs and the upstream access refusal,
 the staged quota estimates and qualification requirements. Public access is
 not fixed by this draft.
+
+The later [isolated qualification report](ebay-isolated-qualification-20261011.md)
+supersedes the earlier baseline validation above: it records 1,378 passing
+tests against production commit `c532e3a`, accelerated hour/day replays and
+source rollback fixes. Those offline results do not qualify live public access.

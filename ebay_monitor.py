@@ -635,7 +635,7 @@ def record_snapshot(
         return created_count
 
 
-def record_failure(search, error, now):
+def record_failure(search, error, now, *, source="browse"):
     with closing(connection()) as conn, conn:
         current = conn.execute(
             "SELECT ebay_generation FROM search_platforms WHERE query_id=?",
@@ -656,10 +656,13 @@ def record_failure(search, error, now):
             ),
         )
         if error.global_cooldown:
+            cooldown_key = (
+                "ebay_public_cooldown" if source == "public" else "ebay_api_cooldown"
+            )
             conn.execute(
-                """INSERT INTO delivery_runtime VALUES ('ebay_api_cooldown',?)
+                """INSERT INTO delivery_runtime VALUES (?,?)
                 ON CONFLICT(key) DO UPDATE SET value=MAX(value,excluded.value)""",
-                (now + error.retry_after,),
+                (cooldown_key, now + error.retry_after),
             )
         if error.halt:
             conn.execute(
@@ -704,7 +707,7 @@ class Poller:
         except EbayError as exc:
             failed_at = time.time()
             for search in group:
-                record_failure(search, exc, failed_at)
+                record_failure(search, exc, failed_at, source=source)
             logger.warning("%s", exc)
             return failed_at + exc.retry_after
         return attempted + interval

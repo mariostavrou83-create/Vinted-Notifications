@@ -8,7 +8,7 @@ import time
 import unittest
 from contextlib import closing
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 from cryptography.fernet import Fernet
 from flask import Flask, redirect, url_for
@@ -672,7 +672,7 @@ class EndpointTests(Fixture, unittest.TestCase):
         result = self.web.post("/supabase/backup/verify", data={"csrf": csrf})
         self.assertEqual(result.status_code, 200)
         self.provider.refresh.assert_called_once_with(
-            "fictional-owner-refresh", now=self.now
+            "fictional-owner-refresh", now=self.now, persist_rotation=ANY
         )
         self.provider.download_backup.assert_called_once_with(
             "rotated-owner-access", with_metadata=True

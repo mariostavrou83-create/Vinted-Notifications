@@ -102,13 +102,13 @@ def parse_form(form, previous=None):
         "ebay_filter_mode", previous["ebay"].get("filter_mode", "manual")
     )
     if filter_mode == "url":
-        from ebay_search_link import parse_link
+        from ebay_browse_link import import_link
 
         if configuration()["source"] != "browse":
             raise ValueError(
                 "Search-link filters require Browse API mode in Connections."
             )
-        config = parse_link(
+        config = import_link(
             form.get("ebay_search_url", previous["ebay"].get("search_url", ""))
         )
         return int(mode != "ebay"), int(mode != "vinted"), config
@@ -144,7 +144,8 @@ def parse_form(form, previous=None):
 
 def parse_shared_form(form, previous=None, maximum=None):
     """New shared alerts use only platform URLs and one dashboard total budget."""
-    from ebay_search_link import parse_link, shared_keyword_query
+    from ebay_browse_link import import_link
+    from ebay_search_link import shared_keyword_query
     from vinted_keywords import parse
 
     previous = previous or {}
@@ -175,7 +176,7 @@ def parse_shared_form(form, previous=None, maximum=None):
             raise ValueError(
                 "eBay title or description keywords must use at least two characters."
             )
-        config = parse_link(
+        config = import_link(
             ebay_url,
             keywords=keyword_query,
             ignore_prices=True,
@@ -537,7 +538,7 @@ def reserve_call(config, now, *, diagnostic=False, media=False):
                 "SELECT value FROM delivery_runtime WHERE key='ebay_public_last_call'"
             ).fetchone()
             cooldown = conn.execute(
-                "SELECT value FROM delivery_runtime WHERE key='ebay_api_cooldown'"
+                "SELECT value FROM delivery_runtime WHERE key='ebay_public_cooldown'"
             ).fetchone()
             due = max(
                 (latest[0] if latest else 0) + call_spacing(config),

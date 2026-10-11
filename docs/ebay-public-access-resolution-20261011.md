@@ -1,5 +1,10 @@
 # Resolving the public-page failure
 
+Latest qualification: [isolated regression, offline replays and rollback
+checks](ebay-isolated-qualification-20261011.md). The matched comparison also
+confirmed that the working workspace inherits a runtime proxy while Railway
+connects directly. Public production access is still unqualified.
+
 Keep the current live worker and saved searches in place. The proposed change
 is shared Browse API discovery, qualified beside the current worker before
 integration. Public-page collection has not passed the hosting-access gate.
@@ -100,10 +105,11 @@ configured allowance until the actual account grant confirms it.
    allowance support the requested rollout. Any later integration needs an
    opt-in switch and preserved state for returning to the current worker.
 
-This draft is unmerged and unwired. Closing it abandons the proposal without
-a production rollback. No quota request or support message was sent as part
-of preparing this document, and no new public request was made after the
-denial.
+The shared Browse planner remains unwired and the draft remains unmerged.
+Closing it abandons the proposal without a production rollback. No quota
+request or support message was sent. The later matched access comparison is
+recorded in the qualification report; no new public request was made in the
+offline regression and rollback revision.
 
 Primary references, checked 11 October 2026:
 

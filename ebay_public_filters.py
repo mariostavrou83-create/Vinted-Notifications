@@ -101,13 +101,18 @@ def selected_filters(body, config):
     missing = []
     for name, values in (config.get("aspects") or {}).items():
         actual = selections.get("su-selection-group__aspect-" + name, set())
-        if not set(values).issubset(actual) and not all(
-            name + ": " + value in chips for value in values
+        prefix = name + ": "
+        applied = {chip[len(prefix) :] for chip in chips if chip.startswith(prefix)}
+        expected_values = set(values)
+        if (
+            (actual and actual != expected_values)
+            or (applied and applied != expected_values)
+            or (not actual and not applied)
         ):
             missing.append(name)
     conditions = set(config.get("condition_ids") or [])
-    if conditions and not conditions.issubset(
-        selections.get("su-selection-group__condition", set())
+    if conditions and conditions != selections.get(
+        "su-selection-group__condition", set()
     ):
         missing.append("condition")
     if config.get("uk_only") and "1" not in selections.get(
@@ -117,7 +122,7 @@ def selected_filters(body, config):
     expected = {"fixed": "LH_BIN", "auction": "LH_Auction", "both": "LH_All"}.get(
         config.get("buying")
     )
-    if expected and expected not in selected_formats:
+    if expected and selected_formats != {expected}:
         missing.append("listing type")
     if config.get("free_shipping"):
         missing.append("free postage (page evidence not qualified)")

@@ -1,0 +1,24 @@
+{% extends 'msj_base.html' %}{% block content %}
+<link rel="stylesheet" href="{{url_for('static',filename='msj_reconnect.css')}}">
+<script src="{{url_for('static',filename='msj_reconnect.js')}}" defer></script>
+<section class="form-card reconnect-card" data-reconnect data-csrf="{{csrf}}">
+<span class="eyebrow">YOUR VINTED CONNECTION</span><h1>Reconnect from this device</h1>
+<p>First choose <b>Check private browser availability</b>. If the check passes, open private Vinted sign-in, sign into the <b>same Vinted account</b> you already linked, complete any Vinted checks, then choose <b>Verify connection</b>.</p>
+<p>Availability alone does not verify your Vinted account. Only a successful same-account verification replaces your saved connection, encrypted. Your password is not saved. Your searches, buying limits and delivery/payment choices stay as they are.</p>
+<button class="primary" type="button" data-start disabled>Open private Vinted sign-in</button>
+<button class="secondary" type="button" data-readiness>Check private browser availability</button>
+<p><small>Use Vinted email/username sign-in in this first version. Google/Apple pop-up sign-in is not supported in the private view.</small></p>
+<p role="status" aria-live="polite" data-status>Check private browser availability first. This does not change your saved connection or start a checkout or payment.</p>
+<div data-browser hidden>
+<p class="muted">Tap a Vinted field in the view, then type below. Text fields in the view are concealed for privacy. Use the buttons to move between fields or scroll. For a slider check, drag directly across the view.</p>
+<img class="reconnect-view" data-frame alt="Private Vinted sign-in view" draggable="false" width="390" height="760">
+<form data-input-form autocomplete="off">
+<label for="reconnect-input">Type into the selected Vinted field</label><input id="reconnect-input" data-text type="password" maxlength="1024" autocomplete="off" autocapitalize="none" spellcheck="false">
+<button class="secondary" type="submit">Send text to selected field</button></form>
+<div class="reconnect-controls"><button type="button" class="secondary" data-key="Tab">Next field</button><button type="button" class="secondary" data-key="Backspace">Delete character</button><button type="button" class="secondary" data-key="Enter">Submit Vinted form</button><button type="button" class="secondary" data-scroll="-500">Scroll up</button><button type="button" class="secondary" data-scroll="500">Scroll down</button><button type="button" class="secondary" data-refresh>Refresh view</button></div>
+<p>Once Vinted shows you are signed in:</p><button type="button" class="primary" data-finish>Verify connection</button>
+<button type="button" class="secondary" data-cancel>Cancel &amp; close private browser</button>
+</div>
+<p class="muted">The browser closes after verification, cancellation, five minutes without your input, or ten minutes in total. If the browser is unavailable, Vinted rejects sign-in, or same-account verification fails, the previous saved connection stays in place.</p>
+<a href="{{url_for('connections')}}#vinted-buying">Back to Connections →</a>
+</section>{% endblock %}

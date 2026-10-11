@@ -21,6 +21,13 @@ RUN groupadd -g ${APP_GID} ${APP_USER} \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# The private reconnect browser is launched only by an authenticated owner.
+# Keep its runtime available to the non-root app user; no always-on browser.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/msj-browsers
+RUN python -m playwright install --with-deps chromium \
+ && chmod -R a+rX /opt/msj-browsers \
+ && rm -rf /var/lib/apt/lists/*
+
 # Copy the rest of the application
 COPY . .
 

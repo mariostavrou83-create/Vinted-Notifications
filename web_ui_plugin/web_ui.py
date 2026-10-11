@@ -78,6 +78,22 @@ def create_app(test_config=None):
         # an owner cookie/CSRF form. All dashboard routes stay protected.
         if request.endpoint == "ebay_account_deletion":
             return None
+        reconnect_api = (request.endpoint or "").startswith(
+            "vinted_reconnect."
+        ) and request.endpoint != "vinted_reconnect.page"
+        if reconnect_api:
+            request.max_content_length = 8192
+            # Consume the bounded body before parsing a chunked form.
+            if request.method == "POST" and len(request.get_data(cache=True)) >= 8192:
+                return {
+                    "state": "stopped",
+                    "message": "This private browser input is too large.",
+                }, 413
+        if reconnect_api and request.content_length and request.content_length > 8192:
+            return {
+                "state": "stopped",
+                "message": "This private browser input is too large.",
+            }, 413
         if "csrf" not in session:
             session["csrf"] = secrets.token_urlsafe(32)
         if request.method == "POST" and not secrets.compare_digest(
@@ -88,13 +104,59 @@ def create_app(test_config=None):
         public = ("login", "setup", "static", "health", "supabase.login", "logout")
         if hosted_auth and request.endpoint not in public:
             if not hosted_auth.is_authenticated():
+                if hosted_auth.temporarily_unavailable():
+                    requires_sign_in = bool(
+                        (hosted_auth.auth_failure() or {}).get("requires_sign_in")
+                    )
+                    message = (
+                        "The dashboard could not confirm its refresh after two interrupted exchanges. Sign in again to restore access. Your searches and buying settings were kept."
+                        if requires_sign_in
+                        else "Your dashboard login is saved. Its connection check is temporarily unavailable. Try again shortly."
+                    )
+                    if reconnect_api:
+                        return (
+                            {"state": "waiting", "message": message},
+                            503,
+                            {"Retry-After": "3"},
+                        )
+                    return (
+                        render_template(
+                            "msj_session_retry.html",
+                            requires_sign_in=requires_sign_in,
+                            login_path=url_for(hosted_auth.login_endpoint),
+                            retry_path=(
+                                url_for(request.endpoint, **(request.view_args or {}))
+                                if request.method == "GET" and request.endpoint
+                                else url_for("dashboard")
+                            ),
+                            message=message,
+                        ),
+                        503,
+                        {"Retry-After": "3"},
+                    )
+                if reconnect_api:
+                    reconnect.cancel_current()
+                    return {
+                        "state": "stopped",
+                        "message": "Sign into your private dashboard again before reconnecting.",
+                    }, 401
                 return redirect(url_for(hosted_auth.login_endpoint))
             return None
         if request.endpoint not in public and not session.get("owner"):
+            if reconnect_api:
+                reconnect.cancel_current()
+                return {
+                    "state": "stopped",
+                    "message": "Sign into your private dashboard before reconnecting.",
+                }, 401
             return redirect(url_for("login"))
         if request.endpoint not in public and not auth_row()["password_hash"]:
             session.clear()
             return redirect(url_for("setup"))
+
+    from vinted_reconnect_routes import install_reconnect
+
+    reconnect = install_reconnect(app)
 
     @app.after_request
     def headers(response):
@@ -201,6 +263,7 @@ def create_app(test_config=None):
 
     @app.post("/logout")
     def logout():
+        reconnect.cancel_current()
         if hosted_auth:
             hosted_auth.logout()
         session.clear()
@@ -438,13 +501,37 @@ def create_app(test_config=None):
 
     @app.post("/ebay/import-search")
     def import_ebay_search():
-        from ebay_search_link import describe, parse_link
+        from ebay_browse_link import import_link
+        from ebay_search_link import describe, shared_keyword_query
 
         try:
-            config = parse_link(request.form.get("search_url", ""))
+            shared = request.form.get("shared_alert_version") == "1"
+            keywords = None
+            if shared:
+                from vinted_keywords import parse
+
+                keywords = shared_keyword_query(
+                    parse(request.form.get("shared_keywords", ""))
+                )
+            config = import_link(
+                request.form.get("search_url", ""),
+                keywords=keywords,
+                ignore_prices=shared,
+            )
+            summary = describe(config)
+            if shared:
+                summary = [
+                    (
+                        "Price: your dashboard complete budget applies when saved."
+                        if line.startswith("Item price: ")
+                        else line
+                    )
+                    for line in summary
+                ]
             return {
-                "summary": describe(config),
-                "message": "Filters read successfully. Save search to apply them. Preview uses no eBay API calls.",
+                "summary": summary,
+                "search_url": config["search_url"],
+                "message": "Filters read successfully. Category links are converted automatically. Save search to apply them. Preview uses no eBay API calls.",
             }
         except ValueError as exc:
             return {"error": str(exc)}, 400
@@ -670,6 +757,13 @@ def create_app(test_config=None):
                         ),
                         "success",
                     )
+                elif action == "buyer_connection_notice_test":
+                    import asyncio
+
+                    from vinted_connection_notices import send_test
+
+                    flash(asyncio.run(send_test()), "success")
+                    return redirect(url_for("connections"), code=303)
                 elif action == "buyer_login":
                     flash(
                         vinted_buyer.start_login(
@@ -719,6 +813,7 @@ def create_app(test_config=None):
                         "success" if result["outcome"] == "matched" else "error",
                     )
                 elif action == "buyer_disconnect":
+                    reconnect.cancel_current()
                     vinted_buyer.disconnect()
                     flash("Vinted buyer disconnected. Autobuy is off.", "success")
                 else:
@@ -942,6 +1037,11 @@ def create_app(test_config=None):
 
     @app.errorhandler(413)
     def too_large(error):
+        if (request.endpoint or "").startswith("vinted_reconnect."):
+            return {
+                "state": "stopped",
+                "message": "This private browser input is too large.",
+            }, 413
         return (
             render_template(
                 "msj_error.html",
@@ -953,18 +1053,34 @@ def create_app(test_config=None):
     @app.errorhandler(400)
     @app.errorhandler(429)
     def request_error(error):
+        if (request.endpoint or "").startswith("vinted_reconnect."):
+            return {"state": "stopped", "message": error.description}, error.code
         return render_template("msj_error.html", message=error.description), error.code
 
     return app
 
 
 def web_ui_process():
+    import signal
+
     from waitress import serve
 
-    serve(
-        create_app(),
-        host="0.0.0.0",
-        port=8000,
-        threads=4,
-        max_request_body_size=33 * 1024 * 1024,
-    )
+    from vinted_reconnect_browser import MANAGER
+
+    def stop_dashboard(_signum, _frame):
+        MANAGER.shutdown()
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, stop_dashboard)
+    signal.signal(signal.SIGINT, stop_dashboard)
+
+    try:
+        serve(
+            create_app(),
+            host="0.0.0.0",
+            port=8000,
+            threads=4,
+            max_request_body_size=33 * 1024 * 1024,
+        )
+    finally:
+        MANAGER.shutdown()

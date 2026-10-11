@@ -10,7 +10,7 @@ import time
 import unittest
 from contextlib import closing
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 import requests
 from cryptography.fernet import Fernet
@@ -338,7 +338,9 @@ class DashboardTests(unittest.TestCase):
             "expires_at": 8180,
         }
         self.assertEqual(self.web.get("/").status_code, 200)
-        self.provider.refresh.assert_called_once_with("private-refresh-token", now=4580)
+        self.provider.refresh.assert_called_once_with(
+            "private-refresh-token", now=4580, persist_rotation=ANY
+        )
         self.provider.verify_owner.reset_mock()
         self.assertEqual(self.web.get("/").status_code, 200)
         self.provider.verify_owner.assert_called_once_with("rotated-access")
@@ -360,7 +362,9 @@ class DashboardTests(unittest.TestCase):
             "expires_at": 8180,
         }
         self.assertEqual(self.web.get("/").status_code, 200)
-        self.provider.refresh.assert_called_once_with("private-refresh-token", now=4580)
+        self.provider.refresh.assert_called_once_with(
+            "private-refresh-token", now=4580, persist_rotation=ANY
+        )
         with self.web.session_transaction() as state:
             reference = state["supabase_session"]
         with self.app.test_request_context():

@@ -13,8 +13,11 @@
 <p class="platform-disabled" data-shared-disabled="vinted" {{'hidden' if row.platform_mode in ('vinted','both')}}>Vinted is off for this search. Its link is optional until you enable it.</p>
 
 <label for="ebay_search_url">eBay search link</label>
-<textarea id="ebay_search_url" name="ebay_search_url" rows="3" maxlength="6000" placeholder="https://www.ebay.co.uk/sch/i.html?…" {{'required' if row.platform_mode in ('ebay','both')}}>{{row.ebay.search_url}}</textarea>
-<small>Choose the eBay UK category, brand, sizes, condition and listing type, leave its search box empty, then copy the full search-results link. Unsupported filters block saving so they are not silently dropped.</small>
+<textarea id="ebay_search_url" name="ebay_search_url" rows="3" maxlength="6000" placeholder="Paste your full eBay UK results or category link" {{'required' if row.platform_mode in ('ebay','both')}}>{{row.ebay.search_url}}</textarea>
+<small>Choose your filters on eBay UK, then paste the full address you see. Search-results links and category links (/b/…) work; category links are converted automatically when you save. Your shared keywords replace eBay's search text. Unsupported or unreadable filters block saving so nothing is silently dropped.</small>
+<button type="button" id="preview-ebay-link" class="secondary">Read link &amp; preview filters</button>
+<p id="ebay-import-feedback" role="status" class="muted"></p>
+<ul id="ebay-import-summary">{% for line in imported_summary %}<li>{{line}}</li>{% endfor %}</ul>
 <p class="platform-disabled" data-shared-disabled="ebay" {{'hidden' if row.platform_mode in ('ebay','both')}}>eBay is off for this search. Its link is optional until you enable it.</p>
 {% if ebay_connection.missing %}<small>To receive eBay alerts, <a href="/connections" target="_blank" rel="noopener">set up the eBay connection ↗</a>.</small>{% endif %}
 

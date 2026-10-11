@@ -55,14 +55,14 @@ def test_connection(kind):
                         )
                     if exc.global_cooldown:
                         conn.execute(
-                            """INSERT INTO delivery_runtime VALUES ('ebay_api_cooldown',?)
+                            """INSERT INTO delivery_runtime VALUES ('ebay_public_cooldown',?)
                             ON CONFLICT(key) DO UPDATE SET value=MAX(value,excluded.value)""",
                             (time.time() + exc.retry_after,),
                         )
                 raise ValueError(str(exc)) from None
             with closing(connection()) as conn, conn:
                 conn.execute(
-                    "DELETE FROM delivery_runtime WHERE key IN ('ebay_public_paused','ebay_api_cooldown')"
+                    "DELETE FROM delivery_runtime WHERE key IN ('ebay_public_paused','ebay_public_cooldown')"
                 )
             return (
                 f"Public eBay search succeeded: {len(items)} readable listings. No listing alerts were sent by this check."

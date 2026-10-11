@@ -71,6 +71,7 @@ class LeRobot:
 
             # BUY replies use the same private alert and purchase controls.
             from telegram.ext import MessageHandler, filters
+
             from vinted_buy_reply import BUY_REPLY, reply_buy
 
             self.app.add_handler(
@@ -431,10 +432,16 @@ class LeRobot:
         self._delivery_task = asyncio.create_task(
             self._delivery_worker.run(), name="vinted-telegram-delivery"
         )
+        from vinted_connection_notices import ConnectionNotifier
         from vinted_session_worker import run as maintain_buyer_session
 
         self._buyer_maintenance_task = asyncio.create_task(
-            maintain_buyer_session(), name="vinted-buyer-session-maintenance"
+            maintain_buyer_session(
+                ConnectionNotifier(
+                    application.bot, db.get_parameter("telegram_chat_id")
+                )
+            ),
+            name="vinted-buyer-session-maintenance",
         )
 
     async def stop_delivery(self, application):

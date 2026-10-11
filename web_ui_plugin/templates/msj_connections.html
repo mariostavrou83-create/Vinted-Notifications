@@ -5,7 +5,7 @@
 </div>
 <nav class="connection-jump" aria-label="Connection sections"><a href="#vinted-buying">Vinted &amp; buying</a><a href="#ebay-connection">eBay</a><a href="#monitoring">Speed &amp; cost</a><a href="#connection-tools">Tests &amp; backups</a></nav>
 <div class="connection-overview">
-<div><span>Vinted account</span><b>{{buyer.username if buyer.connected else 'Connect an account'}}</b><small>Autobuy {{'on' if buyer.enabled else 'off'}}</small></div>
+<div><span>Vinted account</span><b>{{buyer.username if buyer.connected else 'Connect an account'}}</b><small>{% if buyer.connection_health is defined %}{{buyer.connection_health.state|replace('_',' ')}} · {% endif %}Autobuy permission {{'on' if buyer.enabled else 'off'}}</small></div>
 <div><span>Buyer proxy</span><b>{{'Saved' if buyer.network.proxy else 'Needs setup'}}</b><small>CapSolver {{'enabled' if buyer.network.enabled else 'off'}}</small></div>
 <div><span>eBay connection</span><b>{{'Needs setup' if info.missing else 'Details saved'}}</b><small>{{info.active}} / {{info.max_live}} live searches · verify access below</small></div>
 <div><span>Vinted speed</span><b>{{resources.mode}}</b><small>~{{resources.cycle}}s per search · <a href="#monitoring">Change mode</a></small></div>

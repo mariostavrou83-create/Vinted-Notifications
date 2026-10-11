@@ -10,9 +10,9 @@ import os
 import re
 import sqlite3
 import time
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from copy import copy
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -522,7 +522,7 @@ def _public_auth_event(event):
     try:
         display_zone = ZoneInfo("Europe/London")
     except ZoneInfoNotFoundError:
-        display_zone = timezone.utc
+        display_zone = UTC
     message = AUTH_REASONS[event["reason"]]
     if event["kind"] == "buyer_login" and event["reason"] == "security_challenge":
         message = (
@@ -738,8 +738,17 @@ def settings():
         access = dict(
             conn.execute("SELECT * FROM vinted_buyer_access WHERE id=1").fetchone()
         )
+        maintenance = dict(
+            conn.execute("SELECT * FROM vinted_buyer_maintenance WHERE id=1").fetchone()
+        )
+        renewal = _stored_auth_event(conn, "buyer_auth_result_renewal")
     # No credential value is returned to a template or API caller.
-    row["connected"] = bool(row.pop("session") and row["verified_at"])
+    sealed = row.pop("session")
+    row["connected"] = bool(sealed and row["verified_at"])
+    row["connection_health"] = connection_health(
+        sealed, row["verified_at"], access, renewal, maintenance
+    )
+    row["password_saved"] = False
     pending = decrypt(row.pop("pending"))
     row["pending_code"] = bool(pending and pending.get("expires", 0) > time.time())
     row.pop("browser_info")
@@ -762,6 +771,106 @@ def settings():
         "checked": access["checked"],
     }
     return row
+
+
+def _display_auth_time(value):
+    if (
+        type(value) not in (int, float)
+        or not 0 <= value <= 4102444800
+        or not math.isfinite(value)
+    ):
+        return None
+    try:
+        display_zone = ZoneInfo("Europe/London")
+    except ZoneInfoNotFoundError:
+        display_zone = UTC
+    return datetime.fromtimestamp(value, display_zone).strftime("%d %b %Y, %H:%M:%S %Z")
+
+
+def connection_health(sealed, verified_at, access, renewal, maintenance):
+    """Historical storage is separate from the latest accepted account evidence."""
+    verified_time = _display_auth_time(verified_at)
+    saved = bool(sealed and verified_time)
+    result = {
+        "state": "verified" if saved else "not_connected",
+        "message": (
+            "The saved buyer was verified at the time shown. Vinted may require reconnection later."
+            if saved
+            else "Connect your Vinted buyer account."
+        ),
+        "last_verified_at": verified_at if verified_time else None,
+        "last_verified": verified_time,
+        "last_checked_at": None,
+        "last_checked": None,
+        "stage_code": None,
+        "stage": None,
+        "reason": None,
+        "http_status": None,
+        "retry_at": None,
+        "retry_time": None,
+        "maintenance_independent_of_buying": True,
+    }
+    if not saved:
+        return result
+    candidates = []
+    if isinstance(access, dict) and access.get("stage") in (
+        "identity",
+        "renewal",
+        "saved_session",
+    ):
+        checked = access.get("checked")
+        if _display_auth_time(checked) and checked >= verified_at:
+            candidates.append(access)
+    if renewal and renewal["checked"] >= verified_at:
+        candidates.append(
+            {
+                "checked": renewal["checked"],
+                "reason": renewal["reason"],
+                "stage": renewal["stage"],
+                "http_status": renewal["http_status"],
+            }
+        )
+    if candidates:
+        latest = max(candidates, key=lambda event: event["checked"])
+        reason, stage = latest.get("reason"), latest.get("stage")
+        reason = (
+            reason
+            if isinstance(reason, str) and reason in AUTH_REASONS
+            else "not_confirmed"
+        )
+        stage = stage if isinstance(stage, str) and stage in AUTH_STAGES else "request"
+        status = latest.get("http_status")
+        result.update(
+            last_checked_at=latest["checked"],
+            last_checked=_display_auth_time(latest["checked"]),
+            reason=reason,
+            stage_code=stage,
+            stage=AUTH_STAGES[stage],
+            http_status=(
+                status if type(status) is int and 100 <= status <= 599 else None
+            ),
+        )
+        if reason not in ("connected", "renewed"):
+            result.update(state="attention", message=AUTH_REASONS[reason])
+        elif reason == "renewed":
+            result.update(
+                state="awaiting_verification", message=AUTH_REASONS["renewed"]
+            )
+    fingerprint = hashlib.sha256(sealed).hexdigest()
+    if maintenance.get("session_fingerprint") == fingerprint:
+        if maintenance.get("blocked"):
+            result.update(
+                state="reconnect_required",
+                message="Vinted rejected this saved connection. Reconnect the same buyer account.",
+            )
+        else:
+            retry_at = maintenance.get("retry_at")
+            retry_time = _display_auth_time(retry_at)
+            if result["state"] == "attention" and retry_time and retry_at > time.time():
+                result.update(
+                    state="cooldown", retry_at=retry_at, retry_time=retry_time
+                )
+    return result
 
 
 def proxy_url(value):
@@ -1023,8 +1132,17 @@ class Client:
             or self.solver_attempted
         ):
             return False
+        guard = getattr(self, "_reconnect_guard", None)
+        if guard is not None:
+            # Reconnect cancellation must stop a new paid solver after an
+            # already dispatched HTTP read returns a challenge.
+            with guard():
+                pass
         if not self.solve_challenge(response, data):
             return False
+        if guard is not None:
+            with guard():
+                pass
         response.close()
         return True
 
@@ -1441,6 +1559,8 @@ class Client:
             raise
         if renewal:
             record_auth("renewed", "renewal", response.status_code)
+        if stage == "identity":
+            self._last_identity_http_status = response.status_code
         self.persist_session()
         return data
 
@@ -1624,6 +1744,283 @@ def reserve_connection_attempt():
             "UPDATE vinted_buyer SET login_attempt=?,pending=NULL,enabled=0 WHERE id=1",
             (time.time(),),
         )
+
+
+def _browser_connection_fingerprint(sealed, network=None):
+    """Server-only revision of the sealed account and its effective connection."""
+    network = network_configuration() if network is None else network
+    binding = {
+        "proxy": network["proxy"],
+        "api_key": network["api_key"],
+        "enabled": network["enabled"],
+        "ca_bundle": os.environ.get("REQUESTS_CA_BUNDLE")
+        or os.environ.get("CURL_CA_BUNDLE")
+        or "",
+    }
+    encoded = json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(
+        b"msj-browser-connection-v1\0"
+        + len(sealed).to_bytes(8, "big")
+        + sealed
+        + encoded
+    ).hexdigest()
+
+
+def browser_session_snapshot():
+    """Server-owned binding for reconnecting an already verified buyer."""
+    with closing(connection()) as conn:
+        row = conn.execute(
+            "SELECT session,user_id,verified_at FROM vinted_buyer WHERE id=1"
+        ).fetchone()
+    if (
+        not row
+        or not isinstance(row[0], bytes)
+        or not row[0]
+        or not isinstance(row[1], str)
+        or not re.fullmatch(r"[0-9]{1,20}", row[1])
+        or _display_auth_time(row[2]) is None
+    ):
+        raise BuyerError(
+            "Link your Vinted buyer account first, then use secure browser reconnect.",
+            reason="saved_session",
+            stage="saved_session",
+        )
+    return {
+        "user_id": row[1],
+        "session_fingerprint": _browser_connection_fingerprint(row[0]),
+    }
+
+
+def _browser_auth_cookie_records(cookie_records):
+    """Only the two scoped UK authentication cookies may enter this importer."""
+    error = BuyerError(
+        "Complete your Vinted login in the secure browser before connecting it.",
+        reason="not_confirmed",
+        stage="saved_session",
+    )
+    required = {"name", "value", "domain", "path", "secure", "expires"}
+    flags = {"domain_specified", "domain_initial_dot", "path_specified", "discard"}
+    paths = {
+        "access_token_web": "/api/v2/users/current",
+        "refresh_token_web": "/web/api/auth/refresh",
+    }
+    if not isinstance(cookie_records, (list, tuple)) or len(cookie_records) != 2:
+        raise error
+    normalized, names = [], set()
+    now = time.time()
+    for record in cookie_records:
+        if (
+            not isinstance(record, dict)
+            or not required <= set(record)
+            or set(record) - required - flags
+        ):
+            raise error
+        name, value = record["name"], record["value"]
+        domain, path, expires = record["domain"], record["path"], record["expires"]
+        if (
+            not isinstance(name, str)
+            or name not in paths
+            or name in names
+            or not isinstance(value, str)
+            or not re.fullmatch(r"[A-Za-z0-9._~+/=-]{16,8192}", value)
+            or not isinstance(domain, str)
+            or domain not in COOKIE_DOMAINS
+            or not isinstance(path, str)
+            or not path.startswith("/")
+            or len(path) > 2048
+            or any(ord(char) <= 32 or ord(char) > 126 for char in path)
+            or record["secure"] is not True
+            or (
+                expires is not None
+                and (
+                    type(expires) is not int
+                    or not 0 <= expires <= 253402300799
+                    or expires <= now
+                )
+            )
+            or any(flag in record and type(record[flag]) is not bool for flag in flags)
+            or (
+                record.get("domain_specified", True) is False
+                and domain != "www.vinted.co.uk"
+            )
+        ):
+            raise error
+        request_path = paths[name]
+        if not (
+            request_path == path
+            or (
+                request_path.startswith(path)
+                and (path.endswith("/") or request_path[len(path) :].startswith("/"))
+            )
+        ):
+            raise error
+        names.add(name)
+        normalized.append(dict(record))
+    return normalized
+
+
+def replace_browser_session(
+    cookie_records,
+    *,
+    expected_user_id,
+    expected_session_fingerprint,
+    csrf=None,
+    commit_guard=None,
+):
+    """Verify one same-account browser replacement without renewal or buying changes."""
+    if (
+        not isinstance(expected_user_id, str)
+        or not re.fullmatch(r"[0-9]{1,20}", expected_user_id)
+        or not isinstance(expected_session_fingerprint, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", expected_session_fingerprint)
+    ):
+        raise BuyerError(
+            "Start a fresh secure browser connection from your dashboard.",
+            reason="saved_session",
+            stage="saved_session",
+        )
+    if csrf not in (None, "") and (
+        not isinstance(csrf, str)
+        or not re.fullmatch(r"[A-Za-z0-9._~+/=-]{16,1024}", csrf)
+    ):
+        raise BuyerError(
+            "Complete your Vinted login in the secure browser before connecting it.",
+            reason="not_confirmed",
+            stage="saved_session",
+        )
+    records = _browser_auth_cookie_records(cookie_records)
+    client = None
+    with exclusive(wait_seconds=45):
+        if commit_guard is not None:
+            with commit_guard():
+                pass
+        with closing(connection()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT session,user_id,verified_at,login_attempt FROM vinted_buyer WHERE id=1"
+            ).fetchone()
+            if (
+                not row
+                or not isinstance(row[0], bytes)
+                or not row[0]
+                or row[1] != expected_user_id
+                or _display_auth_time(row[2]) is None
+                or _browser_connection_fingerprint(row[0])
+                != expected_session_fingerprint
+            ):
+                raise BuyerError(
+                    "The saved account or connection settings changed while the browser login was open. Start a new secure connection.",
+                    reason="saved_session",
+                    stage="saved_session",
+                )
+            previous_sealed = row[0]
+            now = time.time()
+            if now - row[3] < 30:
+                raise BuyerError("Wait 30 seconds between connection attempts.")
+            # Reserve without clearing the old session, pending code or permission.
+            conn.execute("UPDATE vinted_buyer SET login_attempt=? WHERE id=1", (now,))
+        try:
+            client = Client({"cookie_records": records, "csrf": csrf or ""})
+            client._reconnect_guard = commit_guard
+            if (
+                _browser_connection_fingerprint(previous_sealed, client.network)
+                != expected_session_fingerprint
+            ):
+                raise BuyerError(
+                    "The connection settings changed before verification. Start a new secure connection.",
+                    reason="saved_session",
+                    stage="saved_session",
+                )
+            if not csrf:
+                if commit_guard is not None:
+                    with commit_guard():
+                        pass
+                client.homepage()
+            if commit_guard is not None:
+                with commit_guard():
+                    pass
+            user_id, username = client.identity()
+            if user_id != expected_user_id:
+                raise BuyerError(
+                    AUTH_REASONS["account_changed"],
+                    reason="account_changed",
+                    stage="identity",
+                )
+            current = client.exported()
+            sealed = encrypt(current)
+            checked = time.time()
+            with (
+                commit_guard() if commit_guard is not None else nullcontext(),
+                closing(connection()) as conn,
+                conn,
+            ):
+                conn.execute("BEGIN IMMEDIATE")
+                if (
+                    _browser_connection_fingerprint(previous_sealed)
+                    != expected_session_fingerprint
+                ):
+                    raise BuyerError(
+                        "The connection settings changed during verification. Start a new secure connection.",
+                        reason="saved_session",
+                        stage="saved_session",
+                    )
+                updated = conn.execute(
+                    "UPDATE vinted_buyer SET session=?,pending=NULL,verified_at=?,username=? "
+                    "WHERE id=1 AND user_id=? AND session=?",
+                    (sealed, checked, username, expected_user_id, previous_sealed),
+                ).rowcount
+                if updated != 1:
+                    raise BuyerError(
+                        "The saved account changed during verification. Start a new secure connection.",
+                        reason="saved_session",
+                        stage="saved_session",
+                    )
+                enabled = conn.execute(
+                    "SELECT enabled FROM vinted_buyer WHERE id=1"
+                ).fetchone()[0]
+            # This result records the durable save before optional diagnostics
+            # or cleanup. A later bookkeeping failure cannot unverify it.
+            result = {
+                "outcome": "verified",
+                "account_verified": True,
+                "same_buyer_account": True,
+                "checked_at": checked,
+                "autobuy_on": enabled == 1,
+                "normal_renewal_verified": False,
+                "checkout_created": False,
+                "payment_submitted": False,
+            }
+            try:
+                client.bind_verified_session(user_id, sealed, current)
+                status = getattr(client, "_last_identity_http_status", None)
+                record_auth("connected", "identity", status)
+                record_connection_result(
+                    "buyer_session", "connected", "identity", status
+                )
+            except Exception:  # noqa: BLE001 - never log private exception text.
+                logger.warning(
+                    "Vinted browser reconnect bookkeeping did not complete after verified save."
+                )
+            return result
+        except BuyerError as exc:
+            # This new browser attempt is not evidence that the old session failed.
+            try:
+                record_connection_result(
+                    "buyer_session", exc.reason, exc.stage, exc.status
+                )
+            except Exception:  # noqa: BLE001 - retain the original safe auth result.
+                logger.warning(
+                    "Vinted browser reconnect failure metadata did not complete."
+                )
+            raise
+        finally:
+            if client is not None:
+                try:
+                    client.session.close()
+                except Exception:  # noqa: BLE001 - cleanup cannot reverse saved proof.
+                    logger.warning(
+                        "Vinted browser reconnect client cleanup did not confirm closure."
+                    )
 
 
 def link_session(access_token, refresh_token):
@@ -1981,6 +2378,7 @@ def connected_client(*, renew_before=0, solve_challenges=True, allow_refresh=Tru
         # A bounded recovery must refer to the exact session used by this
         # failed client. Never adopt a newer connection which replaced it while
         # the rejected request was in flight.
+        failure_checked_at = time.time()
         exc.session_fingerprint = None
         reference = (
             client._verified_session or client._loaded_session_reference
@@ -2006,6 +2404,9 @@ def connected_client(*, renew_before=0, solve_challenges=True, allow_refresh=Tru
                 # Optional recovery metadata must not obscure the auth failure.
                 pass
         record_auth(exc.reason, exc.stage, exc.status)
+        from vinted_connection_notices import record_failure
+
+        record_failure(exc, exc.session_fingerprint, checked_at=failure_checked_at)
         if client:
             client.session.close()
         raise

@@ -79,6 +79,32 @@ class ImportedPublicTests(unittest.TestCase):
             self.body("7fam_native"), links.parse_link(FAM)
         )
 
+    def test_extra_checked_brand_is_rejected_even_with_the_original_selected(self):
+        body = self.body("zara_native").replace(
+            b"</body>",
+            b'<input name="su-selection-group__aspect-Brand" value="Nike" checked></body>',
+        )
+        with self.assertRaisesRegex(monitor.EbayError, "Brand"):
+            filters.require_selected_filters(body, self.config)
+
+    def test_extra_applied_size_is_rejected(self):
+        config = links.parse_link(FAM + "&Size=8%257C10%257C12&LH_ItemCondition=3000")
+        body = self.body("multi_size_native").replace(
+            b"</body>",
+            b'<div class="srp-multi-aspect__item--applied">Size: 14Remove filter</div></body>',
+        )
+        with self.assertRaisesRegex(monitor.EbayError, "Size"):
+            filters.require_selected_filters(body, config)
+
+    def test_extra_condition_is_rejected(self):
+        config = links.parse_link(FAM + "&Size=8%257C10%257C12&LH_ItemCondition=3000")
+        body = self.body("multi_size_native").replace(
+            b"</body>",
+            b'<input name="su-selection-group__condition" value="1000" checked></body>',
+        )
+        with self.assertRaisesRegex(monitor.EbayError, "condition"):
+            filters.require_selected_filters(body, config)
+
     def test_same_url_does_not_hide_silently_ignored_brand(self):
         config = links.parse_link(FAM)
         with self.assertRaisesRegex(monitor.EbayError, "Brand"):
