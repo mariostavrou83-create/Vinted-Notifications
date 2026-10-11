@@ -453,6 +453,112 @@ class NetworkAndRuntimeTests(unittest.TestCase):
                 self.assertIn(result, reconnect.READINESS_DIAGNOSTICS)
                 self.assertNotIn(private, result)
 
+    def test_permission_markers_observe_only_fixed_denied_targets(self):
+        private = "private-path-secret private-proxy-secret"
+        for line, enabled in (
+            ("  - <launched> pid=9987", {"launched"}),
+            (
+                "[pid=9987][err] chrome-sandbox: Permission denied " + private,
+                {"launched", "sandbox"},
+            ),
+            (
+                "[pid=9987][err] namespace: Operation not permitted " + private,
+                {"launched", "namespace"},
+            ),
+            ("crashpad_handler: EACCES " + private, {"crashpad"}),
+            ("EPERM open '/proc/self/maps/" + private + "'", {"proc"}),
+            ("EACCES open '/dev/shm/" + private + "'", {"device"}),
+            ("EACCES mkdtemp '/private-custom-temp/" + private + "'", {"temp"}),
+            ("Permission denied '/var/tmp/" + private + "'", {"temp"}),
+            ("EACCES stat '/opt/msj-browsers/" + private + "'", {"browser_root"}),
+            (
+                "EACCES stat '/private-home/.cache/" + private + "'",
+                {"home_cache_config"},
+            ),
+            (
+                "EPERM open '/private-home/.config/" + private + "'",
+                {"home_cache_config"},
+            ),
+            ("EACCES stat '/private-unknown/" + private + "'", set()),
+        ):
+            with self.subTest(enabled=enabled):
+                markers = reconnect._anonymous_permission_markers(RuntimeError(line))
+                self.assertEqual(
+                    {key for key, value in markers.items() if value}, enabled
+                )
+                self.assertTrue(
+                    all(
+                        type(value) is int and value in (0, 1)
+                        for value in markers.values()
+                    )
+                )
+                self.assertNotIn(private, str(markers))
+
+    def test_permission_markers_ignore_commands_and_unrelated_lines_and_are_bounded(
+        self,
+    ):
+        private = "private-path-secret"
+        excluded = (
+            "  - <launching> "
+            + private
+            + " --sandbox=/proc/namespace --crashpad=/dev/tmp --cache=/opt/msj-browsers"
+            + " --config=/home/.config Permission denied EACCES EPERM\n"
+            + "sandbox namespace crashpad /proc/ /dev/ /tmp/ /opt/msj-browsers /home/.config\n"
+            + "  - <launched> pid=N/A\n"
+            + "[pid=N/A][err] Permission denied\n"
+            + "EACCES open '/private/proc/"
+            + private
+            + "'\n"
+            + "EACCES open '/private/dev/"
+            + private
+            + "'\n"
+            + "EACCES open '/private/opt/msj-browsers/"
+            + private
+            + "'"
+        )
+        self.assertFalse(
+            any(
+                reconnect._anonymous_permission_markers(RuntimeError(excluded)).values()
+            )
+        )
+        for message in (
+            " " * 32768 + "EACCES open /proc/self/maps",
+            "unrelated\n" * 256 + "EACCES open /proc/self/maps",
+        ):
+            self.assertFalse(
+                any(
+                    reconnect._anonymous_permission_markers(
+                        RuntimeError(message)
+                    ).values()
+                )
+            )
+
+    def test_permission_marker_log_is_one_fixed_numeric_line_without_private_values(
+        self,
+    ):
+        private = "private-path-secret private-proxy-secret"
+        message = (
+            "  - <launched> pid=9987\n"
+            + "[pid=9987][err] EACCES open '/proc/"
+            + private
+            + "'\n"
+            + "[pid=9987][err] Permission denied '/private-home/.config/"
+            + private
+            + "'"
+        )
+        with self.assertLogs(reconnect.LOGGER, level="INFO") as captured:
+            reconnect._log_anonymous_permission_markers(RuntimeError(message))
+        self.assertEqual(len(captured.output), 1)
+        self.assertTrue(
+            captured.output[0].endswith(
+                "launched=1 sandbox=0 namespace=0 crashpad=0 proc=1 device=0 temp=0 browser_root=0 home_cache_config=1"
+            )
+        )
+        self.assertNotIn(private, captured.output[0])
+        self.assertNotIn("9987", captured.output[0])
+        self.assertNotIn("/proc", captured.output[0])
+        self.assertNotIn("/private-home", captured.output[0])
+
     def test_driver_permission_trace_distinguishes_actual_spawn_failure(self):
         self.assertEqual(
             reconnect._anonymous_launch_diagnostic(
@@ -602,6 +708,10 @@ class NetworkAndRuntimeTests(unittest.TestCase):
             with patch.object(
                 reconnect, "_anonymous_launch_diagnostic", side_effect=AssertionError
             ), patch.object(
+                reconnect, "_log_anonymous_permission_markers"
+            ) as markers, patch.object(
+                reconnect, "_anonymous_permission_markers", side_effect=AssertionError
+            ), patch.object(
                 reconnect, "_readiness_file_preflight"
             ) as files, patch.object(
                 reconnect, "_readiness_binary_preflight"
@@ -612,6 +722,7 @@ class NetworkAndRuntimeTests(unittest.TestCase):
             self.assertEqual(owner_error.exception.diagnostic, "unknown")
             files.assert_not_called()
             binaries.assert_not_called()
+            markers.assert_not_called()
 
     def test_allowlist_supports_real_auth_selector_captcha_and_assets_only(self):
         for url, method, navigation in (

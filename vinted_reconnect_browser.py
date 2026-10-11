@@ -225,6 +225,71 @@ def _anonymous_launch_diagnostic(error, *, phase="browser_launch"):
     return "unknown"
 
 
+def _anonymous_permission_markers(error):
+    """Fixed observations only; no cause inferred from a missing marker."""
+    markers = dict.fromkeys(
+        (
+            "launched",
+            "sandbox",
+            "namespace",
+            "crashpad",
+            "proc",
+            "device",
+            "temp",
+            "browser_root",
+            "home_cache_config",
+        ),
+        0,
+    )
+    try:
+        message = str(error)[:32768].lower()
+    except Exception:  # noqa: BLE001 - an exception cannot expose diagnostic input.
+        return markers
+    for line in message.splitlines()[:256]:
+        # Playwright's command line includes args and paths; never derive a
+        # target marker from it, even when an arg contains permission words.
+        if "<launching>" in line:
+            continue
+        if re.fullmatch(r"\s*(?:-\s*)?<launched>\s+pid=[1-9][0-9]*\s*", line):
+            markers["launched"] = 1
+        if not re.search(
+            r"permission denied|operation not permitted|\b(?:eacces|eperm)\b", line
+        ):
+            continue
+        if re.search(r"\[pid=[1-9][0-9]*\]\[err\]", line):
+            markers["launched"] = 1
+        predicates = {
+            "sandbox": r"\bsandbox(?:ing)?\b|\bchrome[-_]sandbox\b|\bzygote\b",
+            "namespace": r"\bnamespace\b|\bunshare\b|\bsetns\b",
+            "crashpad": r"\bcrashpad(?:_handler)?\b|\bchrome_crashpad_handler\b",
+            "proc": r"(?:^|[\s'\"(])/proc(?:/|[\s'\"):]|$)",
+            "device": r"(?:^|[\s'\"(])/dev(?:/|[\s'\"):]|$)",
+            "temp": r"(?:^|[\s'\"(])/(?:var/)?tmp(?:/|[\s'\"):]|$)|\bmkdtemp\b|\bplaywright[-_]artifacts\b|\bplaywright_chromiumdev_profile\b",
+            "browser_root": r"(?:^|[\s'\"(])/opt/msj-browsers(?:/|[\s'\"):]|$)",
+            "home_cache_config": r"/\.(?:cache|config)(?:/|[\s'\"):]|$)",
+        }
+        for name, pattern in predicates.items():
+            if re.search(pattern, line):
+                markers[name] = 1
+    return markers
+
+
+def _log_anonymous_permission_markers(error):
+    markers = _anonymous_permission_markers(error)
+    LOGGER.info(
+        "Vinted private browser readiness permission markers: launched=%s sandbox=%s namespace=%s crashpad=%s proc=%s device=%s temp=%s browser_root=%s home_cache_config=%s",
+        markers["launched"],
+        markers["sandbox"],
+        markers["namespace"],
+        markers["crashpad"],
+        markers["proc"],
+        markers["device"],
+        markers["temp"],
+        markers["browser_root"],
+        markers["home_cache_config"],
+    )
+
+
 def _readiness_preflight():
     """Only effective UID and availability flags, never environment values."""
     try:
@@ -665,6 +730,8 @@ class _PlaywrightProvider:
         # Browser exceptions can contain secrets; never expose their text.
         except Exception as error:  # noqa: BLE001
             self.close()
+            if not navigate:
+                _log_anonymous_permission_markers(error)
             raise BrowserError(
                 "unavailable",
                 stage=stage,
