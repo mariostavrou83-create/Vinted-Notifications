@@ -105,12 +105,9 @@ def listing_date(label, now):
 
 def search_url(config):
     if config.get("filter_mode") == "url":
-        from ebay_monitor import EbayError
+        from ebay_public_filters import imported_search_url
 
-        raise EbayError(
-            "Imported search filters require Browse API mode. No broad fallback was used.",
-            300,
-        )
+        return imported_search_url(config, PAGE_SIZE)
     params = {"_nkw": config["keywords"], "_sop": "10", "_ipg": str(PAGE_SIZE)}
     if config["category"]:
         params["_sacat"] = config["category"]
@@ -160,6 +157,10 @@ def parse_page(body, config, now=None):
         raise EbayError(
             "eBay did not confirm Newly listed sorting; no listings processed.", 30
         )
+    if config.get("filter_mode") == "url":
+        from ebay_public_filters import require_selected_filters
+
+        require_selected_filters(body, config)
     main = first(doc, "srp-results")
     page_text = text(doc)
     heading = first(doc, "srp-controls__count-heading")
@@ -426,6 +427,14 @@ class PublicClient:
                         True,
                         halt=True,
                     )
+                if config.get("filter_mode") == "url":
+                    from ebay_public_filters import same_remote_filters
+
+                    if not same_remote_filters(config, response.url):
+                        raise EbayError(
+                            "eBay changed the saved search filters; no listings processed.",
+                            300,
+                        )
                 body = bytearray()
                 for chunk in response.iter_content(65536):
                     body.extend(chunk)
