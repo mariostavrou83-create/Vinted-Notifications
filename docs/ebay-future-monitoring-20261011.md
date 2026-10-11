@@ -131,7 +131,8 @@ interactions in these tests are mocked; no live Telegram message or purchase
 was made.
 
 The original 1,163-test prototype also passed GitHub's Python 3.11 and 3.12
-regression jobs. Repository-wide Ruff has 26 findings on both the deployed
+regression jobs, followed by the complete 1,167-test revision passing both
+versions. Repository-wide Ruff has 26 findings on both the deployed
 baseline and the draft, with no added findings. Its CI job therefore remains
 red; Black and dependency audit were skipped by that job after Ruff failed.
 The changed Python files pass the same Ruff 0.17.0 version used by CI.
@@ -146,3 +147,8 @@ The previous Growth Check refusal asked for more usage evidence. A renewed
 request should contain real call-counter history and the measured optimized
 pool count, rather than asserting the synthetic 10-pool example is production
 usage. Do not change the configured allowance before eBay grants it.
+
+See [Resolving the public-page failure](ebay-public-access-resolution-20261011.md)
+for the distinction between filter repairs and the upstream access refusal,
+the staged quota estimates and qualification requirements. Public access is
+not fixed by this draft.
