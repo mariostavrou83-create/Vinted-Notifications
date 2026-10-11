@@ -118,6 +118,19 @@ class OwnerControlsTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         ]
         return next(value for value in data if f":{decision}:" in value)
 
+    async def test_historical_block_names_only_the_current_pending_item(self):
+        self.pending()
+        feedback = await self.offer(
+            {
+                "state": "setup_required",
+                "reason": "earlier_payment_uncertain",
+                "message": "A previous payment for item 10320418087 remains unconfirmed.",
+            }
+        )
+        self.assertIn(self.pending_id, feedback["message"])
+        self.assertNotIn("10320418087", feedback["message"])
+        self.assertEqual(feedback["owner_resolution"]["item_id"], self.pending_id)
+
     async def tap(self, data=None):
         if data is not None:
             self.query.data = data

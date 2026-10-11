@@ -61,11 +61,18 @@ def with_offer(row, outcome):
     result = dict(outcome)
     result.pop("owner_resolution", None)
     if offer:
+        message = (outcome.get("message") or "Payment remains unconfirmed.").split(
+            "\n\nDid you get item "
+        )[0]
+        if outcome.get("reason") == "earlier_payment_uncertain" and outcome.get(
+            "state"
+        ) in ("setup_required", "failed_before_payment"):
+            # Historical blocked alerts can name a payment already resolved.
+            # Show the current exact blocker, rather than two different items.
+            message = f"An earlier payment for item {offer['item_id']} needs your confirmation. No payment was started for this alert."
         result["owner_resolution"] = offer
         result["message"] = (
-            (outcome.get("message") or "Payment remains unconfirmed.").split(
-                "\n\nDid you get item "
-            )[0]
+            message
             + f"\n\nDid you get item {offer['item_id']}? Check that exact item in "
             "Vinted Purchases and any pending bank payment, then choose below. "
             "Your choice clears this item's block on new purchases. "
