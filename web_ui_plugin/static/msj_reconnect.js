@@ -10,10 +10,26 @@
   let verificationPolls = 0;
   let imageURL = null, timer = null, pointer = null;
   const message = text => { status.textContent = text; };
+  function readinessMessage(result) {
+    if (!result || typeof result !== "object") return "The private browser runtime could not be confirmed. Try the check again shortly.";
+    if (result.available === true && result.stage === "ready") {
+      return "The private browser runtime is ready. Vinted sign-in still needs to be completed and verified.";
+    }
+    if (result.available !== false) return "The private browser runtime could not be confirmed. Try the check again shortly.";
+    switch (result.stage) {
+      case "active": return "A private browser session is already active. Finish or cancel it before checking again.";
+      case "dependencies": return "The private browser runtime is unavailable: browser dependencies are missing.";
+      case "browser_start": return "The private browser runtime could not start.";
+      case "context_start": return "The private browser runtime could not create an isolated browser session.";
+      case "page_open": return "The private browser runtime could not open a page.";
+      case "timeout": return "The private browser runtime check timed out. Try the check again shortly.";
+      default: return "The private browser runtime could not be confirmed. Try the check again shortly.";
+    }
+  }
   root.querySelector("[data-readiness]").addEventListener("click", async event => {
     if (busy || active) return;
     busy=true; event.target.disabled=true; message("Checking the private browser runtime…");
-    try { await api("readiness", {}); }
+    try { message(readinessMessage(await api("readiness", {}))); }
     catch (error) {message(error.message);}
     finally {busy=false;event.target.disabled=false;}
   });
@@ -25,6 +41,10 @@
     }
     const response = await fetch(`/vinted/reconnect/${operation}`, options);
     const result = await response.json();
+    // Readiness reports runtime availability only, including a sanitized launch failure.
+    // Leave dashboard authentication errors on the existing error-message path.
+    if (operation === "readiness" && (response.ok ||
+        (response.status === 503 && result && result.available === false && result.stage === "browser_start"))) return result;
     if (!response.ok && response.status !== 202) throw new Error(result.message || "This private reconnect could not continue.");
     if (result.next_seq) nextSequence = result.next_seq;
     if (result.message) message(result.message);
