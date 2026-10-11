@@ -1,0 +1,5 @@
+.reconnect-card { max-width: 680px; margin: 0 auto; }
+.reconnect-view { display: block; width: min(100%,390px); height: auto; margin: 1rem auto; border: 1px solid #d7d9d2; border-radius: 8px; touch-action: none; user-select: none; }
+.reconnect-controls { display: flex; flex-wrap: wrap; gap: .5rem; margin: 1rem 0; }
+.reconnect-card [hidden] { display: none !important; }
+.reconnect-card button:disabled { opacity: .6; cursor: wait; }

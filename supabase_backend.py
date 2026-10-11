@@ -10,6 +10,7 @@ import gzip
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import secrets
@@ -42,10 +43,112 @@ MAX_CIPHERTEXT_BYTES = 46 * 1024 * 1024
 AUTH_BODY_LIMIT = 256 * 1024
 SNAPSHOT_MAGIC = b"MSJ SQLite snapshot v1\n"
 SETTINGS = ("SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "SUPABASE_OWNER_ID")
+AUTH_FAILURE_STAGES = frozenset(
+    {
+        "request",
+        "sign_in",
+        "refresh_exchange",
+        "owner_verification",
+        "session_refresh",
+        "session_decryption",
+        "refresh_lock",
+        "rotation_persistence",
+    }
+)
+AUTH_FAILURE_REASONS = frozenset(
+    {
+        "not_confirmed",
+        "network",
+        "timeout",
+        "rate_limited",
+        "service_unavailable",
+        "conflict",
+        "refresh_busy",
+        "refresh_uncertain",
+        "invalid_refresh",
+        "session_revoked",
+        "session_expired",
+        "owner_mismatch",
+        "http_rejected",
+        "unreadable",
+        "invalid_session",
+        "persistence",
+    }
+)
+TRANSIENT_AUTH_REASONS = frozenset(
+    {
+        "network",
+        "timeout",
+        "rate_limited",
+        "service_unavailable",
+        "conflict",
+        "refresh_busy",
+        "refresh_uncertain",
+        "persistence",
+    }
+)
+
+
+def _valid_auth_expiry(value):
+    return (
+        type(value) in (int, float)
+        and 0 <= value <= 4102444800
+        and math.isfinite(value)
+    )
 
 
 class SupabaseError(ValueError):
     """A fixed, safe message with no provider response, token, or password."""
+
+    def __init__(
+        self,
+        message,
+        *,
+        reason="not_confirmed",
+        stage="request",
+        status=None,
+        refresh_rejected_before_exchange=False,
+    ):
+        super().__init__(message)
+        self.reason = (
+            reason
+            if isinstance(reason, str) and reason in AUTH_FAILURE_REASONS
+            else "not_confirmed"
+        )
+        self.stage = (
+            stage
+            if isinstance(stage, str) and stage in AUTH_FAILURE_STAGES
+            else "request"
+        )
+        self.status = status if type(status) is int and 100 <= status <= 599 else None
+        self.retryable = self.reason in TRANSIENT_AUTH_REASONS
+        self.refresh_rejected_before_exchange = refresh_rejected_before_exchange is True
+
+
+def _auth_http_reason(status, data):
+    # Provider prose and unknown codes are never returned or logged.
+    code = (
+        data.get("code") or data.get("error_code") if isinstance(data, dict) else None
+    )
+    terminal = {
+        "refresh_token_already_used": "invalid_refresh",
+        "refresh_token_not_found": "invalid_refresh",
+        "session_not_found": "session_revoked",
+        "session_expired": "session_expired",
+        "user_not_found": "session_revoked",
+        "user_banned": "session_revoked",
+    }
+    if isinstance(code, str) and code in terminal:
+        return terminal[code]
+    if code == "request_timeout":
+        return "timeout"
+    if code == "conflict":
+        return "conflict"
+    if status == 429:
+        return "rate_limited"
+    if type(status) is int and 500 <= status <= 599:
+        return "service_unavailable"
+    return "http_rejected"
 
 
 def _private_cipher(path):
@@ -144,8 +247,17 @@ class Client:
         token=None,
         body=None,
         limit=AUTH_BODY_LIMIT,
-        headers=None
+        headers=None,
     ):
+        stage = (
+            "refresh_exchange"
+            if path == "/auth/v1/token?grant_type=refresh_token"
+            else (
+                "sign_in"
+                if path == "/auth/v1/token?grant_type=password"
+                else "owner_verification" if path == "/auth/v1/user" else "request"
+            )
+        )
         outgoing = {"apikey": self.config.publishable_key, "Accept": "application/json"}
         if token:
             if (
@@ -171,28 +283,70 @@ class Client:
                 verify=True,
             )
             try:
-                if response.status_code not in (200, 201, 204):
-                    raise SupabaseError(
-                        "Supabase did not accept this request. Check sign-in and project settings."
-                    )
                 chunks = []
                 count = 0
                 for chunk in response.iter_content(65536):
                     count += len(chunk)
                     if count > limit:
                         raise SupabaseError(
-                            "The Supabase response exceeded the permitted size."
+                            "The Supabase response exceeded the permitted size.",
+                            reason=(
+                                _auth_http_reason(response.status_code, None)
+                                if response.status_code not in (200, 201, 204)
+                                else "unreadable"
+                            ),
+                            stage=stage,
+                            status=response.status_code,
                         )
                     chunks.append(chunk)
                 raw = b"".join(chunks)
-                return json.loads(raw) if raw else None
+                try:
+                    data = json.loads(raw) if raw else None
+                except (ValueError, UnicodeError):
+                    data = None
+                    if response.status_code in (200, 201, 204):
+                        raise SupabaseError(
+                            "Supabase returned an unreadable response.",
+                            reason="unreadable",
+                            stage=stage,
+                            status=response.status_code,
+                        ) from None
+                if response.status_code not in (200, 201, 204):
+                    raise SupabaseError(
+                        "Supabase did not accept this request. Check sign-in and project settings.",
+                        reason=_auth_http_reason(response.status_code, data),
+                        stage=stage,
+                        status=response.status_code,
+                        refresh_rejected_before_exchange=(
+                            stage == "refresh_exchange"
+                            and response.status_code == 429
+                            and isinstance(data, dict)
+                            and (data.get("code") or data.get("error_code"))
+                            == "over_request_rate_limit"
+                        ),
+                    )
+                return data
             finally:
                 response.close()
         except SupabaseError:
             raise
-        except (requests.RequestException, ValueError, UnicodeError):
+        except requests.Timeout:
             raise SupabaseError(
-                "Supabase is unavailable or returned an unreadable response."
+                "Supabase did not confirm this request in time. Retry shortly.",
+                reason="timeout",
+                stage=stage,
+            ) from None
+        except requests.RequestException:
+            raise SupabaseError(
+                "Supabase is temporarily unavailable. Retry shortly.",
+                reason="network",
+                stage=stage,
+            ) from None
+        except (ValueError, UnicodeError):
+            raise SupabaseError(
+                "Supabase returned an unreadable response.",
+                reason="unreadable",
+                stage=stage,
             ) from None
 
     def verify_owner(self, token):
@@ -203,7 +357,9 @@ class Client:
         user = self._request("GET", "/auth/v1/user", token=token)
         if not isinstance(user, dict) or user.get("id") != self.config.owner_id:
             raise SupabaseError(
-                "This Supabase account is not the configured dashboard owner."
+                "This Supabase account is not the configured dashboard owner.",
+                reason="owner_mismatch",
+                stage="owner_verification",
             )
         return self.config.owner_id
 
@@ -222,7 +378,7 @@ class Client:
         )
         return self._verified_tokens(data, now)
 
-    def refresh(self, refresh_token, now=None):
+    def refresh(self, refresh_token, now=None, *, persist_rotation=None):
         if not isinstance(refresh_token, str) or not 1 <= len(refresh_token) <= 16384:
             raise SupabaseError("The Supabase sign-in session expired. Sign in again.")
         data = self._request(
@@ -230,24 +386,42 @@ class Client:
             "/auth/v1/token?grant_type=refresh_token",
             body={"refresh_token": refresh_token},
         )
-        return self._verified_tokens(data, now)
+        tokens = self._token_pair(data, now)
+        if persist_rotation is not None:
+            user = data.get("user")
+            if not isinstance(user, dict) or user.get("id") != self.config.owner_id:
+                raise SupabaseError(
+                    "Supabase did not confirm a refresh response for the configured owner.",
+                    reason="owner_mismatch",
+                    stage="refresh_exchange",
+                )
+            persist_rotation(dict(tokens, verification_pending=True))
+        self.verify_owner(tokens["access_token"])
+        return tokens
 
     def _verified_tokens(self, data, now):
+        tokens = self._token_pair(data, now)
+        self.verify_owner(tokens["access_token"])
+        return tokens
+
+    def _token_pair(self, data, now):
         if not isinstance(data, dict):
             raise SupabaseError("Supabase did not confirm the owner sign-in.")
         access, refresh = data.get("access_token"), data.get("refresh_token")
         expires = data.get("expires_in")
         if (
             not isinstance(access, str)
-            or not access
+            or not 1 <= len(access) <= 16384
+            or any(c.isspace() for c in access)
             or not isinstance(refresh, str)
             or not 1 <= len(refresh) <= 16384
+            or any(c.isspace() for c in refresh)
             or not isinstance(expires, (int, float))
             or isinstance(expires, bool)
             or not 60 <= expires <= 86400
+            or not math.isfinite(expires)
         ):
             raise SupabaseError("Supabase did not confirm the owner sign-in.")
-        self.verify_owner(access)
         return {
             "access_token": access,
             "refresh_token": refresh,
@@ -313,7 +487,7 @@ class Client:
             value = data[0].get("updated_at")
             if not isinstance(value, str) or len(value) > 64:
                 raise ValueError
-            updated = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            updated = datetime.fromisoformat(value)
             if updated.tzinfo is None:
                 raise ValueError
         except ValueError:
@@ -414,11 +588,26 @@ class DashboardIntegration:
         cached = getattr(g, "_msj_supabase_tokens", None)
         if cached and cached[0] is self and cached[1] == digest:
             return cached[2]
-        with closing(self.connection()) as conn:
-            row = conn.execute(
-                "SELECT owner_id, encrypted_tokens, expires_at FROM supabase_dashboard_sessions WHERE token_hash=?",
-                (digest,),
-            ).fetchone()
+        failed = getattr(g, "_msj_supabase_failure", None)
+        if failed and failed[0] is self and failed[1] == digest:
+            return None
+        try:
+            with closing(self.connection()) as conn:
+                row = conn.execute(
+                    "SELECT owner_id, encrypted_tokens, expires_at FROM supabase_dashboard_sessions WHERE token_hash=?",
+                    (digest,),
+                ).fetchone()
+        except sqlite3.Error:
+            self._auth_failure(
+                digest,
+                SupabaseError(
+                    "Owner session storage is temporarily unavailable.",
+                    reason="persistence",
+                    stage="session_decryption",
+                ),
+                "session_decryption",
+            )
+            return None
         if not row or row[0] != self.client.config.owner_id or row[2] <= self.clock():
             stage = (
                 "expired_session"
@@ -434,21 +623,87 @@ class DashboardIntegration:
             tokens = json.loads(self.cipher.decrypt(row[1]))
             if not isinstance(tokens, dict):
                 return None
-            if not isinstance(tokens.get("expires_at"), (int, float)):
+            if not _valid_auth_expiry(tokens.get("expires_at")):
                 return None
-            if tokens["expires_at"] <= self.clock() + 60:
+            if (
+                tokens["expires_at"] <= self.clock() + 60
+                or tokens.get("verification_pending") is True
+            ):
                 stage = "session_refresh"
                 tokens = self._refresh_tokens(digest)
             else:
                 stage = "owner_verification"
                 self.client.verify_owner(tokens.get("access_token"))
+            rotation = getattr(g, "_msj_supabase_verified_rotation", None)
+            sealed = (
+                rotation[2]
+                if rotation and rotation[0] is self and rotation[1] == digest
+                else row[1]
+            )
+            # The browser cookie rolls, so the server-side opaque reference has
+            # the same seven-day idle deadline, only after owner verification.
+            with closing(self.connection()) as conn, conn:
+                updated = conn.execute(
+                    "UPDATE supabase_dashboard_sessions SET expires_at=MAX(expires_at,?) "
+                    "WHERE token_hash=? AND owner_id=? AND encrypted_tokens=? AND expires_at>?",
+                    (
+                        self.clock() + 7 * 86400,
+                        digest,
+                        self.client.config.owner_id,
+                        sealed,
+                        self.clock(),
+                    ),
+                ).rowcount
+            if updated != 1:
+                raise SupabaseError(
+                    "The owner session changed during verification. Retry shortly.",
+                    reason="refresh_busy",
+                    stage="rotation_persistence",
+                )
             g._msj_supabase_tokens = (self, digest, tokens)
             return tokens
-        except (SupabaseError, InvalidToken, ValueError, TypeError):
-            self.app.logger.warning(
-                "Supabase owner session: outcome=failed stage=%s", stage
-            )
+        except (
+            SupabaseError,
+            InvalidToken,
+            ValueError,
+            TypeError,
+            sqlite3.Error,
+        ) as error:
+            if isinstance(error, sqlite3.Error):
+                error = SupabaseError(
+                    "Owner session storage is temporarily unavailable.",
+                    reason="persistence",
+                    stage="rotation_persistence",
+                )
+            self._auth_failure(digest, error, stage)
             return None
+
+    def _auth_failure(self, digest, error, stage):
+        reason = error.reason if isinstance(error, SupabaseError) else "invalid_session"
+        failure_stage = (
+            error.stage
+            if isinstance(error, SupabaseError) and error.stage != "request"
+            else stage
+        )
+        status = error.status if isinstance(error, SupabaseError) else None
+        retryable = isinstance(error, SupabaseError) and error.retryable
+        g._msj_supabase_failure = (
+            self,
+            digest,
+            {
+                "stage": failure_stage,
+                "reason": reason,
+                "http_status": status,
+                "retryable": retryable,
+            },
+        )
+        self.app.logger.warning(
+            "Supabase owner session: outcome=failed stage=%s reason=%s http=%s retryable=%s",
+            failure_stage,
+            reason,
+            status,
+            retryable,
+        )
 
     def _refresh_tokens(self, digest):
         """Serialize refresh across dashboard workers without locking alert SQLite."""
@@ -462,7 +717,9 @@ class DashboardIntegration:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise SupabaseError(
-                    "Owner session refresh is in progress. Reload shortly."
+                    "Owner session refresh is in progress. Reload shortly.",
+                    reason="refresh_busy",
+                    stage="refresh_lock",
                 ) from None
             with closing(self.connection()) as conn:
                 row = conn.execute(
@@ -478,31 +735,120 @@ class DashboardIntegration:
                     "The Supabase sign-in session expired. Sign in again."
                 )
             tokens = json.loads(self.cipher.decrypt(row[1]))
-            if not isinstance(tokens, dict) or not isinstance(
-                tokens.get("expires_at"), (int, float)
+            if not isinstance(tokens, dict) or not _valid_auth_expiry(
+                tokens.get("expires_at")
             ):
                 raise SupabaseError(
                     "The Supabase sign-in session is invalid. Sign in again."
                 )
             if tokens["expires_at"] <= self.clock() + 60:
-                tokens = self.client.refresh(
-                    tokens.get("refresh_token"), now=self.clock()
-                )
-                with closing(self.connection()) as conn, conn:
-                    updated = conn.execute(
-                        "UPDATE supabase_dashboard_sessions SET encrypted_tokens=? WHERE token_hash=?",
-                        (self.cipher.encrypt(json.dumps(tokens).encode()), digest),
-                    ).rowcount
-                if not updated:
+                previous_sealed = row[1]
+
+                def persist_rotation(candidate):
+                    nonlocal previous_sealed
+                    sealed = self.cipher.encrypt(json.dumps(candidate).encode())
+                    with closing(self.connection()) as conn, conn:
+                        updated = conn.execute(
+                            "UPDATE supabase_dashboard_sessions SET encrypted_tokens=? "
+                            "WHERE token_hash=? AND owner_id=? AND encrypted_tokens=? AND expires_at>?",
+                            (
+                                sealed,
+                                digest,
+                                self.client.config.owner_id,
+                                previous_sealed,
+                                self.clock(),
+                            ),
+                        ).rowcount
+                    if updated != 1:
+                        raise SupabaseError(
+                            "The Supabase sign-in session changed or expired. Sign in again.",
+                            reason="session_expired",
+                            stage="rotation_persistence",
+                        )
+                    previous_sealed = sealed
+
+                attempts = tokens.get("refresh_exchange_attempts", 0)
+                if type(attempts) is not int or not 0 <= attempts < 2:
                     raise SupabaseError(
-                        "The Supabase sign-in session expired. Sign in again."
+                        "The refresh exchange could not be confirmed. Further automatic exchanges are paused.",
+                        reason="refresh_uncertain",
+                        stage="refresh_exchange",
                     )
+                # Reserve durably before POST. Supabase documents recovery by
+                # the active token's parent after a lost response. Permit one
+                # explicitly tracked parent recovery, then stop further POSTs.
+                persist_rotation(dict(tokens, refresh_exchange_attempts=attempts + 1))
+
+                try:
+                    tokens = self.client.refresh(
+                        tokens.get("refresh_token"),
+                        now=self.clock(),
+                        persist_rotation=persist_rotation,
+                    )
+                except SupabaseError as error:
+                    if error.refresh_rejected_before_exchange:
+                        # The Auth token rate limiter rejects this exact code
+                        # before RefreshTokenGrant. Preserve the prior count;
+                        # a gateway 429 or an ambiguous failure is not proof.
+                        persist_rotation(tokens)
+                    if not error.retryable:
+                        with closing(self.connection()) as conn, conn:
+                            conn.execute(
+                                "DELETE FROM supabase_dashboard_sessions "
+                                "WHERE token_hash=? AND owner_id=? AND encrypted_tokens=?",
+                                (
+                                    digest,
+                                    self.client.config.owner_id,
+                                    previous_sealed,
+                                ),
+                            )
+                    raise
+                # Client.refresh returns only after owner verification succeeds.
+                persist_rotation(tokens)
+                sealed = previous_sealed
             else:
-                self.client.verify_owner(tokens.get("access_token"))
+                try:
+                    self.client.verify_owner(tokens.get("access_token"))
+                except SupabaseError as error:
+                    if (
+                        not error.retryable
+                        and tokens.get("verification_pending") is True
+                    ):
+                        with closing(self.connection()) as conn, conn:
+                            conn.execute(
+                                "DELETE FROM supabase_dashboard_sessions WHERE token_hash=? AND owner_id=? AND encrypted_tokens=?",
+                                (digest, self.client.config.owner_id, row[1]),
+                            )
+                    raise
+                sealed = row[1]
+                if tokens.get("verification_pending") is True:
+                    tokens.pop("verification_pending")
+                    sealed = self.cipher.encrypt(json.dumps(tokens).encode())
+                    with closing(self.connection()) as conn, conn:
+                        updated = conn.execute(
+                            "UPDATE supabase_dashboard_sessions SET encrypted_tokens=? "
+                            "WHERE token_hash=? AND owner_id=? AND encrypted_tokens=? AND expires_at>?",
+                            (
+                                sealed,
+                                digest,
+                                self.client.config.owner_id,
+                                row[1],
+                                self.clock(),
+                            ),
+                        ).rowcount
+                    if updated != 1:
+                        raise SupabaseError(
+                            "The Supabase sign-in session changed or expired. Sign in again.",
+                            reason="session_expired",
+                            stage="rotation_persistence",
+                        )
+            g._msj_supabase_verified_rotation = (self, digest, sealed)
             return tokens
         except OSError:
             raise SupabaseError(
-                "The Supabase owner session could not be refreshed."
+                "The Supabase owner session could not be refreshed.",
+                reason="persistence",
+                stage="refresh_lock",
             ) from None
         finally:
             if descriptor is not None:
@@ -511,8 +857,24 @@ class DashboardIntegration:
     def is_authenticated(self):
         return self.tokens() is not None
 
+    def auth_failure(self):
+        """Current-request fixed metadata; never a token or provider message."""
+        failed = getattr(g, "_msj_supabase_failure", None)
+        if not failed or failed[0] is not self:
+            return None
+        failure = dict(failed[2])
+        if failure["reason"] == "refresh_uncertain":
+            failure["requires_sign_in"] = True
+        return failure
+
+    def temporarily_unavailable(self):
+        failure = self.auth_failure()
+        return bool(failure and failure["retryable"])
+
     def logout(self):
         g.pop("_msj_supabase_tokens", None)
+        g.pop("_msj_supabase_failure", None)
+        g.pop("_msj_supabase_verified_rotation", None)
         digest = self._session_hash()
         if digest:
             with closing(self.connection()) as conn, conn:
@@ -672,7 +1034,11 @@ class DashboardIntegration:
                 result = {
                     **getattr(exc, "observed", {}),
                     "outcome": "unverified",
-                    "stage": getattr(exc, "stage", stage),
+                    "stage": (
+                        getattr(exc, "stage", stage)
+                        if getattr(exc, "stage", "request") != "request"
+                        else stage
+                    ),
                 }
                 if timestamp:
                     result["backup_timestamp"] = timestamp

@@ -529,7 +529,7 @@ class PrivateRouteTests(DatabaseFixture, unittest.TestCase):
                 real_buyer.record_auth(reason, stage, 400)
                 page = self.web.get("/connections").get_data(as_text=True)
                 self.assertEqual(
-                    "Use <b>Connect with a Vinted password</b> below" in page,
+                    "Reconnect the same account above." in page,
                     must_reconnect,
                 )
 

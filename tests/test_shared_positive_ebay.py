@@ -5,14 +5,19 @@ import json
 import unittest
 from contextlib import closing
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
+from test_dashboard import photo_bytes
 from test_ebay_monitor import EbayFixture, item
 
+import alert_delivery
+import alert_images
 import dashboard_store
 import ebay_alerts
+import ebay_images
 import ebay_store
 import keyword_candidates as candidates
+import photo_cards
 import search_settings
 
 
@@ -58,13 +63,17 @@ class SharedPositiveEbay(EbayFixture, unittest.TestCase):
 
     def discover(self, items, now=1020):
         before = self.buyer_state()
-        with patch(
-            "requests.Session.request", side_effect=AssertionError("No HTTP in poll")
-        ), patch(
-            "ebay_images.fetch_details", side_effect=AssertionError("No detail read")
-        ), patch.object(
-            candidates, "stage", wraps=candidates.stage
-        ) as stage:
+        with (
+            patch(
+                "requests.Session.request",
+                side_effect=AssertionError("No HTTP in poll"),
+            ),
+            patch(
+                "ebay_images.fetch_details",
+                side_effect=AssertionError("No detail read"),
+            ),
+            patch.object(candidates, "stage", wraps=candidates.stage) as stage,
+        ):
             result = self.snapshot(self.search, items, now)
         self.assertEqual(self.buyer_state(), before)
         return result, stage
@@ -203,6 +212,135 @@ class SharedPositiveEbay(EbayFixture, unittest.TestCase):
         self.assertIn("skinny", details["keyword_description"])
         self.assertEqual(details["keyword_evidence"]["field"], "description")
 
+    def test_description_only_candidate_delivers_one_native_photo_with_cached_proof(
+        self,
+    ):
+        photo_cards.enable()
+        notes = "Current notes: check <label> & pockets; resell £60."
+        search_settings.update_search(self.identity, "reminder", notes)
+        self.search = search_settings.get_search(self.identity)
+        listing = self.jeans(101, title="Zara straight jeans")
+        result, stage = self.discover([listing])
+        self.assertEqual(result, 0)
+        stage.assert_called_once()
+        self.assertEqual(self.outbox(), [])
+        before = self.buyer_state()
+
+        description = "The seller describes a skinny fit."
+        photo = "https://i.ebayimg.com/images/g/detail/s-l1600.jpg"
+        response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "legacyItemId": "101",
+                "description": f"<p>{description}</p>",
+                "image": {"imageUrl": photo},
+            },
+        )
+        client = SimpleNamespace(
+            token="offline",
+            authenticate=Mock(),
+            session=SimpleNamespace(get=Mock(return_value=response), close=Mock()),
+        )
+        message = SimpleNamespace(
+            message_id=77, photo=[SimpleNamespace(file_id="offline-listing-photo")]
+        )
+        bot = SimpleNamespace(
+            token="456:offline",
+            send_photo=AsyncMock(return_value=message),
+            send_message=AsyncMock(),
+            edit_message_media=AsyncMock(),
+            edit_message_caption=AsyncMock(),
+            edit_message_text=AsyncMock(),
+            do_api_request=AsyncMock(),
+        )
+
+        async def deliver():
+            worker = alert_delivery.EbayPhotoDeliveryWorker(bot, "123", "456")
+            worker.send_slot_delay = lambda: 0
+            try:
+                self.assertTrue(await worker.tick(now=1100))
+                self.assertTrue(await worker.tick(now=1102))
+                self.assertIsNotNone(worker.photo_task)
+                await worker.photo_task
+                self.assertFalse(await worker.tick(now=1104))
+            finally:
+                await worker.close()
+
+        with (
+            patch(
+                "requests.Session.request", side_effect=AssertionError("No live HTTP")
+            ),
+            patch(
+                "ebay_store.configuration",
+                return_value={
+                    "source": "browse",
+                    "client_id": "offline",
+                    "client_secret": "offline",
+                    "daily_budget": 5000,
+                },
+            ),
+            patch("ebay_monitor.BrowseClient", return_value=client) as browse,
+            patch.object(
+                ebay_images, "fetch_details", wraps=ebay_images.fetch_details
+            ) as details_read,
+            patch.object(
+                alert_images,
+                "listing_collage",
+                new=AsyncMock(return_value=photo_bytes()),
+            ) as download,
+        ):
+            self.assertTrue(candidates.process_one("ebay", now=1021))
+            self.assertEqual(self.snapshot(self.search, [listing], 1030), 0)
+            self.assertFalse(candidates.process_one("ebay", now=1052))
+            asyncio.run(deliver())
+            self.assertFalse(candidates.process_one("ebay", now=1105))
+
+        browse.assert_called_once()
+        details_read.assert_called_once()
+        self.assertTrue(details_read.call_args.kwargs["candidate"])
+        client.session.get.assert_called_once()
+        self.assertEqual(
+            client.session.get.call_args.kwargs["params"], {"legacy_item_id": "101"}
+        )
+        client.session.close.assert_called_once()
+        bot.send_photo.assert_awaited_once()
+        bot.send_message.assert_not_awaited()
+        bot.edit_message_media.assert_not_awaited()
+        bot.do_api_request.assert_not_awaited()
+        sent = bot.send_photo.call_args.kwargs
+        self.assertTrue(sent["show_caption_above_media"])
+        self.assertEqual(sent["photo"].input_file_content, photo_bytes())
+        self.assertIn(description, sent["caption"])
+        self.assertIn(
+            "Current notes: check &lt;label&gt; &amp; pockets; resell £60.",
+            sent["caption"],
+        )
+        self.assertIn("Estimated total", sent["caption"])
+        self.assertIn("£19.15", sent["caption"])
+        buttons = [b for row in sent["reply_markup"].inline_keyboard for b in row]
+        self.assertEqual(buttons[0].url, "https://www.ebay.co.uk/itm/101")
+        self.assertFalse(any("Autobuy" in b.text for b in buttons))
+        saved = photo_cards.load("ebay", 77)
+        self.assertIsNotNone(saved)
+        self.assertEqual(saved[0]["item_id"], "ebay:101")
+        self.assertTrue(saved[1]["photo_card"])
+        self.assertTrue(saved[1]["description_checked"])
+        self.assertTrue(saved[1]["description_complete"])
+        self.assertTrue(saved[1]["gallery_checked"])
+        self.assertTrue(saved[1]["keyword_verified"])
+        self.assertEqual(saved[1]["keyword_description"].strip(), description)
+        self.assertEqual(saved[1]["keyword_evidence"]["state"], "matched")
+        self.assertEqual(saved[1]["keyword_evidence"]["field"], "description")
+        self.assertEqual(saved[1]["estimated_total"], 1915)
+        download.assert_awaited_once_with(saved[1]["photos"])
+        self.assertEqual(len(self.outbox()), 1)
+        self.assertEqual(self.outbox()[0]["status"], "sent")
+        self.assertEqual(self.outbox()[0]["photo_status"], "sent")
+        self.assertEqual(self.outbox()[0]["telegram_message_id"], 77)
+        self.assertEqual(len(self.rows("keyword_candidates")), 1)
+        self.assertEqual(self.rows("keyword_candidates")[0]["status"], "accepted")
+        self.assertEqual(self.buyer_state(), before)
+
     def test_explicit_shared_preview_handles_missing_details_and_current_notes_refresh(
         self,
     ):
@@ -217,21 +355,29 @@ class SharedPositiveEbay(EbayFixture, unittest.TestCase):
         manager = AsyncMock()
         manager.__aenter__.return_value = bot
         manager.__aexit__.return_value = False
-        with patch("telegram.Bot", return_value=manager) as factory, patch(
-            "ebay_store.configuration",
-            return_value={"telegram_token": "123456:offline-preview", "chat_id": "123"},
-        ), patch(
-            "vinted_alerts.send_text",
-            new_callable=AsyncMock,
-            return_value=SimpleNamespace(message_id=77),
-        ) as send, patch(
-            "vinted_alerts.enrich", new_callable=AsyncMock, return_value=True
-        ) as enrich, patch(
-            "ebay_alerts.asyncio.sleep", new_callable=AsyncMock
-        ), patch(
-            "ebay_alerts.snapshot", wraps=ebay_alerts.snapshot
-        ) as snapshot, patch(
-            "requests.Session.request", side_effect=AssertionError("No preview HTTP")
+        with (
+            patch("telegram.Bot", return_value=manager) as factory,
+            patch(
+                "ebay_store.configuration",
+                return_value={
+                    "telegram_token": "123456:offline-preview",
+                    "chat_id": "123",
+                },
+            ),
+            patch(
+                "vinted_alerts.send_text",
+                new_callable=AsyncMock,
+                return_value=SimpleNamespace(message_id=77),
+            ) as send,
+            patch(
+                "vinted_alerts.enrich", new_callable=AsyncMock, return_value=True
+            ) as enrich,
+            patch("ebay_alerts.asyncio.sleep", new_callable=AsyncMock),
+            patch("ebay_alerts.snapshot", wraps=ebay_alerts.snapshot) as snapshot,
+            patch(
+                "requests.Session.request",
+                side_effect=AssertionError("No preview HTTP"),
+            ),
         ):
             result = asyncio.run(ebay_alerts.preview(self.identity))
         self.assertIn("eBay layout preview sent", result)
