@@ -501,13 +501,37 @@ def create_app(test_config=None):
 
     @app.post("/ebay/import-search")
     def import_ebay_search():
-        from ebay_search_link import describe, parse_link
+        from ebay_browse_link import import_link
+        from ebay_search_link import describe, shared_keyword_query
 
         try:
-            config = parse_link(request.form.get("search_url", ""))
+            shared = request.form.get("shared_alert_version") == "1"
+            keywords = None
+            if shared:
+                from vinted_keywords import parse
+
+                keywords = shared_keyword_query(
+                    parse(request.form.get("shared_keywords", ""))
+                )
+            config = import_link(
+                request.form.get("search_url", ""),
+                keywords=keywords,
+                ignore_prices=shared,
+            )
+            summary = describe(config)
+            if shared:
+                summary = [
+                    (
+                        "Price: your dashboard complete budget applies when saved."
+                        if line.startswith("Item price: ")
+                        else line
+                    )
+                    for line in summary
+                ]
             return {
-                "summary": describe(config),
-                "message": "Filters read successfully. Save search to apply them. Preview uses no eBay API calls.",
+                "summary": summary,
+                "search_url": config["search_url"],
+                "message": "Filters read successfully. Category links are converted automatically. Save search to apply them. Preview uses no eBay API calls.",
             }
         except ValueError as exc:
             return {"error": str(exc)}, 400

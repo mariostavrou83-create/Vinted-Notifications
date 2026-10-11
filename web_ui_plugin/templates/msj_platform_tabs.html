@@ -36,7 +36,7 @@
 <select id="ebay_filter_mode" name="ebay_filter_mode"><option value="manual" {{'selected' if row.ebay.filter_mode!='url'}}>Manual keywords and prices</option><option value="url" {{'selected' if row.ebay.filter_mode=='url'}}>Paste a filtered eBay search link</option></select>
 <div id="ebay-url-fields" {{'hidden' if row.ebay.filter_mode!='url'}}>
 <label for="ebay_search_url">eBay search link</label><textarea id="ebay_search_url" name="ebay_search_url" rows="4" maxlength="6000" placeholder="https://www.ebay.co.uk/sch/i.html?…">{{row.ebay.search_url}}</textarea>
-<small>Set your brand, sizes, category and price on eBay UK, then copy the full search-results URL from the address bar. Short/share links and shop pages are not supported. Only filters encoded in the link can be imported.</small>
+<small>Set your brand, sizes, category and price on eBay UK, then copy the full results or category URL from the address bar. Category links (/b/…) are converted automatically when you save. Short/share links and shop pages are not supported.</small>
 <button type="button" id="preview-ebay-link" class="secondary">Preview imported filters</button>
 <p id="ebay-import-feedback" role="status" class="muted"></p>
 <ul id="ebay-import-summary">{% for line in imported_summary %}<li>{{line}}</li>{% endfor %}</ul>

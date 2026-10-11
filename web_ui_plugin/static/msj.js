@@ -206,20 +206,25 @@ async function ebayFormRequest(url, values) {
 }
 const previewEbay = document.querySelector('#preview-ebay-link');
 let ebayPreviewVersion = 0;
-document.querySelector('#ebay_search_url')?.addEventListener('input', () => {
+function clearEbayPreview() {
   ebayPreviewVersion++;
   document.querySelector('#ebay-import-summary')?.replaceChildren();
   const feedback = document.querySelector('#ebay-import-feedback');
   if (feedback) feedback.textContent = 'Link changed. Preview again to review its filters.';
-});
+}
+document.querySelector('#ebay_search_url')?.addEventListener('input', clearEbayPreview);
+document.querySelector('#shared_keywords')?.addEventListener('input', clearEbayPreview);
 previewEbay?.addEventListener('click', async () => {
   const version = ++ebayPreviewVersion;
   const feedback = document.querySelector('#ebay-import-feedback'), summary = document.querySelector('#ebay-import-summary');
   previewEbay.disabled = true; summary.replaceChildren(); feedback.textContent = 'Reading filters…';
   try {
-    const result = await ebayFormRequest('/ebay/import-search', {search_url: document.querySelector('#ebay_search_url').value});
+    const values = {search_url: document.querySelector('#ebay_search_url').value};
+    if (sharedAlert) Object.assign(values, {shared_alert_version: '1', shared_keywords: document.querySelector('#shared_keywords').value});
+    const result = await ebayFormRequest('/ebay/import-search', values);
     if (version !== ebayPreviewVersion) return;
     result.summary.forEach(line => { const li = document.createElement('li'); li.textContent = line; summary.append(li); });
+    if (result.search_url) document.querySelector('#ebay_search_url').value = result.search_url;
     feedback.textContent = result.message;
   } catch (error) { if (version === ebayPreviewVersion) feedback.textContent = error.message; }
   finally { previewEbay.disabled = false; }

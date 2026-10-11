@@ -192,7 +192,10 @@ const fs = require('fs');
 const assert = require('assert');
 function field(value='') {
   return {value, required:false, hidden:false, textContent:'', validity:'', events:{},
-    addEventListener(type, handler) { this.events[type]=handler; },
+    addEventListener(type, handler) {
+      const previous = this.events[type];
+      this.events[type]=(...args) => { previous?.(...args); handler(...args); };
+    },
     setCustomValidity(value) { this.validity=value; }};
 }
 const mode = field('both'), query = field(), ebay = field(), keywords = field('fur, fur hood, FUR');

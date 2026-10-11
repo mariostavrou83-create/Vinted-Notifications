@@ -13,6 +13,23 @@ Vinted alternatives retain separate quiet baselines. eBay combines alternatives
 into one bounded OR request; multiword alternatives are quoted phrases. Its
 100-character limit is validated rather than silently truncated.
 
+## Copying filtered eBay category links
+
+Paste the full eBay UK address shown after choosing filters. Both explicit
+`/sch/…/i.html` results and `/b/…` category links are accepted. Saving a category
+link reads its public structured filter metadata once and stores an explicit
+search URL. The optional **Read link & preview filters** button shows the category,
+brand, sizes, condition and other imported criteria before saving, with the shared
+keywords applied. The dashboard complete budget replaces URL price limits.
+
+The importer does not use eBay Browse API quota or marketplace account cookies.
+Polling uses the saved explicit criteria and does not repeatedly fetch category
+HTML. An unreadable/verification page, unsupported constraint or redirect that
+loses a filter stops the save and leaves the existing search unchanged. A bare
+general category URL cannot restore brand or size selections absent from that
+URL's page. Short/share, item and shop links remain unsupported. No live-slot,
+polling, credentials or Autobuy settings change.
+
 Vinted estimates use item price + rounded 5% + £2.20. Payment still checks the
 actual complete checkout total, including balance, fees and delivery. eBay
 estimates use supplied item price/postage and a conservative Buyer Protection
