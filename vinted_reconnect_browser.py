@@ -176,7 +176,10 @@ def _anonymous_launch_diagnostic(error, *, phase="browser_launch"):
             ("error while loading shared libraries", "cannot open shared object file"),
         ),
         ("namespace_denied", ("failed to move to new namespace",)),
-        ("sandbox_unavailable", ("no usable sandbox",)),
+        (
+            "sandbox_unavailable",
+            ("no usable sandbox", "chromium sandboxing failed!"),
+        ),
         (
             "process_limit",
             ("resource temporarily unavailable", "pthread_create", "cannot fork"),
@@ -229,11 +232,12 @@ def _readiness_preflight():
     except (ImportError, ValueError):
         dependency_present = False
     LOGGER.info(
-        "Vinted private browser readiness preflight: euid=%s dependency_present=%s pwdebug_present=%s debug_present=%s",
+        "Vinted private browser readiness preflight: euid=%s dependency_present=%s pwdebug_present=%s debug_present=%s debugp_present=%s",
         os.geteuid(),
         int(dependency_present),
         int(os.environ.get("PWDEBUG") not in (None, "", "0")),
         int(os.environ.get("DEBUG") not in (None, "", "0")),
+        int("DEBUGP" in os.environ),
     )
 
 
@@ -289,8 +293,9 @@ def _readiness_binary_preflight(browser_type):
     headless = None
     try:
         executable = getattr(browser_type, "executable_path", None)
-        # Pinned Playwright1.63 defaults headless launch to a separate shell.
-        # Derive that installed Linux path from its metadata, never scan files.
+        # Pinned Playwright1.63 has a separate headless shell. The explicit
+        # chromium channel selects the ordinary executable; inspect both
+        # installed Linux candidates using metadata, never scan files.
         from playwright._impl._driver import compute_driver_executable
 
         _, entry = compute_driver_executable()
@@ -599,9 +604,11 @@ class _PlaywrightProvider:
         # The Playwright driver inherits process environment. Fail closed
         # before it starts if debugging could expose inputs or cookie data.
         # Do not mutate the server's global environment from this thread.
-        if os.environ.get("PWDEBUG") not in (None, "", "0") or os.environ.get(
-            "DEBUG"
-        ) not in (None, "", "0"):
+        if (
+            os.environ.get("PWDEBUG") not in (None, "", "0")
+            or os.environ.get("DEBUG") not in (None, "", "0")
+            or "DEBUGP" in os.environ
+        ):
             raise BrowserError(
                 "unavailable",
                 stage="browser_start",
@@ -623,6 +630,7 @@ class _PlaywrightProvider:
                 _readiness_binary_preflight(self.playwright.chromium)
             self.browser = self.playwright.chromium.launch(
                 headless=True,
+                channel="chromium",
                 chromium_sandbox=True,
                 handle_sigint=False,
                 handle_sigterm=False,

@@ -339,7 +339,7 @@ class ManagerTests(unittest.TestCase):
             with self.subTest(diagnostic=expected), patch.object(
                 self.manager, "_factory", side_effect=error
             ), patch.dict(
-                "os.environ", {"PWDEBUG": private, "DEBUG": private}
+                "os.environ", {"PWDEBUG": private, "DEBUG": private, "DEBUGP": private}
             ), patch.object(
                 reconnect.os, "geteuid", return_value=10001
             ), patch.object(
@@ -356,6 +356,7 @@ class ManagerTests(unittest.TestCase):
                 output,
             )
             self.assertIn("diagnostic=" + expected, output)
+            self.assertIn("debugp_present=1", output)
             self.assertNotIn(private, output)
             self.assertNotIn(private, str(result))
 
@@ -383,6 +384,10 @@ class NetworkAndRuntimeTests(unittest.TestCase):
                 "namespace_denied",
             ),
             (RuntimeError("No usable sandbox! " + private), "sandbox_unavailable"),
+            (
+                RuntimeError("Chromium sandboxing failed! " + private),
+                "sandbox_unavailable",
+            ),
             (
                 RuntimeError("Running as root without --no-sandbox " + private),
                 "root_runtime",
@@ -590,6 +595,7 @@ class NetworkAndRuntimeTests(unittest.TestCase):
             self.assertEqual(error.exception.stage, "browser_start")
             self.assertNotIn("private-proxy-secret", str(error.exception))
             self.assertTrue(calls[0]["chromium_sandbox"])
+            self.assertEqual(calls[0]["channel"], "chromium")
             self.assertIsNone(calls[0]["proxy"])
             self.assertNotIn("args", calls[0])
             self.assertEqual(calls[1], "driver_closed")
@@ -786,6 +792,10 @@ class NetworkAndRuntimeTests(unittest.TestCase):
         launch = next(entry[1] for entry in calls if entry[0] == "launch")
         options = next(entry[1] for entry in calls if entry[0] == "context")
         self.assertTrue(launch["chromium_sandbox"])
+        self.assertEqual(launch["channel"], "chromium")
+        self.assertTrue(launch["headless"])
+        self.assertIsNone(launch["proxy"])
+        self.assertEqual(launch["timeout"], 10_000)
         self.assertFalse(launch["handle_sigint"])
         self.assertFalse(launch["handle_sigterm"])
         self.assertFalse(launch["handle_sighup"])
@@ -795,7 +805,10 @@ class NetworkAndRuntimeTests(unittest.TestCase):
         self.assertFalse(options["accept_downloads"])
         self.assertNotIn("ignore_https_errors", options)
         self.assertNotIn("record_video_dir", options)
-        self.assertIn(("goto", "about:blank"), calls)
+        self.assertEqual(
+            [entry for entry in calls if entry[0] == "goto"],
+            [("goto", "about:blank")],
+        )
         self.assertLess(
             calls.index(("route", "**/*")), calls.index(("goto", "about:blank"))
         )
@@ -919,6 +932,9 @@ class NetworkAndRuntimeTests(unittest.TestCase):
             ("DEBUG", "pw:protocol"),
             ("DEBUG", "*"),
             ("DEBUG", "app:*"),
+            ("DEBUGP", "0"),
+            ("DEBUGP", ""),
+            ("DEBUGP", "private-debug-value-secret"),
         ):
             with patch.dict("sys.modules", {"playwright.sync_api": module}), patch.dict(
                 "os.environ", {"PWDEBUG": "", "DEBUG": "", variable: value}
@@ -929,6 +945,26 @@ class NetworkAndRuntimeTests(unittest.TestCase):
                 self.assertEqual(error.exception.diagnostic, "debug_enabled")
                 self.assertEqual(__import__("os").environ[variable], value)
         self.assertEqual(starts, [])
+
+    def test_owner_driver_rejects_debugp_zero_before_start(self):
+        starts = []
+        module = SimpleNamespace(sync_playwright=lambda: starts.append(True))
+        with patch.dict("sys.modules", {"playwright.sync_api": module}), patch.dict(
+            "os.environ", {"PWDEBUG": "", "DEBUG": "", "DEBUGP": "0"}
+        ):
+            before = dict(os.environ)
+            with self.assertRaises(reconnect.BrowserError) as error:
+                reconnect._PlaywrightProvider({"server": PROXY}, navigate=True)
+            self.assertEqual(error.exception.stage, "browser_start")
+            self.assertEqual(error.exception.diagnostic, "unknown")
+            self.assertEqual(dict(os.environ), before)
+        self.assertEqual(starts, [])
+
+    def test_anonymous_smoke_aborts_even_allowed_vinted_requests_before_fetch(self):
+        provider, route, calls = self.route_fixture([], navigation=True)
+        provider.network_allowed = False
+        provider._route(route)
+        self.assertEqual(calls, [("abort",)])
 
     def test_redirect_guard_checks_each_get_hop_and_disposes_responses(self):
         provider, route, calls = self.route_fixture(

@@ -44,8 +44,9 @@ response is resolved by reading status, never replaying input or credential impo
 Checkout, conversation, order and payment routes are blocked in this browser.
 Google/Apple popup sign-in is unsupported in this first version.
 
-Chromium is installed in the existing service image and runs with its sandbox
-under the non-root runtime account. Check private browser availability tests
+Chromium is installed in the existing service image. Its launch configuration
+uses full Chromium headless mode with the sandbox enabled under the non-root
+runtime account; there is no sandbox-disabling fallback. Check private browser availability tests
 launch only, without contacting Vinted or replacing credentials. Availability
 must pass before opening sign-in. A failed check blocks this new route and keeps
 the existing saved connection. Anonymous launch diagnostics use only fixed
