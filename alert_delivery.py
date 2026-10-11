@@ -380,24 +380,31 @@ class DeliveryWorker:
                     )
 
     async def run(self):
-        while True:
-            try:
-                # Space starts, not completions: a 0.5s HTTP call already uses
-                # half of the one-second chat budget. Choose the next job only
-                # after this wait so new listings can jump ahead of examples.
-                delay = self.send_slot_delay()
-                if delay:
-                    await asyncio.sleep(delay)
-                worked = await self.tick()
-                if not worked:
-                    await asyncio.sleep(0.05)
-            except Exception as exc:  # noqa: BLE001
-                # Leave the durable lease in place; another tick can reclaim it
-                # after expiry. Never terminate the queue worker on one bad item.
-                logger.error(
-                    "Delivery worker will recover after %s", type(exc).__name__
-                )
-                await asyncio.sleep(2)
+        from keyword_candidates import run as verify_candidates
+
+        verification = asyncio.create_task(verify_candidates(self.platform))
+        try:
+            while True:
+                try:
+                    # Space starts, not completions: a 0.5s HTTP call already uses
+                    # half of the one-second chat budget. Choose the next job only
+                    # after this wait so new listings can jump ahead of examples.
+                    delay = self.send_slot_delay()
+                    if delay:
+                        await asyncio.sleep(delay)
+                    worked = await self.tick()
+                    if not worked:
+                        await asyncio.sleep(0.05)
+                except Exception as exc:  # noqa: BLE001
+                    # Leave the durable lease in place; another tick can reclaim it
+                    # after expiry. Never terminate the queue worker on one bad item.
+                    logger.error(
+                        "Delivery worker will recover after %s", type(exc).__name__
+                    )
+                    await asyncio.sleep(2)
+        finally:
+            verification.cancel()
+            await asyncio.gather(verification, return_exceptions=True)
 
 
 class EbayDeliveryWorker(DeliveryWorker):

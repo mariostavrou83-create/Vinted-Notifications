@@ -143,7 +143,7 @@ class DeliveryConfigurationBatchTests(EbayFixture, unittest.IsolatedAsyncioTestC
         with closing(search_settings.connection()) as conn, conn:
             conn.executemany("INSERT OR REPLACE INTO parameters VALUES (?,?)", settings)
 
-        opened, tokens, workers = [], [], []
+        opened, tokens, workers, verification_events = [], [], [], []
         connect = sqlite3.connect
         test = self
 
@@ -176,6 +176,7 @@ class DeliveryConfigurationBatchTests(EbayFixture, unittest.IsolatedAsyncioTestC
                 workers.append(self)
 
             async def tick(self):
+                await asyncio.sleep(0)
                 assert_closed_reads()
                 # A real committed owner edit must be read on the next loop.
                 with closing(connect(db.DB_PATH)) as conn, conn:
@@ -191,12 +192,23 @@ class DeliveryConfigurationBatchTests(EbayFixture, unittest.IsolatedAsyncioTestC
         async def callbacks(*_args):
             await asyncio.Event().wait()
 
+        async def verify_candidates(platform):
+            assert_closed_reads()
+            verification_events.append((platform, "started"))
+            try:
+                await asyncio.Event().wait()
+            finally:
+                assert_closed_reads()
+                verification_events.append((platform, "cancelled"))
+
         with patch.dict(os.environ, {}, clear=True), patch.object(
             db.sqlite3, "connect", side_effect=counted_connect
         ), patch.object(ebay_monitor, "Bot", FakeBot), patch.object(
             delivery, "EbayPhotoDeliveryWorker", FakeWorker
         ), patch(
             "photo_cards.poll_ebay_callbacks", callbacks
+        ), patch(
+            "keyword_candidates.run", verify_candidates
         ), self.assertRaises(
             asyncio.CancelledError
         ):
@@ -204,6 +216,9 @@ class DeliveryConfigurationBatchTests(EbayFixture, unittest.IsolatedAsyncioTestC
         self.assertEqual(tokens, ["200:old", "200:new"])
         self.assertEqual(len(workers), 1)
         self.assertTrue(workers[0].closed)
+        self.assertEqual(
+            verification_events, [("ebay", "started"), ("ebay", "cancelled")]
+        )
         # Initial, first loop, changed loop, then reopened config: one each.
         self.assertEqual(len(opened), 4)
 

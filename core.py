@@ -439,12 +439,23 @@ def _clear_item_queue(items_queue, new_items_queue):
                 watermark = max(watermark or 0, item.raw_timestamp)
                 continue
 
-            # Being recorded is what stops an item coming back next run, so every
-            # item that reaches this point is written to the db whether or not it
-            # ends up being announced.
+            # Prove literal shared positives before consuming global seen state.
+            # Unknown seller descriptions are durably retained separately.
+            from shared_matching import keyword_evidence
             from vinted_alerts import snapshot
 
             details = snapshot(item, search)
+            evidence = keyword_evidence(
+                search,
+                item.title,
+                details.get("keyword_description", ""),
+                description_complete=details.get("description_complete", False),
+            )
+            if evidence["state"] == "absent":
+                filtered_ids.append(item.id)
+                continue
+            if evidence["state"] != "unrestricted":
+                details["keyword_evidence"] = evidence
             alert = {
                 "content": format_alert(
                     item, search, db.get_parameter("message_template"), details
@@ -454,6 +465,29 @@ def _clear_item_queue(items_queue, new_items_queue):
                 "reference_id": search.get("reference_id"),
                 "vinted_details": details,
             }
+            if evidence["state"] == "unverified":
+                from keyword_candidates import stage
+
+                # Retain this exact candidate before advancing the catalogue
+                # frontier. A later bounded description read must prove a
+                # positive before it consumes global seen/outbox deduplication.
+                stage(
+                    "vinted",
+                    {
+                        "item_id": str(item.id),
+                        "title": item.title,
+                        "price": item.price,
+                        "currency": item.currency,
+                        "photo_url": item.photo,
+                        "url": item.url,
+                        "timestamp": item.raw_timestamp,
+                    },
+                    search,
+                    alert,
+                    now=time(),
+                )
+                watermark = max(watermark or 0, item.raw_timestamp)
+                continue
             seen.add(str(item.id))
             watermark = max(watermark or 0, item.raw_timestamp)
             recorded = db.add_item_to_db(

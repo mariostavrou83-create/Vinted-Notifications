@@ -241,15 +241,20 @@ def _resolve(value, rows):
     return None
 
 
-def _description(value, rows, *, html=False):
+def _description(value, rows, *, html=False, full=False):
     if value == "$undefined":
         return ""
     if isinstance(value, str) and re.fullmatch(r"\$[0-9a-fA-F]+(?::[\w]+)*", value):
         value = _resolve(value, rows)
+    if full:
+        from shared_matching import SHORTENED, description_text
+
+        text, complete = description_text(value, html=html)
+        return text + (SHORTENED if text and not complete else "")
     return clean_description(value, html=html)
 
 
-def _plugins(value, item_id, *, scoped, rows):
+def _plugins(value, item_id, *, scoped, rows, full=False):
     value = _resolve(value, rows)
     if not isinstance(value, list) or len(value) > 100:
         return ""
@@ -273,7 +278,7 @@ def _plugins(value, item_id, *, scoped, rows):
         return ""
     for name, data in plugins:
         if name == "description":
-            return _description(data.get("description"), rows)
+            return _description(data.get("description"), rows, full=full)
     return ""
 
 
@@ -385,7 +390,7 @@ def parse_purchase_item(html, item_id):
     return candidates[0] if candidates and not pending else None
 
 
-def parse_page_data(html, item_id):
+def parse_page_data(html, item_id, *, full_description=False):
     """Return only target-listing data from supported JSON and Flight records."""
     item_id = _item_id(item_id)
     if not item_id or not isinstance(html, str) or len(html) > MAX_HTML:
@@ -445,12 +450,13 @@ def parse_page_data(html, item_id):
         if matched:
             if not result["description"]:
                 result["description"] = _description(
-                    value.get("description"), rows, html=product
+                    value.get("description"), rows, html=product, full=full_description
                 ) or _plugins(
                     _resolve(value.get("plugins"), rows),
                     item_id,
                     scoped=True,
                     rows=rows,
+                    full=full_description,
                 )
             _add_photos(
                 result["photos"],
@@ -463,7 +469,11 @@ def parse_page_data(html, item_id):
             and not explicit_ids
         ):
             result["description"] = _plugins(
-                _resolve(value["plugins"], rows), item_id, scoped=False, rows=rows
+                _resolve(value["plugins"], rows),
+                item_id,
+                scoped=False,
+                rows=rows,
+                full=full_description,
             )
         # Inspect child records individually, never inherit identity to arbitrary
         # descendants (which can contain recommendations or seller profiles).

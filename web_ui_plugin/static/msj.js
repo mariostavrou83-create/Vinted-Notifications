@@ -230,7 +230,7 @@ checkEbay?.addEventListener('click', async () => {
   try {
     const result = await ebayFormRequest(checkEbay.dataset.url, {});
     output.replaceChildren();
-    const lines = [result.message, `${result.active ? 'Live monitoring selected' : 'Standby — select this search in Connections to start monitoring'}. First-check baseline: ${result.baseline}.`, `${result.results} API results; ${result.dated} have listing dates. ${result.matched} match local filters (${result.eligible} within the last hour); ${result.rejected} rejected by local checks. These counts do not mean new notifications.`, `Delivery history: ${Object.entries(result.delivery).map(([status, count]) => `${count} ${status}`).join(', ') || 'no live alerts yet'}.`];
+    const lines = [result.message, `${result.active ? 'Live monitoring selected' : 'Standby — select this search in Connections to start monitoring'}. First-check baseline: ${result.baseline}.`, `${result.results} API results; ${result.dated} have listing dates. ${result.matched} match local filters (${result.eligible} within the last hour); ${result.rejected} rejected; ${result.needs_description || 0} need seller description verification. These counts do not mean new notifications.`, `Delivery history: ${Object.entries(result.delivery).map(([status, count]) => `${count} ${status}`).join(', ') || 'no live alerts yet'}.`];
     if (result.criteria) {
       const criteria = result.criteria;
       lines.push(`Saved eBay request: ${Object.entries(criteria.parameters).map(([key, value]) => `${key}=${value}`).join(' · ')}.`);
@@ -252,6 +252,7 @@ checkEbay?.addEventListener('click', async () => {
         if (item.estimated_total) costs.push(`estimated total: ${item.estimated_total} (fees & postage)`);
         if (item.categories?.length) costs.push(`categories: ${item.categories.join(' / ')}`);
         if (item.category_ids?.length) costs.push(`category IDs: ${item.category_ids.join(', ')}`);
+        if (item.keyword_evidence?.state === 'matched') costs.push(`Keyword “${item.keyword_evidence.keyword}” occurs in ${item.keyword_evidence.field === 'title' ? 'title' : 'seller description'}`);
         if (item.reasons?.length) costs.push(...item.reasons);
         else costs.push(item.recent ? 'recent catalogue sample; this check sends no alert' : 'older catalogue sample; this check sends no alert');
         evidence.textContent = ` · ${costs.join(' · ')}`; p.append(evidence); output.append(p);
@@ -259,6 +260,7 @@ checkEbay?.addEventListener('click', async () => {
     }
     catalogueSamples('Matches saved local rules · up to 5 catalogue samples', result.samples);
     catalogueSamples('Rejected by saved local rules · up to 5 catalogue samples', result.rejected_samples || []);
+    catalogueSamples('Needs seller description verification · not yet a match · up to 5 catalogue samples', result.pending_samples || []);
   } catch (error) { output.textContent = error.message; }
   finally { checkEbay.disabled = false; }
 });

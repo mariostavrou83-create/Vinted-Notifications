@@ -38,7 +38,7 @@ def extract(raw):
     return photos[:4]
 
 
-def fetch_details(row):
+def fetch_details(row, *, candidate=False):
     from ebay_monitor import BrowseClient, EbayError, retry_delay
     from ebay_store import configuration, reserve_call
 
@@ -56,24 +56,31 @@ def fetch_details(row):
     now = time.time()
     with closing(connection()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
-        if not conn.execute(
-            "SELECT 1 FROM alert_outbox WHERE item_id=? AND platform='ebay'", (item_id,)
-        ).fetchone():
-            return {}
-        last = conn.execute(
-            "SELECT attempted FROM ebay_photo_lookups WHERE item_id=?", (item_id,)
+        permitted = conn.execute(
+            (
+                "SELECT 1 FROM keyword_candidates c JOIN ebay_item_owners o ON o.item_id=c.item_id WHERE c.item_id=? AND c.platform='ebay' LIMIT 1"
+                if candidate
+                else "SELECT 1 FROM alert_outbox WHERE item_id=? AND platform='ebay'"
+            ),
+            (item_id,),
         ).fetchone()
-        if last and now - last[0] < 60:
+        if not permitted:
             return {}
-        conn.execute(
-            "INSERT OR REPLACE INTO ebay_photo_lookups VALUES (?,?)", (item_id, now)
-        )
+        if not candidate:
+            last = conn.execute(
+                "SELECT attempted FROM ebay_photo_lookups WHERE item_id=?", (item_id,)
+            ).fetchone()
+            if last and now - last[0] < 60:
+                return {}
+            conn.execute(
+                "INSERT OR REPLACE INTO ebay_photo_lookups VALUES (?,?)", (item_id, now)
+            )
     wait = reserve_call(config, now, media=True)
     if wait:
         logger.info(
             "eBay photo lookup deferred by shared request budget for %s", item_id
         )
-        return {}
+        return {"available": False, "retry_after": wait} if candidate else {}
     client = None
     try:
         client = BrowseClient(config)
@@ -111,6 +118,11 @@ def fetch_details(row):
         if returned_id != legacy_id:
             return {}
         photos = extract(data)
+        from shared_matching import description_text
+
+        full = data.get("description")
+        source = full if isinstance(full, str) else data.get("shortDescription")
+        matching_text, complete = description_text(source, html=True)
         logger.info(
             "eBay photo lookup recovered %s photos for %s", len(photos), item_id
         )
@@ -119,6 +131,10 @@ def fetch_details(row):
             "description": clean_description(data.get("description"), html=True)
             or clean_description(data.get("shortDescription"), html=True),
             "description_checked": True,
+            "keyword_description": matching_text,
+            "description_complete": isinstance(full, str) and complete,
+            "available": True,
+            "gallery_checked": True,
         }
     except (requests.RequestException, ValueError, EbayError):
         logger.warning("eBay photo lookup unavailable for %s", item_id)
@@ -126,6 +142,11 @@ def fetch_details(row):
     finally:
         if client:
             client.session.close()
+
+
+def fetch_candidate_details(row):
+    """The same bound, quota-controlled detail read for a retained candidate."""
+    return fetch_details(row, candidate=True)
 
 
 def cache_description(row, data):

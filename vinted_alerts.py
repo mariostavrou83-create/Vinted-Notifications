@@ -128,6 +128,9 @@ def prepare_listing(row, details=None):
 
 
 def snapshot(item, search):
+    from shared_matching import description_text, required_keywords
+
+    raw_description = (getattr(item, "raw_data", None) or {}).get("description")
     keyword = parse_qs(urlparse(search["query"]).query).get("search_text", [""])[0]
     guide = []
     if search.get("max_buy") is not None and search.get("vinted_max_total") is None:
@@ -142,7 +145,7 @@ def snapshot(item, search):
         guide.append("Your resale target: " + target)
     if search.get("must_have"):
         guide.append("Must have: " + escape(search["must_have"][:400]))
-    return {
+    result = {
         "version": 1,
         "single_message": enabled(),
         "native_photo": enabled() and vinted_native.enabled(),
@@ -153,11 +156,16 @@ def snapshot(item, search):
         "guide": "\n".join(guide),
         "reminder": escape((search.get("reminder") or "")[:800]),
         "budget": vinted_budget.estimate(item, search, display=True),
-        "description": clean_description(
-            (getattr(item, "raw_data", None) or {}).get("description")
-        ),
+        "description": clean_description(raw_description),
         "description_pending": True,
     }
+    if required_keywords(search):
+        keyword_description, description_complete = description_text(raw_description)
+        result.update(
+            keyword_description=keyword_description,
+            description_complete=description_complete,
+        )
+    return result
 
 
 def sections(row, details):

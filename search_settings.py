@@ -11,7 +11,7 @@ from pathlib import Path
 
 import db
 
-SCHEMA_VERSION = "21"
+SCHEMA_VERSION = "22"
 
 
 def connection():
@@ -167,6 +167,9 @@ def ensure_schema():
             conn.execute("""CREATE TABLE IF NOT EXISTS ebay_photo_lookups (
                 item_id TEXT PRIMARY KEY REFERENCES alert_outbox(item_id) ON DELETE CASCADE,
                 attempted REAL NOT NULL)""")
+            from keyword_candidates import migrate as migrate_candidates
+
+            migrate_candidates(conn)
             from vinted_keywords import migrate
 
             migrate(conn)
@@ -188,6 +191,9 @@ def ensure_schema():
                 conn.execute(
                     "UPDATE parameters SET value='1' WHERE key='query_refresh_delay' AND value='3'"
                 )
+        from keyword_candidates import log_pending_boundary
+
+        log_pending_boundary(conn)
         return str(backup)
 
 

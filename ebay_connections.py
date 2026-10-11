@@ -1,5 +1,6 @@
 """Owner-triggered connection checks. Tokens and response bodies never leave here."""
 
+import json
 import time
 from contextlib import closing
 from datetime import UTC, datetime
@@ -153,9 +154,23 @@ def _inspect_catalogue_item(raw, search, now):
     if item:
         phrase = excluded_by(item["title"], search["exclusions"])
         reasons = [f"Excluded title phrase: {phrase}."] if phrase else []
-        return not reasons, _catalogue_sample(
+        evidence = None
+        if not reasons:
+            evidence = _saved_keyword_evidence(raw, item, search)
+            if evidence["state"] == "absent":
+                reasons.append(
+                    "No saved keyword alternative occurs in the title or seller description."
+                )
+            elif evidence["state"] == "unverified":
+                reasons.append(
+                    "Needs seller description verification; no saved alternative occurs in the title or supplied seller text."
+                )
+        sample = _catalogue_sample(
             raw, item, saved, reasons, recent=parse_item(raw, saved, now) is not None
         )
+        if evidence:
+            sample["keyword_evidence"] = evidence
+        return not reasons, sample
 
     # Diagnose failed local criteria using the same parser with only those
     # criteria relaxed. Identity/link/date/currency/listing-type checks remain.
@@ -213,8 +228,53 @@ def _inspect_catalogue_item(raw, search, now):
     return False, _catalogue_sample(raw, cost_item or structural, saved, reasons)
 
 
+def _saved_keyword_evidence(raw, item, search):
+    """Use returned/cached seller text only; never perform per-item reads."""
+    from shared_matching import keyword_evidence
+
+    full = raw.get("description")
+    evidence = keyword_evidence(
+        search,
+        item["title"],
+        full if isinstance(full, str) else raw.get("shortDescription", ""),
+        description_complete=isinstance(full, str),
+        description_html=True,
+    )
+    if evidence["state"] != "unverified":
+        return evidence
+
+    from keyword_candidates import cached_description
+
+    cached = cached_description("ebay", item["item_id"])
+    if cached:
+        evidence = keyword_evidence(
+            search,
+            item["title"],
+            cached.get("keyword_description", cached.get("description", "")),
+            description_complete=cached.get("description_complete", False),
+        )
+        if evidence["state"] != "unverified":
+            return evidence
+    with closing(connection()) as conn:
+        bound = conn.execute(
+            """SELECT d.payload FROM ebay_alert_details d JOIN alert_outbox o
+            ON o.item_id=d.item_id WHERE o.platform='ebay' AND o.item_id=? AND o.url=?""",
+            (item["item_id"], item["url"]),
+        ).fetchone()
+    if bound:
+        details = json.loads(bound[0])
+        evidence = keyword_evidence(
+            search,
+            item["title"],
+            details.get("keyword_description", details.get("description", "")),
+            description_complete=details.get("description_complete", False),
+        )
+    return evidence
+
+
 def check_saved_search(search):
     """One budgeted API read, never a baseline reset or a Telegram send."""
+    from db import connection_scope
     from ebay_monitor import search_params, timestamp
     from ebay_store import active_searches
 
@@ -243,38 +303,45 @@ def check_saved_search(search):
     finally:
         client.session.close()
     now = time.time()
-    samples, rejected_samples = [], []
-    eligible, dated, matched, rejected = 0, 0, 0, 0
-    for raw in items:
-        created = (
-            (
-                timestamp(raw.get("itemOriginDate"))
-                or timestamp(raw.get("itemCreationDate"))
+    samples, rejected_samples, pending_samples = [], [], []
+    eligible, dated, matched, rejected, needs_description = 0, 0, 0, 0, 0
+    # Cached description checks share one short read-only connection; the API
+    # request has already finished and no write transaction wraps this batch.
+    with connection_scope():
+        for raw in items:
+            created = (
+                (
+                    timestamp(raw.get("itemOriginDate"))
+                    or timestamp(raw.get("itemCreationDate"))
+                )
+                if isinstance(raw, dict)
+                else None
             )
-            if isinstance(raw, dict)
-            else None
-        )
-        dated += int(created is not None)
-        accepted, sample = _inspect_catalogue_item(raw, search, now)
-        if accepted:
-            matched += 1
-            eligible += int(sample["recent"])
-            if len(samples) < 5:
-                samples.append(sample)
-        else:
-            rejected += 1
-            if len(rejected_samples) < 5:
-                rejected_samples.append(sample)
-            elif any(
-                r.startswith("Excluded title phrase:") for r in sample["reasons"]
-            ) and not any(
-                r.startswith("Excluded title phrase:")
-                for previous in rejected_samples
-                for r in previous["reasons"]
-            ):
-                # Preserve actual exclusion evidence when earlier budget/data
-                # failures filled the five-sample diagnostic window.
-                rejected_samples[-1] = sample
+            dated += int(created is not None)
+            accepted, sample = _inspect_catalogue_item(raw, search, now)
+            if accepted:
+                matched += 1
+                eligible += int(sample["recent"])
+                if len(samples) < 5:
+                    samples.append(sample)
+            elif (sample.get("keyword_evidence") or {}).get("state") == "unverified":
+                needs_description += 1
+                if len(pending_samples) < 5:
+                    pending_samples.append(sample)
+            else:
+                rejected += 1
+                if len(rejected_samples) < 5:
+                    rejected_samples.append(sample)
+                elif any(
+                    r.startswith("Excluded title phrase:") for r in sample["reasons"]
+                ) and not any(
+                    r.startswith("Excluded title phrase:")
+                    for previous in rejected_samples
+                    for r in previous["reasons"]
+                ):
+                    # Preserve actual exclusion evidence when earlier budget/data
+                    # failures filled the five-sample diagnostic window.
+                    rejected_samples[-1] = sample
     with closing(connection()) as conn:
         delivery = dict(
             conn.execute(
@@ -291,8 +358,10 @@ def check_saved_search(search):
         "eligible": eligible,
         "matched": matched,
         "rejected": rejected,
+        "needs_description": needs_description,
         "samples": samples,
         "rejected_samples": rejected_samples,
+        "pending_samples": pending_samples,
         "criteria": {
             "parameters": search_params(search["ebay"]),
             "exclusions": search["exclusions"],
@@ -309,5 +378,5 @@ def check_saved_search(search):
             else "Not established yet"
         ),
         "delivery": delivery,
-        "message": "Saved filters checked using one API call. These are existing catalogue samples, including older listings, not live alerts. eBay applies the saved keyword/brand/size filters; local checks validate listing data, category, estimated budget and title exclusions. Live alerts require a recent listing newly discovered after the baseline. This check sends no alerts and does not reset the baseline. Estimated totals are not eBay checkout quotes.",
+        "message": "Saved filters checked using one API call. These are existing catalogue samples, including older listings, not live alerts. Shared alternatives must occur in the title or seller description. Unread descriptions are shown separately and do not qualify. eBay applies brand/size request filters; local checks validate listing data, category, estimated budget and title exclusions. This check uses returned or cached seller text only, never extra per-item API calls. Live alerts require a recent listing newly discovered after the baseline. This check sends no alerts and does not reset the baseline. Estimated totals are not eBay checkout quotes.",
     }

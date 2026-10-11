@@ -111,6 +111,10 @@ def search_params(config):
         filters.append("conditions:{" + config["condition"].upper() + "}")
     if config.get("free_shipping"):
         filters.append("maxDeliveryCost:0")
+    # Shared alternatives explicitly cover seller title OR description. Keep
+    # legacy queries unchanged and still require literal proof before enqueue.
+    if config.get("shared_alert_version") == 1 and config.get("shared_keywords"):
+        filters.append("searchInDescription:true")
     params = {
         "q": config["keywords"],
         "sort": "newlyListed",
@@ -356,6 +360,15 @@ def parse_item(raw, config, now, *, fresh_only=True):
         brands = config.get("aspects", {}).get("Brand", [])
         if len(brands) == 1:
             brand, label = brands[0], "Brand filter"
+    from shared_matching import description_text
+
+    full_description = raw.get("description")
+    supplied_description = (
+        full_description
+        if isinstance(full_description, str)
+        else raw.get("shortDescription")
+    )
+    keyword_description, complete = description_text(supplied_description, html=True)
     result = {
         "item_id": "ebay:" + item_id,
         "title": title,
@@ -366,6 +379,8 @@ def parse_item(raw, config, now, *, fresh_only=True):
         "photos": photos,
         "description": clean_description(raw.get("description"), html=True)
         or clean_description(raw.get("shortDescription"), html=True),
+        "keyword_description": keyword_description,
+        "description_complete": isinstance(full_description, str) and complete,
         "brand": str(brand or "Not supplied")[:120],
         "brand_label": label,
         "created": created,
@@ -502,6 +517,49 @@ def record_snapshot(
                 or excluded_by(item["title"], search["exclusions"])
             ):
                 continue
+            from shared_matching import keyword_evidence
+
+            proof = keyword_evidence(
+                search,
+                item["title"],
+                item.get("keyword_description", ""),
+                description_complete=item.get("description_complete", False),
+            )
+            if proof["state"] == "absent":
+                continue
+            if proof["state"] == "unverified":
+                from ebay_alerts import snapshot
+                from keyword_candidates import stage
+
+                stage(
+                    "ebay",
+                    dict(item, currency="GBP"),
+                    search,
+                    {
+                        "content": format_alert(item, search),
+                        "url": item["url"],
+                        "search_name": search["query_name"],
+                        "reference_id": search.get("reference_id"),
+                        "ebay_details": snapshot(item, search),
+                    },
+                    conn=conn,
+                    now=now,
+                    timing={
+                        "listed_at": item["created"],
+                        "date_source": (
+                            "publicSearchMinute"
+                            if item.get("public")
+                            else (
+                                "itemOriginDate"
+                                if timestamp(raw.get("itemOriginDate"))
+                                else "itemCreationDate"
+                            )
+                        ),
+                        "request_started": attempted,
+                        "response_received": received_at,
+                    },
+                )
+                continue
             inserted = conn.execute(
                 """INSERT OR IGNORE INTO alert_outbox
                 (item_id,query_id,search_name,content,url,title,price,currency,photo_url,
@@ -572,7 +630,7 @@ def record_snapshot(
         # Dates reject older listings; only IDs from the recent window need local storage.
         conn.execute("DELETE FROM ebay_seen WHERE first_seen<?", (now - 2 * MAX_AGE,))
         conn.execute(
-            "DELETE FROM ebay_item_owners WHERE raw_id NOT IN (SELECT item_id FROM ebay_seen) AND item_id NOT IN (SELECT item_id FROM alert_outbox WHERE platform='ebay')"
+            "DELETE FROM ebay_item_owners WHERE raw_id NOT IN (SELECT item_id FROM ebay_seen) AND item_id NOT IN (SELECT item_id FROM alert_outbox WHERE platform='ebay') AND item_id NOT IN (SELECT item_id FROM keyword_candidates WHERE platform='ebay') AND item_id NOT IN (SELECT item_id FROM keyword_description_cache WHERE platform='ebay')"
         )
         return created_count
 
@@ -728,6 +786,7 @@ class Poller:
 
 async def run_delivery():
     from alert_delivery import EbayPhotoDeliveryWorker
+    from keyword_candidates import run as verify_candidates
 
     while True:
         # Fresh reads share a short connection; no connection is held while
@@ -750,6 +809,7 @@ async def run_delivery():
                     config["chat_id"],
                     bot_id=config["telegram_token"].split(":")[0],
                 )
+                verification = asyncio.create_task(verify_candidates("ebay"))
                 try:
                     while True:
                         with db.connection_scope():
@@ -764,7 +824,10 @@ async def run_delivery():
                             await asyncio.sleep(0.05)
                 finally:
                     callbacks.cancel()
-                    await asyncio.gather(callbacks, return_exceptions=True)
+                    verification.cancel()
+                    await asyncio.gather(
+                        callbacks, verification, return_exceptions=True
+                    )
                     await worker.close()
         except Exception as exc:  # noqa: BLE001
             logger.warning(

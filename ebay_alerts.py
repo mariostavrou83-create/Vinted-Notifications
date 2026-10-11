@@ -102,6 +102,8 @@ def enabled():
 
 
 def snapshot(item, search):
+    from shared_matching import keyword_evidence, required_keywords
+
     details = vinted_alerts.snapshot(
         SimpleNamespace(
             photo=item.get("photo_url"),
@@ -124,6 +126,17 @@ def snapshot(item, search):
             shared_alert_version=1,
             estimated_total=item.get("estimated_total"),
             buyer_fee_estimate=item.get("buyer_fee_estimate", 0),
+        )
+    if required_keywords(search):
+        details.update(
+            keyword_description=item.get("keyword_description", ""),
+            description_complete=item.get("description_complete", False),
+            keyword_evidence=keyword_evidence(
+                search,
+                item.get("title", ""),
+                item.get("keyword_description", ""),
+                description_complete=item.get("description_complete", False),
+            ),
         )
     return details
 
@@ -161,6 +174,7 @@ async def preview(query_id, *, phone_mode=None):
     if not details:
         details = snapshot(
             {
+                "title": row["title"],
                 "photo_url": row["photo_url"],
                 "auction": "Current bid" in row.get("content", ""),
                 "shipping": None,

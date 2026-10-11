@@ -191,6 +191,9 @@ def purge(conn, digests, *, redact=False):
             conn.execute("DELETE FROM alert_outbox WHERE platform='ebay'")
         if "ebay_seen" in tables:
             conn.execute("DELETE FROM ebay_seen")
+        for table in ("keyword_candidates", "keyword_description_cache"):
+            if table in tables:
+                conn.execute(f"DELETE FROM {table} WHERE platform='ebay'")
         return
     marks = ",".join("?" for _ in digests)
     owned = conn.execute(
@@ -214,6 +217,12 @@ def purge(conn, digests, *, redact=False):
                 (message_id,),
             )
     for raw_id, item_id in owned:
+        for table in ("keyword_candidates", "keyword_description_cache"):
+            if table in tables:
+                conn.execute(
+                    f"DELETE FROM {table} WHERE platform='ebay' AND item_id=?",
+                    (item_id,),
+                )
         if "ebay_preview_messages" in tables:
             if redact:
                 for preview in conn.execute(
@@ -248,6 +257,11 @@ def purge(conn, digests, *, redact=False):
     conn.execute(
         "DELETE FROM ebay_seen WHERE item_id NOT IN (SELECT raw_id FROM ebay_item_owners)"
     )
+    for table in ("keyword_candidates", "keyword_description_cache"):
+        if table in tables:
+            conn.execute(
+                f"DELETE FROM {table} WHERE platform='ebay' AND item_id NOT IN (SELECT item_id FROM ebay_item_owners)"
+            )
     if "ebay_preview_messages" in tables:
         for (message_id,) in conn.execute(
             "SELECT message_id FROM ebay_preview_messages WHERE item_id NOT IN (SELECT item_id FROM ebay_item_owners)"

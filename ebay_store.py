@@ -170,9 +170,14 @@ def parse_shared_form(form, previous=None, maximum=None):
             )
         if not ebay_url:
             raise ValueError("Add an eBay filter link for this alert.")
+        keyword_query = shared_keyword_query(words)
+        if words and len(keyword_query) < 2:
+            raise ValueError(
+                "eBay title or description keywords must use at least two characters."
+            )
         config = parse_link(
             ebay_url,
-            keywords=shared_keyword_query(words),
+            keywords=keyword_query,
             ignore_prices=True,
         )
     config.update(

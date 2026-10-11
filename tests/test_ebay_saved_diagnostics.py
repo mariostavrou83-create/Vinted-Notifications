@@ -1,5 +1,6 @@
 """Saved shared-filter diagnostics: one mocked read, real routes and SQLite."""
 
+import json
 import shutil
 import subprocess
 import time
@@ -181,6 +182,109 @@ class SavedDiagnosticTests(EbayFixture, unittest.TestCase):
             self.assertIsNone(unbound[field])
         self.assertIn("link, item ID", unbound["reasons"][0])
 
+    def test_title_description_absence_and_unread_description_are_distinct(self):
+        before = self.saved_state()
+        with patch("keyword_candidates.cached_description", return_value={}) as cached:
+            response, fake, _, _ = self.check(
+                [
+                    jeans(101),
+                    jeans(
+                        102,
+                        title="Zara straight jeans",
+                        description="<p>A skinny fit.</p>",
+                    ),
+                    jeans(
+                        103,
+                        title="Zara wide-leg jeans",
+                        description="<p>A loose cut.</p>",
+                    ),
+                    jeans(
+                        104, title="Zara straight jeans", shortDescription="Nearly new."
+                    ),
+                ]
+            )
+        data = response.json
+        self.assertEqual(
+            (data["matched"], data["rejected"], data["needs_description"]), (2, 1, 1)
+        )
+        self.assertEqual(data["samples"][0]["keyword_evidence"]["field"], "title")
+        self.assertEqual(data["samples"][1]["keyword_evidence"]["field"], "description")
+        self.assertEqual(
+            data["rejected_samples"][0]["keyword_evidence"]["state"], "absent"
+        )
+        self.assertEqual(data["pending_samples"][0]["item_id"], "ebay:104")
+        self.assertEqual(
+            data["pending_samples"][0]["keyword_evidence"]["state"], "unverified"
+        )
+        cached.assert_called_once_with("ebay", "ebay:104")
+        fake.search.assert_called_once()
+        self.assertEqual(self.saved_state(), before)
+
+    def test_cached_bound_full_description_reuses_proof_without_detail_api_calls(self):
+        with patch(
+            "keyword_candidates.cached_description",
+            return_value={
+                "keyword_description": "Seller says skinny fit.",
+                "description_complete": True,
+            },
+        ) as cached, patch(
+            "ebay_images.fetch_details", side_effect=AssertionError("No detail reads")
+        ):
+            response, fake, _, _ = self.check([jeans(101, title="Zara blue jeans")])
+        self.assertEqual(response.json["matched"], 1)
+        self.assertEqual(
+            response.json["samples"][0]["keyword_evidence"]["field"], "description"
+        )
+        self.assertEqual(response.json["needs_description"], 0)
+        cached.assert_called_once_with("ebay", "ebay:101")
+        fake.search.assert_called_once()
+
+    def save_description(self, *, url="https://www.ebay.co.uk/itm/101", **details):
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                """INSERT INTO alert_outbox
+                (item_id,query_id,search_name,content,url,title,price,currency,found_at,platform)
+                VALUES ('ebay:101',?,'Saved shared','Saved',?,'Zara blue jeans','15','GBP',?,'ebay')""",
+                (self.identity, url, NOW),
+            )
+            conn.execute(
+                "INSERT INTO ebay_alert_details VALUES (?,?)",
+                ("ebay:101", json.dumps(details)),
+            )
+
+    def test_saved_matching_item_description_is_bound_to_exact_link(self):
+        self.save_description(
+            description="Seller says skinny fit.", description_checked=True
+        )
+        with patch("keyword_candidates.cached_description", return_value={}):
+            response, fake, _, _ = self.check([jeans(101, title="Zara blue jeans")])
+        self.assertEqual(response.json["matched"], 1)
+        self.assertEqual(
+            response.json["samples"][0]["keyword_evidence"]["field"], "description"
+        )
+        fake.search.assert_called_once()
+
+    def test_generic_description_checked_and_wrong_link_do_not_prove_absence_or_match(
+        self,
+    ):
+        self.save_description(description="Straight fit.", description_checked=True)
+        with patch("keyword_candidates.cached_description", return_value={}):
+            response, _, _, _ = self.check([jeans(101, title="Zara blue jeans")])
+        self.assertEqual(response.json["needs_description"], 1)
+        self.assertEqual(response.json["rejected"], 0)
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE alert_outbox SET url='https://www.ebay.co.uk/itm/202' WHERE item_id='ebay:101'"
+            )
+            conn.execute(
+                "UPDATE ebay_alert_details SET payload=? WHERE item_id='ebay:101'",
+                (json.dumps({"description": "skinny", "description_complete": True}),),
+            )
+        with patch("keyword_candidates.cached_description", return_value={}):
+            response, _, _, _ = self.check([jeans(101, title="Zara blue jeans")])
+        self.assertEqual(response.json["needs_description"], 1)
+        self.assertEqual(response.json["matched"], 0)
+
     def test_exact_full_total_boundary_uses_existing_parser_and_rounding(self):
         search = search_settings.get_search(self.identity)
         dashboard_store.save_search(
@@ -232,6 +336,7 @@ class SavedDiagnosticTests(EbayFixture, unittest.TestCase):
         self.assertEqual(html.count('id="check-saved-ebay"'), 1)
         self.assertIn(f'data-url="/search/{self.identity}/check-ebay"', html)
         self.assertIn("not unsaved changes", html)
+        self.assertIn("title or seller description", html)
         self.assertNotIn('id="check-saved-ebay"', self.client.get("/search/new").text)
         other = dashboard_store.save_search(
             None,
@@ -324,10 +429,11 @@ const output = new Element('div'), button = new Element('button');
 button.dataset.url='/search/141/check-ebay';
 const elements={'#check-saved-ebay':button, '#ebay-check-result':output, 'input[name="csrf"]':{value:'csrf'}};
 const document={querySelector(s) { return elements[s] || null; }, querySelectorAll() { return []; }, createElement(tag) { return new Element(tag); }};
-const response={message:'Existing catalogue samples, not live alerts',active:true,baseline:'test baseline',results:3,dated:3,eligible:1,matched:1,rejected:2,delivery:{sent:1},
+const response={message:'Existing catalogue samples, not live alerts',active:true,baseline:'test baseline',results:4,dated:4,eligible:1,matched:1,rejected:2,needs_description:1,delivery:{sent:1},
   criteria:{parameters:{q:'skinny',category_ids:'11554',aspect_filter:'categoryId:11554,Brand:{Zara}'},exclusions:['ripped'],maximum_total:'£25.00'},
-  samples:[{item_id:'ebay:101',title:'Zara <script>skinny</script> jeans',price:'£15.00',url:'https://www.ebay.co.uk/itm/101',shipping:'£3.00',buyer_fee_estimate:'£1.15',estimated_total:'£19.15',categories:['Jeans'],category_ids:['11554'],reasons:[],recent:false}],
-  rejected_samples:[{item_id:'ebay:102',title:'Zara ripped skinny jeans',price:'£15.00',url:'https://www.ebay.co.uk/itm/102',shipping:'£3.00',estimated_total:'£19.15',reasons:['Excluded title phrase: ripped.']},{item_id:null,title:'Unsafe response',url:null,reasons:['Listing response failed current link, item ID, date, price or listing-type checks.']}]};
+  samples:[{item_id:'ebay:101',title:'Zara <script>skinny</script> jeans',price:'£15.00',url:'https://www.ebay.co.uk/itm/101',shipping:'£3.00',buyer_fee_estimate:'£1.15',estimated_total:'£19.15',categories:['Jeans'],category_ids:['11554'],reasons:[],recent:false,keyword_evidence:{state:'matched',keyword:'skinny',field:'description'}}],
+  rejected_samples:[{item_id:'ebay:102',title:'Zara ripped skinny jeans',price:'£15.00',url:'https://www.ebay.co.uk/itm/102',shipping:'£3.00',estimated_total:'£19.15',reasons:['Excluded title phrase: ripped.']},{item_id:null,title:'Unsafe response',url:null,reasons:['Listing response failed current link, item ID, date, price or listing-type checks.']}],
+  pending_samples:[{item_id:'ebay:103',title:'Zara wide-leg jeans',url:'https://www.ebay.co.uk/itm/103',reasons:['Needs seller description verification.'],keyword_evidence:{state:'unverified',keyword:null,field:null}}]};
 let calls=0;
 async function fetch(url, options) { calls++; assert.equal(url,button.dataset.url); assert.equal(options.method,'POST'); assert.equal(options.credentials,'same-origin'); assert.equal(options.body.get('csrf'),'csrf'); return {redirected:false,ok:true,headers:{get() {return 'application/json';}},json:async()=>response}; }
 new Function('document','fetch',fs.readFileSync(process.argv[1],'utf8'))(document,fetch);
@@ -337,9 +443,9 @@ function all(node) { return [node,...node.children.flatMap(all)]; }
   await button.events.click();
   assert.equal(calls,1); assert.equal(button.disabled,false);
   const nodes=all(output), text=nodes.map(n=>n.textContent).join('\n');
-  for (const phrase of ['q=skinny','Brand:{Zara}','ripped','£19.15','buyer-fee allowance: £1.15','older catalogue sample','not live alerts','Unverified listing data','category IDs: 11554']) assert(text.includes(phrase),phrase);
+  for (const phrase of ['q=skinny','Brand:{Zara}','ripped','£19.15','buyer-fee allowance: £1.15','older catalogue sample','not live alerts','Unverified listing data','category IDs: 11554','Keyword “skinny” occurs in seller description','1 need seller description verification','not yet a match']) assert(text.includes(phrase),phrase);
   assert(text.includes('<script>skinny</script>'));
-  assert.equal(nodes.filter(n=>n.tag==='a').length,2);
+  assert.equal(nodes.filter(n=>n.tag==='a').length,3);
   assert(nodes.filter(n=>n.tag==='a').every(n=>n.href.startsWith('https://www.ebay.co.uk/itm/')));
   assert.equal(calls,1); // No request until clicked, no automatic retry/polling.
 })().catch(error=>{process.stderr.write(error.stack);process.exitCode=1;});

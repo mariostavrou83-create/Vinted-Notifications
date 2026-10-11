@@ -439,6 +439,36 @@ def fetch_gallery(url):
     return data["photos"], data["state"]
 
 
+def fetch_candidate_details(row):
+    """Read public same-item seller text before registering an ambiguous hit.
+
+    Reuse the existing bounded listing reader and its shared cooldown; no buyer
+    login, checkout or payment operation is involved. Only identity-scoped page
+    records can supply keyword evidence, never unrelated recommendations.
+    """
+    from shared_matching import description_text
+
+    url = listing_url(row.get("url"))
+    identity = str(row.get("item_id", ""))
+    if not url or re.match(r"/items/([0-9]+)", urlparse(url).path)[1] != identity:
+        return {}
+
+    def parse_candidate(html, target):
+        data = parse_page_data(html, identity, full_description=True)
+        matching_text, complete = description_text(data["description"])
+        return {
+            "photos": data["photos"],
+            "description": clean_description(matching_text),
+            "keyword_description": matching_text,
+            # A missing/unrecognised target record cannot prove a negative.
+            "description_complete": bool(matching_text) and complete,
+        }
+
+    data = fetch_listing(url, parser=parse_candidate)
+    ready = data.get("state") == "ready"
+    return dict(data, available=ready, description_checked=ready, gallery_checked=ready)
+
+
 async def resolve(row, details, *, persist=True, include_description=False):
     """Called only after the initial notification, or for an explicit preview.
 
