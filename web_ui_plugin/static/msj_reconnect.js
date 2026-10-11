@@ -6,6 +6,9 @@
   const view = root.querySelector("[data-browser]");
   const image = root.querySelector("[data-frame]");
   const input = root.querySelector("[data-text]");
+  const startButton = root.querySelector("[data-start]");
+  let browserAvailable = false;
+  startButton.disabled = true;
   let active = false, busy = false, verifying = false, frameSequence = 0, nextSequence = 1;
   let verificationPolls = 0;
   let imageURL = null, timer = null, pointer = null;
@@ -28,8 +31,14 @@
   }
   root.querySelector("[data-readiness]").addEventListener("click", async event => {
     if (busy || active) return;
-    busy=true; event.target.disabled=true; message("Checking the private browser runtime…");
-    try { message(readinessMessage(await api("readiness", {}))); }
+    busy=true; browserAvailable=false; startButton.disabled=true;
+    event.target.disabled=true; message("Checking the private browser runtime…");
+    try {
+      const result = await api("readiness", {});
+      browserAvailable = Boolean(result && result.available === true && result.stage === "ready");
+      startButton.disabled = !browserAvailable;
+      message(readinessMessage(result));
+    }
     catch (error) {message(error.message);}
     finally {busy=false;event.target.disabled=false;}
   });
@@ -90,8 +99,9 @@
     }
     finally { busy = false; await refresh(); }
   }
-  root.querySelector("[data-start]").addEventListener("click", async event => {
-    if (busy) return;
+  startButton.addEventListener("click", async event => {
+    if (busy || active || !browserAvailable) return;
+    browserAvailable = false;
     event.target.disabled = true; busy = true;
     message("Opening private Vinted sign-in…");
     try {
@@ -100,7 +110,7 @@
       active = true; view.hidden = false;
       message("Choose Log in on Vinted, then enter your usual sign-in details.");
     } catch (error) { closeView(); message(error.message); }
-    finally { busy = false; event.target.disabled = false; await refresh(); }
+    finally { busy = false; event.target.disabled = true; await refresh(); }
   });
   root.querySelector("[data-input-form]").addEventListener("submit", async event => {
     event.preventDefault(); if (busy || !active || !input.value) return;

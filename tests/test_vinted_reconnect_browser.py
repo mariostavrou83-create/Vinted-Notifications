@@ -315,8 +315,114 @@ class ManagerTests(unittest.TestCase):
                     self.manager.runtime_check(), {"available": False, "stage": stage}
                 )
 
+    def test_readiness_logs_fixed_labels_and_flags_without_changing_public_result(self):
+        private = "private-input-secret private-proxy-secret private-environment-secret"
+        for error, expected in (
+            (ImportError(private), "dependencies_missing"),
+            (
+                reconnect.BrowserError(
+                    "unavailable", stage="browser_start", diagnostic="namespace_denied"
+                ),
+                "namespace_denied",
+            ),
+            (
+                reconnect.BrowserError(
+                    "unavailable", stage="browser_start", diagnostic=private
+                ),
+                "unknown",
+            ),
+        ):
+            with self.subTest(diagnostic=expected), patch.object(
+                self.manager, "_factory", side_effect=error
+            ), patch.dict(
+                "os.environ", {"PWDEBUG": private, "DEBUG": private}
+            ), patch.object(
+                reconnect.os, "geteuid", return_value=10001
+            ), patch.object(
+                reconnect.importlib.util, "find_spec", return_value=object()
+            ), self.assertLogs(
+                reconnect.LOGGER, level="INFO"
+            ) as captured:
+                result = self.manager.runtime_check()
+            self.assertEqual(set(result), {"available", "stage"})
+            self.assertFalse(result["available"])
+            output = " ".join(captured.output)
+            self.assertIn(
+                "euid=10001 dependency_present=1 pwdebug_present=1 debug_present=1",
+                output,
+            )
+            self.assertIn("diagnostic=" + expected, output)
+            self.assertNotIn(private, output)
+            self.assertNotIn(private, str(result))
+
 
 class NetworkAndRuntimeTests(unittest.TestCase):
+    def test_anonymous_launch_classifier_has_only_fixed_labels(self):
+        private = "private-input-secret private-proxy-secret private-path-secret"
+        for error, label in (
+            (FileNotFoundError(private), "binary_missing"),
+            (PermissionError(private), "launch_permission"),
+            (RuntimeError("Executable doesn't exist: " + private), "binary_missing"),
+            (
+                RuntimeError("error while loading shared libraries: " + private),
+                "libraries_missing",
+            ),
+            (
+                RuntimeError(
+                    "Failed to move to new namespace: Operation not permitted "
+                    + private
+                ),
+                "namespace_denied",
+            ),
+            (
+                RuntimeError("unshare: Operation not permitted " + private),
+                "namespace_denied",
+            ),
+            (RuntimeError("No usable sandbox! " + private), "sandbox_unavailable"),
+            (
+                RuntimeError("Running as root without --no-sandbox " + private),
+                "root_runtime",
+            ),
+            (RuntimeError(private), "unknown"),
+        ):
+            with self.subTest(label=label):
+                actual = reconnect._anonymous_launch_diagnostic(error)
+                self.assertEqual(actual, label)
+                self.assertIn(actual, reconnect.READINESS_DIAGNOSTICS)
+                self.assertNotIn(private, actual)
+
+    def test_launch_failure_classified_only_for_anonymous_smoke_and_driver_closes(self):
+        calls = []
+
+        def failed_launch(**options):
+            calls.append(options)
+            raise RuntimeError("Failed to move to new namespace: private-proxy-secret")
+
+        driver = SimpleNamespace(
+            chromium=SimpleNamespace(launch=failed_launch),
+            stop=lambda: calls.append("driver_closed"),
+        )
+        module = SimpleNamespace(
+            sync_playwright=lambda: SimpleNamespace(start=lambda: driver)
+        )
+        with patch.dict("sys.modules", {"playwright.sync_api": module}), patch.dict(
+            "os.environ", {"PWDEBUG": "", "DEBUG": ""}
+        ):
+            with self.assertRaises(reconnect.BrowserError) as error:
+                reconnect._PlaywrightProvider(None, navigate=False)
+            self.assertEqual(error.exception.diagnostic, "namespace_denied")
+            self.assertEqual(error.exception.stage, "browser_start")
+            self.assertNotIn("private-proxy-secret", str(error.exception))
+            self.assertTrue(calls[0]["chromium_sandbox"])
+            self.assertIsNone(calls[0]["proxy"])
+            self.assertNotIn("args", calls[0])
+            self.assertEqual(calls[1], "driver_closed")
+            with patch.object(
+                reconnect, "_anonymous_launch_diagnostic", side_effect=AssertionError
+            ), self.assertRaises(reconnect.BrowserError) as owner_error:
+                reconnect._PlaywrightProvider({"server": PROXY})
+            self.assertEqual(owner_error.exception.diagnostic, "unknown")
+
     def test_allowlist_supports_real_auth_selector_captcha_and_assets_only(self):
         for url, method, navigation in (
             (reconnect.LOGIN_URL, "GET", True),
@@ -636,6 +742,7 @@ class NetworkAndRuntimeTests(unittest.TestCase):
                 with self.assertRaises(reconnect.BrowserError) as error:
                     reconnect._PlaywrightProvider(None, navigate=False)
                 self.assertEqual(error.exception.stage, "browser_start")
+                self.assertEqual(error.exception.diagnostic, "debug_enabled")
                 self.assertEqual(__import__("os").environ[variable], value)
         self.assertEqual(starts, [])
 

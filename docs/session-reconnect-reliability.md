@@ -47,8 +47,12 @@ Google/Apple popup sign-in is unsupported in this first version.
 Chromium is installed in the existing service image and runs with its sandbox
 under the non-root runtime account. Check private browser availability tests
 launch only, without contacting Vinted or replacing credentials. Availability
-does not prove Vinted will accept a real sign-in. Routed requests use Playwright's
-request transport, so upstream security compatibility needs a real owner sign-in
+must pass before opening sign-in. A failed check blocks this new route and keeps
+the existing saved connection. Anonymous launch diagnostics use only fixed
+failure labels, the effective runtime UID and dependency/debug availability
+flags; provider text, arguments and environment values are never logged.
+Availability does not prove Vinted will accept a real sign-in. Routed requests use
+Playwright's request transport, so upstream security compatibility needs a real owner sign-in
 before claiming successful phone/desktop reconnection. No permanent login can be
 promised if Vinted or Supabase revokes a session.
 

@@ -7,7 +7,9 @@ Only the separate same-account importer may consume ``AuthEnvelope``.
 """
 
 import hashlib
+import importlib.util
 import json
+import logging
 import math
 import os
 import queue
@@ -18,6 +20,26 @@ import time
 from concurrent.futures import Future, TimeoutError
 from dataclasses import dataclass, field
 from urllib.parse import parse_qsl, unquote, urljoin, urlsplit
+
+LOGGER = logging.getLogger(__name__)
+READINESS_DIAGNOSTICS = frozenset(
+    {
+        "ready",
+        "active_session",
+        "dependencies_missing",
+        "debug_enabled",
+        "root_runtime",
+        "binary_missing",
+        "libraries_missing",
+        "namespace_denied",
+        "sandbox_unavailable",
+        "launch_permission",
+        "process_limit",
+        "memory_pressure",
+        "launch_timeout",
+        "unknown",
+    }
+)
 
 BASE = "https://www.vinted.co.uk"
 # The canonical target of the UK's public Sign up | Log in link. The owner
@@ -109,14 +131,78 @@ MESSAGES = {
 class BrowserError(ValueError):
     """Fixed public reason only; no browser exception or provider body."""
 
-    def __init__(self, reason="unavailable", *, stage=None):
+    def __init__(self, reason="unavailable", *, stage=None, diagnostic=None):
         self.reason = reason if reason in MESSAGES else "unavailable"
         self.stage = (
             stage
             if stage in ("dependencies", "browser_start", "context_start", "page_open")
             else None
         )
+        # Internal anonymous-smoke metadata only, never provider text.
+        self.diagnostic = (
+            diagnostic
+            if isinstance(diagnostic, str) and diagnostic in READINESS_DIAGNOSTICS
+            else "unknown"
+        )
         super().__init__(MESSAGES[self.reason])
+
+
+def _anonymous_launch_diagnostic(error):
+    """Inspect anonymous launch failure in memory; return only a fixed label."""
+    if isinstance(error, FileNotFoundError):
+        return "binary_missing"
+    if isinstance(error, PermissionError):
+        return "launch_permission"
+    # This is never called for an owner sign-in browser. Do not return, log,
+    # persist or retain the exception message, which may contain private data.
+    try:
+        message = str(error)[:32768].lower()
+    except Exception:  # noqa: BLE001 - a broken exception cannot expose input.
+        return "unknown"
+    checks = (
+        ("root_runtime", ("running as root without",)),
+        (
+            "binary_missing",
+            ("executable doesn't exist", "executable does not exist", "enoent"),
+        ),
+        (
+            "libraries_missing",
+            ("error while loading shared libraries", "cannot open shared object file"),
+        ),
+        ("namespace_denied", ("failed to move to new namespace",)),
+        ("sandbox_unavailable", ("no usable sandbox",)),
+        (
+            "process_limit",
+            ("resource temporarily unavailable", "pthread_create", "cannot fork"),
+        ),
+        ("memory_pressure", ("out of memory", "allocation failed")),
+        ("launch_timeout", ("timeout", "timed out")),
+    )
+    for label, patterns in checks:
+        if any(pattern in message for pattern in patterns):
+            return label
+    if ("namespace" in message or "unshare" in message) and (
+        "operation not permitted" in message or "permission denied" in message
+    ):
+        return "namespace_denied"
+    if "permission denied" in message or "eacces" in message:
+        return "launch_permission"
+    return "unknown"
+
+
+def _readiness_preflight():
+    """Only effective UID and availability flags, never environment values."""
+    try:
+        dependency_present = importlib.util.find_spec("playwright") is not None
+    except (ImportError, ValueError):
+        dependency_present = False
+    LOGGER.info(
+        "Vinted private browser readiness preflight: euid=%s dependency_present=%s pwdebug_present=%s debug_present=%s",
+        os.geteuid(),
+        int(dependency_present),
+        int(os.environ.get("PWDEBUG") not in (None, "", "0")),
+        int(os.environ.get("DEBUG") not in (None, "", "0")),
+    )
 
 
 @dataclass(frozen=True)
@@ -390,7 +476,11 @@ class _PlaywrightProvider:
         if os.environ.get("PWDEBUG") not in (None, "", "0") or os.environ.get(
             "DEBUG"
         ) not in (None, "", "0"):
-            raise BrowserError("unavailable", stage="browser_start")
+            raise BrowserError(
+                "unavailable",
+                stage="browser_start",
+                diagnostic="debug_enabled" if not navigate else None,
+            )
         from playwright.sync_api import sync_playwright
 
         self.playwright = self.browser = self.context = self.page = None
@@ -432,9 +522,16 @@ class _PlaywrightProvider:
                 timeout=12_000,
                 wait_until="domcontentloaded",
             )
-        except Exception:  # noqa: BLE001 - browser exceptions can contain secrets.
+        # Browser exceptions can contain secrets; never expose their text.
+        except Exception as error:  # noqa: BLE001
             self.close()
-            raise BrowserError("unavailable", stage=stage) from None
+            raise BrowserError(
+                "unavailable",
+                stage=stage,
+                diagnostic=(
+                    _anonymous_launch_diagnostic(error) if not navigate else None
+                ),
+            ) from None
 
     def _route(self, route):
         response = None
@@ -746,19 +843,35 @@ class BrowserManager:
     def runtime_check(self):
         """Anonymous sandbox smoke only: no proxy, Vinted navigation or cookies."""
 
+        def report(available, stage, diagnostic):
+            # Only fixed labels reach logs; diagnostics stay out of public JSON.
+            diagnostic = (
+                diagnostic
+                if isinstance(diagnostic, str) and diagnostic in READINESS_DIAGNOSTICS
+                else "unknown"
+            )
+            LOGGER.info(
+                "Vinted private browser readiness: available=%s stage=%s diagnostic=%s",
+                int(available),
+                stage,
+                diagnostic,
+            )
+            return {"available": available, "stage": stage}
+
         def operation():
             if self._active is not None:
-                return {"available": False, "stage": "active"}
+                return report(False, "active", "active_session")
             provider = None
             try:
                 self._job_valid()
+                _readiness_preflight()
                 provider = self._factory(None, navigate=False)
                 self._job_valid()
-                return {"available": True, "stage": "ready"}
+                return report(True, "ready", "ready")
             except ImportError:
-                return {"available": False, "stage": "dependencies"}
+                return report(False, "dependencies", "dependencies_missing")
             except BrowserError as exc:
-                return {"available": False, "stage": exc.stage or "browser_start"}
+                return report(False, exc.stage or "browser_start", exc.diagnostic)
             finally:
                 if provider is not None:
                     provider.close()
@@ -766,10 +879,11 @@ class BrowserManager:
         try:
             return self._call(operation, timeout=25)
         except BrowserError as exc:
-            return {
-                "available": False,
-                "stage": ("timeout" if exc.reason == "timeout" else "browser_start"),
-            }
+            return report(
+                False,
+                "timeout" if exc.reason == "timeout" else "browser_start",
+                "launch_timeout" if exc.reason == "timeout" else exc.diagnostic,
+            )
 
     def state(self, owner_key, identifier):
         return self._call(lambda: self._public(self._bound(owner_key, identifier)))
