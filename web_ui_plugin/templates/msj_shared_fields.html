@@ -18,6 +18,7 @@
 <button type="button" id="preview-ebay-link" class="secondary">Read link &amp; preview filters</button>
 <p id="ebay-import-feedback" role="status" class="muted"></p>
 <ul id="ebay-import-summary">{% for line in imported_summary %}<li>{{line}}</li>{% endfor %}</ul>
+<small>If eBay refuses the page read, use <a href="/ebay/link-helper" target="_blank" rel="noopener">Send filters to MSJ ↗</a> once from your normal eBay browser. It fills this link automatically; it does not save an alert.</small>
 <p class="platform-disabled" data-shared-disabled="ebay" {{'hidden' if row.platform_mode in ('ebay','both')}}>eBay is off for this search. Its link is optional until you enable it.</p>
 {% if ebay_connection.missing %}<small>To receive eBay alerts, <a href="/connections" target="_blank" rel="noopener">set up the eBay connection ↗</a>.</small>{% endif %}
 

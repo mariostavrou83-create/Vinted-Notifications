@@ -30,6 +30,14 @@ general category URL cannot restore brand or size selections absent from that
 URL's page. Short/share, item and shop links remain unsupported. No live-slot,
 polling, credentials or Autobuy settings change.
 
+When eBay refuses server reads, `/ebay/link-helper` provides a user-operated
+bookmarklet. On the owner's already open filtered eBay page it reads only the
+same public structured criteria, validates them without evaluating page code,
+and opens the fixed MSJ `/search/new?ebay_import=…` URL. It has no network, account,
+cookie, token or storage access. The authenticated dashboard validates the
+explicit URL again and only fills an unsaved new form; GET never saves or modifies
+an existing alert. Mobile browsers may restrict executable bookmark addresses.
+
 Vinted estimates use item price + rounded 5% + £2.20. Payment still checks the
 actual complete checkout total, including balance, fees and delivery. eBay
 estimates use supplied item price/postage and a conservative Buyer Protection

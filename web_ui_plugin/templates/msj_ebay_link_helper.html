@@ -1,0 +1,16 @@
+{% extends 'msj_base.html' %}
+{% block content %}
+<a class="back-link" href="/search/new">← Add a search</a>
+<div class="page-heading compact"><div><span class="eyebrow">EBAY FILTER LINKS</span><h1>Send filters to MSJ</h1><p class="muted">A one-time bookmark setup for category links that eBay won't let the dashboard read.</p></div></div>
+<section class="form-card">
+<h2>On your computer</h2>
+<p>Drag this link to your browser's bookmarks bar. Save it as <strong>Send filters to MSJ</strong>.</p>
+<p><a class="secondary" href="{{bookmarklet}}">Send filters to MSJ</a></p>
+<h2>On your phone</h2>
+<p>Save any page as a browser bookmark. Edit that bookmark, name it <strong>Send filters to MSJ</strong>, and replace its address with the code below. Safari lets you edit a bookmark's address; some mobile browsers restrict bookmarks that run code.</p>
+<details><summary>Show bookmark address to copy</summary><label for="ebay-bookmark-address">Bookmark address</label><textarea id="ebay-bookmark-address" rows="5" readonly>{{bookmarklet}}</textarea><small>Copy the whole address, starting with javascript:.</small></details>
+<h2>For each new alert</h2>
+<ol><li>Choose your category, brand, sizes and other filters on eBay UK as usual.</li><li>While that filtered eBay page is open, use your saved <strong>Send filters to MSJ</strong> bookmark.</li><li>The dashboard opens a new form with the eBay filter link filled in. Add your Vinted link, shared keywords, exclusions and complete budget, then save.</li></ol>
+<p class="muted">The helper reads only public search-filter metadata already on that page. It makes no eBay request and transfers no account cookies, tokens or passwords. It creates an unsaved form and cannot buy an item. If it can't confirm the filters, it stops instead of guessing.</p>
+</section>
+{% endblock %}
