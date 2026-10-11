@@ -1,9 +1,13 @@
 """Owner browser isolation without starting a browser or contacting a website."""
 
 import json
+import os
+import subprocess
+import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -361,7 +365,7 @@ class NetworkAndRuntimeTests(unittest.TestCase):
         private = "private-input-secret private-proxy-secret private-path-secret"
         for error, label in (
             (FileNotFoundError(private), "binary_missing"),
-            (PermissionError(private), "launch_permission"),
+            (PermissionError(private), "file_access_permission"),
             (RuntimeError("Executable doesn't exist: " + private), "binary_missing"),
             (
                 RuntimeError("error while loading shared libraries: " + private),
@@ -391,6 +395,178 @@ class NetworkAndRuntimeTests(unittest.TestCase):
                 self.assertIn(actual, reconnect.READINESS_DIAGNOSTICS)
                 self.assertNotIn(private, actual)
 
+    def test_permission_diagnostics_distinguish_launch_operation_and_phase(self):
+        private = "private-path-secret private-proxy-secret"
+        for message, phase, label in (
+            (
+                "EACCES: permission denied, mkdtemp '" + private + "'",
+                "browser_launch",
+                "temp_profile_permission",
+            ),
+            (
+                "Failed to launch: Error: spawn " + private + " EACCES",
+                "browser_launch",
+                "browser_spawn_permission",
+            ),
+            (
+                "Error: spawn " + private + " EACCES",
+                "driver_start",
+                "driver_spawn_permission",
+            ),
+            (
+                "EACCES: permission denied, stat '" + private + "'",
+                "browser_launch",
+                "file_access_permission",
+            ),
+            (
+                "zygote host: Operation not permitted " + private,
+                "browser_launch",
+                "zygote_permission",
+            ),
+            (
+                "zygote: Failed to move to new namespace: Operation not permitted "
+                + private,
+                "browser_launch",
+                "namespace_denied",
+            ),
+            (
+                "Permission denied " + private,
+                "driver_start",
+                "driver_file_permission",
+            ),
+            (
+                "Permission denied " + private,
+                "browser_launch",
+                "launch_permission",
+            ),
+        ):
+            with self.subTest(phase=phase, label=label):
+                result = reconnect._anonymous_launch_diagnostic(
+                    RuntimeError(message), phase=phase
+                )
+                self.assertEqual(result, label)
+                self.assertIn(result, reconnect.READINESS_DIAGNOSTICS)
+                self.assertNotIn(private, result)
+
+    def test_driver_permission_trace_distinguishes_actual_spawn_failure(self):
+        self.assertEqual(
+            reconnect._anonymous_launch_diagnostic(
+                PermissionError("private-path-secret"), phase="driver_start"
+            ),
+            "driver_file_permission",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            node = Path(directory) / "nonexecutable-node"
+            node.write_text("fictional driver", encoding="utf-8")
+            node.chmod(0o600)
+            try:
+                subprocess.run([str(node)], check=True, capture_output=True)
+            except PermissionError as error:
+                result = reconnect._anonymous_launch_diagnostic(
+                    error, phase="driver_start"
+                )
+            else:
+                self.fail("Nonexecutable driver must fail before any process starts")
+        self.assertEqual(result, "driver_spawn_permission")
+
+    def test_anonymous_file_preflight_emits_only_flags_and_does_not_change_env(self):
+        private = "/private-environment-path-secret"
+        module = SimpleNamespace(
+            compute_driver_executable=lambda: (private + "/node", private + "/cli.js")
+        )
+        environment = {
+            "PLAYWRIGHT_BROWSERS_PATH": private,
+            "TMPDIR": private,
+            "TMP": "/other-private-temp-secret",
+        }
+        with patch.dict("os.environ", environment, clear=True), patch.dict(
+            "sys.modules", {"playwright._impl._driver": module}
+        ), patch.object(reconnect.os, "access", return_value=False) as access:
+            before = dict(os.environ)
+            with self.assertLogs(reconnect.LOGGER, level="INFO") as captured:
+                reconnect._readiness_file_preflight()
+            self.assertEqual(dict(os.environ), before)
+        output = " ".join(captured.output)
+        self.assertIn(
+            "expected_browser_path=0 driver_rx=0 driver_entry_readable=0 temp_writable=0 cwd_rx=0",
+            output,
+        )
+        self.assertNotIn(private, output)
+        self.assertNotIn(environment["TMP"], output)
+        access.assert_any_call(private, os.W_OK | os.X_OK, effective_ids=True)
+
+    def test_anonymous_binary_preflight_checks_distinct_pinned_headless_shell(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            chromium = root / "chromium-1243" / "chrome-linux64" / "chrome"
+            headless = (
+                root
+                / "chromium_headless_shell-1243"
+                / "chrome-headless-shell-linux64"
+                / "chrome-headless-shell"
+            )
+            entry = root / "driver" / "package" / "cli.js"
+            for file in (chromium, headless, entry):
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_text("static fixture", encoding="utf-8")
+                file.chmod(0o700)
+            (entry.parent / "browsers.json").write_text(
+                json.dumps(
+                    {
+                        "browsers": [
+                            {"name": "chromium-headless-shell", "revision": "1243"}
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            module = SimpleNamespace(
+                compute_driver_executable=lambda: (root / "node", entry)
+            )
+            browser = SimpleNamespace(executable_path=str(chromium))
+            with patch.dict(
+                "sys.modules", {"playwright._impl._driver": module}
+            ), patch.object(
+                reconnect.platform, "machine", return_value="x86_64"
+            ), patch.object(
+                reconnect.platform, "system", return_value="Linux"
+            ):
+                with self.assertLogs(reconnect.LOGGER, level="INFO") as captured:
+                    reconnect._readiness_binary_preflight(browser)
+                output = " ".join(captured.output)
+                self.assertIn(
+                    "chromium_exists=1 chromium_rx=1 headless_exists=1 headless_rx=1",
+                    output,
+                )
+                self.assertNotIn(str(root), output)
+                headless.chmod(0o600)
+                with self.assertLogs(reconnect.LOGGER, level="INFO") as captured:
+                    reconnect._readiness_binary_preflight(browser)
+                self.assertIn(
+                    "headless_exists=1 headless_rx=0", " ".join(captured.output)
+                )
+                headless.unlink()
+                with self.assertLogs(reconnect.LOGGER, level="INFO") as captured:
+                    reconnect._readiness_binary_preflight(browser)
+                self.assertIn(
+                    "headless_exists=0 headless_rx=0", " ".join(captured.output)
+                )
+
+    def test_binary_diagnostics_cannot_block_launch_if_sdk_probe_fails(self):
+        class UnsupportedBrowser:
+            @property
+            def executable_path(self):
+                raise RuntimeError("private-path-secret")
+
+        with self.assertLogs(reconnect.LOGGER, level="INFO") as captured:
+            reconnect._readiness_binary_preflight(UnsupportedBrowser())
+        output = " ".join(captured.output)
+        self.assertIn(
+            "chromium_exists=-1 chromium_rx=-1 headless_exists=-1 headless_rx=-1",
+            output,
+        )
+        self.assertNotIn("private-path-secret", output)
+
     def test_launch_failure_classified_only_for_anonymous_smoke_and_driver_closes(self):
         calls = []
 
@@ -419,9 +595,17 @@ class NetworkAndRuntimeTests(unittest.TestCase):
             self.assertEqual(calls[1], "driver_closed")
             with patch.object(
                 reconnect, "_anonymous_launch_diagnostic", side_effect=AssertionError
-            ), self.assertRaises(reconnect.BrowserError) as owner_error:
+            ), patch.object(
+                reconnect, "_readiness_file_preflight"
+            ) as files, patch.object(
+                reconnect, "_readiness_binary_preflight"
+            ) as binaries, self.assertRaises(
+                reconnect.BrowserError
+            ) as owner_error:
                 reconnect._PlaywrightProvider({"server": PROXY})
             self.assertEqual(owner_error.exception.diagnostic, "unknown")
+            files.assert_not_called()
+            binaries.assert_not_called()
 
     def test_allowlist_supports_real_auth_selector_captcha_and_assets_only(self):
         for url, method, navigation in (

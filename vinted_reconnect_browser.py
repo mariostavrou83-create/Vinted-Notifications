@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import os
+import platform
 import queue
 import re
 import secrets
@@ -19,6 +20,7 @@ import threading
 import time
 from concurrent.futures import Future, TimeoutError
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import parse_qsl, unquote, urljoin, urlsplit
 
 LOGGER = logging.getLogger(__name__)
@@ -34,6 +36,12 @@ READINESS_DIAGNOSTICS = frozenset(
         "namespace_denied",
         "sandbox_unavailable",
         "launch_permission",
+        "driver_spawn_permission",
+        "driver_file_permission",
+        "browser_spawn_permission",
+        "temp_profile_permission",
+        "file_access_permission",
+        "zygote_permission",
         "process_limit",
         "memory_pressure",
         "launch_timeout",
@@ -147,12 +155,10 @@ class BrowserError(ValueError):
         super().__init__(MESSAGES[self.reason])
 
 
-def _anonymous_launch_diagnostic(error):
+def _anonymous_launch_diagnostic(error, *, phase="browser_launch"):
     """Inspect anonymous launch failure in memory; return only a fixed label."""
     if isinstance(error, FileNotFoundError):
         return "binary_missing"
-    if isinstance(error, PermissionError):
-        return "launch_permission"
     # This is never called for an owner sign-in browser. Do not return, log,
     # persist or retain the exception message, which may contain private data.
     try:
@@ -185,7 +191,33 @@ def _anonymous_launch_diagnostic(error):
         "operation not permitted" in message or "permission denied" in message
     ):
         return "namespace_denied"
-    if "permission denied" in message or "eacces" in message:
+    if (
+        isinstance(error, PermissionError)
+        or "permission denied" in message
+        or "eacces" in message
+        or "operation not permitted" in message
+    ):
+        if re.search(r"\b(?:mkdir|mkdtemp)\b", message):
+            return "temp_profile_permission"
+        if re.search(r"\b(?:spawn|spawnsync)\b", message):
+            return (
+                "driver_spawn_permission"
+                if phase == "driver_start"
+                else "browser_spawn_permission"
+            )
+        if "zygote" in message:
+            return "zygote_permission"
+        if phase == "driver_start":
+            trace = error.__traceback__
+            while trace is not None:
+                if "subprocess" in trace.tb_frame.f_code.co_filename:
+                    return "driver_spawn_permission"
+                trace = trace.tb_next
+            return "driver_file_permission"
+        if isinstance(error, PermissionError) or re.search(
+            r"\b(?:stat|access|open|scandir|readlink)\b", message
+        ):
+            return "file_access_permission"
         return "launch_permission"
     return "unknown"
 
@@ -202,6 +234,100 @@ def _readiness_preflight():
         int(dependency_present),
         int(os.environ.get("PWDEBUG") not in (None, "", "0")),
         int(os.environ.get("DEBUG") not in (None, "", "0")),
+    )
+
+
+def _access_flag(path, mode):
+    """Effective-UID permission hint only; never write or expose a path."""
+    try:
+        return int(os.access(path, mode, effective_ids=True)) if path else -1
+    except (OSError, TypeError, ValueError, NotImplementedError):
+        return -1
+
+
+def _file_exists_flag(path):
+    """Read-only file hint; inaccessible or unsupported probes stay unknown."""
+    try:
+        return int(os.path.isfile(path)) if path else -1
+    except (OSError, TypeError, ValueError):
+        return -1
+
+
+def _readiness_file_preflight():
+    driver_rx = entry_readable = -1
+    try:
+        # Same helper used by PipeTransport.connect; it honors a Node override.
+        from playwright._impl._driver import compute_driver_executable
+
+        driver, entry = compute_driver_executable()
+        driver_rx = _access_flag(driver, os.R_OK | os.X_OK)
+        entry_readable = _access_flag(entry, os.R_OK)
+    except (ImportError, OSError, TypeError, ValueError):
+        pass
+    # Node os.tmpdir's Linux preference, not Python's writable-dir fallback.
+    temp = (
+        os.environ.get("TMPDIR")
+        or os.environ.get("TMP")
+        or os.environ.get("TEMP")
+        or "/tmp"
+    )
+    LOGGER.info(
+        "Vinted private browser readiness file preflight: expected_browser_path=%s driver_rx=%s driver_entry_readable=%s temp_writable=%s cwd_rx=%s",
+        int(
+            os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+            in ("/opt/msj-browsers", "/opt/msj-browsers/")
+        ),
+        driver_rx,
+        entry_readable,
+        _access_flag(temp, os.W_OK | os.X_OK),
+        _access_flag(".", os.R_OK | os.X_OK),
+    )
+
+
+def _readiness_binary_preflight(browser_type):
+    executable = None
+    headless = None
+    try:
+        executable = getattr(browser_type, "executable_path", None)
+        # Pinned Playwright1.63 defaults headless launch to a separate shell.
+        # Derive that installed Linux path from its metadata, never scan files.
+        from playwright._impl._driver import compute_driver_executable
+
+        _, entry = compute_driver_executable()
+        metadata = Path(entry).parent / "browsers.json"
+        with metadata.open(encoding="utf-8") as stream:
+            data = json.loads(stream.read(65536))
+        descriptor = next(
+            value
+            for value in data["browsers"]
+            if value["name"] == "chromium-headless-shell"
+        )
+        revision = descriptor["revision"]
+        architecture = {"x86_64": "linux64", "aarch64": "linux-arm64"}.get(
+            platform.machine()
+        )
+        directory = Path(executable).parent.parent
+        if (
+            platform.system() == "Linux"
+            and architecture
+            and not descriptor.get("revisionOverrides")
+            and re.fullmatch(r"[0-9]{1,8}", revision)
+            and re.fullmatch(r"chromium-[0-9]{1,8}", directory.name)
+        ):
+            headless = (
+                directory.parent
+                / ("chromium_headless_shell-" + revision)
+                / ("chrome-headless-shell-" + architecture)
+                / "chrome-headless-shell"
+            )
+    except Exception:  # noqa: BLE001 - optional read-only diagnostic boundary.
+        headless = None
+    LOGGER.info(
+        "Vinted private browser readiness binary preflight: chromium_exists=%s chromium_rx=%s headless_exists=%s headless_rx=%s",
+        _file_exists_flag(executable),
+        _access_flag(executable, os.R_OK | os.X_OK),
+        _file_exists_flag(headless),
+        _access_flag(headless, os.R_OK | os.X_OK),
     )
 
 
@@ -487,8 +613,14 @@ class _PlaywrightProvider:
         self.warning = ""
         self.network_allowed = navigate
         stage = "browser_start"
+        phase = "driver_start"
         try:
+            if not navigate:
+                _readiness_file_preflight()
             self.playwright = sync_playwright().start()
+            phase = "browser_launch"
+            if not navigate:
+                _readiness_binary_preflight(self.playwright.chromium)
             self.browser = self.playwright.chromium.launch(
                 headless=True,
                 chromium_sandbox=True,
@@ -529,7 +661,9 @@ class _PlaywrightProvider:
                 "unavailable",
                 stage=stage,
                 diagnostic=(
-                    _anonymous_launch_diagnostic(error) if not navigate else None
+                    _anonymous_launch_diagnostic(error, phase=phase)
+                    if not navigate
+                    else None
                 ),
             ) from None
 
