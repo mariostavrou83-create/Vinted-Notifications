@@ -725,16 +725,22 @@ def create_app(test_config=None):
                         "success" if outcome["state"] == "paid" else "error",
                     )
                     return redirect(url_for("connections"), code=303)
-                elif action == "buyer_payment_failed":
+                elif action in ("buyer_payment_failed", "buyer_payment_owned"):
                     import vinted_buying
 
                     if request.form.get("buyer_failed_confirm") != "yes":
                         raise ValueError(
-                            "Confirm this exact purchase failed before releasing its block."
+                            "Confirm the result of this exact purchase before releasing its block."
                         )
-                    outcome = vinted_buying.resolve_failed(
+                    decision = (
+                        "miss"
+                        if action == "buyer_payment_failed"
+                        else request.form.get("buyer_purchase_decision", "")
+                    )
+                    outcome = vinted_buying.resolve_owned(
                         request.form.get("buyer_item_id", ""),
                         request.form.get("buyer_attempt_updated", ""),
+                        decision,
                     )
                     flash(outcome["message"], "success")
                     return redirect(url_for("connections"), code=303)

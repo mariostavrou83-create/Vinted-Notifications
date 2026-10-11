@@ -130,9 +130,11 @@
 <input type="hidden" name="csrf" value="{{csrf}}">
 <input type="hidden" name="buyer_item_id" value="{{attempt.item_id}}">
 <input type="hidden" name="buyer_attempt_updated" value="{{attempt.updated}}">
-<label class="checkbox"><input type="checkbox" name="buyer_failed_confirm" value="yes" required> I confirmed item {{attempt.item_id}} was not purchased and this payment failed.</label>
-<small>Only confirm after checking Vinted Purchases and any pending bank payment. This records your confirmation and releases this attempt's block on other items. It does not submit or retry a payment.</small>
-<button class="secondary" name="action" value="buyer_payment_failed">Record failed purchase &amp; unblock other items</button>
+<input type="hidden" name="action" value="buyer_payment_owned">
+<label class="checkbox"><input type="checkbox" name="buyer_failed_confirm" value="yes" required> I checked item {{attempt.item_id}} in Vinted Purchases and any pending bank payment.</label>
+<small>Your choice records your confirmation and clears this item's block on new purchases. It never buys this item again or submits a payment.</small>
+<button class="secondary" name="buyer_purchase_decision" value="got">I got it</button>
+<button class="secondary" name="buyer_purchase_decision" value="miss">I didn't get it</button>
 </form>
 {% endif %}
 </div>

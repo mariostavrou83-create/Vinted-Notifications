@@ -66,7 +66,10 @@ class LeRobot:
             from vinted_buying import callback as buy_callback
 
             self.app.add_handler(
-                CallbackQueryHandler(buy_callback, pattern=r"^buy:(click|status)$")
+                CallbackQueryHandler(
+                    buy_callback,
+                    pattern=r"^buy:(click|status)$|^buy:resolve:(got|miss):[0-9]{1,24}:[0-9a-f]{16}$",
+                )
             )
 
             # BUY replies use the same private alert and purchase controls.
@@ -443,14 +446,26 @@ class LeRobot:
             ),
             name="vinted-buyer-session-maintenance",
         )
+        from vinted_owner_controls import refresh_existing
+
+        self._owner_controls_task = asyncio.create_task(
+            refresh_existing(application.bot, db.get_parameter("telegram_chat_id")),
+            name="vinted-owner-purchase-controls",
+        )
 
     async def stop_delivery(self, application):
         task, worker = self._delivery_task, self._delivery_worker
         maintenance = self._buyer_maintenance_task
+        owner_controls = getattr(self, "_owner_controls_task", None)
         self._delivery_task = None
         self._delivery_worker = None
         self._buyer_maintenance_task = None
-        tasks = [running for running in (task, maintenance) if running is not None]
+        self._owner_controls_task = None
+        tasks = [
+            running
+            for running in (task, maintenance, owner_controls)
+            if running is not None
+        ]
         for running in tasks:
             running.cancel()
         if tasks:

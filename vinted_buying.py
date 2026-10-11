@@ -116,7 +116,7 @@ def guard_new_payment(item_id):
     """An earlier uncertain submission must be resolved before another item."""
     with closing(connection()) as conn:
         uncertain = conn.execute(
-            "SELECT item_id,state FROM vinted_buy_attempts WHERE item_id<>? AND state IN ('paying','unknown','needs_action') LIMIT 1",
+            "SELECT item_id,state FROM vinted_buy_attempts WHERE item_id<>? AND state IN ('paying','unknown','needs_action') ORDER BY updated,item_id LIMIT 1",
             (str(item_id),),
         ).fetchone()
     if uncertain:
@@ -140,15 +140,41 @@ def guard_new_payment(item_id):
 
 def resolve_failed(item_id, expected_updated):
     """Record an owner's explicit failed-payment decision, never retry payment."""
+    return resolve_owned(item_id, expected_updated, "miss")
+
+
+def resolve_owned(item_id, expected_updated, decision, *, close_item_id=None):
+    """Record the owner's got/miss decision without contacting Vinted."""
     with buyer.exclusive():
-        return _resolve_failed(item_id, expected_updated)
+        return _resolve_owned(
+            item_id, expected_updated, decision, close_item_id=close_item_id
+        )
 
 
 def _resolve_failed(item_id, expected_updated):
+    """Compatibility entry point for a caller already holding the buyer lock."""
+    return _resolve_owned(item_id, expected_updated, "miss")
+
+
+def _resolve_owned(item_id, expected_updated, decision, *, close_item_id=None):
     """Recheck the exact durable attempt while holding the buyer lock."""
+    if not isinstance(decision, str) or decision not in ("got", "miss"):
+        raise buyer.BuyerError(
+            "Choose whether you got this exact item before resetting Autobuy.",
+            reason="resolution_invalid",
+        )
     if not isinstance(item_id, str) or not re.fullmatch(r"[0-9]{1,24}", item_id):
         raise buyer.BuyerError(
             "Choose the exact existing Vinted attempt to resolve.",
+            reason="resolution_invalid",
+        )
+    if close_item_id is not None and (
+        not isinstance(close_item_id, str)
+        or not re.fullmatch(r"[0-9]{1,24}", close_item_id)
+        or close_item_id == item_id
+    ):
+        raise buyer.BuyerError(
+            "Choose the exact different alert to close after this purchase decision.",
             reason="resolution_invalid",
         )
     if not isinstance(expected_updated, str):
@@ -171,6 +197,25 @@ def _resolve_failed(item_id, expected_updated):
         ) from None
     with closing(connection()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
+
+        def close_source_alert():
+            if close_item_id is None:
+                return
+            conn.execute(
+                "INSERT INTO vinted_buy_attempts(item_id,state,message,updated) "
+                "VALUES (?,'closed',?,?) ON CONFLICT(item_id) DO UPDATE SET "
+                "state='closed',message=excluded.message,updated=excluded.updated "
+                "WHERE vinted_buy_attempts.state IN ('preparing','failed_before_payment')",
+                (
+                    close_item_id,
+                    (
+                        "This alert was closed after resolving an earlier payment. "
+                        "Use Autobuy on new items."
+                    ),
+                    time.time(),
+                ),
+            )
+
         saved = conn.execute(
             "SELECT * FROM vinted_buy_attempts WHERE item_id=?", (item_id,)
         ).fetchone()
@@ -189,14 +234,35 @@ def _resolve_failed(item_id, expected_updated):
                 resolved_at REAL NOT NULL,
                 UNIQUE(item_id,operation,original_updated)
             )""")
-        if (
-            saved["state"] == "payment_failed"
+        # Keep the existing failed-only audit table intact. New owner purchase
+        # decisions use a separate additive table, preserving older records and
+        # distinguishing owner confirmation from independently verified payment.
+        conn.execute("""CREATE TABLE IF NOT EXISTS vinted_owner_purchase_resolutions (
+                id INTEGER PRIMARY KEY,
+                item_id TEXT NOT NULL,
+                operation TEXT NOT NULL CHECK(operation IN ('got','miss')),
+                original_state TEXT NOT NULL CHECK(original_state IN ('unknown','needs_action')),
+                original_updated REAL NOT NULL,
+                original_attempt TEXT NOT NULL,
+                resolved_at REAL NOT NULL,
+                UNIQUE(item_id,original_updated)
+            )""")
+        resolved_state = "paid" if decision == "got" else "payment_failed"
+        previous_decision = conn.execute(
+            "SELECT 1 FROM vinted_owner_purchase_resolutions WHERE item_id=? "
+            "AND operation=? AND original_updated=? AND resolved_at=?",
+            (item_id, decision, version, saved["updated"]),
+        ).fetchone()
+        legacy_failed = (
+            decision == "miss"
             and conn.execute(
                 "SELECT 1 FROM vinted_payment_resolutions WHERE item_id=? "
-                "AND operation='owner_confirmed_failed' AND original_updated=?",
-                (item_id, version),
+                "AND operation='owner_confirmed_failed' AND original_updated=? AND resolved_at=?",
+                (item_id, version, saved["updated"]),
             ).fetchone()
-        ):
+        )
+        if saved["state"] == resolved_state and (previous_decision or legacy_failed):
+            close_source_alert()
             return dict(saved)
         if saved["state"] not in ("unknown", "needs_action"):
             raise buyer.BuyerError(
@@ -224,23 +290,43 @@ def _resolve_failed(item_id, expected_updated):
             )
         }
         resolved_at = time.time()
+        original_attempt = json.dumps(snapshot, sort_keys=True, allow_nan=False)
         conn.execute(
-            "INSERT INTO vinted_payment_resolutions "
+            "INSERT INTO vinted_owner_purchase_resolutions "
             "(item_id,operation,original_state,original_updated,original_attempt,resolved_at) "
-            "VALUES (?,'owner_confirmed_failed',?,?,?,?)",
+            "VALUES (?,?,?,?,?,?)",
             (
                 item_id,
+                decision,
                 saved["state"],
                 saved["updated"],
-                json.dumps(snapshot, sort_keys=True, allow_nan=False),
+                original_attempt,
                 resolved_at,
             ),
         )
+        if decision == "miss":
+            conn.execute(
+                "INSERT INTO vinted_payment_resolutions "
+                "(item_id,operation,original_state,original_updated,original_attempt,resolved_at) "
+                "VALUES (?,'owner_confirmed_failed',?,?,?,?)",
+                (
+                    item_id,
+                    saved["state"],
+                    saved["updated"],
+                    original_attempt,
+                    resolved_at,
+                ),
+            )
         changed = conn.execute(
-            "UPDATE vinted_buy_attempts SET state='payment_failed',message=?,updated=? "
+            "UPDATE vinted_buy_attempts SET state=?,message=?,updated=? "
             "WHERE item_id=? AND state=? AND updated=?",
             (
-                "Owner confirmed this attempt failed; no payment resubmitted.",
+                resolved_state,
+                (
+                    "Owner confirmed they purchased this item; no payment resubmitted."
+                    if decision == "got"
+                    else "Owner confirmed this attempt failed; no payment resubmitted."
+                ),
                 resolved_at,
                 item_id,
                 saved["state"],
@@ -252,12 +338,13 @@ def _resolve_failed(item_id, expected_updated):
                 "This payment attempt changed. No saved payment state was changed.",
                 reason="resolution_stale",
             )
+        close_source_alert()
         outcome = dict(
             conn.execute(
                 "SELECT * FROM vinted_buy_attempts WHERE item_id=?", (item_id,)
             ).fetchone()
         )
-    logger.info("Autobuy owner resolution item=%s outcome=confirmed_failed", item_id)
+    logger.info("Autobuy owner resolution item=%s decision=%s", item_id, decision)
     return outcome
 
 
@@ -1350,6 +1437,9 @@ def buy_checkout_quote(token, *, alert_row=None):
     item_id, purchase_id = quote["item_id"], quote["checkout_id"]
     report("waiting")
     with buyer.exclusive(wait_seconds=45):
+        saved = result(item_id)
+        if saved and saved["state"] == "closed":
+            return saved
         config = buyer.settings()
         limits = None
         if alert_row is not None:
@@ -1567,6 +1657,9 @@ def _buy(row):
     host = urlsplit(row["url"]).hostname
     if not item_id.isdigit() or host != "www.vinted.co.uk" or row["currency"] != "GBP":
         raise buyer.BuyerError("Autobuy currently supports UK Vinted listings in GBP.")
+    saved = result(item_id)
+    if saved and saved["state"] == "closed":
+        return saved
     from vinted_telegram_review import approved_token, restricted
 
     if restricted():
@@ -1932,6 +2025,8 @@ def feedback_buttons(row, feedback=None):
         "paying": "Payment submitted · check details",
         "preparing": "Preparing purchase · details",
         "payment_failed": "Payment failed · check details",
+        "owner_resolution_recorded": "Your purchase choice saved · details",
+        "closed": "Alert closed · details",
     }.get(state, "Autobuy status · details")
     if state in ("setup_required", "failed_before_payment"):
         label = {
@@ -1960,7 +2055,7 @@ def feedback_buttons(row, feedback=None):
             "unexpected_error": "Checkout error · details",
         }.get(reason, label)
     buttons = [[InlineKeyboardButton(label, callback_data="buy:status")]]
-    if state == "in_progress":
+    if state in ("in_progress", "closed"):
         # Live stages are informational, with no resume or payment action.
         return buttons
     if state == "preparing":
@@ -2014,6 +2109,9 @@ def feedback_buttons(row, feedback=None):
                 )
             ]
         )
+    from vinted_owner_controls import buttons as owner_buttons
+
+    buttons.extend(owner_buttons(feedback))
     return buttons
 
 
@@ -2045,7 +2143,14 @@ async def show_purchase_feedback(bot, message, outcome):
                 outcome.get("state") == "setup_required"
                 and latest
                 and latest.get("state")
-                in ("paying", "unknown", "needs_action", "paid", "payment_failed")
+                in (
+                    "paying",
+                    "unknown",
+                    "needs_action",
+                    "paid",
+                    "payment_failed",
+                    "closed",
+                )
             ) or (
                 type(updated) in (int, float)
                 and math.isfinite(updated)
@@ -2069,9 +2174,20 @@ async def show_alert_feedback(bot, message, outcome):
     if not saved:
         return
     row, details, card = saved
+    from vinted_owner_controls import with_offer
+
+    outcome = with_offer(row, outcome)
     feedback = {
         key: outcome.get(key)
-        for key in ("state", "message", "checkout_id", "total", "reason", "action_url")
+        for key in (
+            "state",
+            "message",
+            "checkout_id",
+            "total",
+            "reason",
+            "action_url",
+            "owner_resolution",
+        )
     }
     details = dict(details, buy_feedback=feedback)
     try:
@@ -2115,6 +2231,14 @@ async def show_alert_feedback(bot, message, outcome):
                 raise
         photo_cards.after_edit("vinted", message.message_id, view=view)
         photo_cards.control_health("vinted", "success")
+        offer = feedback.get("owner_resolution")
+        if offer:
+            logger.info(
+                "Autobuy owner controls displayed alert_item=%s decision_item=%s message_id=%s",
+                row["item_id"],
+                offer["item_id"],
+                message.message_id,
+            )
     except TelegramError as exc:
         photo_cards.control_health(
             "vinted", "error", "Could not display Autobuy status"
@@ -2151,6 +2275,20 @@ async def callback(update, context):
         )
         return
     photo_cards.control_health("vinted", "click")
+    if (getattr(query, "data", "") or "").startswith("buy:resolve:"):
+        if getattr(query.message.chat, "type", None) != "private":
+            await photo_cards.answer(
+                query,
+                "Only your private Telegram chat can confirm purchases.",
+                alert=True,
+            )
+            return
+        from vinted_owner_controls import handle
+
+        await handle(
+            query, context, photo_cards.load("vinted", query.message.message_id)
+        )
+        return
     saved = photo_cards.recover("vinted", query.message)
     if not saved:
         await photo_cards.answer(
@@ -2188,6 +2326,8 @@ async def callback(update, context):
             if previous and previous["state"] != "failed_before_payment"
             else details.get("buy_feedback") or previous
         )
+        if feedback and feedback.get("reason") == "earlier_payment_uncertain":
+            await show_purchase_feedback(context.bot, query.message, feedback)
         message = (
             feedback.get("message")
             if feedback
