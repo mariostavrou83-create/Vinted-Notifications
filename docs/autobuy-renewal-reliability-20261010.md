@@ -1,5 +1,40 @@
 # Autobuy renewal audit — 10 October 2026
 
+## Follow-up — 13 October: shared renewal admission
+
+Actual service logs show identity HTTP 401 followed by an unexplained renewal
+HTTP 400 at 09:32 UTC, 10:54 UTC and 13:15–13:45 UTC. At 13:15 the access
+credential still had 1,199 seconds remaining according to its scheduling
+metadata. That metadata does not prove server acceptance. Refused responses
+rolled credentials back; no usable changed credentials were supplied. Logs
+do not establish why Vinted first refused the connection or renewal.
+
+Automatic renewal did succeed at 10:14 and 12:35 UTC: usable matching changed
+credentials, saved rotation, committed renewed-session log, same-buyer identity
+and a verified worker result. The latest owner replacement passed identity at
+13:50 and again on the 13:51 owner attempt. That later attempt stopped because
+the item was unavailable; it was not a new login failure.
+
+The worker's cooldown previously applied only to maintenance. Separate owner
+taps could repeat an expired-account renewal within seconds, including two
+attempts at 09:32. Shared admission now checks the exact saved session and buyer
+before public bootstrap or renewal, reserves one attempt and preserves the
+900-second cooldown after an unexplained HTTP 400. Maintenance can consume its
+own exact reservation without bypassing a terminal block. Local refusals do
+not extend the deadline or overwrite the original upstream diagnostic.
+
+A still-accepted same-buyer identity remains usable for normal owner purchases
+without renewal, even during renewal backoff. A verified replacement does not
+inherit the old session's block. Accepted renewal completion binds the normal
+300-second reservation to its final saved seal, retaining persistence and
+same-account checks. No request format, proxy, saved credentials, buying
+permission, budget, delivery/card preference or purchase guard is changed.
+
+This corrects repeated renewal requests. It does not independently explain the
+first HTTP 400, establish a successful renewal after the latest replacement,
+or guarantee permanent login. Verification uses offline responses and actual
+deployment logs; no live purchase or forced renewal is used.
+
 ## Observed incident
 
 Production service `msj-vinted-fixed` was running commit

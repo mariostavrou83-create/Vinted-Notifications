@@ -58,6 +58,8 @@ AUTH_REASONS = {
     "unreadable": "Vinted returned a response the bot could not read.",
     "session_refresh": "Vinted requested renewal of the saved buyer session.",
     "renewal_failed": "Vinted could not renew the saved buyer session. Its renewal request or response needs checking. No purchase or payment was started.",
+    "renewal_cooldown": "Saved session renewal is cooling down after an earlier failure. Wait before trying again. No checkout or payment was started.",
+    "renewal_blocked": "Saved session renewal is paused after an earlier refusal. Check the buyer connection in Connections. No checkout or payment was started.",
     "refresh_rejected": "Vinted rejected the saved refresh credential. Reconnect your Vinted buyer in Connections. No purchase or payment was started.",
     "account_changed": "Vinted verified a different buyer account. Reconnect the account already linked here. No purchase or payment was started.",
     "signin_redirect": "Vinted redirected this session to sign-in. Reconnect your buyer account.",
@@ -2272,12 +2274,19 @@ def renew_saved_client(client):
 
 
 @timed_operation("buyer_connect")
-def connected_client(*, renew_before=0, solve_challenges=True, allow_refresh=True):
+def connected_client(
+    *,
+    renew_before=0,
+    solve_challenges=True,
+    allow_refresh=True,
+    _renewal_reservation=None,
+):
     with closing(connection()) as conn:
         row = conn.execute(
             "SELECT session,user_id FROM vinted_buyer WHERE id=1"
         ).fetchone()
     client = None
+    renewal_started = False
     try:
         saved = decrypt(row[0])
         if not saved:
@@ -2303,6 +2312,10 @@ def connected_client(*, renew_before=0, solve_challenges=True, allow_refresh=Tru
                 or not refresh
             ):
                 raise
+            from vinted_session_worker import reserve_renewal
+
+            reserve_renewal(client, reservation=_renewal_reservation)
+            renewal_started = True
             renew_saved_client(client)
             user_id, _ = client.identity()
         else:
@@ -2339,6 +2352,10 @@ def connected_client(*, renew_before=0, solve_challenges=True, allow_refresh=Tru
                     )
                 )
             ):
+                from vinted_session_worker import reserve_renewal
+
+                reserve_renewal(client, reservation=_renewal_reservation)
+                renewal_started = True
                 renew_saved_client(client)
                 user_id, _ = client.identity()
         if user_id != row[1]:
@@ -2372,6 +2389,12 @@ def connected_client(*, renew_before=0, solve_challenges=True, allow_refresh=Tru
                 stage="saved_session",
             )
         client.bind_verified_session(user_id, sealed, saved)
+        if renewal_started:
+            from vinted_session_worker import record_renewal_result
+
+            record_renewal_result(
+                None, session_fingerprint=hashlib.sha256(sealed).hexdigest()
+            )
         record_auth("connected", "identity", 200)
         return client
     except BuyerError as exc:
@@ -2403,10 +2426,17 @@ def connected_client(*, renew_before=0, solve_challenges=True, allow_refresh=Tru
             except (sqlite3.Error, OSError):
                 # Optional recovery metadata must not obscure the auth failure.
                 pass
-        record_auth(exc.reason, exc.stage, exc.status)
-        from vinted_connection_notices import record_failure
+        if renewal_started:
+            from vinted_session_worker import record_renewal_result
 
-        record_failure(exc, exc.session_fingerprint, checked_at=failure_checked_at)
+            record_renewal_result(exc, session_fingerprint=exc.session_fingerprint)
+        # A local backoff decision is not a new Vinted refusal. Keep the
+        # original upstream reason/status and notice incident unchanged.
+        if exc.reason not in ("renewal_cooldown", "renewal_blocked"):
+            record_auth(exc.reason, exc.stage, exc.status)
+            from vinted_connection_notices import record_failure
+
+            record_failure(exc, exc.session_fingerprint, checked_at=failure_checked_at)
         if client:
             client.session.close()
         raise

@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import sqlite3
 import threading
 import time
 import unittest
@@ -93,15 +94,68 @@ class MaintenanceTests(buying_tests.SessionRotationFixture, unittest.TestCase):
         )
 
     def run_cycle(self, at=None):
-        with patch.object(
-            worker.time, "time", return_value=at or self.now
-        ), patch.object(
-            requests.adapters.HTTPAdapter,
-            "send",
-            autospec=True,
-            side_effect=self.native,
+        with (
+            patch.object(worker.time, "time", return_value=at or self.now),
+            patch.object(
+                requests.adapters.HTTPAdapter,
+                "send",
+                autospec=True,
+                side_effect=self.native,
+            ),
         ):
             return worker.maintain_connection()
+
+    def foreground_connection(self, at=None, **kwargs):
+        with (
+            patch.object(worker.time, "time", return_value=at or self.now),
+            patch.object(
+                requests.adapters.HTTPAdapter,
+                "send",
+                autospec=True,
+                side_effect=self.native,
+            ),
+            buyer.exclusive(),
+        ):
+            return buyer.connected_client(**kwargs)
+
+    def expire_original_identity(self):
+        native = self.native
+
+        def expired(adapter, prepared, **kwargs):
+            if prepared.url.endswith("/api/v2/users/current") and (
+                self.new_access not in prepared.headers.get("Cookie", "")
+            ):
+                self.calls.append((prepared.method, "/api/v2/users/current"))
+                return self.transport_response(
+                    prepared, {"error": "authentication_required"}, status=401
+                )
+            return native(adapter, prepared, **kwargs)
+
+        self.native = expired
+
+    def maintenance(self):
+        with closing(search_settings.connection()) as conn:
+            return dict(
+                conn.execute("SELECT * FROM vinted_buyer_maintenance").fetchone()
+            )
+
+    def failure_metadata(self):
+        with closing(search_settings.connection()) as conn:
+            return (
+                tuple(conn.execute("SELECT * FROM vinted_buyer_access").fetchone()),
+                tuple(
+                    conn.execute("SELECT * FROM vinted_connection_notice").fetchone()
+                ),
+            )
+
+    def seed_backoff(self, *, blocked=False):
+        fingerprint = hashlib.sha256(self.saved()[0]["session"]).hexdigest()
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE vinted_buyer_maintenance SET session_fingerprint=?,retry_at=?,blocked=?",
+                (fingerprint, self.now + 900, int(blocked)),
+            )
+        return fingerprint
 
     def controls(self):
         with closing(search_settings.connection()) as conn:
@@ -114,6 +168,153 @@ class MaintenanceTests(buying_tests.SessionRotationFixture, unittest.TestCase):
                 [tuple(r) for r in conn.execute("SELECT * FROM vinted_search_budgets")],
                 [tuple(r) for r in conn.execute("SELECT * FROM vinted_buy_attempts")],
             )
+
+    def test_foreground_401_observes_worker_backoff_without_replacing_failure(self):
+        self.expire_original_identity()
+        self.renew_status = 400
+        controls, seal = self.controls(), self.saved()[0]["session"]
+        self.assertEqual(self.run_cycle(), "cooldown")
+        state, metadata = self.maintenance(), self.failure_metadata()
+        self.assertEqual(state["retry_at"], self.now + 900)
+        for elapsed in (8, 9, 899):
+            with self.assertRaises(buyer.BuyerError) as failure:
+                self.foreground_connection(self.now + elapsed)
+            self.assertEqual(failure.exception.reason, "renewal_cooldown")
+            self.assertEqual(failure.exception.retry_after_seconds, 900 - elapsed)
+            self.assertEqual(self.maintenance(), state)
+            self.assertEqual(self.failure_metadata(), metadata)
+        self.assertEqual(self.saved()[0]["session"], seal)
+        self.assertEqual(self.controls(), controls)
+        self.assertEqual(self.calls.count(("POST", "/web/api/auth/refresh")), 1)
+        self.assertEqual(self.calls.count(("GET", "/")), 1)
+
+    def test_foreground_400_schedules_worker_and_next_owner_retry_at_900_seconds(self):
+        self.expire_original_identity()
+        self.renew_status = 400
+        controls = self.controls()
+        with self.assertRaises(buyer.BuyerError) as failure:
+            self.foreground_connection()
+        self.assertEqual(failure.exception.reason, "renewal_failed")
+        state = self.maintenance()
+        self.assertEqual(state["retry_at"], self.now + 900)
+        self.assertEqual(self.run_cycle(self.now + 1), "cooldown")
+        with self.assertRaises(buyer.BuyerError) as failure:
+            self.foreground_connection(self.now + 899)
+        self.assertEqual(failure.exception.reason, "renewal_cooldown")
+        self.assertEqual(self.maintenance(), state)
+        self.renew_status = 200
+        client = self.foreground_connection(self.now + 900)
+        client.session.close()
+        self.assertEqual(self.calls.count(("POST", "/web/api/auth/refresh")), 2)
+        # Accepted rotation moves the short reservation to its new saved seal.
+        self.assertEqual(self.maintenance()["retry_at"], self.now + 1200)
+        self.assertEqual(self.run_cycle(self.now + 901), "cooldown")
+        self.assertEqual(self.controls(), controls)
+
+    def test_foreground_401_does_not_clear_or_repeat_a_terminal_block(self):
+        self.expire_original_identity()
+        self.seed_backoff(blocked=True)
+        state, metadata = self.maintenance(), self.failure_metadata()
+        with self.assertRaises(buyer.BuyerError) as failure:
+            self.foreground_connection()
+        self.assertEqual(failure.exception.reason, "renewal_blocked")
+        self.assertEqual(self.calls, [("GET", "/api/v2/users/current")])
+        self.assertEqual(self.maintenance(), state)
+        self.assertEqual(self.failure_metadata(), metadata)
+
+    def test_verified_foreground_identity_stays_usable_during_backoff_or_block(self):
+        controls, seal = self.controls(), self.saved()[0]["session"]
+        for blocked in (False, True):
+            with self.subTest(blocked=blocked):
+                self.seed_backoff(blocked=blocked)
+                state = self.maintenance()
+                client = self.foreground_connection()
+                client.session.close()
+                self.assertEqual(self.maintenance(), state)
+                self.assertEqual(self.saved()[0]["session"], seal)
+                self.assertEqual(self.controls(), controls)
+        self.assertEqual(self.calls, [("GET", "/api/v2/users/current")] * 2)
+
+    def test_proactive_foreground_renewal_observes_backoff_before_bootstrap(self):
+        self.seed_backoff()
+        state = self.maintenance()
+        with self.assertRaises(buyer.BuyerError) as failure:
+            self.foreground_connection(renew_before=worker.ACCESS_MARGIN)
+        self.assertEqual(failure.exception.reason, "renewal_cooldown")
+        self.assertEqual(self.calls, [("GET", "/api/v2/users/current")])
+        self.assertEqual(self.maintenance(), state)
+
+    def test_worker_reservation_requires_its_exact_fingerprint_and_deadline(self):
+        self.expire_original_identity()
+        fingerprint = self.seed_backoff()
+        state = self.maintenance()
+        for reservation in (
+            (fingerprint, self.now + 899),
+            ("0" * 64, self.now + 900),
+        ):
+            with self.subTest(reservation=reservation):
+                with self.assertRaises(buyer.BuyerError) as failure:
+                    self.foreground_connection(_renewal_reservation=reservation)
+                self.assertEqual(failure.exception.reason, "renewal_cooldown")
+                self.assertEqual(self.maintenance(), state)
+        self.seed_backoff(blocked=True)
+        with self.assertRaises(buyer.BuyerError) as failure:
+            self.foreground_connection(
+                _renewal_reservation=(fingerprint, self.now + 900)
+            )
+        self.assertEqual(failure.exception.reason, "renewal_blocked")
+        self.assertEqual(self.calls, [("GET", "/api/v2/users/current")] * 3)
+
+    def test_owner_replacement_cannot_inherit_old_session_backoff(self):
+        self.expire_original_identity()
+        for blocked in (False, True):
+            with self.subTest(blocked=blocked):
+                old_fingerprint = self.seed_backoff(blocked=blocked)
+                self.replacement_session()
+                client = self.foreground_connection()
+                client.session.close()
+                self.assertNotEqual(
+                    self.maintenance()["session_fingerprint"], old_fingerprint
+                )
+                self.assertEqual(self.maintenance()["blocked"], 0)
+        self.assertEqual(self.calls.count(("POST", "/web/api/auth/refresh")), 2)
+
+    def test_foreground_failure_cannot_defer_a_replacement_during_renewal(self):
+        self.expire_original_identity()
+        native = self.native
+        replacement = []
+
+        def replace(adapter, prepared, **kwargs):
+            if prepared.url.endswith("/web/api/auth/refresh"):
+                self.replacement_session()
+                replacement.append(self.saved()[0]["session"])
+            return native(adapter, prepared, **kwargs)
+
+        self.native = replace
+        self.renew_status = 400
+        with self.assertRaises(buyer.BuyerError) as failure:
+            self.foreground_connection()
+        self.assertEqual(failure.exception.reason, "renewal_failed")
+        self.assertIsNone(failure.exception.session_fingerprint)
+        self.assertEqual(self.saved()[0]["session"], replacement[0])
+        self.assertNotEqual(
+            self.maintenance()["session_fingerprint"],
+            hashlib.sha256(replacement[0]).hexdigest(),
+        )
+
+    def test_backoff_storage_error_is_sanitised_and_does_not_replace_auth_failure(self):
+        fingerprint = self.seed_backoff()
+        error = buyer.BuyerError(
+            "Offline refusal", 400, reason="renewal_failed", stage="renewal"
+        )
+        with (
+            patch.object(worker, "connection", side_effect=sqlite3.Error("private")),
+            self.assertLogs(worker.logger, level="WARNING") as logs,
+        ):
+            self.assertFalse(
+                worker.record_renewal_result(error, session_fingerprint=fingerprint)
+            )
+        self.assertNotIn("private", " ".join(logs.output))
 
     def test_due_connection_renews_once_and_keeps_purchase_controls(self):
         before = self.controls()
@@ -335,12 +536,15 @@ class MaintenanceTests(buying_tests.SessionRotationFixture, unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_successful_connection_cannot_apply_its_cooldown_to_a_replacement(self):
-        original_fingerprint = hashlib.sha256(self.saved()[0]["session"]).hexdigest()
         connected = buyer.connected_client
         replacement = []
+        accepted_fingerprint = []
 
         def replaced_after_connection(**kwargs):
             client = connected(**kwargs)
+            accepted_fingerprint.append(
+                hashlib.sha256(client._verified_session[1]).hexdigest()
+            )
             replacement.append(self.replacement_session())
             return client
 
@@ -351,7 +555,10 @@ class MaintenanceTests(buying_tests.SessionRotationFixture, unittest.TestCase):
         self.assertEqual(self.saved()[0]["session"], replacement[0])
         self.assertEqual(
             self.maintenance_state(),
-            (1, original_fingerprint, self.now + worker.RETRY_DELAY, 0),
+            (1, accepted_fingerprint[0], self.now + worker.RETRY_DELAY, 0),
+        )
+        self.assertNotEqual(
+            accepted_fingerprint[0], hashlib.sha256(replacement[0]).hexdigest()
         )
         self.assertEqual(self.run_cycle(), "fresh")
         self.assertEqual(len(self.calls), 4)
@@ -379,13 +586,12 @@ class MaintenanceTests(buying_tests.SessionRotationFixture, unittest.TestCase):
             events.append("sleep")
             raise asyncio.CancelledError
 
-        with patch.object(
-            worker.asyncio, "to_thread", side_effect=thread_call
-        ), patch.object(worker.asyncio, "sleep", side_effect=sleep), self.assertRaises(
-            asyncio.CancelledError
-        ), self.assertLogs(
-            "vinted_session_worker", level="INFO"
-        ) as logs:
+        with (
+            patch.object(worker.asyncio, "to_thread", side_effect=thread_call),
+            patch.object(worker.asyncio, "sleep", side_effect=sleep),
+            self.assertRaises(asyncio.CancelledError),
+            self.assertLogs("vinted_session_worker", level="INFO") as logs,
+        ):
             asyncio.run(worker.run())
         self.assertEqual(events, ["verified", "sleep"])
         self.assertEqual(len(self.calls), 4)
@@ -555,8 +761,9 @@ class MaintenanceTests(buying_tests.SessionRotationFixture, unittest.TestCase):
         thread.start()
         self.assertTrue(entered.wait(1))
         try:
-            with self.assertRaises(buyer.BuyerError) as error, buyer.exclusive(
-                wait_seconds=0.01
+            with (
+                self.assertRaises(buyer.BuyerError) as error,
+                buyer.exclusive(wait_seconds=0.01),
             ):
                 self.fail("Maintenance still holds the buyer lock")
             self.assertEqual(error.exception.reason, "busy")
@@ -591,8 +798,14 @@ class MaintenanceTests(buying_tests.SessionRotationFixture, unittest.TestCase):
                 )
             return original(adapter, prepared, **kwargs)
 
-        with patch.object(worker.time, "time", return_value=self.now), patch.object(
-            requests.adapters.HTTPAdapter, "send", autospec=True, side_effect=rotated
+        with (
+            patch.object(worker.time, "time", return_value=self.now),
+            patch.object(
+                requests.adapters.HTTPAdapter,
+                "send",
+                autospec=True,
+                side_effect=rotated,
+            ),
         ):
             self.assertEqual(worker.maintain_connection(), "verified")
         self.assertEqual(len(self.calls), 1)

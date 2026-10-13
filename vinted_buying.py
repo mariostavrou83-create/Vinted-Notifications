@@ -2034,6 +2034,8 @@ def feedback_buttons(row, feedback=None):
             "disabled": "Autobuy is off · details",
             "not_connected": "Buyer not connected · details",
             "renewal_failed": "Session renewal needs checking · details",
+            "renewal_cooldown": "Session renewal cooling down · details",
+            "renewal_blocked": "Session renewal paused · details",
             "refresh_rejected": "Buyer session needs reconnecting · details",
             "search_inactive": "Search is inactive · details",
             "item_sold": "Already sold · details",

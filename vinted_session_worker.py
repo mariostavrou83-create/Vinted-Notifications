@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import logging
 import math
+import sqlite3
 import time
 from contextlib import closing
 
@@ -160,6 +161,116 @@ def _ambiguous_renewal_failure(error):
     )
 
 
+def renewal_failure_policy(error):
+    """Keep foreground and maintenance renewal failures on the same backoff."""
+    transient = (
+        error.reason in ("network", "rate_limited")
+        or (isinstance(error.status, int) and error.status >= 500)
+        or _ambiguous_renewal_failure(error)
+    )
+    delay = (
+        AMBIGUOUS_RENEWAL_DELAY
+        if error.reason == "rate_limited" or _ambiguous_renewal_failure(error)
+        else RETRY_DELAY
+    )
+    return not transient, delay
+
+
+def reserve_renewal(client, *, reservation=None):
+    """Caller holds the buyer lock; admit one renewal of its exact saved seal.
+
+    A successful identity read is still allowed during backoff. Only the
+    renewal path consumes this reservation, before public bootstrap or a paid
+    solver. Maintenance may consume its own exact prior reservation once;
+    a different seal, deadline or terminal block cannot use that allowance.
+    """
+    reference = client._verified_session or client._loaded_session_reference
+    if reference is None:
+        raise buyer.BuyerError(
+            buyer.AUTH_REASONS["saved_session"],
+            reason="saved_session",
+            stage="saved_session",
+        )
+    user_id, sealed, _ = reference
+    fingerprint = hashlib.sha256(sealed).hexdigest()
+    now = time.time()
+    with closing(connection()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute(
+            "SELECT session,user_id FROM vinted_buyer WHERE id=1"
+        ).fetchone()
+        if not current or current[0] != sealed or current[1] != user_id:
+            raise buyer.BuyerError(
+                buyer.AUTH_REASONS["saved_session"],
+                reason="saved_session",
+                stage="saved_session",
+            )
+        state = conn.execute(
+            "SELECT * FROM vinted_buyer_maintenance WHERE id=1"
+        ).fetchone()
+        if state["session_fingerprint"] == fingerprint:
+            if state["blocked"]:
+                logger.info("Vinted renewal admission: result=blocked")
+                raise buyer.BuyerError(
+                    buyer.AUTH_REASONS["renewal_blocked"],
+                    reason="renewal_blocked",
+                    stage="renewal",
+                )
+            if state["retry_at"] > now and reservation != (
+                fingerprint,
+                state["retry_at"],
+            ):
+                error = buyer.BuyerError(
+                    buyer.AUTH_REASONS["renewal_cooldown"],
+                    reason="renewal_cooldown",
+                    stage="renewal",
+                )
+                error.retry_after_seconds = math.ceil(state["retry_at"] - now)
+                logger.info(
+                    "Vinted renewal admission: result=cooldown retry_after_seconds=%s",
+                    error.retry_after_seconds,
+                )
+                raise error
+        conn.execute(
+            "UPDATE vinted_buyer_maintenance SET session_fingerprint=?,retry_at=?,blocked=0 WHERE id=1",
+            (fingerprint, now + RETRY_DELAY),
+        )
+
+
+def record_renewal_result(error, *, session_fingerprint):
+    """Caller holds the buyer lock; None completes one accepted renewal cycle."""
+    if (
+        (error is not None and error.reason in ("renewal_cooldown", "renewal_blocked"))
+        or not isinstance(session_fingerprint, str)
+        or len(session_fingerprint) != 64
+        or any(char not in "0123456789abcdef" for char in session_fingerprint)
+    ):
+        return False
+    blocked, delay = (
+        renewal_failure_policy(error) if error is not None else (False, RETRY_DELAY)
+    )
+    try:
+        with closing(connection()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT session FROM vinted_buyer WHERE id=1"
+            ).fetchone()
+            if (
+                not current
+                or not current[0]
+                or hashlib.sha256(current[0]).hexdigest() != session_fingerprint
+            ):
+                return False
+            conn.execute(
+                "UPDATE vinted_buyer_maintenance SET session_fingerprint=?,retry_at=?,blocked=? WHERE id=1",
+                (session_fingerprint, time.time() + delay, int(blocked)),
+            )
+    except (sqlite3.Error, OSError) as exc:
+        logger.warning("Vinted renewal backoff unavailable: %s", type(exc).__name__)
+        return False
+    return True
+
+
 def note_ambiguous_failure(error, *, session_fingerprint):
     """Adopt one freshly observed failure without clearing a newer session.
 
@@ -253,8 +364,12 @@ def maintain_connection():
             outcome = "verified"
             delay = RETRY_DELAY
             result_fingerprint = None
+            local_gate = False
             try:
-                client = buyer.connected_client(renew_before=ACCESS_MARGIN)
+                client = buyer.connected_client(
+                    renew_before=ACCESS_MARGIN,
+                    _renewal_reservation=(fingerprint, now + RETRY_DELAY),
+                )
                 # A successful connection can advance the saved seal more than
                 # once. Attribute maintenance only to its final verified seal.
                 reference = client._verified_session
@@ -264,15 +379,13 @@ def maintain_connection():
                 # connected_client binds this to its last known saved seal, or
                 # None if another connection superseded it during the request.
                 result_fingerprint = getattr(exc, "session_fingerprint", fingerprint)
-                transient = (
-                    exc.reason in ("network", "rate_limited")
-                    or (isinstance(exc.status, int) and exc.status >= 500)
-                    or _ambiguous_renewal_failure(exc)
-                )
-                blocked = not transient
+                blocked, delay = renewal_failure_policy(exc)
                 outcome = "blocked" if blocked else "cooldown"
-                if exc.reason == "rate_limited" or _ambiguous_renewal_failure(exc):
-                    delay = AMBIGUOUS_RENEWAL_DELAY
+                if exc.reason in ("renewal_cooldown", "renewal_blocked"):
+                    local_gate = True
+                    outcome = (
+                        "blocked" if exc.reason == "renewal_blocked" else "cooldown"
+                    )
                 logger.info(
                     "Vinted session maintenance: result=%s stage=%s reason=%s http=%s",
                     outcome,
@@ -282,7 +395,8 @@ def maintain_connection():
                 )
                 from vinted_connection_notices import record_failure
 
-                record_failure(exc, result_fingerprint)
+                if exc.reason not in ("renewal_cooldown", "renewal_blocked"):
+                    record_failure(exc, result_fingerprint)
             finally:
                 if client:
                     client.session.close()
@@ -297,10 +411,11 @@ def maintain_connection():
                         and current[1] == row[2]
                         and hashlib.sha256(current[0]).hexdigest() == result_fingerprint
                     ):
-                        conn.execute(
-                            "UPDATE vinted_buyer_maintenance SET session_fingerprint=?,retry_at=?,blocked=? WHERE id=1",
-                            (result_fingerprint, now + delay, int(blocked)),
-                        )
+                        if not local_gate:
+                            conn.execute(
+                                "UPDATE vinted_buyer_maintenance SET session_fingerprint=?,retry_at=?,blocked=? WHERE id=1",
+                                (result_fingerprint, time.time() + delay, int(blocked)),
+                            )
                     else:
                         # Keep the original reservation on its original seal.
                         # Its failure must not block a replacement connection.

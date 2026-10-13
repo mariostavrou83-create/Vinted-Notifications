@@ -2444,6 +2444,13 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
             ("redirect", 307, False),
             ("forbidden", 403, False),
         ]:
+            # These are independent upstream classification cases. A mocked
+            # successful renewal leaves this fixture's credentials unchanged;
+            # do not carry its real saved-session reservation into the next case.
+            with closing(search_settings.connection()) as conn, conn:
+                conn.execute(
+                    "UPDATE vinted_buyer_maintenance SET session_fingerprint=NULL,retry_at=0,blocked=0"
+                )
             client = Mock()
             client._verified_session = None
             client._loaded_session_reference = None
