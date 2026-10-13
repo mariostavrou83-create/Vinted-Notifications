@@ -120,9 +120,10 @@ class LinkParserTests(unittest.TestCase):
 
     def test_public_mode_does_not_drop_api_aspects(self):
         import ebay_public
+        from ebay_public_filters import same_remote_filters
 
-        with self.assertRaisesRegex(ebay_monitor.EbayError, "Browse API"):
-            ebay_public.search_url(links.parse_link(LINK))
+        config = links.parse_link(LINK)
+        self.assertTrue(same_remote_filters(config, ebay_public.search_url(config)))
 
 
 class LinkDashboardTests(EbayFixture, unittest.TestCase):

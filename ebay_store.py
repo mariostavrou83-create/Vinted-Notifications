@@ -538,7 +538,7 @@ def reserve_call(config, now, *, diagnostic=False, media=False):
                 "SELECT value FROM delivery_runtime WHERE key='ebay_public_last_call'"
             ).fetchone()
             cooldown = conn.execute(
-                "SELECT value FROM delivery_runtime WHERE key='ebay_api_cooldown'"
+                "SELECT value FROM delivery_runtime WHERE key='ebay_public_cooldown'"
             ).fetchone()
             due = max(
                 (latest[0] if latest else 0) + call_spacing(config),

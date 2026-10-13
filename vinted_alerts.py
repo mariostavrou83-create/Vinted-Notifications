@@ -154,7 +154,15 @@ def snapshot(item, search):
         "brand": (getattr(item, "brand_title", None) or "Not specified")[:120],
         "photos": alert_images.photo_urls(item),
         "guide": "\n".join(guide),
-        "reminder": escape((search.get("reminder") or "")[:800]),
+        "reminder": escape(
+            (search.get("reminder") or "")[
+                : (
+                    dashboard_store.SHARED_NOTES_LIMIT
+                    if search.get("shared_alert_version") == 1
+                    else 800
+                )
+            ]
+        ),
         "budget": vinted_budget.estimate(item, search, display=True),
         "description": clean_description(raw_description),
         "description_pending": True,
