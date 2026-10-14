@@ -140,6 +140,79 @@ class Fixture:
 
 
 class SnapshotTests(Fixture, unittest.TestCase):
+    def reference_pages(self):
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute(
+                "CREATE TABLE dashboard_reference_pages(reference_id TEXT,page INTEGER,media_id TEXT)"
+            )
+            conn.execute("INSERT INTO dashboard_media VALUES ('extra-photo',x'040506')")
+            conn.execute(
+                "INSERT INTO dashboard_reference_pages VALUES ('photo',1,'extra-photo')"
+            )
+
+    def test_additional_reference_page_is_verified_and_compared(self):
+        self.reference_pages()
+        result = recovery.verify_snapshot(
+            self.encrypted(), self.directory, live_database=self.database
+        )
+        self.assertTrue(result["photo_references_match_live"])
+        encrypted = self.encrypted()
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute("INSERT INTO dashboard_media VALUES ('replaced-photo',x'07')")
+            conn.execute(
+                "UPDATE dashboard_reference_pages SET media_id='replaced-photo'"
+            )
+        result = recovery.verify_snapshot(
+            encrypted, self.directory, live_database=self.database
+        )
+        self.assertFalse(result["photo_references_match_live"])
+
+    def test_missing_additional_reference_page_schema_does_not_match_live(self):
+        encrypted = self.encrypted()
+        self.reference_pages()
+        result = recovery.verify_snapshot(
+            encrypted, self.directory, live_database=self.database
+        )
+        self.assertFalse(result["photo_references_match_live"])
+
+    def test_orphan_or_empty_additional_reference_page_is_rejected(self):
+        self.reference_pages()
+        for problem in (
+            "missing child",
+            "missing parent",
+            "empty child",
+            "bad page",
+            "null page",
+        ):
+            with closing(sqlite3.connect(self.database)) as conn, conn:
+                conn.execute(
+                    "UPDATE dashboard_reference_pages SET reference_id='photo',page=1,media_id='extra-photo'"
+                )
+                conn.execute(
+                    "UPDATE dashboard_media SET image=x'040506' WHERE id='extra-photo'"
+                )
+                if problem == "missing child":
+                    conn.execute(
+                        "UPDATE dashboard_reference_pages SET media_id='absent'"
+                    )
+                elif problem == "missing parent":
+                    conn.execute(
+                        "UPDATE dashboard_reference_pages SET reference_id='absent'"
+                    )
+                elif problem == "empty child":
+                    conn.execute(
+                        "UPDATE dashboard_media SET image=x'' WHERE id='extra-photo'"
+                    )
+                elif problem == "bad page":
+                    conn.execute("UPDATE dashboard_reference_pages SET page=2")
+                else:
+                    conn.execute("UPDATE dashboard_reference_pages SET page=NULL")
+            with self.subTest(problem=problem), self.assertRaises(
+                recovery.RecoveryError
+            ) as error:
+                recovery.verify_snapshot(self.encrypted(), self.directory)
+            self.assertEqual(error.exception.stage, "example_photo_references")
+
     def verify_live(self, encrypted=None):
         return recovery.verify_snapshot(
             self.encrypted() if encrypted is None else encrypted,

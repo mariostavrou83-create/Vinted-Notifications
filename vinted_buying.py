@@ -2218,7 +2218,7 @@ async def show_alert_feedback(bot, message, outcome):
             **photo_cards.TIMEOUTS,
         )
         try:
-            if card.get("listing_file_id") or card.get("example_file_id"):
+            if photo_cards.has_photo(card, details):
                 await bot.edit_message_caption(
                     **kwargs, caption=caption, show_caption_above_media=True
                 )

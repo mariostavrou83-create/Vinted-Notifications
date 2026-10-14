@@ -36,6 +36,7 @@ if (searchList) {
 const photoInput = document.querySelector('#photo');
 if (photoInput) {
   let newPhotos = [], selection = 0, collageUrl;
+  const maxPhotos = 8;
   const saved = [...document.querySelectorAll('[data-saved-photo]')];
   const kept = () => saved.filter(slot => !slot.querySelector('input').checked);
   const syncFiles = () => {
@@ -60,13 +61,15 @@ if (photoInput) {
     saved.forEach(slot => slot.classList.toggle('marked-remove', slot.querySelector('input').checked));
     const urls = [...kept().map(slot => slot.querySelector('img').src), ...newPhotos.map(entry => entry.url)];
     const count = urls.length;
-    document.querySelector('#photo-count').textContent = `${count} of 4 photos after saving. ${Math.max(0, 4-count)} spaces available.`;
-    photoInput.setCustomValidity(count > 4 ? 'Remove a photo to keep four in total.' : '');
+    document.querySelector('#photo-count').textContent = `${count} of ${maxPhotos} photos after saving. ${Math.max(0, maxPhotos-count)} spaces available.`;
+    photoInput.setCustomValidity(count > maxPhotos ? 'Remove a photo to keep eight in total.' : '');
     const preview = document.querySelector('#photo-preview'), placeholder = document.querySelector('#upload-placeholder');
     if (!count) { preview.hidden = true; placeholder.hidden = false; return; }
-    if (count > 4) return;
+    if (count > maxPhotos) return;
     try {
-      const images = await Promise.all(urls.map(url => new Promise((resolve, reject) => {
+      // Telegram shows four reference photos at a time. Keep this preview
+      // on the initial page while every original remains visible below.
+      const images = await Promise.all(urls.slice(0, 4).map(url => new Promise((resolve, reject) => {
         const image = new Image(); image.onload = () => resolve(image); image.onerror = reject; image.src = url;
       })));
       if (current !== selection) return;
@@ -78,7 +81,7 @@ if (photoInput) {
         4: [[0,0,320,320],[320,0,320,320],[0,320,320,320],[320,320,320,320]]
       };
       images.forEach((image, i) => {
-        const [x,y,w,h] = layouts[count][i], scale = Math.min((w-6)/image.width, (h-6)/image.height);
+        const [x,y,w,h] = layouts[images.length][i], scale = Math.min((w-6)/image.width, (h-6)/image.height);
         const width = image.width*scale, height = image.height*scale;
         context.drawImage(image, x+(w-width)/2, y+(h-height)/2, width, height);
       });
@@ -91,8 +94,8 @@ if (photoInput) {
   }
   photoInput.addEventListener('change', () => {
     const files = [...photoInput.files];
-    if (kept().length + newPhotos.length + files.length > 4 || files.some(file => file.size > 8*1024*1024)) {
-      alert('Keep up to four photos in total, each smaller than 8 MB. Remove a saved or new photo to make room.');
+    if (kept().length + newPhotos.length + files.length > maxPhotos || files.some(file => file.size > 8*1024*1024)) {
+      alert('Keep up to eight photos in total, each smaller than 8 MB. Remove a saved or new photo to make room.');
       syncFiles(); return;
     }
     newPhotos.push(...files.map(file => ({file, url:URL.createObjectURL(file)})));

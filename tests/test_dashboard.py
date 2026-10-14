@@ -408,7 +408,7 @@ class ReferencePhotoTransactionTests(DatabaseFixture, unittest.TestCase):
             store.save_search(1, form, photos=[b"invalid image"])
         self.assertEqual(self.database_state(), before)
         with self.assertRaises(ValueError):
-            store.save_search(1, form, photos=[self.photo] * 4)
+            store.save_search(1, form, photos=[self.photo] * 8)
         self.assertEqual(self.database_state(), before)
         invalid = dict(form, remove_reference=["3"])
         with self.assertRaises(ValueError):
@@ -430,7 +430,7 @@ class ReferencePhotoTransactionTests(DatabaseFixture, unittest.TestCase):
     def test_noop_photo_save_skips_collage_and_preserves_photo_bytes_and_order(self):
         import alert_images
 
-        store.save_search(1, self.form(), photos=[self.photo] * 4)
+        store.save_search(1, self.form(), photos=[self.photo] * 8)
         references = store.reference_photos(1)
         media = self.database_state()["dashboard_media"]
         with patch.object(alert_images, "collage") as collage:

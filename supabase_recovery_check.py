@@ -117,6 +117,28 @@ def _search_definitions_match(snapshot, live):
     return True
 
 
+def _reference_pages_match(snapshot, live):
+    """Include the immutable extra collage in photo recovery comparisons."""
+    columns = [
+        database.execute('PRAGMA table_info("dashboard_reference_pages")').fetchall()
+        for database in (snapshot, live)
+    ]
+    if [row[1] for row in columns[0]] != [row[1] for row in columns[1]]:
+        return False
+    if not columns[0]:
+        return True  # Both copies predate paginated references.
+    return (
+        snapshot.execute(
+            "SELECT reference_id,page,media_id FROM dashboard_reference_pages "
+            "ORDER BY reference_id,page"
+        ).fetchall()
+        == live.execute(
+            "SELECT reference_id,page,media_id FROM dashboard_reference_pages "
+            "ORDER BY reference_id,page"
+        ).fetchall()
+    )
+
+
 def verify_snapshot(encrypted, directory, *, live_database=None, expected_searches=44):
     """Read an isolated copy; None binds counts and definitions to live settings.
 
@@ -217,6 +239,16 @@ def verify_snapshot(encrypted, directory, *, live_database=None, expected_search
                 ).fetchone()[0]
                 if not counts["example_photos"] or invalid_refs:
                     raise RecoveryError(stage)
+                if "dashboard_reference_pages" in tables:
+                    invalid_pages = conn.execute(
+                        "SELECT COUNT(*) FROM dashboard_reference_pages p "
+                        "LEFT JOIN dashboard_media parent ON parent.id=p.reference_id "
+                        "LEFT JOIN dashboard_media child ON child.id=p.media_id "
+                        "WHERE p.page IS NOT 1 OR parent.id IS NULL OR child.id IS NULL "
+                        "OR length(parent.image)=0 OR length(child.image)=0"
+                    ).fetchone()[0]
+                    if invalid_pages:
+                        raise RecoveryError(stage)
                 stage = "excluded_dashboard_sessions"
                 if counts["web_sessions"]:
                     raise RecoveryError(stage)
@@ -288,7 +320,7 @@ def verify_snapshot(encrypted, directory, *, live_database=None, expected_search
                             == live.execute(
                                 "SELECT * FROM search_reference_photos ORDER BY query_id,position"
                             ).fetchall()
-                        )
+                        ) and _reference_pages_match(conn, live)
         return {
             "outcome": "verified",
             "integrity": "ok",

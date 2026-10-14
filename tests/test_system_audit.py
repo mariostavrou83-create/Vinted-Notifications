@@ -381,7 +381,7 @@ class ContentionTests(DatabaseFixture, unittest.TestCase):
             )
         self.assertLessEqual(results.count(None), 1)
 
-    def test_production_upload_limit_matches_four_photo_form(self):
+    def test_production_upload_limit_matches_eight_photo_form(self):
         from web_ui_plugin.web_ui import create_app, web_ui_process
 
         app = create_app({"TESTING": True})
@@ -394,7 +394,7 @@ class ContentionTests(DatabaseFixture, unittest.TestCase):
             app.config["MAX_CONTENT_LENGTH"],
         )
         self.assertGreater(
-            serve.call_args.kwargs["max_request_body_size"], 4 * 8 * 1024 * 1024
+            serve.call_args.kwargs["max_request_body_size"], 8 * 8 * 1024 * 1024
         )
 
 

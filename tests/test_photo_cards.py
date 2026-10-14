@@ -43,6 +43,7 @@ def query(data="card:examples", chat_id=123):
     return SimpleNamespace(
         data=data,
         answer=AsyncMock(),
+        from_user=SimpleNamespace(id=chat_id),
         message=SimpleNamespace(message_id=42, chat=SimpleNamespace(id=chat_id)),
     )
 

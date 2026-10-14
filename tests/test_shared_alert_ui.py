@@ -186,6 +186,70 @@ class SharedBrowserInitialization(unittest.TestCase):
     @unittest.skipUnless(
         shutil.which("node"), "Node is required for browser-script checks"
     )
+    def test_eight_uploads_keep_order_preview_first_four_and_reject_ninth(self):
+        harness = r"""
+const fs = require('fs'), assert = require('assert');
+function element() {
+  return {children:[], events:{}, hidden:false, textContent:'', files:[],
+    addEventListener(type, handler) {this.events[type]=handler;},
+    setCustomValidity(value) {this.validity=value;},
+    replaceChildren() {this.children=[];},
+    append(...children) {this.children.push(...children);}};
+}
+const input=element(), slots=element(), count=element(), preview=element(), empty=element();
+const elements={'#photo':input,'#new-reference-slots':slots,'#photo-count':count,
+  '#photo-preview':preview,'#upload-placeholder':empty};
+const draws=[], alerts=[];
+const document={querySelector(selector) {return elements[selector] || null;},
+  querySelectorAll() {return [];}, createElement(tag) {
+    if (tag==='canvas') return {getContext() {return {fillRect() {},
+      drawImage(image) {draws.push(image.src);}};}, toBlob(done) {done({});}};
+    return element();
+  }};
+class Transfer {
+  constructor() {this.values=[]; this.items={add:file=>this.values.push(file)};}
+  get files() {return this.values;}
+}
+class Picture {
+  constructor() {this.width=160; this.height=240;}
+  set src(value) {this._src=value; queueMicrotask(()=>this.onload());}
+  get src() {return this._src;}
+}
+const urls={createObjectURL(file) {return file.name || 'collage';}, revokeObjectURL() {}};
+new Function('document','DataTransfer','URL','Image','alert',
+  fs.readFileSync(process.argv[1],'utf8'))(document,Transfer,urls,Picture,message=>alerts.push(message));
+const settle=()=>new Promise(resolve=>setImmediate(resolve));
+(async()=>{
+  input.files=Array.from({length:8},(_,i)=>({name:'photo'+i,size:100}));
+  input.events.change(); await settle();
+  assert.equal(slots.children.length,8);
+  assert(count.textContent.startsWith('8 of 8 photos'));
+  assert.equal(input.validity,'');
+  assert.deepEqual(draws,['photo0','photo1','photo2','photo3']);
+  assert.deepEqual(input.files.map(file=>file.name),Array.from({length:8},(_,i)=>'photo'+i));
+  input.files=[{name:'ninth',size:100}]; input.events.change(); await settle();
+  assert.equal(alerts.length,1); assert(alerts[0].includes('eight'));
+  assert.equal(input.files.length,8); assert.equal(slots.children.length,8);
+  draws.length=0;
+  slots.children[0].children[1].events.click(); await settle();
+  assert.equal(input.files.length,7);
+  assert.equal(slots.children.length,7);
+  assert.deepEqual(draws,['photo1','photo2','photo3','photo4']);
+  assert(count.textContent.startsWith('7 of 8 photos'));
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""
+        result = subprocess.run(
+            ["node", "-e", harness, str(ROOT / "web_ui_plugin/static/msj.js")],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(
+        shutil.which("node"), "Node is required for browser-script checks"
+    )
     def test_new_form_initializes_without_removed_legacy_elements(self):
         harness = r"""
 const fs = require('fs');

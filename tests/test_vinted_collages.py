@@ -99,7 +99,7 @@ class UploadTests(DatabaseFixture, unittest.TestCase):
         before = [r[:3] for r in db.get_queries()]
         self.assertEqual(self.add_photos().status_code, 302)
         first = store.reference_photos(1)[0]["media_id"]
-        for count in (2, 3, 4):
+        for count in range(2, 9):
             self.assertEqual(self.add_photos().status_code, 302)
             slots = store.reference_photos(1)
             self.assertEqual(len(slots), count)
@@ -109,12 +109,13 @@ class UploadTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(settings.get_search(1), original_row)
         # Make room and append in one atomic save, retaining the other originals.
         self.assertEqual(self.add_photos(remove_reference=["1", "2"]).status_code, 302)
-        self.assertEqual(len(store.reference_photos(1)), 3)
+        self.assertEqual(len(store.reference_photos(1)), 7)
         self.assertEqual(store.reference_photos(1)[0]["media_id"], first)
         self.assertEqual([r[:3] for r in db.get_queries()], before)
         self.assertEqual(settings.get_search(1)["rebaseline"], 0)
         self.assertEqual(
-            self.add_photos(0, remove_reference=["0", "1", "2"]).status_code, 302
+            self.add_photos(0, remove_reference=list(map(str, range(7)))).status_code,
+            302,
         )
         self.assertEqual(store.reference_photos(1), [])
         self.assertIsNone(settings.get_search(1)["reference_id"])
@@ -159,7 +160,7 @@ class UploadTests(DatabaseFixture, unittest.TestCase):
         self.owner()
         before = db.get_queries()
         form = self.form(
-            photo=[(io.BytesIO(photo_bytes()), f"{i}.png") for i in range(4)]
+            photo=[(io.BytesIO(photo_bytes()), f"{i}.png") for i in range(8)]
         )
         self.assertEqual(self.client.post("/search/1", data=form).status_code, 302)
         row = settings.get_search(1)
@@ -170,7 +171,7 @@ class UploadTests(DatabaseFixture, unittest.TestCase):
         ) as image:
             self.assertEqual(image.size, (1280, 1280))
         invalid = self.form(
-            photo=[(io.BytesIO(photo_bytes()), f"{i}.png") for i in range(5)],
+            photo=[(io.BytesIO(photo_bytes()), f"{i}.png") for i in range(9)],
         )
         invalid["revision"] = str(row["revision"])
         self.assertEqual(self.client.post("/search/1", data=invalid).status_code, 200)

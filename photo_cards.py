@@ -243,6 +243,42 @@ def _captions(row, details, limit):
     )
 
 
+def snapshot_references(row, details):
+    """Bind controls to the immutable saved set, never the search's later photos."""
+    if "reference_page_ids" not in details:
+        reference_id = row.get("reference_id")
+        references = (
+            dashboard_store.get_reference_pages(reference_id) if reference_id else []
+        )
+        details["reference_page_ids"] = [photo["id"] for photo in references[:2]]
+    return details
+
+
+def reference_page_ids(row, details):
+    saved = details.get("reference_page_ids")
+    if isinstance(saved, list):
+        return [value for value in saved[:2] if isinstance(value, str) and value]
+    # Existing one-page cards stay usable without a new database read.
+    return [row["reference_id"]] if row.get("reference_id") else []
+
+
+def reference_page_index(view, details):
+    if view == "examples:1":
+        return 1
+    if view.startswith("notes:"):
+        return int(details.get("active_reference_page", 0) == 1)
+    return 0
+
+
+def has_photo(card, details):
+    """A successful edit can lack a new file ID after an accepted-response timeout."""
+    return bool(
+        card.get("listing_file_id")
+        or card.get("example_file_id")
+        or details.get("reference_photo_present")
+    )
+
+
 def markup(row, details, *, view="listing", note_page=None):
     marketplace = "eBay" if details.get("platform") == "ebay" else "Vinted"
     buttons = [
@@ -252,6 +288,20 @@ def markup(row, details, *, view="listing", note_page=None):
         from vinted_buying import feedback_buttons
 
         buttons.extend(feedback_buttons(row, details.get("buy_feedback")))
+    if len(reference_page_ids(row, details)) > 1:
+        initial = reference_page_index(view, details) == 1
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    (
+                        "Show initial reference pictures"
+                        if initial
+                        else "Show additional reference pictures"
+                    ),
+                    callback_data=f"card:references:{0 if initial else 1}",
+                )
+            ]
+        )
     if row.get("reference_id"):
         buttons.append(
             [
@@ -320,6 +370,7 @@ def record(row, details, result):
     platform = details.get("platform", "vinted")
     file_id = result.photo[-1].file_id if getattr(result, "photo", None) else None
     details = dict(details)
+    snapshot_references(row, details)
     if file_id:
         details["rendered_listing_photos"] = details.get("photos", [])[:4]
     try:
@@ -357,7 +408,16 @@ def record(row, details, result):
     return True
 
 
-def after_edit(platform, message_id, *, view, file_id=None, listing_photos=None):
+def after_edit(
+    platform,
+    message_id,
+    *,
+    view,
+    file_id=None,
+    listing_photos=None,
+    reference_id=None,
+    reference_ids=None,
+):
     with closing(connection()) as conn, conn:
         if not conn.execute(
             "SELECT 1 FROM telegram_photo_cards WHERE platform=? AND message_id=?",
@@ -373,18 +433,35 @@ def after_edit(platform, message_id, *, view, file_id=None, listing_photos=None)
             (view, platform, message_id),
         )
         if file_id:
-            column = "example_file_id" if view == "examples" else "listing_file_id"
+            column = (
+                "example_file_id"
+                if view in ("examples", "examples:1")
+                else "listing_file_id"
+            )
             conn.execute(
                 f"UPDATE telegram_photo_cards SET {column}=? WHERE platform=? AND message_id=?",
                 (file_id, platform, message_id),
             )
-        if listing_photos is not None:
+        if listing_photos is not None or reference_ids is not None or reference_id:
             saved = conn.execute(
                 "SELECT details FROM telegram_photo_cards WHERE platform=? AND message_id=?",
                 (platform, message_id),
             ).fetchone()
             details = json.loads(saved[0])
-            details["rendered_listing_photos"] = listing_photos[:4]
+            if listing_photos is not None:
+                details["rendered_listing_photos"] = listing_photos[:4]
+                if view == "listing":
+                    details["active_reference_page"] = 0
+            if reference_ids is not None:
+                details["reference_page_ids"] = reference_ids
+            if reference_id:
+                details["active_reference_page"] = 1 if view == "examples:1" else 0
+                details["reference_photo_present"] = True
+                if file_id:
+                    details["example_file_id_page"] = details["active_reference_page"]
+                    cached = dict(details.get("reference_file_ids") or {})
+                    cached[reference_id] = file_id
+                    details["reference_file_ids"] = cached
             conn.execute(
                 "UPDATE telegram_photo_cards SET details=? WHERE platform=? AND message_id=?",
                 (json.dumps(details), platform, message_id),
@@ -401,6 +478,7 @@ async def listing_photo(details):
 
 
 async def send_initial(bot, chat_id, row, details, before_send, *, require_photo=False):
+    details = snapshot_references(row, dict(details))
     if details.get("platform") == "ebay":
         from ebay_images import resolve
 
@@ -541,7 +619,7 @@ async def enrich(bot, chat_id, row, details, before_edit):
                 **TIMEOUTS,
             )
             try:
-                if card["listing_file_id"] or card["example_file_id"]:
+                if has_photo(card, details):
                     await bot.edit_message_caption(
                         **kwargs, caption=caption, show_caption_above_media=True
                     )
@@ -607,8 +685,16 @@ async def handle_callback(bot, query, platform, chat_id):
     if not message or str(message.chat.id) != str(chat_id):
         await answer(query, "This is a private notification bot.", alert=True)
         return
+    sender = getattr(query, "from_user", None)
+    if getattr(message, "date", None) == 0 or (
+        str(chat_id).isdigit() and (sender is None or str(sender.id) != str(chat_id))
+    ):
+        await answer(query, "This control belongs to the alert owner.", alert=True)
+        return
     data = query.data or ""
-    if not re.fullmatch(r"card:(listing|examples|notes:[0-9]{1,2})", data):
+    if not re.fullmatch(
+        r"card:(listing|examples|references:[01]|notes:[0-9]{1,2})", data
+    ):
         await answer(query)
         return
     control_health(platform, "click")
@@ -626,6 +712,19 @@ async def handle_callback(bot, query, platform, chat_id):
             return
         row, details, card = saved
         view = data[5:]
+        target_page = int(view[-1]) if view.startswith("references:") else 0
+        if view.startswith("references:"):
+            view = "examples:1" if target_page else "examples"
+        example_view = view in ("examples", "examples:1")
+        reference_ids = reference_page_ids(row, details)
+        if example_view and target_page >= len(reference_ids):
+            await answer(
+                query, "This alert has no additional reference pictures.", alert=True
+            )
+            return
+        if data.startswith("card:references:") and card["view"] == view:
+            # Target pages, rather than a blind toggle, make a double tap safe.
+            return
         started = time.monotonic()
         try:
             if view.startswith("notes:"):
@@ -640,10 +739,10 @@ async def handle_callback(bot, query, platform, chat_id):
                     chat_id=chat_id,
                     message_id=message.message_id,
                     parse_mode="HTML",
-                    reply_markup=markup(row, details, note_page=index),
+                    reply_markup=markup(row, details, view=view, note_page=index),
                     **TIMEOUTS,
                 )
-                if card["listing_file_id"] or card["example_file_id"]:
+                if has_photo(card, details):
                     await bot.edit_message_caption(
                         **kwargs, caption=text, show_caption_above_media=True
                     )
@@ -658,41 +757,29 @@ async def handle_callback(bot, query, platform, chat_id):
                 after_edit(platform, message.message_id, view=view)
                 control_health(platform, "success")
                 return
-            file_key = "example_file_id" if view == "examples" else "listing_file_id"
-            media = card[file_key]
+            reference_id = reference_ids[target_page] if example_view else None
+            file_key = "example_file_id" if example_view else "listing_file_id"
+            media = (
+                card[file_key]
+                if not example_view
+                else (
+                    (details.get("reference_file_ids") or {}).get(reference_id)
+                    or (
+                        card[file_key]
+                        if details.get("example_file_id_page", 0) == target_page
+                        else None
+                    )
+                )
+            )
             if view == "listing" and details.get("photos", [])[:4] != details.get(
                 "rendered_listing_photos", details.get("photos", [])[:4]
             ):
                 media = None
-            if view == "examples" and not media:
-                media = cached_example(bot, platform, row.get("reference_id"))
+            if example_view and not media:
+                media = cached_example(bot, platform, reference_id)
             if not media:
-                if view == "examples":
-                    reference = (
-                        dashboard_store.get_media(row["reference_id"])
-                        if row["reference_id"]
-                        else None
-                    )
-                    if not reference and row.get("query_id"):
-                        # Before retained-card storage was introduced, an edited
-                        # search could have its old example removed by cleanup.
-                        # Use that search's current saved examples if available.
-                        from search_settings import get_search
-
-                        current = get_search(row["query_id"])
-                        reference_id = current.get("reference_id") if current else None
-                        reference = (
-                            dashboard_store.get_media(reference_id)
-                            if reference_id
-                            else None
-                        )
-                        if reference:
-                            row["reference_id"] = reference_id
-                            with closing(connection()) as conn, conn:
-                                conn.execute(
-                                    "UPDATE telegram_photo_cards SET reference_id=?,example_file_id=NULL WHERE platform=? AND message_id=?",
-                                    (reference_id, platform, message.message_id),
-                                )
+                if example_view:
+                    reference = dashboard_store.get_media(reference_id)
                     # Uploads are already normalized and collaged when saved.
                     media = reference["image"] if reference else None
                 else:
@@ -711,7 +798,7 @@ async def handle_callback(bot, query, platform, chat_id):
                     "error",
                     (
                         "Example image unavailable"
-                        if view == "examples"
+                        if example_view
                         else "Listing image unavailable"
                     ),
                 )
@@ -745,9 +832,9 @@ async def handle_callback(bot, query, platform, chat_id):
                     term in str(exc).lower() for term in ("file", "identifier", "media")
                 ):
                     raise
-                if view == "examples":
-                    cache_example(bot, platform, row.get("reference_id"), None)
-                    reference = dashboard_store.get_media(row.get("reference_id"))
+                if example_view:
+                    cache_example(bot, platform, reference_id, None)
+                    reference = dashboard_store.get_media(reference_id)
                     replacement = reference["image"] if reference else None
                 else:
                     replacement = await listing_photo(details)
@@ -767,11 +854,11 @@ async def handle_callback(bot, query, platform, chat_id):
                 view=view,
                 file_id=result.photo[-1].file_id,
                 listing_photos=details.get("photos", []) if view == "listing" else None,
+                reference_id=reference_id,
+                reference_ids=reference_ids if example_view else None,
             )
-            if view == "examples":
-                cache_example(
-                    bot, platform, row.get("reference_id"), result.photo[-1].file_id
-                )
+            if example_view:
+                cache_example(bot, platform, reference_id, result.photo[-1].file_id)
             control_health(platform, "success")
             logger.info(
                 "%s photo control accepted; message_id=%s view=%s elapsed=%.3fs",
@@ -788,6 +875,8 @@ async def handle_callback(bot, query, platform, chat_id):
                 message.message_id,
                 view=view,
                 listing_photos=details.get("photos", []) if view == "listing" else None,
+                reference_id=reference_ids[target_page] if example_view else None,
+                reference_ids=reference_ids if example_view else None,
             )
             control_health(platform, "success")
         finally:
@@ -936,15 +1025,42 @@ async def test_controls(platform):
             raise ValueError("This listing was removed during the test.")
         await asyncio.sleep(1.1)
         await enrich(bot, chat_id, row, details, ready)
-        query = SimpleNamespace(message=first, answer=ready, data="card:examples")
-        for view in ("examples", "listing"):
+        query = SimpleNamespace(
+            message=first,
+            answer=ready,
+            data="card:examples",
+            from_user=SimpleNamespace(id=chat_id),
+        )
+        saved = load(platform, first.message_id)
+        references = reference_page_ids(saved[0], saved[1]) if saved else []
+        steps = [("card:examples", "examples")]
+        if len(references) > 1:
+            steps.extend(
+                [("card:references:1", "examples:1"), ("card:references:0", "examples")]
+            )
+        steps.append(("card:listing", "listing"))
+        for data, view in steps:
             await asyncio.sleep(1.1)
-            query.data = "card:" + view
+            query.data = data
             await handle_callback(bot, query, platform, chat_id)
             saved = load(platform, first.message_id)
-            field = "example_file_id" if view == "examples" else "listing_file_id"
-            if not saved or saved[2]["view"] != view or not saved[2][field]:
+            field = (
+                "example_file_id" if view.startswith("examples") else "listing_file_id"
+            )
+            reference_id = (
+                references[1 if view == "examples:1" else 0]
+                if view.startswith("examples") and references
+                else None
+            )
+            if (
+                not saved
+                or saved[2]["view"] != view
+                or not saved[2][field]
+                or (reference_id and not cached_example(bot, platform, reference_id))
+            ):
                 raise ValueError(
                     "The test photo was sent but Telegram did not confirm both picture buttons."
                 )
+    if len(references) > 1:
+        return f"{platform.title()} PHOTO & BUTTON TEST sent. Telegram confirmed your first four references, additional references, switching back, and the listing photo in the same message. Hold the new notification on your iPhone to check its preview."
     return f"{platform.title()} PHOTO & BUTTON TEST sent. Telegram confirmed the initial listing photo, your saved examples, and switching back in the same message. Hold the new notification on your iPhone to check its preview."

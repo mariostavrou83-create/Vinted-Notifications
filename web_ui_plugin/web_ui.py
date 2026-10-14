@@ -57,7 +57,7 @@ def create_app(test_config=None):
     app = Flask(__name__)
     app.config.update(
         SECRET_KEY=auth_row()["session_key"],
-        MAX_CONTENT_LENGTH=33 * 1024 * 1024,
+        MAX_CONTENT_LENGTH=65 * 1024 * 1024,
         MAX_FORM_MEMORY_SIZE=100_000,
         MAX_FORM_PARTS=50,
         SESSION_COOKIE_NAME="msj_session",
@@ -441,8 +441,8 @@ def create_app(test_config=None):
                 uploads = [
                     file for file in request.files.getlist("photo") if file.filename
                 ]
-                if len(uploads) > 4:
-                    raise ValueError("Choose up to four example photos in total.")
+                if len(uploads) > store.MAX_REFERENCE_PHOTOS:
+                    raise ValueError("Choose up to eight example photos in total.")
                 photos = [store.normalize_photo(file.stream) for file in uploads]
                 store.save_search(query_id, request.form, photos=photos)
                 flash("Search saved. Changes apply automatically.", "success")
@@ -1051,7 +1051,7 @@ def create_app(test_config=None):
         return (
             render_template(
                 "msj_error.html",
-                message="That upload is too large. Choose up to four photos, each smaller than 8 MB.",
+                message="That upload is too large. Choose up to eight photos, each smaller than 8 MB.",
             ),
             413,
         )
@@ -1086,7 +1086,7 @@ def web_ui_process():
             host="0.0.0.0",
             port=8000,
             threads=4,
-            max_request_body_size=33 * 1024 * 1024,
+            max_request_body_size=65 * 1024 * 1024,
         )
     finally:
         MANAGER.shutdown()

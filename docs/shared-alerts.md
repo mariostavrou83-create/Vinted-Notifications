@@ -13,6 +13,20 @@ Vinted alternatives retain separate quiet baselines. eBay combines alternatives
 into one bounded OR request; multiword alternatives are quoted phrases. Its
 100-character limit is validated rather than silently truncated.
 
+## Reference pictures in Telegram
+
+Every search can keep up to eight ordered example photos, each up to 8 MB.
+The initial example collage contains photos 1–4. When more than four are saved,
+**Show additional reference pictures** switches that same Telegram alert to
+photos 5–8, and **Show initial reference pictures** returns to photos 1–4.
+Existing listing and buying buttons remain available. This applies to both
+Vinted and eBay photo alerts, with no new message sent by a toggle.
+
+Saved alerts retain their own immutable collage pair when the search is later
+edited. Photo normalization, per-message edit locking, bot-specific file caches
+and account-deletion guards apply to both pages. Searches with four or fewer
+photos keep their existing single example collage.
+
 ## Copying filtered eBay category links
 
 Paste the full eBay UK address shown after choosing filters. Both explicit

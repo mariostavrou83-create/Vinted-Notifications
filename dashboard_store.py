@@ -14,6 +14,8 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 import db
 from search_settings import connection, parse_exclusions
 
+MAX_REFERENCE_PHOTOS = 8
+
 
 def normalize_url(value):
     value = value.strip()
@@ -304,13 +306,14 @@ def save_search(query_id, form, photo=None, *, photos=None):
         return query_id
 
 
-def _store_media(conn, photo):
-    digest = hashlib.sha256(photo).hexdigest()
+def _store_media(conn, photo, *, media_id=None):
+    digest = media_id or hashlib.sha256(photo).hexdigest()
     # Keep recently detached photos for alerts already in the delivery queue.
     conn.execute(
         """DELETE FROM dashboard_media WHERE created<? AND id NOT IN
                 (SELECT reference_id FROM search_dashboard WHERE reference_id IS NOT NULL)
                 AND id NOT IN (SELECT media_id FROM search_reference_photos)
+                AND id NOT IN (SELECT media_id FROM dashboard_reference_pages)
                 AND id NOT IN (SELECT reference_id FROM telegram_photo_cards
                     WHERE reference_id IS NOT NULL)
                 AND id NOT IN (SELECT reference_id FROM alert_outbox WHERE reference_id IS NOT NULL
@@ -353,6 +356,8 @@ class _ReferencePhotoPlan:
     kept_ids: tuple[str, ...]
     uploads: tuple[bytes, ...]
     compiled: bytes | None
+    additional: bytes | None
+    bundle_id: str | None
     changed: bool
 
 
@@ -403,13 +408,24 @@ def _prepare_reference_photos(query_id, form, photos):
         if form.get("remove_photo") == "yes"
         else [row for row in existing if str(row[0]) not in removals]
     )
-    if len(keep) + len(uploads) > 4:
+    if len(keep) + len(uploads) > MAX_REFERENCE_PHOTOS:
         raise ValueError(
-            "Keep up to four example photos in total. Remove a saved photo to make room."
+            "Keep up to eight example photos in total. Remove a saved photo to make room."
         )
     changed = bool(uploads) or len(keep) != len(existing)
     originals = [row[2] for row in keep] + list(uploads)
-    compiled = collage(originals) if changed and originals else None
+    compiled = collage(originals[:4]) if changed and originals else None
+    additional = collage(originals[4:]) if changed and len(originals) > 4 else None
+    # Hash every ordered original for a multi-page set: changing only photos
+    # 5–8 must never replace page 2 of an already-delivered alert.
+    bundle_id = (
+        hashlib.sha256(
+            b"msj-reference-pages-v1\0"
+            + b"".join(hashlib.sha256(raw).digest() for raw in originals)
+        ).hexdigest()
+        if additional
+        else None
+    )
     return _ReferencePhotoPlan(
         existing=existing,
         revision=search["revision"] if search else None,
@@ -417,6 +433,8 @@ def _prepare_reference_photos(query_id, form, photos):
         kept_ids=tuple(row[1] for row in keep),
         uploads=uploads,
         compiled=compiled,
+        additional=additional,
+        bundle_id=bundle_id,
         changed=changed,
     )
 
@@ -426,7 +444,17 @@ def _save_reference_photos(conn, query_id, plan):
     if not plan.changed:
         return
     ids = list(plan.kept_ids) + [_store_media(conn, raw) for raw in plan.uploads]
-    digest = _store_media(conn, plan.compiled) if plan.compiled else None
+    digest = (
+        _store_media(conn, plan.compiled, media_id=plan.bundle_id)
+        if plan.compiled
+        else None
+    )
+    if plan.additional:
+        additional_id = _store_media(conn, plan.additional)
+        conn.execute(
+            "INSERT OR IGNORE INTO dashboard_reference_pages VALUES (?,1,?)",
+            (digest, additional_id),
+        )
     conn.execute("DELETE FROM search_reference_photos WHERE query_id=?", (query_id,))
     conn.executemany(
         "INSERT INTO search_reference_photos VALUES (?,?,?)",
@@ -530,6 +558,23 @@ def get_media(media_id):
             "SELECT * FROM dashboard_media WHERE id=?", (media_id,)
         ).fetchone()
         return dict(row) if row else None
+
+
+def get_reference_pages(reference_id):
+    """Return the immutable collage pages captured by this alert's reference."""
+    with closing(connection()) as conn:
+        first = conn.execute(
+            "SELECT * FROM dashboard_media WHERE id=?", (reference_id,)
+        ).fetchone()
+        if first is None:
+            return []
+        extra = conn.execute(
+            """SELECT m.* FROM dashboard_reference_pages p
+            JOIN dashboard_media m ON m.id=p.media_id
+            WHERE p.reference_id=? ORDER BY p.page""",
+            (reference_id,),
+        ).fetchall()
+        return [dict(first), *(dict(row) for row in extra)]
 
 
 def cache_telegram_photo(media_id, file_id):

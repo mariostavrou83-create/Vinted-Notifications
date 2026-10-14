@@ -11,7 +11,7 @@ from pathlib import Path
 
 import db
 
-SCHEMA_VERSION = "23"
+SCHEMA_VERSION = "24"
 
 
 def connection():
@@ -49,6 +49,7 @@ def ensure_schema():
             if destination.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                 raise RuntimeError("Database backup failed integrity check")
         with conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute("""CREATE TABLE IF NOT EXISTS search_preferences (
                 query_id INTEGER PRIMARY KEY REFERENCES queries(id) ON DELETE CASCADE,
                 reminder TEXT NOT NULL DEFAULT '',
@@ -74,11 +75,31 @@ def ensure_schema():
             conn.execute("""CREATE TABLE IF NOT EXISTS dashboard_media (
                 id TEXT PRIMARY KEY, image BLOB NOT NULL, telegram_file_id TEXT,
                 created REAL NOT NULL)""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS search_reference_photos (
+            # Widen the existing table's CHECK constraint without altering
+            # saved photo order or search identifiers. This runs inside the
+            # backed-up migration transaction, before workers can read it.
+            conn.execute("""CREATE TABLE search_reference_photos_v24 (
                 query_id INTEGER NOT NULL REFERENCES queries(id) ON DELETE CASCADE,
-                position INTEGER NOT NULL CHECK(position BETWEEN 0 AND 3),
+                position INTEGER NOT NULL CHECK(position BETWEEN 0 AND 7),
                 media_id TEXT NOT NULL REFERENCES dashboard_media(id),
                 PRIMARY KEY(query_id, position))""")
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='search_reference_photos'"
+            ).fetchone():
+                conn.execute("""INSERT INTO search_reference_photos_v24
+                    SELECT query_id,position,media_id FROM search_reference_photos""")
+                conn.execute("DROP TABLE search_reference_photos")
+            conn.execute(
+                "ALTER TABLE search_reference_photos_v24 RENAME TO search_reference_photos"
+            )
+            # A sent alert keeps an immutable first/second collage pair even
+            # when its search is edited later. The first page stays in the
+            # existing dashboard_media image for legacy callers.
+            conn.execute("""CREATE TABLE IF NOT EXISTS dashboard_reference_pages (
+                reference_id TEXT NOT NULL REFERENCES dashboard_media(id) ON DELETE CASCADE,
+                page INTEGER NOT NULL CHECK(page=1),
+                media_id TEXT NOT NULL REFERENCES dashboard_media(id),
+                PRIMARY KEY(reference_id,page))""")
             # Earlier uploads only kept a flattened image. Preserve it as one
             # editable slot; future uploads retain each original separately.
             conn.execute("""INSERT INTO search_reference_photos
