@@ -1,5 +1,6 @@
 """Offline regression for real durable events and Telegram delivery semantics."""
 
+import sqlite3
 import time
 import unittest
 from contextlib import closing
@@ -33,6 +34,71 @@ class BuyerEventTests(NoticeFixture, unittest.IsolatedAsyncioTestCase):
             return [
                 dict(row) for row in conn.execute("SELECT * FROM vinted_buyer_event")
             ]
+
+    def test_production_v24_upgrade_creates_events_and_preserves_existing_data(self):
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("DROP TABLE vinted_buyer_event")
+            conn.execute(
+                "ALTER TABLE vinted_connection_notice DROP COLUMN identity_rejected"
+            )
+            conn.execute(
+                "UPDATE parameters SET value='24' WHERE key='msj_search_schema'"
+            )
+            for position in range(8):
+                conn.execute(
+                    "INSERT INTO dashboard_media(id,image,created) VALUES (?,?,1)",
+                    (f"photo-{position}", b"offline-photo"),
+                )
+                conn.execute(
+                    "INSERT INTO search_reference_photos VALUES (1,?,?)",
+                    (position, f"photo-{position}"),
+                )
+            tables = (
+                "vinted_buyer",
+                "vinted_buy_attempts",
+                "queries",
+                "items",
+                "search_reference_photos",
+                "dashboard_media",
+            )
+            before = {
+                name: [tuple(row) for row in conn.execute(f'SELECT * FROM "{name}"')]
+                for name in tables
+            }
+        backup = search_settings.ensure_schema()
+        self.assertIsNotNone(backup)
+        with closing(sqlite3.connect(backup)) as saved:
+            self.assertEqual(
+                saved.execute("PRAGMA integrity_check").fetchone()[0], "ok"
+            )
+            self.assertEqual(
+                saved.execute(
+                    "SELECT value FROM parameters WHERE key='msj_search_schema'"
+                ).fetchone()[0],
+                "24",
+            )
+        with closing(search_settings.connection()) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT value FROM parameters WHERE key='msj_search_schema'"
+                ).fetchone()[0],
+                "25",
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT identity_rejected FROM vinted_connection_notice"
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM vinted_buyer_event").fetchone()[0], 0
+            )
+            after = {
+                name: [tuple(row) for row in conn.execute(f'SELECT * FROM "{name}"')]
+                for name in tables
+            }
+        self.assertEqual(after, before)
+        self.assertIsNone(search_settings.ensure_schema())
 
     async def test_checkout_403_warns_without_claiming_logout_or_sending_payment(self):
         self.assertTrue(self.failure())

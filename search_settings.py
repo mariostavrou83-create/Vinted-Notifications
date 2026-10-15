@@ -11,7 +11,7 @@ from pathlib import Path
 
 import db
 
-SCHEMA_VERSION = "24"
+SCHEMA_VERSION = "25"
 
 
 def connection():
