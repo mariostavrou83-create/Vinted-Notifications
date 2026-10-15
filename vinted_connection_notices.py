@@ -42,6 +42,16 @@ def migrate(conn):
         retry_at REAL NOT NULL DEFAULT 0, telegram_message_id INTEGER,
         test_checked REAL NOT NULL DEFAULT 0)""")
     conn.execute("INSERT OR IGNORE INTO vinted_connection_notice(id) VALUES (1)")
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(vinted_connection_notice)")
+    }
+    if "identity_rejected" not in columns:
+        conn.execute(
+            "ALTER TABLE vinted_connection_notice ADD COLUMN identity_rejected INTEGER NOT NULL DEFAULT 0"
+        )
+    from vinted_buyer_events import migrate as migrate_events
+
+    migrate_events(conn)
 
 
 def record_failure(error, session_fingerprint, *, checked_at=None):
@@ -96,7 +106,7 @@ def record_failure(error, session_fingerprint, *, checked_at=None):
             conn.execute(
                 """UPDATE vinted_connection_notice SET session_fingerprint=?,buyer_id=?,
                 reason=?,stage=?,http_status=?,checked=?,incident_started=?,sent_level=?,
-                lease_id=?,lease_until=?,retry_at=?,telegram_message_id=? WHERE id=1""",
+                lease_id=?,lease_until=?,retry_at=?,telegram_message_id=?,identity_rejected=? WHERE id=1""",
                 (
                     session_fingerprint,
                     current[1],
@@ -110,6 +120,7 @@ def record_failure(error, session_fingerprint, *, checked_at=None):
                     previous["lease_until"] if same_incident else 0,
                     previous["retry_at"] if same_incident else 0,
                     previous["telegram_message_id"] if same_incident else None,
+                    int(getattr(error, "identity_rejected", False) is True),
                 ),
             )
         return True
@@ -147,6 +158,8 @@ def dashboard_url():
 
 def warning_level(row, now):
     reason, stage, status = row["reason"], row["stage"], row["http_status"]
+    if row.get("identity_rejected"):
+        return 2
     if reason in RECONNECT_REASONS:
         return 2
     if reason == "renewal_failed" and stage == "renewal" and status == 400:
@@ -158,7 +171,12 @@ def warning_level(row, now):
 
 def warning_text(row):
     reason, stage, status = row["reason"], row["stage"], row["http_status"]
-    if reason == "renewal_failed" and stage == "renewal" and status == 400:
+    if row.get("identity_rejected"):
+        detail = "Vinted rejected the saved account check (HTTP 401), and the connection could not be restored. Autobuy cannot proceed with this connection."
+        action = (
+            "Open Connections → Vinted & buying and reconnect the same buyer account."
+        )
+    elif reason == "renewal_failed" and stage == "renewal" and status == 400:
         detail = "The saved session renewal could not be confirmed. This does not prove that your login has expired. Automatic maintenance will retry after its cooldown."
         action = (
             "Open Connections → Vinted & buying and check the saved buyer connection."
@@ -202,6 +220,9 @@ class ConnectionNotifier:
             and self.chat_id != "0"
             and str(db.get_parameter("telegram_chat_id") or "").strip() == self.chat_id
         )
+
+    def notice_text(self, row):
+        return warning_text(row)
 
     def claim(self):
         if not self.recipient_valid():
@@ -308,7 +329,7 @@ class ConnectionNotifier:
             )
             sent = await self.bot.send_message(
                 chat_id=self.chat_id,
-                text=warning_text(row),
+                text=self.notice_text(row),
                 reply_markup=markup,
                 disable_web_page_preview=True,
                 read_timeout=10,
@@ -318,7 +339,9 @@ class ConnectionNotifier:
             )
             await asyncio.to_thread(self.finish, row, sent.message_id)
             logger.info(
-                "Vinted connection warning accepted: level=%s stage=%s reason=%s http=%s",
+                "Vinted buyer notification accepted: channel=%s kind=%s level=%s stage=%s reason=%s http=%s",
+                row.get("channel", "account"),
+                row.get("kind", "warning"),
                 row["level"],
                 row["stage"],
                 row["reason"],

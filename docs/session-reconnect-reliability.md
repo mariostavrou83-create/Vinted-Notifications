@@ -65,6 +65,30 @@ Vinted Telegram chat, with the reason, operation, numeric HTTP status, timestamp
 and a validated HTTPS Connections link. No additional Vinted requests, login,
 renewal or purchase are initiated by warning delivery.
 
+Idle buyer accounts now also receive an identity check about every five minutes.
+An unexpired token is not proof that the provider has not revoked it. This check
+shares the existing buyer lock, renewal cooldown and blocked-session policy;
+recent successful account checks skip the extra read. It creates no checkout or
+payment and continues even when Autobuy permission is off.
+
+Successful manual reconnects queue a durable Telegram confirmation. Recovery
+after an already-delivered account warning queues one recovery notice. Routine
+healthy checks stay quiet. Confirmation states the current Autobuy permission
+and explicitly separates verified account access from checkout readiness.
+
+Checkout, delivery and payment-request refusals now have a separate durable
+episode and owner notice. These failures previously bypassed the connection
+warning recorder. The failure is accepted only from the exact currently saved,
+verified client; raw provider messages and credentials are never stored in the
+event. The dashboard retains the last checkout failure across ordinary identity
+checks, credential rotations and reconnects. A confirmed purchase clears it.
+An uncertain payment is labelled as such and never reported as "no payment".
+
+The two fixed event channels use SQLite delivery leases and retry cooldowns.
+Repeated attempts and process restarts do not repeat a delivered warning; a
+later uncertain-payment failure may escalate it once. Disconnect removes queued
+events. Telegram acknowledgement loss can still cause a duplicate on retry.
+
 Failures are recorded only with the exact current encrypted-session fingerprint.
 Password sign-in errors, failures belonging to a replaced session and failures
 older than a fresh same-buyer verification cannot create a warning. An unexplained
@@ -75,10 +99,11 @@ errors warn only after 15 minutes without a later successful account check.
 SQLite stores delivery leases and the warning level for the unresolved episode.
 Ordinary repeated ticks and process restarts do not repeat an accepted warning;
 confirmed credential rejection can escalate an earlier attention warning once.
-A fresh same-account verification closes the episode. Telegram delivery failures
+A fresh same-account verification closes the account episode, but not a checkout
+episode. Telegram delivery failures
 retry with a cooldown and never stop maintenance; a lost delivery acknowledgement
 can still produce a duplicate on retry. Immediate upstream logout detection is
-not promised: Vinted account requests remain expiry-driven or owner-initiated.
+not promised: idle verification is periodic and respects upstream cooldowns.
 
 An authenticated, CSRF-protected dashboard button sends one clearly labelled
 connection-warning delivery test with a five-minute cooldown. The test makes no

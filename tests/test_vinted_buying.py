@@ -95,6 +95,28 @@ def web_checkout(total="18.84", *, home=False):
 
 
 class BuyingTests(DatabaseFixture, unittest.TestCase):
+    def test_checkout_refusal_records_separate_health_and_never_submits_payment(self):
+        with closing(search_settings.connection()) as conn:
+            sealed = conn.execute("SELECT session FROM vinted_buyer").fetchone()[0]
+        self.client._verified_session = ("99", sealed, {})
+        original = self.client.request.side_effect
+
+        def response(method, path, body=None):
+            if path == "/api/v2/purchases/checkout/build":
+                raise buyer.BuyerError(
+                    "private-upstream", 403, reason="security_challenge"
+                )
+            return original(method, path, body)
+
+        self.client.request.side_effect = response
+        self.assertEqual(self.run_buy()["state"], "failed_before_payment")
+        self.assertEqual(self.payments(), [])
+        self.assertEqual(buyer.settings()["checkout_health"]["http_status"], 403)
+        self.client.request.side_effect = original
+        self.assertEqual(self.run_buy()["state"], "paid")
+        self.assertIsNone(buyer.settings()["checkout_health"])
+        self.assertEqual(len(self.payments()), 1)
+
     def test_response_persistence_failure_after_payment_never_submits_again(self):
         from test_vinted_page_data import next_data, purchase_item
 

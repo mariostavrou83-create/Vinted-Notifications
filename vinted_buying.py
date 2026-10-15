@@ -1331,6 +1331,9 @@ def check_checkout(url, *, prepare_test=False):
                 "token": buyer.encrypt(quote).decode("ascii"),
             }
         except buyer.BuyerError as exc:
+            from vinted_buyer_events import record_checkout_failure
+
+            record_checkout_failure(client, exc, phase)
             logger.info(
                 "Autobuy checkout check: phase=%s reason=%s http=%s",
                 phase,
@@ -1564,7 +1567,14 @@ def buy_checkout_quote(token, *, alert_row=None):
                 },
             )
             record_payment_result(item_id, paid, total)
+            if result(item_id)["state"] == "paid":
+                from vinted_buyer_events import clear_checkout_failure
+
+                clear_checkout_failure(client)
         except Exception as exc:  # noqa: BLE001 -- preserve uncertain payments
+            from vinted_buyer_events import record_checkout_failure
+
+            record_checkout_failure(client, exc, phase, payment_started=payment_started)
             logger.info(
                 "Autobuy test stopped: phase=%s error_type=%s",
                 phase,
@@ -1793,7 +1803,14 @@ def _buy(row):
                 },
             )
             record_payment_result(item_id, paid, total)
+            if result(item_id)["state"] == "paid":
+                from vinted_buyer_events import clear_checkout_failure
+
+                clear_checkout_failure(client)
         except buyer.BuyerError as exc:
+            from vinted_buyer_events import record_checkout_failure
+
+            record_checkout_failure(client, exc, phase, payment_started=payment_started)
             reason = exc.reason
             message = str(exc)
             if reason in buyer.AUTH_REASONS:

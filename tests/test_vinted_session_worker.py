@@ -338,6 +338,63 @@ class MaintenanceTests(buying_tests.SessionRotationFixture, unittest.TestCase):
         self.assertEqual(self.run_cycle(self.now + 300), "fresh")
         self.assertEqual(len(self.calls), 4)
 
+    def test_idle_health_check_verifies_account_without_checkout_and_is_rate_limited(
+        self,
+    ):
+        before = self.controls()
+        with (
+            patch.object(worker.time, "time", return_value=self.now),
+            patch.object(
+                requests.adapters.HTTPAdapter,
+                "send",
+                autospec=True,
+                side_effect=self.native,
+            ),
+        ):
+            self.assertEqual(worker.check_account_health(), "verified")
+            self.assertEqual(worker.check_account_health(), "fresh")
+        self.assertEqual(self.calls, [("GET", "/api/v2/users/current")])
+        self.assertEqual(self.controls(), before)
+
+    def test_idle_health_check_cannot_bypass_renewal_backoff(self):
+        self.seed_backoff()
+        with (
+            patch.object(worker.time, "time", return_value=self.now),
+            patch.object(buyer, "connected_client") as connect,
+        ):
+            self.assertEqual(worker.check_account_health(), "cooldown")
+        connect.assert_not_called()
+
+    def test_idle_health_check_detects_revocation_with_fresh_expiry_metadata(self):
+        with closing(search_settings.connection()) as conn, conn:
+            saved = self.saved()[1]
+            for cookie in saved["cookie_records"]:
+                if cookie["name"] == "access_token_web":
+                    cookie["value"] = token(self.now + 3600, "revoked-access")
+                    saved["cookies"]["access_token_web"] = cookie["value"]
+            conn.execute("UPDATE vinted_buyer SET session=?", (buyer.encrypt(saved),))
+        self.identity_status = 401
+        self.renew_status = 400
+        self.renew_error = {"error": "invalid_grant"}
+        with (
+            patch.object(worker.time, "time", return_value=self.now),
+            patch.object(
+                requests.adapters.HTTPAdapter,
+                "send",
+                autospec=True,
+                side_effect=self.native,
+            ),
+        ):
+            self.assertEqual(worker.check_account_health(), "unavailable")
+        with closing(search_settings.connection()) as conn:
+            notice = conn.execute(
+                "SELECT reason,http_status FROM vinted_connection_notice"
+            ).fetchone()
+        self.assertEqual(tuple(notice), ("refresh_rejected", 400))
+        self.assertFalse(
+            any("checkout" in path or "payment" in path for _, path in self.calls)
+        )
+
     def test_longest_cooldown_recovers_before_the_original_access_cookie_expires(self):
         self.old_access = "offline-opaque-access-still-valid-0123456789"
         self.new_access = token(self.now + 7200, "longer-renewed-access")
@@ -578,8 +635,11 @@ class MaintenanceTests(buying_tests.SessionRotationFixture, unittest.TestCase):
         events = []
 
         async def thread_call(function):
-            self.assertIs(function, worker.maintain_connection)
-            events.append(self.run_cycle())
+            if function is worker.maintain_connection:
+                events.append(self.run_cycle())
+            else:
+                self.assertIs(function, worker.check_account_health)
+                self.assertEqual(function(), "fresh")
 
         async def sleep(seconds):
             self.assertEqual(seconds, 60)
@@ -601,6 +661,40 @@ class MaintenanceTests(buying_tests.SessionRotationFixture, unittest.TestCase):
         self.assertIn("network_retry_seconds=300", startup)
         self.assertIn("renewal_retry_seconds=900", startup)
         self.assertNotIn(saved["cookies"]["access_token_web"], startup)
+
+    def test_unexpected_tick_failure_does_not_stop_the_background_worker(self):
+        calls = []
+
+        async def thread_call(function):
+            calls.append(function)
+            if len(calls) == 1:
+                raise RuntimeError("private-error")
+            return "fresh"
+
+        sleeps = 0
+
+        async def sleep(_seconds):
+            nonlocal sleeps
+            sleeps += 1
+            if sleeps == 2:
+                raise asyncio.CancelledError
+
+        with (
+            patch.object(worker.asyncio, "to_thread", side_effect=thread_call),
+            patch.object(worker.asyncio, "sleep", side_effect=sleep),
+            self.assertRaises(asyncio.CancelledError),
+            self.assertLogs(worker.logger, level="WARNING") as logs,
+        ):
+            asyncio.run(worker.run())
+        self.assertEqual(
+            calls,
+            [
+                worker.maintain_connection,
+                worker.maintain_connection,
+                worker.check_account_health,
+            ],
+        )
+        self.assertNotIn("private-error", " ".join(logs.output))
 
     def test_startup_does_not_clear_an_existing_terminal_block(self):
         fingerprint = hashlib.sha256(self.saved()[0]["session"]).hexdigest()

@@ -414,6 +414,7 @@ class DeliveryTests(NoticeFixture, unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.bot.send_message.await_args.kwargs["reply_markup"])
 
     async def test_healthy_worker_tick_has_no_warning_or_auth_request(self):
+        self.update_buyer(verified_at=time.time())
         before = self.protected_rows()
         with patch.object(worker, "due", return_value=False), patch.object(
             buyer, "connected_client"

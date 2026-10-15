@@ -23,6 +23,7 @@ ACCESS_MARGIN = 20 * 60
 REFRESH_MARGIN = 2 * 86400
 RETRY_DELAY = 300
 AMBIGUOUS_RENEWAL_DELAY = 900
+HEALTH_INTERVAL = 300
 COOKIE_REQUEST_PATHS = {
     "access_token_web": "/api/v2/users/current",
     "refresh_token_web": "/web/api/auth/refresh",
@@ -131,10 +132,78 @@ async def run(notifier=None):
             "Vinted connection warnings enabled; stored-failure checks every 60s"
         )
     while True:
-        await asyncio.to_thread(maintain_connection)
-        if notifier is not None:
-            await notifier.check()
+        try:
+            await asyncio.to_thread(maintain_connection)
+            await asyncio.to_thread(check_account_health)
+            if notifier is not None:
+                await notifier.check()
+                from vinted_buyer_events import BuyerEventNotifier
+
+                events = BuyerEventNotifier(notifier.bot, notifier.chat_id)
+                # At most the two fixed event channels; no unbounded outbox drain.
+                for _ in range(2):
+                    if await events.check() != "sent":
+                        break
+        except Exception as exc:  # noqa: BLE001 -- keep the worker alive
+            logger.warning(
+                "Vinted buyer worker tick unavailable: %s", type(exc).__name__
+            )
         await asyncio.sleep(60)
+
+
+def check_account_health():
+    """Verify idle sessions every five minutes, respecting shared renewal backoff.
+
+    Expiry claims cannot detect revocation. This read uses the same account,
+    transport and normal renewal policy; it never creates a checkout or payment.
+    """
+    client = None
+    try:
+        with buyer.exclusive():
+            now = time.time()
+            with closing(connection()) as conn, conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT session,user_id,verified_at FROM vinted_buyer WHERE id=1"
+                ).fetchone()
+                state = conn.execute(
+                    "SELECT * FROM vinted_buyer_maintenance WHERE id=1"
+                ).fetchone()
+                last = conn.execute(
+                    "SELECT last_probe FROM vinted_buyer_access WHERE id=1"
+                ).fetchone()[0]
+                if not row or not row[0] or not row[2]:
+                    return "idle"
+                if now - max(row[2], last) < HEALTH_INTERVAL:
+                    return "fresh"
+                if state["session_fingerprint"] == hashlib.sha256(
+                    row[0]
+                ).hexdigest() and (state["blocked"] or state["retry_at"] > now):
+                    return "cooldown"
+                conn.execute(
+                    "UPDATE vinted_buyer_access SET last_probe=? WHERE id=1", (now,)
+                )
+            client = buyer.connected_client()
+            logger.info(
+                "Vinted account health: verified; interval=300s; no checkout or payment"
+            )
+            return "verified"
+    except buyer.BuyerError as exc:
+        if exc.reason == "busy":
+            return "busy"
+        logger.info(
+            "Vinted account health: stage=%s reason=%s http=%s; no checkout or payment",
+            exc.stage if exc.stage in buyer.AUTH_STAGES else "request",
+            exc.reason if exc.reason in buyer.AUTH_REASONS else "not_confirmed",
+            exc.status if type(exc.status) is int else None,
+        )
+        return "unavailable"
+    except Exception as exc:  # noqa: BLE001 -- keep maintenance running
+        logger.warning("Vinted account health unavailable: %s", type(exc).__name__)
+        return "unavailable"
+    finally:
+        if client is not None:
+            client.session.close()
 
 
 def due(saved, now):

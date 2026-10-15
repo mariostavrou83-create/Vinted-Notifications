@@ -744,6 +744,9 @@ def settings():
             conn.execute("SELECT * FROM vinted_buyer_maintenance WHERE id=1").fetchone()
         )
         renewal = _stored_auth_event(conn, "buyer_auth_result_renewal")
+        from vinted_buyer_events import checkout_health
+
+        row["checkout_health"] = checkout_health(conn, row["user_id"])
     # No credential value is returned to a template or API caller.
     sealed = row.pop("session")
     row["connected"] = bool(sealed and row["verified_at"])
@@ -1727,11 +1730,16 @@ def save_connected(client):
                 reason="account_changed",
                 stage="identity",
             )
+        saved = client.exported()
+        sealed = encrypt(saved)
         conn.execute(
             "UPDATE vinted_buyer SET session=?,pending=NULL,verified_at=?,user_id=?,username=?,enabled=0 WHERE id=1",
-            (encrypt(client.exported()), time.time(), user_id, username),
+            (sealed, time.time(), user_id, username),
         )
     record_auth("connected", "identity", 200)
+    from vinted_buyer_events import record_connected
+
+    record_connected((user_id, sealed, saved), manual=True)
 
 
 def reserve_connection_attempt():
@@ -1994,6 +2002,9 @@ def replace_browser_session(
             }
             try:
                 client.bind_verified_session(user_id, sealed, current)
+                from vinted_buyer_events import record_connected
+
+                record_connected(client._verified_session, manual=True)
                 status = getattr(client, "_last_identity_http_status", None)
                 record_auth("connected", "identity", status)
                 record_connection_result(
@@ -2287,6 +2298,7 @@ def connected_client(
         ).fetchone()
     client = None
     renewal_started = False
+    identity_rejected = False
     try:
         saved = decrypt(row[0])
         if not saved:
@@ -2306,6 +2318,7 @@ def connected_client(
         except BuyerError as exc:
             refresh = saved.get("cookies", {}).get("refresh_token_web")
             expired = exc.status == 401 and exc.reason == "credentials"
+            identity_rejected = expired
             if (
                 not allow_refresh
                 or not (expired or exc.reason == "session_refresh")
@@ -2396,12 +2409,16 @@ def connected_client(
                 None, session_fingerprint=hashlib.sha256(sealed).hexdigest()
             )
         record_auth("connected", "identity", 200)
+        from vinted_buyer_events import record_connected
+
+        record_connected(client._verified_session)
         return client
     except BuyerError as exc:
         # A bounded recovery must refer to the exact session used by this
         # failed client. Never adopt a newer connection which replaced it while
         # the rejected request was in flight.
         failure_checked_at = time.time()
+        exc.identity_rejected = identity_rejected
         exc.session_fingerprint = None
         reference = (
             client._verified_session or client._loaded_session_reference
@@ -2526,3 +2543,4 @@ def disconnect():
         conn.execute(
             "UPDATE vinted_buyer SET session=NULL,pending=NULL,verified_at=NULL,user_id=NULL,username=NULL,enabled=0 WHERE id=1"
         )
+        conn.execute("DELETE FROM vinted_buyer_event")
