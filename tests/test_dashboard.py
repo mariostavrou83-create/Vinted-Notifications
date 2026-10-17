@@ -420,12 +420,21 @@ class ReferencePhotoTransactionTests(DatabaseFixture, unittest.TestCase):
         with closing(search_settings.connection()) as conn, conn:
             conn.execute(
                 "INSERT INTO dashboard_media(id,image,created) VALUES ('full',zeroblob(?),?)",
-                (50 * 1024 * 1024, 10**12),
+                (store.MAX_REFERENCE_STORAGE_BYTES, 10**12),
             )
         full = self.database_state()
         with self.assertRaisesRegex(ValueError, "storage is full"):
             store.save_search(1, form, photos=[self.photo])
         self.assertEqual(self.database_state(), full)
+
+    def test_reference_collection_can_grow_beyond_old_50mb_limit(self):
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "INSERT INTO dashboard_media(id,image,created) VALUES ('existing',zeroblob(?),?)",
+                (50 * 1024 * 1024, 10**12),
+            )
+        store.save_search(1, self.form(), photos=[self.photo])
+        self.assertEqual(len(store.reference_photos(1)), 1)
 
     def test_noop_photo_save_skips_collage_and_preserves_photo_bytes_and_order(self):
         import alert_images

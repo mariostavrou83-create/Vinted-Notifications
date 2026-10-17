@@ -15,6 +15,8 @@ import db
 from search_settings import connection, parse_exclusions
 
 MAX_REFERENCE_PHOTOS = 8
+# Allow the reviewed 128-search reference collection within the existing volume.
+MAX_REFERENCE_STORAGE_BYTES = 128 * 1024 * 1024
 
 
 def normalize_url(value):
@@ -326,7 +328,7 @@ def _store_media(conn, photo, *, media_id=None):
     exists = conn.execute(
         "SELECT 1 FROM dashboard_media WHERE id=?", (digest,)
     ).fetchone()
-    if size + (0 if exists else len(photo)) > 50 * 1024 * 1024:
+    if size + (0 if exists else len(photo)) > MAX_REFERENCE_STORAGE_BYTES:
         raise ValueError(
             "Photo storage is full. Remove unused example photos and try again tomorrow."
         )
