@@ -301,6 +301,97 @@ class CatalogueHeaderBatchTests(DatabaseFixture, unittest.TestCase):
 
 
 class ScaledPollingCapacityTests(DatabaseFixture, unittest.TestCase):
+    def test_574_checks_gain_capacity_without_overlap_or_lost_coverage(self):
+        with closing(search_settings.connection()) as conn, conn:
+            conn.executemany(
+                "INSERT INTO queries VALUES (?,?,100,?)",
+                [
+                    (
+                        i,
+                        f"https://www.vinted.co.uk/catalog?search_text=test{i}",
+                        f"Search {i}",
+                    )
+                    for i in range(45, 575)
+                ],
+            )
+        resource_controls.save_rate("0")
+        intervals = []
+        for workers in (12, polling.DEFAULT_WORKERS):
+            clock, starts, active = [100.0], {}, set()
+            test = self
+
+            class Future:
+                def __init__(self, query, clock=clock, active=active):
+                    self.query, self.started = query, clock[0]
+                    self.clock, self.active = clock, active
+
+                def done(self):
+                    return self.clock[0] >= self.started + 0.34
+
+                def result(self):
+                    self.active.remove(self.query[0])
+                    return []
+
+            def submit(
+                _fn,
+                query,
+                _count,
+                test=test,
+                active=active,
+                starts=starts,
+                clock=clock,
+                future=Future,
+            ):
+                test.assertNotIn(query[0], active)
+                active.add(query[0])
+                starts.setdefault(query[0], []).append(clock[0])
+                return future(query)
+
+            queue = Queue()
+            with patch.object(
+                polling,
+                "ThreadPoolExecutor",
+                return_value=SimpleNamespace(submit=submit),
+            ), patch.object(
+                polling.time, "monotonic", side_effect=lambda clock=clock: clock[0]
+            ), patch.object(
+                polling, "budget", polling.RequestBudget()
+            ), patch.object(
+                search_settings, "record_health"
+            ), patch.object(
+                polling.logger, "info"
+            ):
+                poller = polling.Poller(queue, workers=workers)
+                for step in range(1600):
+                    clock[0] = 100 + step * 0.025
+                    poller.tick()
+                    self.assertLessEqual(len(active), workers)
+                    while not queue.empty():
+                        queue.get_nowait()
+                self.assertEqual(set(starts), set(range(1, 575)))
+                repeats = [
+                    b - a for times in starts.values() for a, b in pairwise(times)
+                ]
+                self.assertTrue(all(len(times) >= 2 for times in starts.values()))
+                self.assertTrue(all(interval >= 0.999 for interval in repeats))
+                intervals.append(sum(repeats) / len(repeats))
+        self.assertEqual(polling.DEFAULT_WORKERS, 16)
+        self.assertLess(intervals[1], intervals[0] * 0.8)
+
+    def test_fast_extra_slots_are_disabled_during_cooldown_recovery(self):
+        resource_controls.save_rate("0")
+        executor = Mock()
+        executor.submit.side_effect = lambda *args: SimpleNamespace(done=lambda: False)
+        with patch.object(
+            polling, "ThreadPoolExecutor", return_value=executor
+        ), patch.object(polling, "budget", polling.RequestBudget()):
+            poller = polling.Poller(Queue())
+            poller.backoff_target = 2
+            poller.recover_at = float("inf")
+            poller.next_due = {q[0]: 0 for q in search_settings.active_queries()}
+            poller.tick()
+        self.assertEqual(executor.submit.call_count, polling.RECOVERY_WORKERS)
+
     def test_250_searches_stay_fair_bounded_and_nonoverlapping_at_varied_latencies(
         self,
     ):

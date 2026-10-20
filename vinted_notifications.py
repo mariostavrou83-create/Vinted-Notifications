@@ -41,10 +41,11 @@ shutdown_requested = threading.Event()
 
 
 def scraper_process(items_queue):
-    from polling import Poller
+    from polling import DEFAULT_WORKERS, Poller
 
     logger.info(
-        "Scrape process started: twelve independent workers; interval updates apply without restart"
+        "Scrape process started: up to %s independent workers; interval updates apply without restart",
+        DEFAULT_WORKERS,
     )
     Poller(items_queue).run()
 

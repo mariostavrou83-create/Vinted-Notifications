@@ -13,6 +13,8 @@ import vinted_keywords
 from logger import get_logger
 
 logger = get_logger(__name__)
+DEFAULT_WORKERS = 16
+RECOVERY_WORKERS = 12
 
 
 class CoolingDown(Exception):
@@ -78,7 +80,7 @@ def fetch_query(query, count):
 
 
 class Poller:
-    def __init__(self, queue, workers=12, fetch=fetch_query):
+    def __init__(self, queue, workers=DEFAULT_WORKERS, fetch=fetch_query):
         self.queue = queue
         self.workers = workers
         self.fetch = fetch
@@ -218,13 +220,19 @@ class Poller:
             # Keep success status fresh without committing it for every poll.
             # Failures and recovery are persisted immediately; speed metrics in
             # the poller log still include every request.
-            if error or was_failing or now - self.health_written.get(query_id, float("-inf")) >= 5:
+            if (
+                error
+                or was_failing
+                or now - self.health_written.get(query_id, float("-inf")) >= 5
+            ):
                 with db.connection_scope():
                     search_settings.record_health(
                         parent_id, wall_start, duration, actual_interval, error
                     )
                     if variant_id:
-                        vinted_keywords.health(variant_id, wall_start, actual_interval, error)
+                        vinted_keywords.health(
+                            variant_id, wall_start, actual_interval, error
+                        )
                 self.health_written[query_id] = now
             delay = (
                 target
@@ -253,7 +261,15 @@ class Poller:
             eligible = sorted(
                 (self.next_due[q], q) for q in queries if q not in self.pending
             )
-            slots = self.workers - len(self.pending)
+            # Fast mode can use the extra capacity only while healthy. Keep the
+            # original concurrency throughout backoff recovery; the shared
+            # request ceiling and Retry-After still apply to every worker.
+            worker_limit = (
+                min(self.workers, RECOVERY_WORKERS)
+                if self.request_rate or self.backoff_target
+                else self.workers
+            )
+            slots = max(0, worker_limit - len(self.pending))
             for due, query_id in eligible[:slots]:
                 if due > now:
                     break
@@ -283,7 +299,7 @@ class Poller:
                 )
 
             logger.info(
-                "Poller: %s searches; target %.1fs; %s successes/%s errors in last %.1fs; cooldown %.1fs; interval median %.3fs p95 %.3fs; fetch p95 %.3fs; %s unchanged pages reused",
+                "Poller: %s searches; target %.1fs; %s successes/%s errors in last %.1fs; cooldown %.1fs; interval median %.3fs p95 %.3fs; fetch p95 %.3fs; %s unchanged pages reused; workers %s",
                 len(queries),
                 target,
                 self.successes,
@@ -294,6 +310,7 @@ class Poller:
                 percentile(intervals, 0.95),
                 percentile(durations, 0.95),
                 self.reused_pages,
+                self.workers,
             )
             self.successes = self.errors = 0
             self.reused_pages = 0

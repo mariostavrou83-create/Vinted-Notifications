@@ -1,5 +1,8 @@
 """A shared Vinted polling ceiling: adding searches changes cycle length, not load."""
 
+import math
+import statistics
+import time
 from contextlib import closing
 
 import db
@@ -40,22 +43,58 @@ def summary():
 
     searches = search_settings.active_queries()
     active = len(searches)
-    checks = len(vinted_keywords.expand(searches))
+    queries = vinted_keywords.expand(searches)
+    checks = len(queries)
     rate = request_rate()
     target = max(1, float(db.get_parameter("query_refresh_delay") or 15))
     options = [
         {
             "rate": value,
             "name": name,
-            "cycle": round(max(1 if value == 0 else target, checks / value if value else 0), 1),
+            "cycle": round(
+                max(1 if value == 0 else target, checks / value if value else 0), 1
+            ),
         }
         for value, name in ((0, "Fast"), (10, "Balanced"), (5, "Budget"))
     ]
+    cycle = round(max(target, checks / rate if rate else 0), 1)
+    fresh_after = time.time() - max(120, cycle * 3)
+    measured = []
+    # Include each independent keyword, not just the last variant which wrote
+    # its parent search's health row. Ignore paused, stale and failed checks.
+    with closing(search_settings.connection()) as conn:
+        for table, id_column, sign in (
+            ("search_health", "query_id", 1),
+            ("vinted_keyword_variants", "id", -1),
+        ):
+            for row in conn.execute(
+                f"SELECT {id_column},actual_interval,last_success,error FROM {table}"
+            ):
+                interval = row["actual_interval"]
+                if (
+                    sign * row[id_column] in queries
+                    and row["last_success"] is not None
+                    and row["last_success"] >= fresh_after
+                    and not row["error"]
+                    and interval is not None
+                    and math.isfinite(interval)
+                    and interval > 0
+                ):
+                    measured.append(interval)
+    measured.sort()
     return {
         "active": active,
         "checks": checks,
         "rate": rate,
-        "cycle": round(max(target, checks / rate if rate else 0), 1),
+        "cycle": cycle,
+        "target": target,
+        "measured_checks": len(measured),
+        "measured_cycle": round(statistics.median(measured), 1) if measured else None,
+        "measured_p95": (
+            round(measured[min(len(measured) - 1, int(len(measured) * 0.95))], 1)
+            if measured
+            else None
+        ),
         "mode": {0: "Fast", 10: "Balanced", 5: "Budget"}.get(rate, "Custom"),
         "options": options,
     }

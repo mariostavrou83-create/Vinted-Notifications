@@ -1,6 +1,7 @@
 """Persistent live selection, quota preservation, and bounded Vinted scaling."""
 
 import itertools
+import time
 import unittest
 from contextlib import closing
 
@@ -13,6 +14,7 @@ import db
 import ebay_store
 import resource_controls
 import search_settings
+import vinted_keywords
 from web_ui_plugin.web_ui import create_app
 
 
@@ -135,6 +137,49 @@ class ScalingTests(test_search_controls.DatabaseFixture, unittest.TestCase):
         )
         db.set_parameter("query_refresh_delay", "1")
         self.assertEqual(resource_controls.summary()["cycle"], 20)
+
+    def test_measured_speed_uses_active_fresh_successful_keyword_intervals(self):
+        now = time.time()
+        with closing(search_settings.connection()) as conn, conn:
+            vinted_keywords.save(
+                conn, 1, search_settings.get_search(1)["query"], ["fur", "sherpa"]
+            )
+            conn.execute(
+                "UPDATE vinted_keyword_variants SET actual_interval=13,last_success=?",
+                (now,),
+            )
+            # The parent's last-variant summary must not be counted again.
+            for query_id, interval, last_success, error in (
+                (1, 100, now, ""),
+                (2, 100, now - 200, ""),
+                (3, 100, now, "HTTPError"),
+                (4, 10, now, ""),
+                (5, 100, now, ""),
+            ):
+                conn.execute(
+                    "INSERT INTO search_health(query_id,actual_interval,last_success,error) VALUES (?,?,?,?)",
+                    (query_id, interval, last_success, error),
+                )
+            conn.execute(
+                "INSERT OR REPLACE INTO search_dashboard(query_id,paused) VALUES (5,1)"
+            )
+        resources = resource_controls.summary()
+        self.assertEqual(resources["measured_checks"], 3)
+        self.assertEqual(resources["measured_cycle"], 13)
+        self.assertEqual(resources["measured_p95"], 13)
+
+    def test_connections_does_not_present_fast_target_as_observed_speed(self):
+        resource_controls.save_rate("0")
+        self.app = create_app({"TESTING": True, "SESSION_COOKIE_SECURE": False})
+        self.client = self.app.test_client()
+        test_ebay_dashboard.SharedDashboardTests.login(self)
+        response = self.client.get("/connections")
+        self.assertIn("Waiting for fresh repeat-interval measurements", response.text)
+        self.assertIn("Fast · quickest available checks", response.text)
+        self.assertNotIn("approximately <b>1.0 seconds per search", response.text)
+        search_settings.record_health(1, time.time(), 0.3, 12.5)
+        response = self.client.get("/connections")
+        self.assertIn("12.5 seconds typical", response.text)
 
 
 if __name__ == "__main__":
