@@ -20,6 +20,7 @@ logger = get_logger(__name__)
 DEFAULT_WORKERS = 80
 RECOVERY_WORKERS = 12
 FRONTIER_HEARTBEAT_SECONDS = 30
+HEALTH_WRITE_SECONDS = 20
 
 
 class CoolingDown(Exception):
@@ -290,13 +291,15 @@ class Poller:
             if actual_interval is not None:
                 self.intervals.append(actual_interval)
             self.durations.append(duration)
-            # Keep success status fresh without committing it for every poll.
-            # Failures and recovery are persisted immediately; speed metrics in
-            # the poller log still include every request.
+            # Successful status writes can share a staggered 20-40s maintenance
+            # clock without delaying any network check or new-item processing.
+            # Keep below the health command's 60s freshness threshold. Failures
+            # and recovery are immediate; logs still measure every request.
             if (
                 error
                 or was_failing
-                or now - self.health_written.get(query_id, float("-inf")) >= 5
+                or now - self.health_written.get(query_id, float("-inf"))
+                >= self.heartbeat_interval(query_id, base=HEALTH_WRITE_SECONDS)
             ):
                 health_updates.append(
                     (
@@ -476,11 +479,11 @@ class Poller:
         return True
 
     @staticmethod
-    def heartbeat_interval(query_id):
+    def heartbeat_interval(query_id, *, base=FRONTIER_HEARTBEAT_SECONDS):
         # Stable multiplicative phases spread consecutive parent/variant IDs
         # across a whole interval; new IDs bypass this timer on every check.
         phase = ((abs(query_id) * 2654435761) & 0xFFFFFFFF) / 2**32
-        return FRONTIER_HEARTBEAT_SECONDS * (1 + phase)
+        return base * (1 + phase)
 
     def run(self):
         try:

@@ -267,6 +267,12 @@ class EfficientPollingTests(DatabaseFixture, unittest.TestCase):
                 (104, None),
                 (105, None),
                 (109, None),
+                (
+                    104
+                    + poller.heartbeat_interval(1, base=polling.HEALTH_WRITE_SECONDS)
+                    + 0.1,
+                    None,
+                ),
             ]:
                 clock[0] = now
                 future = Mock()
@@ -282,6 +288,45 @@ class EfficientPollingTests(DatabaseFixture, unittest.TestCase):
                 ["", "ValueError", "", ""],
             )
         self.assertEqual(search_settings.health_rows()[0]["failures"], 0)
+
+    def test_sparse_status_writes_keep_every_new_alert_immediate_and_health_fresh(self):
+        resource_controls.save_rate("0")
+        clock = [100.0]
+        output = Queue()
+        executor = SimpleNamespace(
+            submit=lambda *args: SimpleNamespace(done=lambda: False)
+        )
+        query = search_settings.active_queries()[0]
+        with patch.object(
+            polling, "ThreadPoolExecutor", return_value=executor
+        ), patch.object(
+            polling.time, "monotonic", side_effect=lambda: clock[0]
+        ), patch.object(
+            polling, "budget", polling.RequestBudget()
+        ), patch.object(
+            search_settings, "active_queries", return_value=[query]
+        ), patch.object(
+            search_settings, "record_health", wraps=search_settings.record_health
+        ) as health:
+            poller = polling.Poller(self.queue)
+            for step in range(121):
+                clock[0] = 100 + step
+                item = listing(100 + step)
+                future = Mock()
+                future.done.return_value = True
+                future.result.return_value = [item]
+                future.search_url = query[1]
+                poller.pending = {query[0]: (future, clock[0] - 0.1, 1000 + step, 1)}
+                poller.tick()
+                self.core.clear_item_queue(self.queue, output)
+                # Each newly discovered ID arrives in the same tick. The first
+                # page alone remains a quiet baseline, as before.
+                self.assertEqual(output.qsize(), step)
+                self.assertLess(clock[0] - poller.health_written[query[0]], 40)
+            self.assertEqual(poller.successes, 0)  # last 30s report just flushed
+            self.assertLessEqual(health.call_count, 7)
+            self.assertEqual(output.qsize(), 120)
+            self.assertEqual(search_settings.health_rows()[0]["failures"], 0)
 
     def test_speed_choices_show_real_workload_and_do_not_change_saved_mode(self):
         resource_controls.save_rate("0")
