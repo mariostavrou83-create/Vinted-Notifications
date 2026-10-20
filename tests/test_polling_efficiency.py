@@ -431,6 +431,46 @@ class EfficientPollingTests(DatabaseFixture, unittest.TestCase):
             self.assertEqual(health.call_count, 2)
             self.assertEqual(search_settings.health_rows()[0]["failures"], 0)
 
+    def test_new_keyword_failure_follows_older_buffered_success_for_same_parent(self):
+        with closing(search_settings.connection()) as conn, conn:
+            vinted_keywords.save(
+                conn, 1, search_settings.get_search(1)["query"], ["fur", "sherpa"]
+            )
+        resource_controls.save_rate("0")
+        clock = [100.0]
+        queries = vinted_keywords.expand(search_settings.active_queries())
+        first, second = [-row["id"] for row in vinted_keywords.rows(1)]
+        executor = SimpleNamespace(
+            submit=lambda *args: SimpleNamespace(done=lambda: False)
+        )
+        with patch.object(
+            polling, "ThreadPoolExecutor", return_value=executor
+        ), patch.object(
+            polling.time, "monotonic", side_effect=lambda: clock[0]
+        ), patch.object(
+            polling, "budget", polling.RequestBudget()
+        ):
+            poller = polling.Poller(self.queue)
+            poller.health_written = {qid: 0 for qid in queries}
+            for qid, now, error in (
+                (first, 100.1, None),
+                (second, 100.2, None),
+                (first, 100.3, ValueError("unreadable catalogue")),
+            ):
+                clock[0] = now
+                future = Mock()
+                future.done.return_value = True
+                future.result.return_value = []
+                future.result.side_effect = error
+                future.search_url = queries[qid][1]
+                poller.pending = {qid: (future, now - 0.1, 1000 + now, 1)}
+                poller.tick()
+            self.assertFalse(poller.pending_health)
+            parent = search_settings.health_rows()[0]
+            self.assertEqual(parent["error"], "ValueError")
+            self.assertEqual(parent["failures"], 1)
+            self.assertEqual(vinted_keywords.rows(1)[0]["error"], "ValueError")
+
     def test_speed_choices_show_real_workload_and_do_not_change_saved_mode(self):
         resource_controls.save_rate("0")
         choices = resource_controls.summary()

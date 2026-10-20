@@ -307,6 +307,9 @@ class Poller:
                 urgent_health = urgent_health or bool(
                     error or was_failing or query_id not in self.health_written
                 )
+                # A newer result must follow older buffered statuses when
+                # several keyword variants update the same parent search.
+                self.pending_health.pop(query_id, None)
                 self.pending_health[query_id] = (
                     search_url,
                     (
