@@ -16,6 +16,7 @@ from logger import get_logger
 logger = get_logger(__name__)
 DEFAULT_WORKERS = 64
 RECOVERY_WORKERS = 12
+FRONTIER_HEARTBEAT_SECONDS = 30
 
 
 class CoolingDown(Exception):
@@ -423,7 +424,7 @@ class Poller:
         """Avoid re-sending known pages through IPC and SQLite on every poll.
 
         Network checks stay at the owner's selected speed. New IDs, changed
-        searches and uncommitted batches always pass through. Ten-second
+        searches and uncommitted batches always pass through. Thirty-second
         heartbeats retain outage detection and shared freshness checkpoints.
         """
         state = self.processing_states.get(query_id)
@@ -434,10 +435,12 @@ class Poller:
         previous = self.processed_pages.get(query_id)
         if (
             previous
-            and previous[0] == signature
+            # Reordered or backfilled old IDs are still below the consumer's
+            # committed frontier. They need no duplicate heartbeat processing.
+            and previous[0][:2] == signature[:2]
             and state["primed"]
             and max((int(i) for i in ids), default=0) <= state["max_item_id"]
-            and 0 <= now - previous[1] < 10
+            and 0 <= now - previous[1] < FRONTIER_HEARTBEAT_SECONDS
         ):
             self.reused_pages += 1
             return False

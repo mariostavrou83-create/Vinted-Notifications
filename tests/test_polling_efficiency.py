@@ -71,7 +71,7 @@ class EfficientPollingTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(self.output.qsize(), 1)
         self.assertIn("/items/101", self.output.get()[1])
         self.assertFalse(self.page([101, 100], 110))
-        self.assertTrue(self.page([101, 100], 119.1))  # freshness heartbeat
+        self.assertTrue(self.page([101, 100], 139.2))  # freshness heartbeat
         self.assertTrue(self.output.empty())
 
     def test_committed_ids_are_trimmed_without_losing_uncommitted_new_items(self):
@@ -88,13 +88,22 @@ class EfficientPollingTests(DatabaseFixture, unittest.TestCase):
             self.poller.queue_items(1, query[1], [listing(102), listing(100)]), []
         )
         # An empty heartbeat preserves the committed frontier and its baseline.
-        self.assertTrue(self.page([102, 101, 100], 112))
+        self.assertTrue(self.page([102, 101, 100], 132))
         with closing(search_settings.connection()) as conn:
             frontier = conn.execute(
                 "SELECT * FROM listing_frontiers WHERE query_id=1"
             ).fetchone()
             self.assertEqual(frontier["max_item_id"], 102)
         self.assertEqual(self.output.qsize(), 2)
+
+    def test_reordered_old_pages_reuse_the_cache_but_new_ids_pass_immediately(self):
+        self.page([105, 104, 103], 100)
+        self.assertFalse(self.page([104, 100, 105], 101))
+        self.assertTrue(self.page([106, 105, 104], 102))
+        self.assertEqual(self.output.qsize(), 1)
+        self.assertFalse(self.page([105, 106], 131))
+        self.assertTrue(self.page([105, 106], 133))
+        self.assertEqual(self.output.qsize(), 1)
 
     def test_new_url_unprimed_and_invalid_pages_are_never_trimmed(self):
         query = search_settings.get_search(1)["query"]
