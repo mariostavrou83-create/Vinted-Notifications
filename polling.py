@@ -21,6 +21,7 @@ DEFAULT_WORKERS = 80
 RECOVERY_WORKERS = 12
 FRONTIER_HEARTBEAT_SECONDS = 30
 HEALTH_WRITE_SECONDS = 20
+HEALTH_FLUSH_SECONDS = 1
 
 
 class CoolingDown(Exception):
@@ -156,6 +157,8 @@ class Poller:
         self.processed_pages = {}
         self.reused_pages = 0
         self.health_written = {}
+        self.pending_health = {}
+        self.last_health_write = time.monotonic()
         if os.environ.get("MSJ_DISCOVERY_SHADOW") == "1":
             from discovery_shadow import DiscoveryShadow
 
@@ -213,7 +216,7 @@ class Poller:
             self.backoff_target,
             len(queries) / self.request_rate if self.request_rate else 0,
         )
-        health_updates = []
+        urgent_health = False
         for query_id, (future, started, wall_start, actual_interval) in list(
             self.pending.items()
         ):
@@ -301,7 +304,11 @@ class Poller:
                 or now - self.health_written.get(query_id, float("-inf"))
                 >= self.heartbeat_interval(query_id, base=HEALTH_WRITE_SECONDS)
             ):
-                health_updates.append(
+                urgent_health = urgent_health or bool(
+                    error or was_failing or query_id not in self.health_written
+                )
+                self.pending_health[query_id] = (
+                    search_url,
                     (
                         query_id,
                         parent_id,
@@ -310,7 +317,7 @@ class Poller:
                         duration,
                         actual_interval,
                         error,
-                    )
+                    ),
                 )
             delay = (
                 target
@@ -322,28 +329,39 @@ class Poller:
                 started + delay, now + (delay if error else 0.1)
             )
 
-        # All completed statuses share one short transaction. No connection or
-        # write lock is held during network requests or listing processing.
-        if health_updates:
-            with closing(search_settings.connection()) as conn, conn:
-                for (
-                    scheduler_id,
-                    parent_id,
-                    variant_id,
-                    wall_start,
-                    duration,
-                    interval,
-                    error,
-                ) in health_updates:
-                    search_settings.record_health(
-                        parent_id, wall_start, duration, interval, error, conn=conn
-                    )
-                    if variant_id:
-                        vinted_keywords.health(
-                            variant_id, wall_start, interval, error, conn=conn
+        # Routine writes share one short transaction per second. Errors, first
+        # results and recovery bypass that wait. No connection or write lock is
+        # held during network requests or listing processing.
+        if self.pending_health and (
+            urgent_health or now - self.last_health_write >= HEALTH_FLUSH_SECONDS
+        ):
+            health_updates = [
+                update
+                for scheduler_id, (url, update) in self.pending_health.items()
+                if scheduler_id in queries and queries[scheduler_id][1] == url
+            ]
+            if health_updates:
+                with closing(search_settings.connection()) as conn, conn:
+                    for (
+                        scheduler_id,
+                        parent_id,
+                        variant_id,
+                        wall_start,
+                        duration,
+                        interval,
+                        error,
+                    ) in health_updates:
+                        search_settings.record_health(
+                            parent_id, wall_start, duration, interval, error, conn=conn
                         )
-            for scheduler_id, *_ in health_updates:
-                self.health_written[scheduler_id] = now
+                        if variant_id:
+                            vinted_keywords.health(
+                                variant_id, wall_start, interval, error, conn=conn
+                            )
+                for scheduler_id, *_ in health_updates:
+                    self.health_written[scheduler_id] = now
+            self.pending_health.clear()
+            self.last_health_write = now
 
         for query_id in list(self.next_due):
             if query_id not in queries:

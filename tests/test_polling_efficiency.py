@@ -323,9 +323,112 @@ class EfficientPollingTests(DatabaseFixture, unittest.TestCase):
                 # page alone remains a quiet baseline, as before.
                 self.assertEqual(output.qsize(), step)
                 self.assertLess(clock[0] - poller.health_written[query[0]], 40)
-            self.assertEqual(poller.successes, 0)  # last 30s report just flushed
             self.assertLessEqual(health.call_count, 7)
             self.assertEqual(output.qsize(), 120)
+            self.assertEqual(search_settings.health_rows()[0]["failures"], 0)
+
+    def test_routine_status_batch_keeps_new_alerts_and_recovery_immediate(self):
+        self.page([100], 99)
+        resource_controls.save_rate("0")
+        clock = [100.0]
+        queries = {q[0]: q for q in search_settings.active_queries()}
+        executor = SimpleNamespace(
+            submit=lambda *args: SimpleNamespace(done=lambda: False)
+        )
+        with patch.object(
+            polling, "ThreadPoolExecutor", return_value=executor
+        ), patch.object(
+            polling.time, "monotonic", side_effect=lambda: clock[0]
+        ), patch.object(
+            polling, "budget", polling.RequestBudget()
+        ), patch.object(
+            search_settings, "record_health", wraps=search_settings.record_health
+        ) as health:
+            poller = polling.Poller(self.queue)
+            poller.health_written = {qid: 0 for qid in queries}
+
+            def complete(qid, now, items, error=None):
+                clock[0] = now
+                future = Mock()
+                future.done.return_value = True
+                future.result.return_value = items
+                future.result.side_effect = error
+                future.search_url = queries[qid][1]
+                poller.pending = {qid: (future, now - 0.1, 1000 + now, 1)}
+                poller.tick()
+                while not self.queue.empty():
+                    self.core.clear_item_queue(self.queue, self.output)
+
+            complete(1, 100.1, [listing(101)])
+            self.assertEqual(self.output.qsize(), 1)
+            health.assert_not_called()
+            complete(2, 100.2, [])
+            health.assert_not_called()
+            clock[0] = 101.1
+            poller.tick()
+            self.assertEqual(health.call_count, 2)
+            self.assertFalse(poller.pending_health)
+            complete(1, 101.2, [], ValueError("unreadable catalogue"))
+            self.assertEqual(health.call_count, 3)
+            self.assertEqual(search_settings.health_rows()[0]["failures"], 1)
+            complete(1, 101.3, [listing(102)])
+            self.assertEqual(health.call_count, 4)
+            self.assertEqual(self.output.qsize(), 2)
+            self.assertEqual(search_settings.health_rows()[0]["failures"], 0)
+
+    def test_error_replaces_queued_success_and_edited_urls_drop_stale_status(self):
+        resource_controls.save_rate("0")
+        clock = [100.0]
+        queries = {q[0]: q for q in search_settings.active_queries()}
+        executor = SimpleNamespace(
+            submit=lambda *args: SimpleNamespace(done=lambda: False)
+        )
+        with patch.object(
+            polling, "ThreadPoolExecutor", return_value=executor
+        ), patch.object(
+            polling.time, "monotonic", side_effect=lambda: clock[0]
+        ), patch.object(
+            polling, "budget", polling.RequestBudget()
+        ), patch.object(
+            search_settings, "record_health", wraps=search_settings.record_health
+        ) as health:
+            poller = polling.Poller(self.queue)
+            poller.health_written = {qid: 0 for qid in queries}
+
+            def complete(qid, now, error=None):
+                clock[0] = now
+                future = Mock()
+                future.done.return_value = True
+                future.result.return_value = []
+                future.result.side_effect = error
+                future.search_url = queries[qid][1]
+                poller.pending = {qid: (future, now - 0.1, 1000 + now, 1)}
+                poller.tick()
+
+            complete(1, 100.1)
+            health.assert_not_called()
+            complete(1, 100.2, ValueError("unreadable catalogue"))
+            self.assertEqual(health.call_count, 1)
+            self.assertEqual(health.call_args.args[-1], "ValueError")
+            complete(2, 100.3)
+            old = search_settings.get_search(2)
+            dashboard_store.save_search(
+                2,
+                {
+                    "query_name": "Edited URL",
+                    "query": old["query"] + "&brand_ids[]=999",
+                    "revision": str(old["revision"]),
+                },
+            )
+            clock[0] = 101.4
+            poller.pending = {}
+            poller.config_checked = 0
+            poller.tick()
+            self.assertEqual(health.call_count, 1)
+            self.assertFalse(poller.pending_health)
+            self.assertEqual(search_settings.health_rows()[0]["failures"], 1)
+            complete(1, 101.5)
+            self.assertEqual(health.call_count, 2)
             self.assertEqual(search_settings.health_rows()[0]["failures"], 0)
 
     def test_speed_choices_show_real_workload_and_do_not_change_saved_mode(self):
