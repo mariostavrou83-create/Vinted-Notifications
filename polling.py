@@ -29,6 +29,7 @@ class RequestBudget:
     def __init__(self):
         self.lock = threading.Lock()
         self.until = 0.0
+        self.restricted_until = 0.0
         self.server_delay = 0.0
         self.last_server_error = float("-inf")
 
@@ -43,6 +44,12 @@ class RequestBudget:
     def pause(self, seconds):
         with self.lock:
             self.until = max(self.until, time.monotonic() + seconds)
+            self.restricted_until = max(self.restricted_until, self.until)
+
+    def recovery_remaining(self):
+        """Only explicit/rate/auth pauses require prolonged capacity recovery."""
+        with self.lock:
+            return max(0.0, self.restricted_until - time.monotonic())
 
     def pause_server_error(self):
         """Back off briefly for an isolated 5xx with no Retry-After directive.
@@ -134,7 +141,7 @@ class Poller:
         self.processing_lags = []
         self.trimmed_items = 0
         self.backoff_target = 0.0
-        self.was_cooling = False
+        self.was_restricted = False
         self.recover_at = 0.0
         self.shadow = None
         self.request_rate = resource_controls.DEFAULT_REQUESTS_PER_SECOND
@@ -176,8 +183,8 @@ class Poller:
                 )
                 self.shadow.close()
                 self.shadow = None
-        cooling = budget.remaining() > 0
-        if cooling and not self.was_cooling:
+        restricted = budget.recovery_remaining() > 0
+        if restricted and not self.was_restricted:
             # Do not resume a refused request rate immediately after Retry-After.
             self.backoff_target = min(60.0, max(target, self.backoff_target) * 2)
             self.recover_at = now + budget.remaining() + 300
@@ -185,12 +192,12 @@ class Poller:
                 "Slowing checks after Vinted cooldown; effective target %.1fs",
                 max(target, self.backoff_target),
             )
-        elif not cooling and self.backoff_target and now >= self.recover_at:
+        elif not restricted and self.backoff_target and now >= self.recover_at:
             self.backoff_target /= 2
             if self.backoff_target <= target:
                 self.backoff_target = 0.0
             self.recover_at = now + 300
-        self.was_cooling = cooling
+        self.was_restricted = restricted
         target = max(
             target,
             self.backoff_target,

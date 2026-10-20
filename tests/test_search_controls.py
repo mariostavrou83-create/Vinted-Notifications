@@ -383,6 +383,36 @@ class SchedulerTests(DatabaseFixture, unittest.TestCase):
             self.assertEqual(budget.pause_server_error(), 120)
             self.assertEqual(budget.remaining(), 120)
 
+    def test_isolated_server_pause_recovers_full_capacity_but_rate_limits_still_slow_recovery(
+        self,
+    ):
+        import resource_controls
+
+        resource_controls.save_rate("0")
+        clock = [100.0]
+        executor = MagicMock()
+        executor.submit.side_effect = lambda *args: SimpleNamespace(done=lambda: False)
+        with patch.object(
+            polling.time, "monotonic", side_effect=lambda: clock[0]
+        ), patch.object(
+            polling, "ThreadPoolExecutor", return_value=executor
+        ), patch.object(
+            polling, "budget", polling.RequestBudget()
+        ):
+            polling.budget.pause_server_error()
+            poller = polling.Poller(Queue())
+            poller.tick()
+            self.assertEqual(poller.backoff_target, 0)
+            executor.submit.assert_not_called()
+            clock[0] = 102.1
+            poller.tick()
+            self.assertEqual(executor.submit.call_count, 44)
+            self.assertEqual(poller.backoff_target, 0)
+            polling.budget.pause(120)
+            poller.tick()
+            self.assertEqual(poller.backoff_target, 2)
+            self.assertGreaterEqual(polling.budget.recovery_remaining(), 120)
+
     def test_isolated_502_uses_short_shared_pause_and_503_honours_retry_after(self):
         requester_module = importlib.import_module("pyVintedVN.requester")
         client = requester_module.Requester()
