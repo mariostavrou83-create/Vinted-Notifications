@@ -217,6 +217,7 @@ class Poller:
             search_url = getattr(future, "search_url", scheduled[1])
             variant_id = scheduled[4] if len(scheduled) > 4 else None
             error = ""
+            shared_backoff = False
             was_failing = self.failures.get(query_id, 0) > 0
             try:
                 items = future.result()
@@ -263,6 +264,11 @@ class Poller:
             except Exception as exc:  # noqa: BLE001
                 # Do not include response bodies, headers or credentials in logs.
                 status = getattr(getattr(exc, "response", None), "status_code", None)
+                shared_backoff = (
+                    isinstance(exc, CoolingDown)
+                    or status == 429
+                    or (isinstance(status, int) and status >= 500)
+                ) and (budget.remaining() > 0 or budget.last_server_error >= started)
                 error = f"HTTP {status}" if status else type(exc).__name__
                 self.failures[query_id] = self.failures.get(query_id, 0) + 1
                 self.errors += 1
@@ -292,7 +298,7 @@ class Poller:
                 )
             delay = (
                 target
-                if not error
+                if not error or shared_backoff
                 else max(target, min(300, 5 * 2 ** min(self.failures[query_id], 6)))
             )
             # No catch-up bursts after a slow response or a cooldown.

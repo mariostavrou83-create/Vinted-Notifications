@@ -413,6 +413,40 @@ class SchedulerTests(DatabaseFixture, unittest.TestCase):
             self.assertEqual(poller.backoff_target, 2)
             self.assertGreaterEqual(polling.budget.recovery_remaining(), 120)
 
+    def test_failed_search_does_not_add_a_second_delay_after_shared_server_backoff(
+        self,
+    ):
+        from requests.exceptions import HTTPError
+
+        import resource_controls
+
+        resource_controls.save_rate("0")
+        clock = [100.0]
+        executor = MagicMock()
+        executor.submit.side_effect = lambda *args: SimpleNamespace(done=lambda: False)
+        failed = MagicMock()
+        failed.done.return_value = True
+        failed.result.side_effect = HTTPError(response=SimpleNamespace(status_code=500))
+        failed.search_url = settings.get_search(1)["query"]
+        with patch.object(
+            polling.time, "monotonic", side_effect=lambda: clock[0]
+        ), patch.object(
+            polling, "ThreadPoolExecutor", return_value=executor
+        ), patch.object(
+            polling, "budget", polling.RequestBudget()
+        ):
+            poller = polling.Poller(Queue())
+            poller.pending = {1: (failed, 100, 1000, 4)}
+            clock[0] = 100.3
+            polling.budget.pause_server_error()
+            poller.tick()
+            self.assertLessEqual(poller.next_due[1], polling.budget.until)
+            executor.submit.assert_not_called()
+            clock[0] = 102.4
+            poller.tick()
+            self.assertIn(1, poller.pending)
+            self.assertEqual(poller.backoff_target, 0)
+
     def test_isolated_502_uses_short_shared_pause_and_503_honours_retry_after(self):
         requester_module = importlib.import_module("pyVintedVN.requester")
         client = requester_module.Requester()
