@@ -11,7 +11,7 @@ from pathlib import Path
 
 import db
 
-SCHEMA_VERSION = "25"
+SCHEMA_VERSION = "26"
 
 
 def connection():
@@ -191,6 +191,9 @@ def ensure_schema():
             from keyword_candidates import migrate as migrate_candidates
 
             migrate_candidates(conn)
+            from search_match_audit import migrate as migrate_match_audit
+
+            migrate_match_audit(conn)
             from vinted_keywords import migrate
 
             migrate(conn)

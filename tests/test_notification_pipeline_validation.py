@@ -182,7 +182,7 @@ class SharedNotificationPipeline(DatabaseFixture, unittest.TestCase):
                 )
                 self.assertEqual(
                     details.get("estimated_total") or details["budget"]["total"],
-                    1915 if row["platform"] == "ebay" else 1795,
+                    1915 if row["platform"] == "ebay" else 1865,
                 )
 
 

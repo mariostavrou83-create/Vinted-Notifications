@@ -150,7 +150,10 @@ def add_item_to_db(
         if cursor.execute("SELECT 1 FROM items WHERE item=?", (id,)).fetchone():
             # A borrowed batch connection stays open after this helper returns.
             # End the duplicate's transaction before another item is recorded.
-            conn.rollback()
+            from search_match_audit import record
+
+            record(conn, id, query_id, (alert or {}).get("match_audit"))
+            conn.commit()
             return False
         # Insert into db the id and the query_id related to the item
         cursor.execute(
@@ -204,6 +207,10 @@ def add_item_to_db(
                     "INSERT INTO vinted_alert_details(item_id,payload) VALUES (?,?)",
                     (str(id), json.dumps(alert["vinted_details"], ensure_ascii=False)),
                 )
+        if alert is not None:
+            from search_match_audit import record
+
+            record(conn, id, query_id, alert.get("match_audit"), canonical=True)
         conn.commit()
         return True
     except (sqlite3.Error, OSError):

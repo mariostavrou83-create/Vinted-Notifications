@@ -35,7 +35,7 @@
 <label for="vinted_max_total">Maximum total including fees &amp; postage (£)</label>
 <input id="vinted_max_total" name="vinted_max_total" type="number" min="1" max="1000" step="0.01" inputmode="decimal" value="{{prices.vinted_max_total}}" placeholder="e.g. 20.00" required>
 <small>One maximum for both platforms and all your keywords. This replaces price limits in both links.</small>
-<small>Vinted alert estimate: item price + 5% + £2.20 postage. Autobuy checks the actual complete checkout total before payment and stops if it exceeds your maximum.</small>
+<small>Vinted alert estimate: supplied buyer-protection-inclusive price + £2.20 estimated postage. If protection is unavailable, the fallback is item price + 5% + £0.70 + £2.20 postage. Autobuy checks the actual complete checkout total before payment and stops if it exceeds your maximum.</small>
 <small>eBay alert estimate: listing price + supplied postage, with a conservative Buyer Protection allowance for private or unconfirmed seller types. This can overestimate API prices that already include the fee and skip borderline items. Listings with unknown postage are skipped. Auction prices can rise.</small>
 
 <label for="reminder">Buying &amp; resale notes <span>optional</span></label>

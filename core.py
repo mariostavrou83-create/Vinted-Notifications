@@ -366,6 +366,9 @@ def _clear_item_queue(items_queue, new_items_queue):
         to_notify = []
         filtered_ids = []
         seen = db.get_seen_item_ids([item.id for item in data])
+        import search_match_audit
+
+        auditable_seen = search_match_audit.eligible_seen(query_id, list(seen))
         locally_filtered = search_settings.filtered_ids(
             query_id, [item.id for item in data]
         )
@@ -414,7 +417,7 @@ def _clear_item_queue(items_queue, new_items_queue):
             ):
                 continue
             # In case of multiple queries, we need to check if the item is already in the db
-            if str(item.id) in seen:
+            if str(item.id) in seen and str(item.id) not in auditable_seen:
                 if item.has_real_timestamp:
                     watermark = max(watermark or 0, item.raw_timestamp)
                 continue
@@ -464,6 +467,7 @@ def _clear_item_queue(items_queue, new_items_queue):
                 "search_name": search["query_name"] or f"Search #{query_id}",
                 "reference_id": search.get("reference_id"),
                 "vinted_details": details,
+                "match_audit": search_match_audit.capture(search, details),
             }
             if evidence["state"] == "unverified":
                 from keyword_candidates import stage
@@ -481,6 +485,11 @@ def _clear_item_queue(items_queue, new_items_queue):
                         "photo_url": item.photo,
                         "url": item.url,
                         "timestamp": item.raw_timestamp,
+                        "raw_data": {
+                            "total_item_price": (
+                                getattr(item, "raw_data", None) or {}
+                            ).get("total_item_price")
+                        },
                     },
                     search,
                     alert,

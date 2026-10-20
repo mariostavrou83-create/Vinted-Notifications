@@ -265,7 +265,7 @@ class SharedAlertStore(DatabaseFixture, unittest.TestCase):
 
 
 class SharedVintedEstimate(unittest.TestCase):
-    def test_new_fixed_estimate_legacy_formula_and_boundary(self):
+    def test_shared_uses_supplied_protection_and_preserves_the_total_cap(self):
         item = SimpleNamespace(
             price="15.00",
             currency="GBP",
@@ -277,10 +277,11 @@ class SharedVintedEstimate(unittest.TestCase):
             "vinted_postage_estimate": 999,
         }
         result = vinted_budget.estimate(item, search)
-        self.assertEqual(result["total"], 1795)
-        self.assertEqual(result["buyer_protection"], 75)
+        self.assertEqual(result["total"], 2120)
+        self.assertEqual(result["buyer_protection"], 400)
+        self.assertFalse(result["buyer_protection_estimated"])
         self.assertEqual(result["postage_estimate"], 220)
-        self.assertTrue(result["within_budget"])
+        self.assertFalse(result["within_budget"])
         self.assertFalse(
             vinted_budget.estimate(item, dict(search, vinted_max_total=1794))[
                 "within_budget"
@@ -300,5 +301,5 @@ class SharedVintedEstimate(unittest.TestCase):
             vinted_budget.estimate(
                 item, {"shared_alert_version": 1, "vinted_max_total": 2000}
             )["total"],
-            1806,
+            1876,
         )

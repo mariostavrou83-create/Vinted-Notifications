@@ -246,6 +246,19 @@ if __name__ == "__main__":
             backup_path,
         )
 
+    from search_audit_release import apply_once as apply_search_audit
+
+    try:
+        audit_release = apply_search_audit()
+    except Exception:
+        # A concurrent owner edit must stop this guarded settings release, not
+        # take otherwise healthy monitoring offline. apply_once rolls back its
+        # entire transaction before raising; verify the marker after deployment.
+        logger.exception("Audited search release not applied; saved settings retained")
+        audit_release = None
+    if audit_release:
+        logger.info("Approved search audit applied: %s", audit_release)
+
     from vinted_buyer import import_auth_results_once
 
     import_auth_results_once()

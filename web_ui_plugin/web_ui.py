@@ -308,6 +308,23 @@ def create_app(test_config=None):
     def health():
         return {"status": "ok"}
 
+    @app.get("/search-match-audit.json")
+    def search_match_audit_export():
+        import search_match_audit
+
+        return (
+            {
+                "summary": search_match_audit.summary(),
+                "matches": search_match_audit.export_rows(),
+                "method": "Observed marketplace matches; one notification per listing. Unobserved matches are unknown.",
+            },
+            200,
+            {
+                "Cache-Control": "no-store",
+                "Content-Disposition": "attachment; filename=search-match-audit.json",
+            },
+        )
+
     @app.get("/")
     def dashboard():
         archived = request.args.get("view") == "archive"
@@ -382,6 +399,7 @@ def create_app(test_config=None):
             )
         return render_template(
             "msj_dashboard.html",
+            match_audit=__import__("search_match_audit").summary(),
             rows=rows,
             archived=archived,
             active=sum(not r["paused"] for r in rows),

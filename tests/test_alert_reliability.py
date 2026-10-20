@@ -37,6 +37,9 @@ class AlertTests(unittest.TestCase):
         settings_patch = patch("db.get_parameter", return_value=None)
         settings_patch.start()
         self.addCleanup(settings_patch.stop)
+        audit_patch = patch("search_match_audit.eligible_seen", return_value=set())
+        audit_patch.start()
+        self.addCleanup(audit_patch.stop)
         self.seen = set()
         self.watermark = None
         self.frontier = 0

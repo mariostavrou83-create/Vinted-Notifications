@@ -44,7 +44,9 @@ general category URL cannot restore brand or size selections absent from that
 URL's page. Short/share, item and shop links remain unsupported. No live-slot,
 polling, credentials or Autobuy settings change.
 
-Vinted estimates use item price + rounded 5% + £2.20. Payment still checks the
+Vinted estimates use the supplied protection-inclusive price plus £2.20 estimated
+postage. If protection is unavailable, the fallback is item + rounded 5% + £0.70
++ £2.20 postage. This fallback is an assumption, not a guaranteed tariff. Payment still checks the
 actual complete checkout total, including balance, fees and delivery. eBay
 estimates use supplied item price/postage and a conservative Buyer Protection
 allowance for private or unknown Browse seller types. Website/public prices

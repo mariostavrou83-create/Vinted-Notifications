@@ -201,7 +201,9 @@ def _budget(item, search, platform):
 
         budget = estimate(
             SimpleNamespace(
-                price=item["price"], currency=item.get("currency", "GBP"), raw_data={}
+                price=item["price"],
+                currency=item.get("currency", "GBP"),
+                raw_data=item.get("raw_data", {}),
             ),
             search,
         )
@@ -347,8 +349,15 @@ def _enqueue(conn, candidate, data, search):
         )[:4]
         details["gallery_checked"] = True
     if platform == "vinted":
-        inserted = conn.execute(
-            """INSERT OR IGNORE INTO items
+        # items.item is indexed but not UNIQUE. The surrounding immediate
+        # transaction serialises this explicit check with the discovery path.
+        if conn.execute("SELECT 1 FROM items WHERE item=?", (item_id,)).fetchone():
+            from search_match_audit import capture, record
+
+            record(conn, item_id, candidate["query_id"], capture(search, details))
+            return False
+        conn.execute(
+            """INSERT INTO items
             (item,title,price,currency,timestamp,photo_url,query_id) VALUES (?,?,?,?,?,?,?)""",
             (
                 item_id,
@@ -359,9 +368,7 @@ def _enqueue(conn, candidate, data, search):
                 item.get("photo_url"),
                 candidate["query_id"],
             ),
-        ).rowcount
-        if not inserted:
-            return False
+        )
         conn.execute(
             "UPDATE queries SET last_item=MAX(COALESCE(last_item,0),?) WHERE id=?",
             (item.get("timestamp", candidate["found_at"]), candidate["query_id"]),
@@ -393,6 +400,16 @@ def _enqueue(conn, candidate, data, search):
         conn.execute(
             f"INSERT INTO {table} VALUES (?,?)", (item_id, json.dumps(details))
         )
+        if platform == "vinted":
+            from search_match_audit import capture, record
+
+            record(
+                conn,
+                item_id,
+                candidate["query_id"],
+                capture(search, details),
+                canonical=True,
+            )
         timing = payload.get("timing")
         if platform == "ebay" and timing:
             values = (

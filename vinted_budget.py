@@ -108,15 +108,18 @@ def estimate(item, search, *, display=False):
     raw = getattr(item, "raw_data", None) or {}
     protected = money(raw.get("total_item_price"))
     shared = search.get("shared_alert_version") == 1
-    supplied_fee = not shared and protected is not None and protected >= price
+    supplied_fee = protected is not None and protected >= price
     if not supplied_fee:
         # Explicit fallback assumption for alert estimates, not a Vinted tariff
         # or permission to pay. Checkout always uses Vinted's actual full total.
-        fee = int(
-            (Decimal(price) * Decimal("0.05")).quantize(
-                Decimal(1), rounding=ROUND_HALF_UP
+        fee = (
+            int(
+                (Decimal(price) * Decimal("0.05")).quantize(
+                    Decimal(1), rounding=ROUND_HALF_UP
+                )
             )
-        ) + (0 if shared else 70)
+            + 70
+        )
         protected = price + fee
     postage = (
         DEFAULT_POSTAGE
