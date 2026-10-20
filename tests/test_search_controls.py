@@ -447,6 +447,83 @@ class SchedulerTests(DatabaseFixture, unittest.TestCase):
             self.assertIn(1, poller.pending)
             self.assertEqual(poller.backoff_target, 0)
 
+    def test_first_timeout_keeps_deadline_priority_ahead_of_younger_checks(self):
+        from requests.exceptions import ReadTimeout
+
+        import resource_controls
+
+        resource_controls.save_rate("0")
+        clock, starts = [103.0], []
+
+        def submit(_fn, query, _count):
+            started = clock[0]
+            starts.append(query[0])
+            return SimpleNamespace(done=lambda: clock[0] >= started + 0.1, result=list)
+
+        failed = MagicMock()
+        failed.done.return_value = True
+        failed.result.side_effect = ReadTimeout("slow catalogue response")
+        failed.search_url = settings.get_search(1)["query"]
+        with patch.object(
+            polling.time, "monotonic", side_effect=lambda: clock[0]
+        ), patch.object(
+            polling, "ThreadPoolExecutor", return_value=SimpleNamespace(submit=submit)
+        ), patch.object(
+            polling, "budget", polling.RequestBudget()
+        ):
+            poller = polling.Poller(Queue(), workers=1)
+            poller.pending = {1: (failed, 100, 1000, 4)}
+            poller.next_due = {i: 103 for i in range(1, 45)}
+            poller.previous_start = {i: 102 for i in range(1, 45)}
+            poller.previous_start[1] = 100
+            poller.tick()
+            clock[0] = 104.1
+            poller.tick()
+        self.assertEqual(starts, [2, 1])
+        self.assertLess(poller.previous_start[1] - 100, 5)
+
+    def test_catalogue_deadline_does_not_change_other_requester_clients(self):
+        requester_module = importlib.import_module("pyVintedVN.requester")
+        client = requester_module.Requester()
+        client.session.cookies.set("access_token_web", "offline-test-cookie")
+        response = MagicMock(status_code=200)
+        response.__enter__.return_value = response
+        with patch.object(
+            requester_module, "budget", polling.RequestBudget()
+        ), patch.object(
+            client.session, "get", return_value=response
+        ) as get, patch.object(
+            requester_module.proxies, "configure_proxy", return_value=False
+        ):
+            client.request_deadline = 3
+            client.get("https://api.vinted.co.uk/svc-catalogue/items")
+            timeout = get.call_args.kwargs["timeout"]
+            self.assertEqual(timeout.total, 3)
+            self.assertEqual(timeout.connect_timeout, 1)
+            timeout.start_connect()
+            self.assertLessEqual(timeout.read_timeout, 2.5)
+            client.request_deadline = None
+            client.get("https://api.vinted.co.uk/svc-catalogue/items")
+            self.assertEqual(get.call_args.kwargs["timeout"], (5, 10))
+
+    def test_fast_request_deadline_is_disabled_for_capped_checking_modes(self):
+        import resource_controls
+
+        executor = SimpleNamespace(
+            submit=lambda *args: SimpleNamespace(done=lambda: False)
+        )
+        with patch.object(
+            polling, "ThreadPoolExecutor", return_value=executor
+        ), patch.object(polling, "budget", polling.RequestBudget()):
+            resource_controls.save_rate("0")
+            poller = polling.Poller(Queue())
+            poller.tick()
+            self.assertEqual(poller.fetch.keywords["deadline"], 3)
+            resource_controls.save_rate("5")
+            poller.config_checked = 0
+            poller.tick()
+            self.assertIsNone(poller.fetch.keywords["deadline"])
+
     def test_isolated_502_uses_short_shared_pause_and_503_honours_retry_after(self):
         requester_module = importlib.import_module("pyVintedVN.requester")
         client = requester_module.Requester()

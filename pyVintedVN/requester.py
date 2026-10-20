@@ -6,6 +6,7 @@ import threading
 
 import requests
 from requests.exceptions import HTTPError
+from urllib3.util import Timeout
 
 import db
 import proxies
@@ -55,6 +56,7 @@ class Requester:
         self.session = requests.Session()
         self.debug = debug
         self.shared_config = shared_config
+        self.request_deadline = None
         self._refresh_headers()
 
         if self.debug:
@@ -184,11 +186,16 @@ class Requester:
             self.set_cookies()
 
         tried = 0
+        timeout = (
+            Timeout(total=self.request_deadline, connect=1, read=2.5)
+            if self.request_deadline is not None
+            else (5, 10)
+        )
         while tried < self.MAX_RETRIES:
             tried += 1
             budget.check()
             with self.session.get(
-                url, params=params, headers=self._auth_headers(), timeout=(5, 10)
+                url, params=params, headers=self._auth_headers(), timeout=timeout
             ) as response:
                 if response.status_code == 200:
                     return response

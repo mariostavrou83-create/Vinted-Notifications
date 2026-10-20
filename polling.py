@@ -6,6 +6,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from email.utils import parsedate_to_datetime
+from functools import partial
+
+from requests.exceptions import Timeout
 
 import db
 import resource_controls
@@ -97,7 +100,7 @@ class FetchedPage(list):
         self.completed_monotonic = completed
 
 
-def fetch_query(query, count):
+def fetch_query(query, count, *, deadline=None):
     # Each worker keeps a separate requester for each market. Cookies, locale and
     # headers are never mutated by another thread or copied between markets.
     from urllib.parse import urlparse
@@ -111,6 +114,7 @@ def fetch_query(query, count):
         _local.clients = {}
     if host not in _local.clients:
         _local.clients[host] = Items(client=Requester(shared_config=True))
+    _local.clients[host].requester.request_deadline = deadline
     items = _local.clients[host].search(query[1], nbr_items=count)
     observed = time.time()
     for item in items:
@@ -123,6 +127,7 @@ class Poller:
         self.queue = queue
         self.workers = workers
         self.fetch = fetch
+        self.base_fetch = fetch
         self.executor = ThreadPoolExecutor(max_workers=workers)
         self.pending = {}
         self.next_due = {}
@@ -172,6 +177,10 @@ class Poller:
             self.target = max(1.0, float(db.get_parameter("query_refresh_delay") or 15))
             self.count = int(db.get_parameter("items_per_query") or 96)
             self.request_rate = resource_controls.request_rate()
+            if self.base_fetch is fetch_query:
+                self.fetch = partial(
+                    fetch_query, deadline=3.0 if not self.request_rate else None
+                )
             self.config_checked = now + 1
         queries, target, count = self.queries, self.target, self.count
         if self.shadow:
@@ -218,6 +227,7 @@ class Poller:
             variant_id = scheduled[4] if len(scheduled) > 4 else None
             error = ""
             shared_backoff = False
+            first_timeout = False
             was_failing = self.failures.get(query_id, 0) > 0
             try:
                 items = future.result()
@@ -264,6 +274,7 @@ class Poller:
             except Exception as exc:  # noqa: BLE001
                 # Do not include response bodies, headers or credentials in logs.
                 status = getattr(getattr(exc, "response", None), "status_code", None)
+                first_timeout = isinstance(exc, Timeout) and not was_failing
                 shared_backoff = (
                     isinstance(exc, CoolingDown)
                     or status == 429
@@ -298,7 +309,7 @@ class Poller:
                 )
             delay = (
                 target
-                if not error or shared_backoff
+                if not error or shared_backoff or first_timeout
                 else max(target, min(300, 5 * 2 ** min(self.failures[query_id], 6)))
             )
             # No catch-up bursts after a slow response or a cooldown.
@@ -343,8 +354,12 @@ class Poller:
         if not budget.remaining() and (
             not self.request_rate or now >= self.next_dispatch
         ):
+            # Eligible retries retain their original deadline priority. An
+            # isolated slow response must not go behind a whole extra cycle.
             eligible = sorted(
-                (self.next_due[q], q) for q in queries if q not in self.pending
+                (self.previous_start.get(q, float("-inf")), self.next_due[q], q)
+                for q in queries
+                if q not in self.pending and self.next_due[q] <= now
             )
             # Fast mode can use the extra capacity only while healthy. Keep the
             # original concurrency throughout backoff recovery; the shared
@@ -355,9 +370,7 @@ class Poller:
                 else self.workers
             )
             slots = max(0, worker_limit - len(self.pending))
-            for due, query_id in eligible[:slots]:
-                if due > now:
-                    break
+            for _, _, query_id in eligible[:slots]:
                 previous = self.previous_start.get(query_id)
                 actual_interval = None if previous is None else now - previous
                 self.previous_start[query_id] = now
