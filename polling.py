@@ -437,8 +437,8 @@ class Poller:
         """Avoid re-sending known pages through IPC and SQLite on every poll.
 
         Network checks stay at the owner's selected speed. New IDs, changed
-        searches and uncommitted batches always pass through. Thirty-second
-        heartbeats retain outage detection and shared freshness checkpoints.
+        searches and uncommitted batches always pass through. Staggered
+        30–60 second heartbeats retain freshness without synchronized writes.
         """
         state = self.processing_states.get(query_id)
         ids = tuple(str(item.id) for item in items)
@@ -453,12 +453,19 @@ class Poller:
             and previous[0][:2] == signature[:2]
             and state["primed"]
             and max((int(i) for i in ids), default=0) <= state["max_item_id"]
-            and 0 <= now - previous[1] < FRONTIER_HEARTBEAT_SECONDS
+            and 0 <= now - previous[1] < self.heartbeat_interval(query_id)
         ):
             self.reused_pages += 1
             return False
         self.processed_pages[query_id] = (signature, now)
         return True
+
+    @staticmethod
+    def heartbeat_interval(query_id):
+        # Stable multiplicative phases spread consecutive parent/variant IDs
+        # across a whole interval; new IDs bypass this timer on every check.
+        phase = ((abs(query_id) * 2654435761) & 0xFFFFFFFF) / 2**32
+        return FRONTIER_HEARTBEAT_SECONDS * (1 + phase)
 
     def run(self):
         try:

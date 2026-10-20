@@ -71,7 +71,9 @@ class EfficientPollingTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(self.output.qsize(), 1)
         self.assertIn("/items/101", self.output.get()[1])
         self.assertFalse(self.page([101, 100], 110))
-        self.assertTrue(self.page([101, 100], 139.2))  # freshness heartbeat
+        self.assertTrue(
+            self.page([101, 100], 109.2 + self.poller.heartbeat_interval(1))
+        )  # freshness heartbeat
         self.assertTrue(self.output.empty())
 
     def test_committed_ids_are_trimmed_without_losing_uncommitted_new_items(self):
@@ -88,7 +90,9 @@ class EfficientPollingTests(DatabaseFixture, unittest.TestCase):
             self.poller.queue_items(1, query[1], [listing(102), listing(100)]), []
         )
         # An empty heartbeat preserves the committed frontier and its baseline.
-        self.assertTrue(self.page([102, 101, 100], 132))
+        self.assertTrue(
+            self.page([102, 101, 100], 101.1 + self.poller.heartbeat_interval(1))
+        )
         with closing(search_settings.connection()) as conn:
             frontier = conn.execute(
                 "SELECT * FROM listing_frontiers WHERE query_id=1"
@@ -102,8 +106,20 @@ class EfficientPollingTests(DatabaseFixture, unittest.TestCase):
         self.assertTrue(self.page([106, 105, 104], 102))
         self.assertEqual(self.output.qsize(), 1)
         self.assertFalse(self.page([105, 106], 131))
-        self.assertTrue(self.page([105, 106], 133))
+        self.assertTrue(
+            self.page([105, 106], 102.1 + self.poller.heartbeat_interval(1))
+        )
         self.assertEqual(self.output.qsize(), 1)
+
+    def test_heartbeat_work_is_spread_across_all_574_checks(self):
+        intervals = [self.poller.heartbeat_interval(i) for i in range(1, 575)]
+        self.assertTrue(all(30 <= interval < 60 for interval in intervals))
+        self.assertGreater(max(intervals) - min(intervals), 29)
+        buckets = [
+            sum(second <= interval < second + 1 for interval in intervals)
+            for second in range(30, 60)
+        ]
+        self.assertLessEqual(max(buckets) - min(buckets), 3)
 
     def test_new_url_unprimed_and_invalid_pages_are_never_trimmed(self):
         query = search_settings.get_search(1)["query"]
