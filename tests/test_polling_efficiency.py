@@ -52,7 +52,12 @@ class EfficientPollingTests(DatabaseFixture, unittest.TestCase):
         accepted = self.poller.process_page(scheduler_id, query[1], items, now)
         if accepted:
             self.queue.put(
-                (items, query[0], query[1], query[4] if len(query) > 4 else None)
+                (
+                    self.poller.queue_items(scheduler_id, query[1], items),
+                    query[0],
+                    query[1],
+                    query[4] if len(query) > 4 else None,
+                )
             )
             if process:
                 self.core.clear_item_queue(self.queue, self.output)
@@ -68,6 +73,44 @@ class EfficientPollingTests(DatabaseFixture, unittest.TestCase):
         self.assertFalse(self.page([101, 100], 110))
         self.assertTrue(self.page([101, 100], 119.1))  # freshness heartbeat
         self.assertTrue(self.output.empty())
+
+    def test_committed_ids_are_trimmed_without_losing_uncommitted_new_items(self):
+        self.page([100], 100)
+        self.assertTrue(self.page([102, 101, 100], 101, process=False))
+        queued = self.queue.get_nowait()
+        self.assertEqual([item.id for item in queued[0]], [102, 101])
+        self.queue.put(queued)
+        self.core.clear_item_queue(self.queue, self.output)
+        self.assertEqual(self.output.qsize(), 2)
+        self.poller.processing_states = search_settings.processing_states()
+        query = vinted_keywords.expand(search_settings.active_queries())[1]
+        self.assertEqual(
+            self.poller.queue_items(1, query[1], [listing(102), listing(100)]), []
+        )
+        # An empty heartbeat preserves the committed frontier and its baseline.
+        self.assertTrue(self.page([102, 101, 100], 112))
+        with closing(search_settings.connection()) as conn:
+            frontier = conn.execute(
+                "SELECT * FROM listing_frontiers WHERE query_id=1"
+            ).fetchone()
+            self.assertEqual(frontier["max_item_id"], 102)
+        self.assertEqual(self.output.qsize(), 2)
+
+    def test_new_url_unprimed_and_invalid_pages_are_never_trimmed(self):
+        query = search_settings.get_search(1)["query"]
+        items = [listing(100)]
+        for state in (
+            None,
+            {"url": query, "primed": False, "max_item_id": 200},
+            {"url": query + "&brand_ids[]=88", "primed": True, "max_item_id": 200},
+        ):
+            self.poller.processing_states = {1: state} if state else {}
+            self.assertIs(self.poller.queue_items(1, query, items), items)
+        self.poller.processing_states = {
+            1: {"url": query, "primed": True, "max_item_id": 200}
+        }
+        invalid = [listing("invalid"), listing(100)]
+        self.assertIs(self.poller.queue_items(1, query, invalid), invalid)
 
     def test_failed_item_commit_is_retried_instead_of_cached_as_processed(self):
         self.page([100], 100)

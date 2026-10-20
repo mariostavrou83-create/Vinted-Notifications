@@ -131,6 +131,7 @@ class Poller:
         self.durations = []
         self.worker_durations = []
         self.processing_lags = []
+        self.trimmed_items = 0
         self.backoff_target = 0.0
         self.was_cooling = False
         self.recover_at = 0.0
@@ -237,7 +238,13 @@ class Poller:
                 if self.process_page(query_id, search_url, items, now):
                     self.queue.put(
                         (
-                            [item for item in items if item.is_new_item()],
+                            [
+                                item
+                                for item in self.queue_items(
+                                    query_id, search_url, items
+                                )
+                                if item.is_new_item()
+                            ],
                             parent_id,
                             search_url,
                             variant_id,
@@ -365,7 +372,7 @@ class Poller:
                 )
 
             logger.info(
-                "Poller: %s searches; target %.1fs; %s successes/%s errors in last %.1fs; cooldown %.1fs; interval median %.3fs p95 %.3fs; fetch p95 %.3fs; %s unchanged pages reused; workers %s; interval max %.3fs; over 5s %s/%s; worker p95 %.3fs; process lag p95 %.3fs",
+                "Poller: %s searches; target %.1fs; %s successes/%s errors in last %.1fs; cooldown %.1fs; interval median %.3fs p95 %.3fs; fetch p95 %.3fs; %s unchanged pages reused; workers %s; interval max %.3fs; over 5s %s/%s; worker p95 %.3fs; process lag p95 %.3fs; %s committed old items omitted from IPC",
                 len(queries),
                 target,
                 self.successes,
@@ -382,6 +389,7 @@ class Poller:
                 len(intervals),
                 percentile(worker_durations, 0.95),
                 percentile(processing_lags, 0.95),
+                self.trimmed_items,
             )
             self.successes = self.errors = 0
             self.reused_pages = 0
@@ -389,7 +397,27 @@ class Poller:
             self.durations.clear()
             self.worker_durations.clear()
             self.processing_lags.clear()
+            self.trimmed_items = 0
             self.last_report = now
+
+    def queue_items(self, query_id, url, items):
+        """Omit only IDs the consumer's own committed frontier already rejects.
+
+        Keep the full page for first baselines, changed URLs and invalid IDs.
+        A stale in-memory frontier only sends more data: it cannot hide an
+        uncommitted new listing. Empty heartbeats still refresh freshness state.
+        """
+        state = self.processing_states.get(query_id)
+        if (
+            not state
+            or state["url"] != url
+            or not state["primed"]
+            or any(not str(item.id).isdigit() for item in items)
+        ):
+            return items
+        retained = [item for item in items if int(item.id) > state["max_item_id"]]
+        self.trimmed_items += len(items) - len(retained)
+        return retained
 
     def process_page(self, query_id, url, items, now):
         """Avoid re-sending known pages through IPC and SQLite on every poll.
