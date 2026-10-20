@@ -4,6 +4,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from email.utils import parsedate_to_datetime
 
 import db
@@ -79,6 +80,15 @@ def retry_after_seconds(value, default=60):
 _local = threading.local()
 
 
+class FetchedPage(list):
+    """Separate HTTP-worker time from waiting for the scheduler to collect it."""
+
+    def __init__(self, items, started, completed):
+        super().__init__(items)
+        self.fetch_elapsed = completed - started
+        self.completed_monotonic = completed
+
+
 def fetch_query(query, count):
     # Each worker keeps a separate requester for each market. Cookies, locale and
     # headers are never mutated by another thread or copied between markets.
@@ -87,16 +97,17 @@ def fetch_query(query, count):
     from pyVintedVN.items.items import Items
     from pyVintedVN.requester import Requester
 
+    started = time.monotonic()
     host = urlparse(query[1]).netloc
     if not hasattr(_local, "clients"):
         _local.clients = {}
     if host not in _local.clients:
-        _local.clients[host] = Items(client=Requester())
+        _local.clients[host] = Items(client=Requester(shared_config=True))
     items = _local.clients[host].search(query[1], nbr_items=count)
     observed = time.time()
     for item in items:
         item.observed_at = observed
-    return items
+    return FetchedPage(items, started, time.monotonic())
 
 
 class Poller:
@@ -118,6 +129,8 @@ class Poller:
         self.count = 96
         self.intervals = []
         self.durations = []
+        self.worker_durations = []
+        self.processing_lags = []
         self.backoff_target = 0.0
         self.was_cooling = False
         self.recover_at = 0.0
@@ -181,6 +194,7 @@ class Poller:
             self.backoff_target,
             len(queries) / self.request_rate if self.request_rate else 0,
         )
+        health_updates = []
         for query_id, (future, started, wall_start, actual_interval) in list(
             self.pending.items()
         ):
@@ -197,6 +211,11 @@ class Poller:
             was_failing = self.failures.get(query_id, 0) > 0
             try:
                 items = future.result()
+                if isinstance(items, FetchedPage):
+                    self.worker_durations.append(items.fetch_elapsed)
+                    self.processing_lags.append(
+                        max(0, time.monotonic() - items.completed_monotonic)
+                    )
                 observed = time.time()
                 for item in items:
                     if not hasattr(item, "observed_at"):
@@ -245,15 +264,17 @@ class Poller:
                 or was_failing
                 or now - self.health_written.get(query_id, float("-inf")) >= 5
             ):
-                with db.connection_scope():
-                    search_settings.record_health(
-                        parent_id, wall_start, duration, actual_interval, error
+                health_updates.append(
+                    (
+                        query_id,
+                        parent_id,
+                        variant_id,
+                        wall_start,
+                        duration,
+                        actual_interval,
+                        error,
                     )
-                    if variant_id:
-                        vinted_keywords.health(
-                            variant_id, wall_start, actual_interval, error
-                        )
-                self.health_written[query_id] = now
+                )
             delay = (
                 target
                 if not error
@@ -263,6 +284,29 @@ class Poller:
             self.next_due[query_id] = max(
                 started + delay, now + (delay if error else 0.1)
             )
+
+        # All completed statuses share one short transaction. No connection or
+        # write lock is held during network requests or listing processing.
+        if health_updates:
+            with closing(search_settings.connection()) as conn, conn:
+                for (
+                    scheduler_id,
+                    parent_id,
+                    variant_id,
+                    wall_start,
+                    duration,
+                    interval,
+                    error,
+                ) in health_updates:
+                    search_settings.record_health(
+                        parent_id, wall_start, duration, interval, error, conn=conn
+                    )
+                    if variant_id:
+                        vinted_keywords.health(
+                            variant_id, wall_start, interval, error, conn=conn
+                        )
+            for scheduler_id, *_ in health_updates:
+                self.health_written[scheduler_id] = now
 
         for query_id in list(self.next_due):
             if query_id not in queries:
@@ -310,6 +354,8 @@ class Poller:
         if now - self.last_report >= 30:
             intervals = sorted(self.intervals)
             durations = sorted(self.durations)
+            worker_durations = sorted(self.worker_durations)
+            processing_lags = sorted(self.processing_lags)
 
             def percentile(values, fraction):
                 return (
@@ -319,7 +365,7 @@ class Poller:
                 )
 
             logger.info(
-                "Poller: %s searches; target %.1fs; %s successes/%s errors in last %.1fs; cooldown %.1fs; interval median %.3fs p95 %.3fs; fetch p95 %.3fs; %s unchanged pages reused; workers %s; interval max %.3fs; over 5s %s/%s",
+                "Poller: %s searches; target %.1fs; %s successes/%s errors in last %.1fs; cooldown %.1fs; interval median %.3fs p95 %.3fs; fetch p95 %.3fs; %s unchanged pages reused; workers %s; interval max %.3fs; over 5s %s/%s; worker p95 %.3fs; process lag p95 %.3fs",
                 len(queries),
                 target,
                 self.successes,
@@ -334,11 +380,15 @@ class Poller:
                 max(intervals, default=0),
                 sum(interval > 5 for interval in intervals),
                 len(intervals),
+                percentile(worker_durations, 0.95),
+                percentile(processing_lags, 0.95),
             )
             self.successes = self.errors = 0
             self.reused_pages = 0
             self.intervals.clear()
             self.durations.clear()
+            self.worker_durations.clear()
+            self.processing_lags.clear()
             self.last_report = now
 
     def process_page(self, query_id, url, items, now):

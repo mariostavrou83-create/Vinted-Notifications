@@ -381,12 +381,18 @@ def remember_filtered(query_id, item_ids):
             )
 
 
-def record_health(query_id, attempted, duration, actual_interval, error=""):
-    with closing(connection()) as conn, conn:
-        if not conn.execute("SELECT 1 FROM queries WHERE id=?", (query_id,)).fetchone():
-            return
-        conn.execute(
-            """INSERT INTO search_health
+def record_health(
+    query_id, attempted, duration, actual_interval, error="", *, conn=None
+):
+    if conn is None:
+        with closing(connection()) as opened, opened:
+            return record_health(
+                query_id, attempted, duration, actual_interval, error, conn=opened
+            )
+    if not conn.execute("SELECT 1 FROM queries WHERE id=?", (query_id,)).fetchone():
+        return
+    conn.execute(
+        """INSERT INTO search_health
             (query_id, last_attempt, last_success, duration, actual_interval, failures, error)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(query_id) DO UPDATE SET
@@ -395,16 +401,16 @@ def record_health(query_id, attempted, duration, actual_interval, error=""):
             duration=excluded.duration, actual_interval=excluded.actual_interval,
             failures=CASE WHEN excluded.error='' THEN 0 ELSE search_health.failures+1 END,
             error=excluded.error""",
-            (
-                query_id,
-                attempted,
-                None if error else attempted + duration,
-                duration,
-                actual_interval,
-                int(bool(error)),
-                error,
-            ),
-        )
+        (
+            query_id,
+            attempted,
+            None if error else attempted + duration,
+            duration,
+            actual_interval,
+            int(bool(error)),
+            error,
+        ),
+    )
 
 
 def health_rows():

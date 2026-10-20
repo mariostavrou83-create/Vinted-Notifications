@@ -224,6 +224,43 @@ class EfficientPollingTests(DatabaseFixture, unittest.TestCase):
         )
         self.assertEqual(resource_controls.request_rate(), 0)
 
+    def test_completed_parent_and_keyword_statuses_share_one_commit(self):
+        with closing(search_settings.connection()) as conn, conn:
+            vinted_keywords.save(
+                conn, 1, search_settings.get_search(1)["query"], ["fur", "sherpa"]
+            )
+        variants = vinted_keywords.rows(1)
+        queries = vinted_keywords.expand(search_settings.active_queries())
+        for scheduler_id in (-variants[0]["id"], -variants[1]["id"], 2):
+            future = Mock()
+            future.done.return_value = True
+            future.result.return_value = []
+            future.search_url = queries[scheduler_id][1]
+            self.poller.pending[scheduler_id] = (
+                future,
+                polling.time.monotonic() - 0.3,
+                1000,
+                4,
+            )
+        transactions = []
+        connect = sqlite3.connect
+
+        def traced(*args, **kwargs):
+            conn = connect(*args, **kwargs)
+            conn.set_trace_callback(
+                lambda sql: transactions.append(sql) if sql == "COMMIT" else None
+            )
+            return conn
+
+        with patch.object(db.sqlite3, "connect", side_effect=traced):
+            self.poller.tick()
+        self.assertEqual(transactions, ["COMMIT"])
+        with closing(search_settings.connection()) as conn:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM search_health").fetchone()[0], 2
+            )
+        self.assertTrue(all(row["last_success"] for row in vinted_keywords.rows(1)))
+
 
 class CatalogueHeaderBatchTests(DatabaseFixture, unittest.TestCase):
     def setUp(self):

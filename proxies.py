@@ -14,6 +14,8 @@ logger = get_logger(__name__)
 _PROXY_CACHE = None
 _PROXY_CACHE_INITIALIZED = False
 _SINGLE_PROXY = None
+_NOT_PROVIDED = object()
+_PROXY_REFRESHED_AT = 0.0
 
 # URL to test proxies against
 _TEST_URL = "https://www.vinted.fr/"
@@ -80,7 +82,7 @@ def check_proxies_parallel(proxies_list: list[str]) -> list[str]:
     return working_proxies
 
 
-def get_random_proxy() -> str | None:
+def get_random_proxy(*, last_proxy_check_time=_NOT_PROVIDED) -> str | None:
     """
     Get a random proxy from the configuration values.
 
@@ -95,7 +97,7 @@ def get_random_proxy() -> str | None:
     Returns:
         Optional[str]: A randomly selected proxy string or None if no working proxies are found.
     """
-    global _PROXY_CACHE, _PROXY_CACHE_INITIALIZED, _SINGLE_PROXY
+    global _PROXY_CACHE, _PROXY_CACHE_INITIALIZED, _SINGLE_PROXY, _PROXY_REFRESHED_AT
 
     # Import db here to avoid circular imports
     import db
@@ -103,9 +105,13 @@ def get_random_proxy() -> str | None:
     current_time = time.time()
 
     # Get the last proxy check time from the database
-    last_proxy_check_time_str = db.get_parameter("last_proxy_check_time")
-    last_proxy_check_time = (
-        float(last_proxy_check_time_str) if last_proxy_check_time_str else 0
+    last_proxy_check_time_str = (
+        db.get_parameter("last_proxy_check_time")
+        if last_proxy_check_time is _NOT_PROVIDED
+        else last_proxy_check_time
+    )
+    last_proxy_check_time = max(
+        float(last_proxy_check_time_str or 0), _PROXY_REFRESHED_AT
     )
 
     # Check if we need to recheck proxies (if more than PROXY_RECHECK_INTERVAL seconds have passed)
@@ -137,6 +143,9 @@ def get_random_proxy() -> str | None:
 
     # Update the last check time in the database
     db.set_parameter("last_proxy_check_time", str(current_time))
+    # A one-second transport snapshot can still contain the previous saved
+    # timestamp. The refresh just completed must not run again for that reason.
+    _PROXY_REFRESHED_AT = current_time
 
     # Initialize all_proxies list
     all_proxies = []
@@ -263,7 +272,12 @@ def convert_proxy_string_to_dict(proxy: str | None) -> dict:
         return {"http": f"http://{proxy}", "https": f"https://{proxy}"}
 
 
-def configure_proxy(session: requests.Session, proxy: str | None = None) -> bool:
+def configure_proxy(
+    session: requests.Session,
+    proxy: str | None = None,
+    *,
+    last_proxy_check_time=_NOT_PROVIDED,
+) -> bool:
     """
     Configure the proxy settings for a requests session.
 
@@ -276,7 +290,7 @@ def configure_proxy(session: requests.Session, proxy: str | None = None) -> bool
     """
     # If no proxy is provided, get a random one
     if proxy is None:
-        proxy = get_random_proxy()
+        proxy = get_random_proxy(last_proxy_check_time=last_proxy_check_time)
 
     # If we still don't have a proxy, return False
     if proxy is None:

@@ -166,11 +166,13 @@ def finish(variant, item_ids, watermark, now):
         )
 
 
-def health(variant_id, attempted, interval, error):
-    with closing(connection()) as conn, conn:
-        conn.execute(
-            """UPDATE vinted_keyword_variants SET last_attempt=?,
+def health(variant_id, attempted, interval, error, *, conn=None):
+    if conn is None:
+        with closing(connection()) as opened, opened:
+            return health(variant_id, attempted, interval, error, conn=opened)
+    conn.execute(
+        """UPDATE vinted_keyword_variants SET last_attempt=?,
             last_success=CASE WHEN ?='' THEN ? ELSE last_success END, actual_interval=?,
             failures=CASE WHEN ?='' THEN 0 ELSE failures+1 END,error=? WHERE id=?""",
-            (attempted, error, time.time(), interval, error, error, variant_id),
-        )
+        (attempted, error, time.time(), interval, error, error, variant_id),
+    )

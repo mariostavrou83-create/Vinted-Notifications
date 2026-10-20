@@ -33,7 +33,7 @@ class Requester:
     by the www host on any plain request, so no account or API key is needed.
     """
 
-    def __init__(self, debug=False):
+    def __init__(self, debug=False, *, shared_config=False):
         """
         Initialize the Requester with default headers and session.
 
@@ -42,6 +42,8 @@ class Requester:
 
         Args:
             debug (bool, optional): Whether to print debug messages. Defaults to False.
+            shared_config (bool): Catalogue workers share transport settings for
+                at most one second. Other clients keep immediate settings reads.
         """
 
         # Add the parent directory to sys.path to import db
@@ -52,6 +54,7 @@ class Requester:
         self.MAX_RETRIES = 3
         self.session = requests.Session()
         self.debug = debug
+        self.shared_config = shared_config
         self._refresh_headers()
 
         if self.debug:
@@ -65,12 +68,19 @@ class Requester:
         matters now that auth (www.vinted.<tld>) and data (api.vinted.<tld>) live
         on two different hosts.
         """
-        # Keep both values fresh on every call while avoiding a second SQLite
-        # connection for this short, read-only configuration batch. The scope
-        # ends before parsing headers or making any network request.
-        with db.connection_scope():
-            user_agents_json = db.get_parameter("user_agents")
-            default_headers_json = db.get_parameter("default_headers")
+        # Catalogue workers share a one-second transport-only snapshot. Other
+        # clients keep fresh reads on every call. Neither route holds a database
+        # connection while parsing settings or making network requests.
+        if self.shared_config:
+            from catalogue_config import snapshot
+
+            settings = snapshot()
+            user_agents_json = settings["user_agents"]
+            default_headers_json = settings["default_headers"]
+        else:
+            with db.connection_scope():
+                user_agents_json = db.get_parameter("user_agents")
+                default_headers_json = db.get_parameter("default_headers")
 
         # Parse JSON strings
         user_agents = json.loads(user_agents_json) if user_agents_json else []
@@ -157,7 +167,15 @@ class Requester:
         # Set a random proxy for this request
         budget.check()
         with _proxy_lock:
-            proxy_configured = proxies.configure_proxy(self.session)
+            if self.shared_config:
+                from catalogue_config import snapshot
+
+                proxy_configured = proxies.configure_proxy(
+                    self.session,
+                    last_proxy_check_time=snapshot()["last_proxy_check_time"],
+                )
+            else:
+                proxy_configured = proxies.configure_proxy(self.session)
         if self.debug and proxy_configured:
             logger.debug(f"Using proxy: {self.session.proxies}")
 
