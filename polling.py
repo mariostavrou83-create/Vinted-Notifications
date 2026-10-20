@@ -27,6 +27,8 @@ class RequestBudget:
     def __init__(self):
         self.lock = threading.Lock()
         self.until = 0.0
+        self.server_delay = 0.0
+        self.last_server_error = float("-inf")
 
     def remaining(self):
         with self.lock:
@@ -39,6 +41,24 @@ class RequestBudget:
     def pause(self, seconds):
         with self.lock:
             self.until = max(self.until, time.monotonic() + seconds)
+
+    def pause_server_error(self):
+        """Back off briefly for an isolated 5xx with no Retry-After directive.
+
+        Concurrent failures share one pause. Failures after that pause grow it
+        exponentially to a minute; five healthy minutes restore the short wait.
+        Never shorten a rate-limit, authentication or explicit Retry-After wait.
+        """
+        now = time.monotonic()
+        with self.lock:
+            if self.until > now:
+                return self.until - now
+            if now - self.last_server_error > 300:
+                self.server_delay = 0.0
+            self.server_delay = min(60.0, max(2.0, self.server_delay * 2))
+            self.last_server_error = now
+            self.until = now + self.server_delay
+            return self.server_delay
 
 
 budget = RequestBudget()

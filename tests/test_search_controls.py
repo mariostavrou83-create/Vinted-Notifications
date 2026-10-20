@@ -364,6 +364,54 @@ class SchedulerTests(DatabaseFixture, unittest.TestCase):
             self.assertEqual(get.call_count, 1)
             self.assertGreater(budget.remaining(), 119)
 
+    def test_server_error_backoff_grows_coalesces_and_resets_without_shortening_limits(
+        self,
+    ):
+        clock = [100.0]
+        with patch.object(polling.time, "monotonic", side_effect=lambda: clock[0]):
+            budget = polling.RequestBudget()
+            self.assertEqual(budget.pause_server_error(), 2)
+            clock[0] += 0.5
+            self.assertEqual(budget.pause_server_error(), 1.5)
+            self.assertEqual(budget.until, 102)
+            for expected in (4, 8, 16, 32, 60, 60):
+                clock[0] = budget.until + 0.1
+                self.assertEqual(budget.pause_server_error(), expected)
+            clock[0] = budget.until + 301
+            self.assertEqual(budget.pause_server_error(), 2)
+            budget.pause(120)
+            self.assertEqual(budget.pause_server_error(), 120)
+            self.assertEqual(budget.remaining(), 120)
+
+    def test_isolated_502_uses_short_shared_pause_and_503_honours_retry_after(self):
+        requester_module = importlib.import_module("pyVintedVN.requester")
+        client = requester_module.Requester()
+        client.session.cookies.set("access_token_web", "offline-test-cookie")
+        for status, headers, expected in (
+            (502, {}, 2),
+            (503, {"Retry-After": "120"}, 120),
+        ):
+            with self.subTest(status=status):
+                response = MagicMock(status_code=status, headers=headers)
+                response.__enter__.return_value = response
+                budget = polling.RequestBudget()
+                with patch.object(requester_module, "budget", budget), patch.object(
+                    client.session, "get", return_value=response
+                ) as get, patch.object(
+                    requester_module.proxies, "configure_proxy", return_value=False
+                ):
+                    self.assertEqual(
+                        client.get(
+                            "https://api.vinted.co.uk/svc-catalogue/items"
+                        ).status_code,
+                        status,
+                    )
+                    self.assertGreater(budget.remaining(), expected - 0.1)
+                    self.assertLessEqual(budget.remaining(), expected)
+                    with self.assertRaises(polling.CoolingDown):
+                        client.get("https://api.vinted.co.uk/svc-catalogue/items")
+                    self.assertEqual(get.call_count, 1)
+
     def test_auth_refresh_discards_rejected_persistent_token(self):
         requester_module = importlib.import_module("pyVintedVN.requester")
         from requests.cookies import create_cookie

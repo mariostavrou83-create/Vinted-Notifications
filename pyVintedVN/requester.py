@@ -175,8 +175,12 @@ class Requester:
                 if response.status_code == 200:
                     return response
                 elif response.status_code == 429 or response.status_code >= 500:
-                    seconds = retry_after_seconds(response.headers.get("Retry-After"))
-                    budget.pause(seconds)
+                    retry_after = response.headers.get("Retry-After")
+                    if response.status_code == 429 or retry_after:
+                        seconds = retry_after_seconds(retry_after)
+                        budget.pause(seconds)
+                    else:
+                        seconds = budget.pause_server_error()
                     logger.warning(
                         "Vinted HTTP %s; all searches backing off for %.1fs",
                         response.status_code,
