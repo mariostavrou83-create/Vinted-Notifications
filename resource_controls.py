@@ -90,6 +90,8 @@ def summary():
         "target": target,
         "measured_checks": len(measured),
         "measured_cycle": round(statistics.median(measured), 1) if measured else None,
+        "measured_max": round(max(measured), 2) if measured else None,
+        "over_five_seconds": sum(interval > 5 for interval in measured),
         "measured_p95": (
             round(measured[min(len(measured) - 1, int(len(measured) * 0.95))], 1)
             if measured

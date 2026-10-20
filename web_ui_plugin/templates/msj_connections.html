@@ -84,6 +84,7 @@
 <section class="form-card guide-section" id="monitoring">
 <h2>Speed &amp; cost</h2><p>{{resources.active}} active Vinted searches · {{resources.checks}} underlying checks.</p>
 <p>Current mode: <b>{{resources.mode}}</b>. {% if resources.measured_cycle is not none %}Observed repeat interval: <b>{{resources.measured_cycle}} seconds typical</b> · {{resources.measured_p95}} seconds at the 95th percentile · {{resources.measured_checks}} checks measured recently.{% else %}Waiting for fresh repeat-interval measurements.{% endif %}</p>
+{% if resources.measured_max is not none %}<p>Largest latest measured interval: <b>{{resources.measured_max}} seconds</b>. Five-second goal: {{resources.over_five_seconds}} of {{resources.measured_checks}} measured intervals exceeded five seconds.</p>{% endif %}
 <p>Requested minimum interval: {{resources.target}} seconds. The full set of checks takes longer when it exceeds the available capacity. Listing discovery also depends on when Vinted exposes the item.</p>
 <form method="post"><input type="hidden" name="csrf" value="{{csrf}}">
 <label for="request_rate">Vinted checking speed</label><select id="request_rate" name="request_rate">

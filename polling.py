@@ -13,7 +13,7 @@ import vinted_keywords
 from logger import get_logger
 
 logger = get_logger(__name__)
-DEFAULT_WORKERS = 16
+DEFAULT_WORKERS = 64
 RECOVERY_WORKERS = 12
 
 
@@ -319,7 +319,7 @@ class Poller:
                 )
 
             logger.info(
-                "Poller: %s searches; target %.1fs; %s successes/%s errors in last %.1fs; cooldown %.1fs; interval median %.3fs p95 %.3fs; fetch p95 %.3fs; %s unchanged pages reused; workers %s",
+                "Poller: %s searches; target %.1fs; %s successes/%s errors in last %.1fs; cooldown %.1fs; interval median %.3fs p95 %.3fs; fetch p95 %.3fs; %s unchanged pages reused; workers %s; interval max %.3fs; over 5s %s/%s",
                 len(queries),
                 target,
                 self.successes,
@@ -331,6 +331,9 @@ class Poller:
                 percentile(durations, 0.95),
                 self.reused_pages,
                 self.workers,
+                max(intervals, default=0),
+                sum(interval > 5 for interval in intervals),
+                len(intervals),
             )
             self.successes = self.errors = 0
             self.reused_pages = 0

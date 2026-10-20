@@ -167,6 +167,8 @@ class ScalingTests(test_search_controls.DatabaseFixture, unittest.TestCase):
         self.assertEqual(resources["measured_checks"], 3)
         self.assertEqual(resources["measured_cycle"], 13)
         self.assertEqual(resources["measured_p95"], 13)
+        self.assertEqual(resources["measured_max"], 13)
+        self.assertEqual(resources["over_five_seconds"], 3)
 
     def test_connections_does_not_present_fast_target_as_observed_speed(self):
         resource_controls.save_rate("0")
@@ -180,6 +182,8 @@ class ScalingTests(test_search_controls.DatabaseFixture, unittest.TestCase):
         search_settings.record_health(1, time.time(), 0.3, 12.5)
         response = self.client.get("/connections")
         self.assertIn("12.5 seconds typical", response.text)
+        self.assertIn("12.5 seconds</b>", response.text)
+        self.assertIn("1 of 1 measured intervals exceeded five seconds", response.text)
 
 
 if __name__ == "__main__":
