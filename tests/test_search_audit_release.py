@@ -59,7 +59,7 @@ def manifest_fixture():
             "maximum": 2500,
             "folder_id": 1,
             "photo_count": identity % 8 + 1,
-            "reminder": "Synthetic resale notes",
+            "reminder": "Synthetic resale notes\nTotal limit includes fees\nCheck the shape",
         }
         rows.append(
             {
@@ -242,6 +242,26 @@ class AuditedRelease(DatabaseFixture, unittest.TestCase):
         with patch.dict(
             os.environ, {"MSJ_SEARCH_AUDIT_SHA256": "wrong"}
         ), self.assertRaisesRegex(RuntimeError, "checksum"):
+            release.apply_once()
+        self.assertEqual(self.dump(), before)
+
+    def test_browser_crlf_submission_and_lf_audit_are_the_same_notes(self):
+        with closing(search_settings.connection()) as conn, conn:
+            for row in self.manifest["rows"]:
+                original = row["expected"]["reminder"]
+                conn.execute(
+                    "UPDATE search_preferences SET reminder=? WHERE query_id=?",
+                    (original.replace("\n", "\r\n"), row["id"]),
+                )
+        self.assertEqual(release.apply_once()["new_active"], 128)
+
+    def test_changed_note_text_still_aborts_the_whole_release(self):
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE search_preferences SET reminder=reminder || ' Owner edit.' WHERE query_id=142"
+            )
+        before = self.dump()
+        with self.assertRaisesRegex(RuntimeError, "#142 changed in reminder"):
             release.apply_once()
         self.assertEqual(self.dump(), before)
 

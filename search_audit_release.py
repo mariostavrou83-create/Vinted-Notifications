@@ -47,6 +47,15 @@ def _url_identity(url):
     return parts.scheme, parts.netloc, parts.path, sorted(parse_qsl(parts.query))
 
 
+def _same_saved_value(key, left, right):
+    # HTML form submissions may persist CRLF; textarea reads expose LF. Only
+    # normalise line endings, preserving the guard against actual owner edits.
+    if key == "reminder":
+        left = left.replace("\r\n", "\n").replace("\r", "\n")
+        right = right.replace("\r\n", "\n").replace("\r", "\n")
+    return left == right
+
+
 def _backup(conn):
     directory = Path(db.DB_PATH).resolve().parent / "backups"
     directory.mkdir(mode=0o700, exist_ok=True)
@@ -123,7 +132,11 @@ def apply_once(*, manifest_path=None, now=None):
                         (row["id"],),
                     ).fetchone()[0],
                 }
-                wrong = [key for key, value in checks.items() if value != expected[key]]
+                wrong = [
+                    key
+                    for key, value in checks.items()
+                    if not _same_saved_value(key, value, expected[key])
+                ]
                 if _url_identity(search["query"]) != _url_identity(expected["url"]):
                     wrong.append("url")
                 if wrong:
