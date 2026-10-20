@@ -447,40 +447,92 @@ class SchedulerTests(DatabaseFixture, unittest.TestCase):
             self.assertIn(1, poller.pending)
             self.assertEqual(poller.backoff_target, 0)
 
-    def test_first_timeout_keeps_deadline_priority_ahead_of_younger_checks(self):
-        from requests.exceptions import ReadTimeout
+    def test_first_transport_failure_keeps_deadline_priority_ahead_of_younger_checks(
+        self,
+    ):
+        from requests.exceptions import ConnectionError, ConnectTimeout, ReadTimeout
 
         import resource_controls
 
         resource_controls.save_rate("0")
-        clock, starts = [103.0], []
+        for error_type in (ConnectionError, ConnectTimeout, ReadTimeout):
+            with self.subTest(error=error_type.__name__):
+                clock, starts = [103.0], []
 
-        def submit(_fn, query, _count):
-            started = clock[0]
-            starts.append(query[0])
-            return SimpleNamespace(done=lambda: clock[0] >= started + 0.1, result=list)
+                def submit(_fn, query, _count, clock=clock, starts=starts):
+                    started = clock[0]
+                    starts.append(query[0])
+                    return SimpleNamespace(
+                        done=lambda: clock[0] >= started + 0.1, result=list
+                    )
 
-        failed = MagicMock()
-        failed.done.return_value = True
-        failed.result.side_effect = ReadTimeout("slow catalogue response")
-        failed.search_url = settings.get_search(1)["query"]
-        with patch.object(
-            polling.time, "monotonic", side_effect=lambda: clock[0]
-        ), patch.object(
-            polling, "ThreadPoolExecutor", return_value=SimpleNamespace(submit=submit)
-        ), patch.object(
-            polling, "budget", polling.RequestBudget()
-        ):
-            poller = polling.Poller(Queue(), workers=1)
-            poller.pending = {1: (failed, 100, 1000, 4)}
-            poller.next_due = {i: 103 for i in range(1, 45)}
-            poller.previous_start = {i: 102 for i in range(1, 45)}
-            poller.previous_start[1] = 100
-            poller.tick()
-            clock[0] = 104.1
-            poller.tick()
-        self.assertEqual(starts, [2, 1])
-        self.assertLess(poller.previous_start[1] - 100, 5)
+                failed = MagicMock()
+                failed.done.return_value = True
+                failed.result.side_effect = error_type("catalogue transport failure")
+                failed.search_url = settings.get_search(1)["query"]
+                with patch.object(
+                    polling.time, "monotonic", side_effect=lambda clock=clock: clock[0]
+                ), patch.object(
+                    polling,
+                    "ThreadPoolExecutor",
+                    return_value=SimpleNamespace(submit=submit),
+                ), patch.object(
+                    polling, "budget", polling.RequestBudget()
+                ):
+                    poller = polling.Poller(Queue(), workers=1)
+                    poller.pending = {1: (failed, 100, 1000, 4)}
+                    poller.next_due = {i: 103 for i in range(1, 45)}
+                    poller.previous_start = {i: 102 for i in range(1, 45)}
+                    poller.previous_start[1] = 100
+                    poller.tick()
+                    clock[0] = 104.1
+                    poller.tick()
+                self.assertEqual(starts, [2, 1])
+                self.assertLess(poller.previous_start[1] - 100, 5)
+
+    def test_transport_retry_still_honours_shared_wait_and_repeated_failure_backoff(
+        self,
+    ):
+        from requests.exceptions import ConnectionError, ReadTimeout
+
+        import resource_controls
+
+        resource_controls.save_rate("0")
+        for error_type in (ConnectionError, ReadTimeout):
+            with self.subTest(error=error_type.__name__):
+                clock = [103.0]
+                executor = MagicMock()
+                executor.submit.side_effect = lambda *args: SimpleNamespace(
+                    done=lambda: False
+                )
+                failed = MagicMock()
+                failed.done.return_value = True
+                failed.result.side_effect = error_type("catalogue transport failure")
+                failed.search_url = settings.get_search(1)["query"]
+                with patch.object(
+                    polling.time, "monotonic", side_effect=lambda clock=clock: clock[0]
+                ), patch.object(
+                    polling, "ThreadPoolExecutor", return_value=executor
+                ), patch.object(
+                    polling, "budget", polling.RequestBudget()
+                ):
+                    poller = polling.Poller(Queue())
+                    poller.pending = {1: (failed, 100, 1000, 4)}
+                    poller.previous_start = {i: 101 for i in range(1, 45)}
+                    poller.previous_start[1] = 100
+                    polling.budget.pause(60)
+                    poller.tick()
+                    executor.submit.assert_not_called()
+                    self.assertEqual(poller.failures[1], 1)
+                    self.assertGreaterEqual(polling.budget.remaining(), 60)
+                    clock[0] = 164
+                    poller.tick()
+                    self.assertIn(1, poller.pending)
+                    poller.pending[1] = (failed, 164, 1064, 64)
+                    clock[0] = 164.2
+                    poller.tick()
+                    self.assertEqual(poller.failures[1], 2)
+                    self.assertAlmostEqual(poller.next_due[1], 184.2)
 
     def test_catalogue_deadline_does_not_change_other_requester_clients(self):
         requester_module = importlib.import_module("pyVintedVN.requester")

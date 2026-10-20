@@ -430,7 +430,7 @@ class ScaledPollingCapacityTests(DatabaseFixture, unittest.TestCase):
                     self.query, self.started = query, clock[0]
                     self.clock, self.active = clock, active
                     self.duration = (
-                        0.2 + 0.6 * (query[0] % 31) / 30
+                        0.2 + 0.8 * (query[0] % 31) / 30
                         if workers == polling.DEFAULT_WORKERS
                         else 0.34
                     )
@@ -487,7 +487,7 @@ class ScaledPollingCapacityTests(DatabaseFixture, unittest.TestCase):
                 if workers == polling.DEFAULT_WORKERS:
                     self.assertLessEqual(max(repeats), 5)
                 intervals.append(sum(repeats) / len(repeats))
-        self.assertEqual(polling.DEFAULT_WORKERS, 64)
+        self.assertEqual(polling.DEFAULT_WORKERS, 80)
         self.assertLess(intervals[1], intervals[0] * 0.8)
 
     def test_fast_extra_slots_are_disabled_during_cooldown_recovery(self):

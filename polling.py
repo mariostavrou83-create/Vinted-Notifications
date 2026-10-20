@@ -8,7 +8,7 @@ from contextlib import closing
 from email.utils import parsedate_to_datetime
 from functools import partial
 
-from requests.exceptions import Timeout
+from requests.exceptions import ConnectionError, Timeout
 
 import db
 import resource_controls
@@ -17,7 +17,7 @@ import vinted_keywords
 from logger import get_logger
 
 logger = get_logger(__name__)
-DEFAULT_WORKERS = 64
+DEFAULT_WORKERS = 80
 RECOVERY_WORKERS = 12
 FRONTIER_HEARTBEAT_SECONDS = 30
 
@@ -227,7 +227,7 @@ class Poller:
             variant_id = scheduled[4] if len(scheduled) > 4 else None
             error = ""
             shared_backoff = False
-            first_timeout = False
+            first_transport_failure = False
             was_failing = self.failures.get(query_id, 0) > 0
             try:
                 items = future.result()
@@ -274,7 +274,9 @@ class Poller:
             except Exception as exc:  # noqa: BLE001
                 # Do not include response bodies, headers or credentials in logs.
                 status = getattr(getattr(exc, "response", None), "status_code", None)
-                first_timeout = isinstance(exc, Timeout) and not was_failing
+                first_transport_failure = (
+                    isinstance(exc, (Timeout, ConnectionError)) and not was_failing
+                )
                 shared_backoff = (
                     isinstance(exc, CoolingDown)
                     or status == 429
@@ -309,7 +311,7 @@ class Poller:
                 )
             delay = (
                 target
-                if not error or shared_backoff or first_timeout
+                if not error or shared_backoff or first_transport_failure
                 else max(target, min(300, 5 * 2 ** min(self.failures[query_id], 6)))
             )
             # No catch-up bursts after a slow response or a cooldown.
