@@ -474,6 +474,40 @@ class OfferTests(DatabaseFixture, unittest.TestCase):
             )
         )
 
+    def test_default_worker_runs_notification_wardrobe_page_conversation_offer_flow(
+        self,
+    ):
+        self.enable()
+        self.client.notifications = [notification()]
+        self.client.wardrobe = [
+            self.client.request("GET", "/api/v2/items/1001")["item"]
+        ]
+        worker = offers.OfferWorker(client_factory=self.factory, clock=lambda: self.now)
+        worker.tick()
+        self.now += 5
+        worker.tick()
+        self.assertEqual(self.jobs()[0]["status"], "sent")
+        self.assertEqual(self.jobs()[0]["offer_price"], 2150)
+        self.assertEqual(len(self.client.writes()), 1)
+        self.assertTrue(
+            any("/wardrobe/111/items?" in path for _, path, _ in self.client.calls)
+        )
+
+    def test_default_worker_keeps_older_wardrobe_item_queued_between_pages(self):
+        self.enable()
+        self.add(item=1099)
+        self.client.wardrobe = [
+            self.client.request("GET", f"/api/v2/items/{1000+i}")["item"]
+            for i in range(100)
+        ]
+        worker = offers.OfferWorker(client_factory=self.factory, clock=lambda: self.now)
+        worker.tick()
+        self.assertEqual(self.jobs()[0]["status"], "queued")
+        self.assertEqual(self.jobs()[0]["reason"], "inventory")
+        self.now += 5
+        worker.tick()
+        self.assertEqual(self.jobs()[0]["status"], "sent")
+
     def test_wardrobe_pagination_yields_between_pages_and_keeps_old_items(self):
         self.client.wardrobe = [
             self.client.request("GET", f"/api/v2/items/{1000+i}")["item"]

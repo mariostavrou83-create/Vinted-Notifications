@@ -506,7 +506,7 @@ def _finish(job_id, status, reason="", **fields):
             f"UPDATE vinted_offer_jobs SET status=?,reason=?,lease_until=0{',' if fields else ''}{assignments} WHERE id=?",
             (status, reason, *fields.values(), job_id),
         )
-        if status != "ready":
+        if status not in ("ready", "queued"):
             event(conn, status, reason, job_id)
 
 
