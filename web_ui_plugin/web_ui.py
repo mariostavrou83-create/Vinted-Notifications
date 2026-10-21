@@ -158,6 +158,10 @@ def create_app(test_config=None):
 
     reconnect = install_reconnect(app)
 
+    from vinted_offer_routes import install as install_offers
+
+    install_offers(app)
+
     @app.after_request
     def headers(response):
         response.headers.update(

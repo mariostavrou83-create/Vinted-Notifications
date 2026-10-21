@@ -456,6 +456,7 @@ class WatchdogTests(unittest.TestCase):
             "telegram_process": None,
             "rss_process": None,
             "ebay_worker_process": Mock(),
+            "offers_worker_process": Mock(),
             "scrape_process": Mock(),
             "item_extractor_process": Mock(),
             "dispatcher_process": Mock(),
@@ -476,7 +477,13 @@ class WatchdogTests(unittest.TestCase):
             monitor("items", "telegram", "rss", "new")
         self.assertEqual(
             {c.kwargs["name"] for c in ensure.call_args_list},
-            {"vinted-poller", "item-extractor", "dispatcher", "dashboard"},
+            {
+                "vinted-poller",
+                "item-extractor",
+                "dispatcher",
+                "dashboard",
+                "vinted-offers",
+            },
         )
         namespace["shutdown_requested"].set()
         with patch("process_watchdog.ensure_running") as ensure:

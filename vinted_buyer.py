@@ -13,6 +13,7 @@ import time
 from contextlib import closing, contextmanager, nullcontext
 from copy import copy
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -93,12 +94,19 @@ def csrf_from_html(html):
 
 class BuyerError(ValueError):
     def __init__(
-        self, message, status=None, *, reason="not_confirmed", stage="request"
+        self,
+        message,
+        status=None,
+        *,
+        reason="not_confirmed",
+        stage="request",
+        retry_after=0,
     ):
         super().__init__(message)
         self.status = status
         self.reason = reason
         self.stage = stage
+        self.retry_after = retry_after
 
 
 def token_expiry_timestamp(value):
@@ -344,7 +352,26 @@ def response_error(response, data, stage):
         reason = "unreadable"
     else:
         reason = "http_error"
-    return BuyerError(AUTH_REASONS[reason], status, reason=reason, stage=stage)
+    retry_after = 0
+    wait = getattr(response, "headers", {}).get("Retry-After")
+    if isinstance(wait, str) and len(wait) < 128:
+        try:
+            retry_after = (
+                float(wait)
+                if wait.isdigit()
+                else parsedate_to_datetime(wait).timestamp() - time.time()
+            )
+            if not math.isfinite(retry_after) or retry_after < 0:
+                retry_after = 0
+        except (ValueError, TypeError, OverflowError):
+            retry_after = 0
+    return BuyerError(
+        AUTH_REASONS[reason],
+        status,
+        reason=reason,
+        stage=stage,
+        retry_after=retry_after,
+    )
 
 
 def redirect_target(response):

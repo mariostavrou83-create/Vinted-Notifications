@@ -6,12 +6,12 @@ import re
 import sqlite3
 import unicodedata
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import db
 
-SCHEMA_VERSION = "26"
+SCHEMA_VERSION = "27"
 
 
 def connection():
@@ -40,7 +40,7 @@ def ensure_schema():
             return None
         directory = Path(db.DB_PATH).resolve().parent / "backups"
         directory.mkdir(mode=0o700, exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
         backup = directory / f"before-search-controls-{stamp}.sqlite3"
         fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         os.close(fd)
@@ -206,6 +206,9 @@ def ensure_schema():
             from vinted_budget import migrate as migrate_budgets
 
             migrate_budgets(conn)
+            from vinted_offers import migrate as migrate_offers
+
+            migrate_offers(conn)
             conn.execute("""INSERT OR IGNORE INTO parameters
                 VALUES ('vinted_single_message_alerts', '0')""")
             conn.execute(

@@ -30,6 +30,7 @@ from web_ui_plugin.web_ui import web_ui_process
 telegram_process = None
 rss_process = None
 ebay_worker_process = None
+offers_worker_process = None
 scrape_process = None
 item_extractor_process = None
 dispatcher_process = None
@@ -146,7 +147,7 @@ def monitor_processes(items_queue, telegram_queue, rss_queue, new_items_queue=No
 
 
 def _monitor_processes(items_queue, telegram_queue, rss_queue, new_items_queue=None):
-    global telegram_process, rss_process, ebay_worker_process
+    global telegram_process, rss_process, ebay_worker_process, offers_worker_process
     global scrape_process, item_extractor_process, dispatcher_process, web_ui_process_instance
 
     if new_items_queue is not None:
@@ -169,6 +170,12 @@ def _monitor_processes(items_queue, telegram_queue, rss_queue, new_items_queue=N
         )
         web_ui_process_instance = ensure_running(
             web_ui_process_instance, web_ui_process, name="dashboard"
+        )
+
+        from vinted_offers import run as offers_run
+
+        offers_worker_process = ensure_running(
+            offers_worker_process, offers_run, name="vinted-offers"
         )
 
     if ebay_worker_process is None or not ebay_worker_process.is_alive():
@@ -439,6 +446,7 @@ if __name__ == "__main__":
                 dispatcher_process,
                 web_ui_process_instance,
                 ebay_worker_process,
+                offers_worker_process,
                 telegram_process,
                 rss_process,
                 buyer_check_process,

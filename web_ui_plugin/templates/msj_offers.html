@@ -1,0 +1,38 @@
+{% extends 'msj_base.html' %}
+{% block content %}
+<div class="page-heading"><div><span class="eyebrow">YOUR VINTED WARDROBE</span><h1>Offers to favourites.</h1><p class="muted">A little nudge for people who already like your items.</p></div><a class="secondary" href="{{url_for('offers_page')}}">Refresh activity</a></div>
+<div class="offer-summary" aria-label="Offers summary">
+  <div><span>Offers</span><b>{{'Live' if config.mode=='live' else 'Preview' if config.mode=='preview' else 'Paused'}}</b><small>{{buyer.username if buyer.connected else 'Connect Vinted to start'}}</small></div>
+  <div><span>Discount</span><b>5% off</b><small>{{'Then round down to 50p' if config.rounding=='half_pound' else 'Then round down to a penny'}}</small></div>
+  <div><span>Waiting</span><b>{{counts.get('queued',0)+counts.get('ready',0)+counts.get('checking',0)}}</b><small>At least 3 minutes between sends</small></div>
+  <div><span>Sent</span><b>{{counts.get('sent',0)}}</b><small>{{counts.get('uncertain',0)}} need checking on Vinted</small></div>
+</div>
+{% if config.mode!='paused' and not worker_online %}<div class="notice" role="status">Waiting for the offers worker to check in. No recent worker heartbeat has been confirmed.</div>{% endif %}
+{% if pause_message %}<div class="notice error" role="status">{{pause_message}}</div>{% endif %}
+{% if counts.get('uncertain',0) %}<div class="notice" role="status">An offer needs checking on Vinted. Open its conversation below. Uncertain offers stay out of the queue, including after a restart.</div>{% endif %}
+<div class="offer-layout">
+<section class="form-card offer-settings"><h2>Your offer rules</h2>
+<form method="post" action="{{url_for('offers_settings')}}">
+<input type="hidden" name="csrf" value="{{csrf}}">
+<label for="offer-rounding">Price rounding</label>
+<select id="offer-rounding" name="rounding"><option value="half_pound" {{'selected' if config.rounding=='half_pound'}}>5% off, then round down to 50p</option><option value="penny" {{'selected' if config.rounding=='penny'}}>5% off, then round down to a penny</option></select>
+<p class="offer-help">For a £23 item: £21.50 with 50p rounding, or £21.85 to the penny. The current item price is checked before sending.</p>
+<label for="offer-history">Include favourites from</label>
+<select id="offer-history" name="history"><option value="today" {{'selected' if config.history=='today'}}>Today, then new favourites</option><option value="new" {{'selected' if config.history=='new'}}>Switch-on time, then new favourites</option><option value="all" {{'selected' if config.history=='all'}}>All available favourite notifications</option></select>
+<p class="offer-help">The starting time is kept when you pause and resume. Changing this choice starts a new scan. Buyers already offered this item will not be contacted again.</p>
+<label for="offer-mode">Mode</label>
+<select id="offer-mode" name="mode"><option value="preview" {{'selected' if config.mode=='preview' or config.mode=='paused'}}>Preview queue — send nothing</option><option value="live" {{'selected' if config.mode=='live'}}>Live — send 5% offers</option><option value="paused">Paused</option></select>
+<button class="primary" {{'disabled' if not buyer.connected}}>Save offer settings</button>
+{% if not buyer.connected %}<p><a href="/connections#vinted-buying">Connect your Vinted account →</a></p>{% endif %}
+</form>
+<form class="offer-pause" method="post" action="{{url_for('offers_pause')}}"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary">Pause offers now</button></form>
+</section>
+<section class="form-card offer-detail"><h2>Steady, one at a time.</h2><p>Native price offers, with at least three minutes between sends. No extra message is added.</p><ul><li>One offer per buyer for each item.</li><li>Sold, reserved and hidden items are skipped.</li><li>Existing offers and negotiations are skipped.</li><li>Vinted account or rate-limit errors pause the queue.</li></ul><p class="muted">Only favourites visible in your Vinted notifications can be processed. A large history takes longer to work through.</p><dl class="offer-timing"><div><dt>Vinted cooldown until</dt><dd>{{display_time(config.cooldown_until)}}</dd></div><div><dt>Last favourites check</dt><dd>{{display_time(config.last_scan)}}</dd></div><div><dt>Last offer sent</dt><dd>{{display_time(config.last_sent)}}</dd></div><div><dt>Next send at or after</dt><dd>{{display_time(config.next_send) if config.mode=='live' else 'Paused / preview'}}</dd></div></dl><p class="offer-help">Preview checks items and prices without sending offers. In live mode, pausing stops the next send; an offer already in flight may finish.</p></section>
+</div>
+<section class="offer-queue" aria-labelledby="offer-queue-title"><div class="offer-queue-heading"><div><h2 id="offer-queue-title">Queue & history</h2><p class="muted">Most recent 150 entries · all counts above include the full queue.</p></div><span class="muted">{{counts.get('skipped',0)}} skipped</span></div>
+{% if jobs %}<div class="offer-table-wrap"><table class="offer-table"><thead><tr><th scope="col">Item</th><th scope="col">Buyer</th><th scope="col">Offer</th><th scope="col">Status</th><th scope="col">Action</th></tr></thead><tbody>{% for job in jobs %}<tr><td><a href="{{job.item_url}}" target="_blank" rel="noopener noreferrer">{{job.title or ('Item '+job.item_id)}}</a><small>Liked {{display_time(job.liked_at)}}</small></td><td><a href="https://www.vinted.co.uk/member/{{job.recipient_id}}" target="_blank" rel="noopener noreferrer">Member {{job.recipient_id}}</a></td><td>{% if job.offer_price is not none %}<b>£{{money(job.offer_price)}}</b><small>Item £{{money(job.price)}}</small>{% else %}<span class="muted">Awaiting price check</span>{% endif %}</td><td><span class="offer-status offer-{{job.status}}">{{{'queued':'Waiting','ready':'Preview ready','checking':'Checking','sending':'Sending','sent':'Sent','skipped':'Skipped','uncertain':'Check Vinted'}.get(job.status,job.status)}}</span>{% if job.message %}<small>{{job.message}}</small>{% endif %}{% if job.sent_at %}<small>{{display_time(job.sent_at)}}</small>{% endif %}</td><td>{% if job.status in ('queued','ready') %}<form method="post" action="{{url_for('offers_cancel',job_id=job.id)}}"><input type="hidden" name="csrf" value="{{csrf}}"><button class="text-button">Skip</button></form>{% endif %}{% if job.conversation_url %}<a href="{{job.conversation_url}}" target="_blank" rel="noopener noreferrer">Open chat ↗</a>{% endif %}</td></tr>{% endfor %}</tbody></table></div>
+{% else %}<div class="empty"><h3>Your offer queue starts here.</h3><p>Choose your starting period and save Preview to check your favourites. Switch to Live when the queue is ready.</p></div>{% endif %}
+{% if config.unknown_notifications %}<p class="offer-help">{{config.unknown_notifications}} favourite notification(s) could not be read reliably during scans. No recipient was guessed.</p>{% endif %}
+</section>
+{% if events %}<details class="form-card offer-activity"><summary>Recent activity</summary><ul>{% for e in events %}<li>{{display_time(e.happened)}} · {{e.action|replace('_',' ')}}{% if e.job_id %} · Queue #{{e.job_id}}{% endif %}{% if e.reason %} · {{e.reason|replace('_',' ')}}{% endif %}</li>{% endfor %}</ul></details>{% endif %}
+{% endblock %}
