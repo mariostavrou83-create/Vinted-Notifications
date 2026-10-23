@@ -33,6 +33,7 @@ from vinted_timing import (
 
 BASE = "https://www.vinted.co.uk"
 PICKUP_BASE = "https://api.vinted.co.uk"
+NOTIFICATIONS_PATH = "/web/gateway/inbox-notifications/v1/notifications"
 # Requests preserves Domain=www.vinted.co.uk as .www.vinted.co.uk. Both
 # representations are scoped to the canonical buyer host, not another site.
 COOKIE_DOMAINS = frozenset(
@@ -1367,6 +1368,7 @@ class Client:
             public.session.close()
 
     def request(self, method, path, body=None, *, allow_challenge=False, params=None):
+        notifications_gateway = path == NOTIFICATIONS_PATH
         pickup_gateway = bool(
             re.fullmatch(
                 r"/shipping-estimation/external/shipping_orders/[0-9]{1,24}/nearby_pickup_points",
@@ -1374,7 +1376,27 @@ class Client:
             )
         )
         extra = {}
-        if pickup_gateway:
+        if notifications_gateway:
+            if (
+                method != "GET"
+                or body is not None
+                or allow_challenge
+                or not isinstance(params, dict)
+                or set(params) != {"page", "per_page"}
+                or type(params["page"]) is not int
+                or not 1 <= params["page"] <= 1000
+                or type(params["per_page"]) is not int
+                or not 1 <= params["per_page"] <= 100
+            ):
+                raise BuyerError("Vinted notifications request could not be verified.")
+            extra = {
+                "params": params,
+                "headers": {
+                    "Platform": "web",
+                    "X-Next-App": "marketplace-web",
+                },
+            }
+        elif pickup_gateway:
             if (
                 method != "GET"
                 or body is not None
@@ -1427,7 +1449,7 @@ class Client:
             referer = BASE + "/checkout?purchase_id=" + path.split("/")[4]
         elif path.startswith("/api/v2/items/"):
             referer = BASE + "/items/" + path.split("/")[4]
-        elif renewal:
+        elif renewal or notifications_gateway:
             referer = BASE + "/"
         elif path.startswith("/web/api/auth/"):
             referer = BASE + "/member/login"

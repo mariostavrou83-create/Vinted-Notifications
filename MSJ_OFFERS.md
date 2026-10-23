@@ -22,8 +22,12 @@ offer. Existing dashboard owner authentication and CSRF protection apply.
 - One offer per connected account/item/recipient. Repeated notifications and
   re-likes cannot create another offer for that pair. A buyer may receive an
   offer for another item; there is no cross-item 24-hour prohibition.
-- Only explicit first-party favourite action links with valid item, recipient
-  and timestamp data enter the queue. Hidden/private likes cannot be discovered.
+- The current inbox notifications gateway supplies typed `ItemFavourite`
+  records (`entry_type=20`), with `subject_id` identifying the item, `user_id`
+  the liker and `updated_at` the event time. Other notification types never
+  enter the queue. Explicit first-party favourite action links remain supported
+  for older records without a type. Every queued record needs valid item,
+  recipient and timestamp data. Hidden/private likes cannot be discovered.
 - Price and ownership are rechecked using the current wardrobe and canonical
   listing-page flow. Sold, closed, reserved or hidden items are skipped. The
   conversation must independently confirm the item, seller and opposite user.
@@ -63,6 +67,12 @@ and [AliYous extension](https://github.com/AliYous/VintedAutoReply-chrome-extens
 illustrate notification-based recipient discovery, but contain older endpoints
 and are not used as runnable dependencies. [Microck's Vinted client](https://github.com/Microck/vinted-cli)
 provides a current reference for wardrobe, conversation and seller-offer shapes.
+The [Vintrack client](https://github.com/JakobAIOdev/Vintrack-Vinted-Monitor/blob/c229f812aa2c4a2e65ca31b6edd441fef886f12d/apps/vinted-service/internal/vinted/client.go)
+and its gateway test document the same-origin notifications route and web
+headers. The [Fill & Sell notification audit](https://github.com/Nelsonchatnoir/fill-sell/blob/4309aac03d3848adaa27e360b437aac02aafd43e/docs/AUDIT_BORDEREAUX_FAVORIS_2026-09-24.md)
+documents typed favourite records and distinguishes them from messages, price
+reductions and sold-item notifications. Structural diagnostics record counts
+and format classes, never notification bodies, links or recipient IDs.
 The implementation is original; no third-party source is copied or executed.
 
 These are unofficial interfaces. Their continued availability must be checked

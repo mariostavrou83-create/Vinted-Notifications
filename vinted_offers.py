@@ -264,10 +264,41 @@ def timestamp(value):
         return None
 
 
+def notification_time(notification):
+    for field in ("created_at", "created_at_ts", "updated_at"):
+        value = timestamp(notification.get(field))
+        if value is not None:
+            return value
+    return None
+
+
 def favourite(notification):
-    """Read explicit IDs from Vinted's favourite action link, never body text."""
+    """Use typed ItemFavourite metadata, or an explicit legacy action link.
+
+    The current inbox gateway uses entry_type=20, subject_id for the item,
+    user_id for the liker and updated_at for the event time. Message, price
+    reduction and sold-item notifications must never become offer recipients.
+    """
     if not isinstance(notification, dict):
         return None
+    liked_at = notification_time(notification)
+    if "entry_type" in notification:
+        if (
+            type(notification["entry_type"]) is not int
+            or notification["entry_type"] != 20
+        ):
+            return None
+        item_id = identifier(notification.get("subject_id"))
+        recipient = identifier(notification.get("user_id"))
+        if not (item_id and recipient and liked_at):
+            return None
+        return {
+            "item_id": item_id,
+            "recipient_id": recipient,
+            "notification_id": identifier(notification.get("id"))
+            or f"{item_id}:{recipient}",
+            "liked_at": liked_at,
+        }
     link = notification.get("link")
     if not isinstance(link, str) or len(link) > 2048:
         return None
@@ -290,9 +321,6 @@ def favourite(notification):
             item_id = identifier(items[0]) if len(items) == 1 else None
         else:
             return None
-        liked_at = timestamp(
-            notification.get("created_at") or notification.get("created_at_ts")
-        )
         if not (recipient and item_id and liked_at):
             return None
         return {
@@ -304,6 +332,54 @@ def favourite(notification):
         }
     except (ValueError, TypeError):
         return None
+
+
+def notification_shape(rows, page):
+    """Only structural counts, never recipient IDs, links, bodies or credentials."""
+    types, formats, keys = set(), set(), set()
+    updated = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        entry = row.get("entry_type")
+        if type(entry) is int and 0 <= entry <= 1000:
+            types.add(entry)
+        updated += timestamp(row.get("updated_at")) is not None
+        try:
+            url = urlsplit(str(row.get("link") or "")[:2048])
+            if url.scheme in ("", "https") and url.netloc in (
+                "",
+                "vinted.co.uk",
+                "www.vinted.co.uk",
+            ):
+                formats.add("web")
+            elif url.scheme == "vinted" and url.netloc in ("messaging", "item"):
+                formats.add(url.netloc)
+            else:
+                formats.add("other")
+            keys.update(
+                set(parse_qs(url.query))
+                & {
+                    "item_id",
+                    "offering_id",
+                    "opposite_user_id",
+                    "user_id",
+                    "portal",
+                    "initiator",
+                }
+            )
+        except ValueError:
+            formats.add("invalid")
+    logger.info(
+        "Vinted offers notification format: page=%s rows=%s entry_types=%s links=%s query_fields=%s updated_dates=%s supported_favourites=%s",
+        page,
+        len(rows),
+        ",".join(map(str, sorted(types))) or "none",
+        ",".join(sorted(formats)) or "none",
+        ",".join(sorted(keys)) or "none",
+        updated,
+        sum(favourite(row) is not None for row in rows),
+    )
 
 
 def offer_amount(price, rounding):
@@ -561,20 +637,24 @@ class OfferWorker:
         now = self.clock()
         page = config["scan_page"]
         data = client.request(
-            "GET", f"/api/v2/notifications?page={page}&per_page={PAGE_SIZE}"
+            "GET",
+            buyer.NOTIFICATIONS_PATH,
+            params={"page": page, "per_page": PAGE_SIZE},
         )
         rows = data.get("notifications") if isinstance(data, dict) else None
-        if not isinstance(rows, list) or len(rows) > PAGE_SIZE:
+        if not isinstance(rows, list) or len(rows) > 100:
             raise OfferCheck("shape", pause=True)
+        notification_shape(rows, page)
         cutoff = max(config["since"] or 0, config["scan_watermark"] - 300)
-        times = [
-            timestamp(n.get("created_at") or n.get("created_at_ts"))
-            for n in rows
-            if isinstance(n, dict)
-        ]
+        times = [notification_time(n) for n in rows if isinstance(n, dict)]
         valid_times = [t for t in times if t is not None]
         latest = max([config["scan_latest"], *valid_times])
-        finished = len(rows) < PAGE_SIZE or bool(
+        pagination = data.get("pagination") or {}
+        total_pages = (
+            pagination.get("total_pages") if isinstance(pagination, dict) else None
+        )
+        more = type(total_pages) is int and page < total_pages
+        finished = (len(rows) < PAGE_SIZE and not more) or bool(
             rows and len(valid_times) == len(rows) and max(valid_times) < cutoff
         )
         unknown = 0
@@ -605,8 +685,9 @@ class OfferWorker:
                             now,
                         ),
                     )
-                elif isinstance(notification, dict) and "offering_id" in str(
-                    notification.get("link", "")
+                elif isinstance(notification, dict) and (
+                    notification.get("entry_type") == 20
+                    or "offering_id" in str(notification.get("link", ""))
                 ):
                     unknown += 1
             conn.execute(

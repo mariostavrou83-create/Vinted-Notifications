@@ -45,12 +45,12 @@ class FakeClient:
         item["user_id"] = item.get("user", {}).get("id")
         return {"item": item}
 
-    def request(self, method, path, body=None):
+    def request(self, method, path, body=None, *, params=None):
         self.calls.append((method, path, body))
         if self.fail:
             self.fail(method, path, body)
-        if path.startswith("/api/v2/notifications?"):
-            page = int(parse_qs(urlsplit(path).query)["page"][0])
+        if path == buyer.NOTIFICATIONS_PATH:
+            page = params["page"]
             return {"notifications": self.notifications[(page - 1) * 20 : page * 20]}
         if path.startswith("/api/v2/wardrobe/"):
             page = int(parse_qs(urlsplit(path).query)["page"][0])
@@ -173,6 +173,81 @@ class OfferTests(DatabaseFixture, unittest.TestCase):
             self.assertIsNone(offers.favourite(dict(n, **changes)), changes)
         self.assertIsNotNone(
             offers.favourite(dict(n, created_at="2026-10-21T11:00:00Z"))
+        )
+
+    def test_gateway_notification_updated_date_is_supported(self):
+        row = notification(created_at=None, updated_at="2026-10-21T11:00:00Z")
+        parsed = offers.favourite(row)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["item_id"], "1001")
+
+    def test_current_item_favourite_uses_explicit_subject_and_liker(self):
+        row = {
+            "id": "notification-uuid",
+            "entry_type": 20,
+            "subject_id": 1001,
+            "user_id": 222,
+            "updated_at": "2026-10-21T11:00:00Z",
+            "link": "vinted://messaging?item_id=1001&portal=uk",
+        }
+        parsed = offers.favourite(row)
+        self.assertEqual(parsed["item_id"], "1001")
+        self.assertEqual(parsed["recipient_id"], "222")
+        for entry_type in (30, 50, 110, 120, 121, 300, 750, "20", True):
+            self.assertIsNone(offers.favourite(dict(row, entry_type=entry_type)))
+        for field in ("subject_id", "user_id", "updated_at"):
+            invalid = dict(row)
+            invalid.pop(field)
+            self.assertIsNone(offers.favourite(invalid))
+
+    def test_current_gateway_favourites_queue_without_messaging_other_notices(self):
+        self.enable("preview", history="all")
+        self.client.notifications = [
+            {
+                "entry_type": kind,
+                "subject_id": 1000 + index,
+                "user_id": 222,
+                "updated_at": self.now,
+                "link": "/inbox",
+            }
+            for index, kind in enumerate((20, 50, 110, 121, 300))
+        ]
+        self.worker.tick()
+        self.assertEqual([j["item_id"] for j in self.jobs()], ["1000"])
+        self.assertFalse(self.client.writes())
+
+    def test_notification_diagnostics_never_log_bodies_links_or_ids(self):
+        row = notification(
+            item=98765432101,
+            recipient=98765432102,
+            body="Private buyer text",
+            entry_type=20,
+            subject_id=98765432101,
+            user_id=98765432102,
+            updated_at="2026-10-21T11:00:00Z",
+        )
+        with self.assertLogs("vinted_offers", level="INFO") as logs:
+            offers.notification_shape([row], 1)
+        rendered = " ".join(logs.output)
+        self.assertNotIn("Private buyer", rendered)
+        self.assertNotIn("98765432101", rendered)
+        self.assertNotIn("98765432102", rendered)
+        self.assertNotIn("https://", rendered)
+        self.assertIn("updated_dates=1", rendered)
+        self.assertIn("supported_favourites=1", rendered)
+
+    def test_gateway_pagination_keeps_scanning_when_server_returns_short_page(self):
+        self.enable("preview", history="all")
+        rows = [notification(item=1000 + i) for i in range(5)]
+        client = Mock()
+        client.request.return_value = {
+            "notifications": rows,
+            "pagination": {"current_page": 1, "total_pages": 3, "per_page": 5},
+        }
+        self.worker.scan(client, offers.state())
+        self.assertEqual(offers.state()["scan_page"], 2)
+        client.request.assert_called_once_with(
+            "GET", buyer.NOTIFICATIONS_PATH, params={"page": 1, "per_page": 20}
         )
 
     def test_paused_worker_makes_no_marketplace_requests(self):
@@ -572,6 +647,82 @@ class OfferTests(DatabaseFixture, unittest.TestCase):
         self.worker.tick()
         self.assertEqual(offers.state()["mode"], "paused")
         self.assertFalse(any(c[0] == "POST" for c in self.client.calls))
+
+
+class OfferGatewayTests(DatabaseFixture, unittest.TestCase):
+    def test_only_exact_read_only_gateway_has_web_headers(self):
+        from test_vinted_network import response
+
+        client = buyer.Client()
+        client.solver_attempted = True
+        try:
+            with patch.object(
+                client.session,
+                "request",
+                return_value=response(data={"notifications": []}),
+            ) as request:
+                result = client.request(
+                    "GET", buyer.NOTIFICATIONS_PATH, params={"page": 2, "per_page": 20}
+                )
+            self.assertEqual(result, {"notifications": []})
+            self.assertEqual(
+                request.call_args.args, ("GET", buyer.BASE + buyer.NOTIFICATIONS_PATH)
+            )
+            self.assertEqual(
+                request.call_args.kwargs["params"], {"page": 2, "per_page": 20}
+            )
+            self.assertEqual(
+                request.call_args.kwargs["headers"],
+                {"Platform": "web", "X-Next-App": "marketplace-web"},
+            )
+            self.assertFalse(request.call_args.kwargs["allow_redirects"])
+        finally:
+            client.session.close()
+
+    def test_gateway_rejects_mutations_or_unbounded_parameters_before_network(self):
+        client = buyer.Client()
+        try:
+            with patch.object(client.session, "request") as request:
+                for method, body, params in (
+                    ("POST", None, {"page": 1, "per_page": 20}),
+                    ("GET", {"anything": "not allowed"}, {"page": 1, "per_page": 20}),
+                    ("GET", None, {"page": True, "per_page": 20}),
+                    ("GET", None, {"page": 0, "per_page": 20}),
+                    ("GET", None, {"page": 1, "per_page": 101}),
+                    (
+                        "GET",
+                        None,
+                        {"page": 1, "per_page": 20, "url": "https://untrusted.invalid"},
+                    ),
+                    ("GET", None, None),
+                ):
+                    with self.assertRaises(buyer.BuyerError):
+                        client.request(
+                            method, buyer.NOTIFICATIONS_PATH, body, params=params
+                        )
+                request.assert_not_called()
+        finally:
+            client.session.close()
+
+    def test_gateway_refusal_never_replays_an_old_route(self):
+        from test_vinted_network import response
+
+        client = buyer.Client()
+        client.solver_attempted = True
+        try:
+            with patch.object(
+                client.session,
+                "request",
+                return_value=response(status=404, text="not found"),
+            ) as request, self.assertRaises(buyer.BuyerError):
+                client.request(
+                    "GET",
+                    buyer.NOTIFICATIONS_PATH,
+                    params={"page": 1, "per_page": 20},
+                )
+            self.assertEqual(request.call_count, 1)
+        finally:
+            client.session.close()
 
 
 class OfferRouteTests(DashboardTests):
