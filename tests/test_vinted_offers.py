@@ -266,6 +266,22 @@ class OfferTests(DatabaseFixture, unittest.TestCase):
         self.assertIn("updated_dates=1", rendered)
         self.assertIn("supported_favourites=1", rendered)
 
+    def test_old_valid_likes_are_not_parse_errors_and_scan_counts_reset(self):
+        self.enable("preview", history="new")
+        self.client.notifications = [notification(at=NOW - 60)]
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_offer_settings SET unknown_notifications=35")
+        self.worker.tick()
+        self.assertFalse(self.jobs())
+        self.assertEqual(offers.state()["unknown_notifications"], 0)
+        self.client.notifications = [notification(link="/inbox", entry_type=20)]
+        self.now += 61
+        self.worker.tick()
+        self.assertEqual(offers.state()["unknown_notifications"], 1)
+        self.now += 61
+        self.worker.tick()
+        self.assertEqual(offers.state()["unknown_notifications"], 1)
+
     def test_gateway_pagination_keeps_scanning_when_server_returns_short_page(self):
         self.enable("preview", history="all")
         rows = [notification(item=1000 + i) for i in range(5)]

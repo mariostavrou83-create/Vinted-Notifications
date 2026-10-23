@@ -771,15 +771,20 @@ class OfferWorker:
                             now,
                         ),
                     )
-                elif isinstance(notification, dict) and (
-                    notification.get("entry_type") == 20
-                    or "offering_id" in str(notification.get("link", ""))
+                elif (
+                    not match
+                    and isinstance(notification, dict)
+                    and (
+                        notification.get("entry_type") == 20
+                        or "offering_id" in str(notification.get("link", ""))
+                    )
                 ):
                     unknown += 1
             conn.execute(
                 """UPDATE vinted_offer_settings SET scan_page=?,scan_latest=?,
                 scan_watermark=CASE WHEN ? THEN MAX(scan_watermark,?) ELSE scan_watermark END,
-                next_scan=?,last_scan=?,unknown_notifications=unknown_notifications+? WHERE id=1""",
+                next_scan=?,last_scan=?,unknown_notifications=
+                CASE WHEN ? THEN ? ELSE unknown_notifications+? END WHERE id=1""",
                 (
                     1 if finished else page + 1,
                     0 if finished else latest,
@@ -787,6 +792,8 @@ class OfferWorker:
                     latest,
                     now + (SCAN_GAP if finished else PAGE_GAP),
                     now,
+                    page == 1,
+                    unknown,
                     unknown,
                 ),
             )
