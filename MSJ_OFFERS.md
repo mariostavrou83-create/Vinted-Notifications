@@ -34,6 +34,12 @@ offer. Existing dashboard owner authentication and CSRF protection apply.
   listing-page flow. Sold, closed, reserved or hidden items are skipped. The
   conversation must independently confirm the item, seller and opposite user.
   Existing native offers or negotiations are skipped.
+- An explicit seller ID or seller role can confirm the conversation's side;
+  conflicting fields always stop the offer. The chat link is retained as soon
+  as a conversation exists. **Recheck** is available only for item/recipient
+  checks that stopped before any offer attempt, for the current account and
+  starting period. It preserves pause mode and cooldowns, reuses the chat,
+  and never requeues an uncertain or previously attempted send.
 
 ## Scheduling and failure behaviour
 

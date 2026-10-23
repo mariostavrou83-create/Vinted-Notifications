@@ -435,6 +435,78 @@ class OfferTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(self.jobs()[0]["reason"], "recipient")
         self.assertFalse(self.client.writes())
 
+    def test_seller_id_or_role_confirms_seller_but_conflicts_stop_offer(self):
+        self.client.item_id, self.client.recipient_id = 1001, 222
+        base = self.client.request("GET", "/api/v2/conversations/7001")
+        job = {"item_id": "1001", "recipient_id": "222", "account_id": "111"}
+        for transaction in (
+            {"id": 8001, "item_id": 1001, "seller_id": 111},
+            {"id": 8001, "item_id": 1001, "user_side": "seller"},
+        ):
+            data = {
+                "conversation": {**base["conversation"], "transaction": transaction}
+            }
+            self.assertEqual(offers.checked_conversation(data, job), ("7001", "8001"))
+        for fields in (
+            {},
+            {"seller_id": 999, "user_side": "seller"},
+            {"seller_id": 111, "user_side": "buyer"},
+            {"seller_id": "invalid", "user_side": "seller"},
+        ):
+            transaction = {"id": 8001, "item_id": 1001, **fields}
+            data = {
+                "conversation": {**base["conversation"], "transaction": transaction}
+            }
+            with self.assertRaises(offers.OfferCheck):
+                offers.checked_conversation(data, job)
+
+    def test_failed_check_keeps_chat_and_rechecks_without_recreating_it(self):
+        self.enable()
+        job_id = self.add()
+        self.client.conversation_changes = {"opposite_user": {"id": 999}}
+        self.worker.tick()
+        self.assertEqual(self.jobs()[0]["conversation_id"], "7001")
+        self.assertTrue(offers.recheck(job_id))
+        count = len(self.client.calls)
+        self.worker.tick()  # Recheck does not clear the paused mode.
+        self.assertEqual(len(self.client.calls), count)
+        self.client.conversation_changes = {}
+        self.enable()
+        self.worker.tick()
+        self.assertEqual(self.jobs()[0]["status"], "sent")
+        self.assertEqual(
+            sum(path == "/api/v2/conversations" for _, path, _ in self.client.calls), 1
+        )
+        self.assertFalse(offers.recheck(job_id))
+        self.assertEqual(len(self.client.writes()), 1)
+
+    def test_recheck_never_replays_uncertain_or_attempted_writes(self):
+        self.enable()
+        for index, (status, reason, attempted) in enumerate(
+            (
+                ("uncertain", "uncertain", True),
+                ("sent", "", True),
+                ("skipped", "cancelled", False),
+                ("skipped", "recipient", True),
+            )
+        ):
+            job_id = self.add(item=1001 + index)
+            with closing(search_settings.connection()) as conn, conn:
+                conn.execute(
+                    "UPDATE vinted_offer_jobs SET status=?,reason=? WHERE id=?",
+                    (status, reason, job_id),
+                )
+                if attempted:
+                    offers.event(conn, "sending", job_id=job_id, now=self.now)
+            self.assertFalse(offers.recheck(job_id))
+        job_id = self.add(item=2001)
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE vinted_offer_jobs SET status='skipped',reason='recipient',account_id='999' WHERE id=?",
+                (job_id,),
+            )
+        self.assertFalse(offers.recheck(job_id))
+
     def test_existing_offer_is_not_overwritten_or_repeated(self):
         self.enable()
         self.add()
@@ -771,6 +843,13 @@ class OfferRouteTests(DashboardTests):
         self.assertEqual(self.client.get("/offers").status_code, 200)
         self.assertIn(b"Offers to favourites", self.client.get("/offers").data)
         self.assertEqual(self.client.post("/offers/pause").status_code, 400)
+        self.assertEqual(self.client.post("/offers/1/recheck").status_code, 400)
+        self.assertEqual(
+            self.client.post(
+                "/offers/1/recheck", data={"csrf": "offline-csrf"}
+            ).status_code,
+            409,
+        )
         self.assertEqual(
             self.client.post(
                 "/offers/settings",

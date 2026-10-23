@@ -243,6 +243,24 @@ def cancel(job_id):
         return bool(changed)
 
 
+def recheck(job_id):
+    """Owner-triggered recovery of a check failure, never an attempted send."""
+    with closing(connection()) as conn, conn:
+        changed = conn.execute(
+            """UPDATE vinted_offer_jobs SET status='queued',reason='',lease_until=0
+            WHERE id=? AND status='skipped' AND reason IN ('recipient','shape')
+            AND offer_id IS NULL AND sent_at IS NULL
+            AND account_id=(SELECT account_id FROM vinted_offer_settings WHERE id=1)
+            AND liked_at>=(SELECT since FROM vinted_offer_settings WHERE id=1)
+            AND NOT EXISTS (SELECT 1 FROM vinted_offer_events
+                            WHERE job_id=vinted_offer_jobs.id AND action='sending')""",
+            (job_id,),
+        ).rowcount
+        if changed:
+            event(conn, "recheck", job_id=job_id)
+        return bool(changed)
+
+
 def identifier(value):
     text = str(value) if type(value) in (str, int) else ""
     return text if re.fullmatch(r"[1-9][0-9]{0,23}", text) else None
@@ -503,14 +521,46 @@ def checked_conversation(data, job):
     item = conv.get("item") or transaction.get("item") or {}
     if not all(isinstance(v, dict) for v in (transaction, opposite, item)):
         raise OfferCheck("recipient", pause=True)
+    recipient_id = identifier(opposite.get("id") or conv.get("opposite_user_id"))
+    item_id = identifier(item.get("id") or transaction.get("item_id"))
+    seller_id = identifier(transaction.get("seller_id"))
+    user_side = transaction.get("user_side")
+
+    def relation(value, expected):
+        return (
+            "missing"
+            if value is None
+            else "match" if value == expected else "different"
+        )
+
+    logger.info(
+        "Vinted offers conversation format: conversation_id=%s transaction_id=%s recipient=%s item=%s seller=%s user_side=%s messages=%s",
+        bool(identifier(conv.get("id"))),
+        bool(identifier(transaction.get("id"))),
+        relation(recipient_id, job["recipient_id"]),
+        relation(item_id, job["item_id"]),
+        relation(seller_id, job["account_id"]),
+        (
+            user_side
+            if user_side in ("seller", "buyer")
+            else "missing" if user_side is None else "other"
+        ),
+        isinstance(conv.get("messages"), list),
+    )
+    # Vinted may provide the seller ID or the explicit seller role. Either
+    # confirms the role after independent item ownership checks, but an
+    # explicitly contradictory field always stops the offer.
+    seller_confirmed = (
+        (seller_id == job["account_id"] or user_side == "seller")
+        and (transaction.get("seller_id") is None or seller_id == job["account_id"])
+        and user_side in (None, "seller")
+    )
     if not (
         identifier(conv.get("id"))
         and identifier(transaction.get("id"))
-        and identifier(opposite.get("id") or conv.get("opposite_user_id"))
-        == job["recipient_id"]
-        and identifier(item.get("id") or transaction.get("item_id")) == job["item_id"]
-        and identifier(transaction.get("seller_id")) == job["account_id"]
-        and transaction.get("user_side") == "seller"
+        and recipient_id == job["recipient_id"]
+        and item_id == job["item_id"]
+        and seller_confirmed
     ):
         raise OfferCheck("recipient", pause=True)
     if any(transaction.get(key) for key in ("is_completed", "is_cancelled", "is_paid")):
@@ -776,18 +826,32 @@ class OfferWorker:
             if config["mode"] == "preview":
                 _finish(job["id"], "ready", checked_at=self.clock(), **info)
                 return
-            data = client.request(
-                "POST",
-                "/api/v2/conversations",
-                {
-                    "initiator": "seller_enters_notification",
-                    "item_id": int(job["item_id"]),
-                    "opposite_user_id": int(job["recipient_id"]),
-                },
-            )
-            conv_id = identifier((data.get("conversation") or {}).get("id"))
+            conv_id = identifier(job.get("conversation_id"))
             if not conv_id:
-                raise OfferCheck("shape", pause=True)
+                data = client.request(
+                    "POST",
+                    "/api/v2/conversations",
+                    {
+                        "initiator": "seller_enters_notification",
+                        "item_id": int(job["item_id"]),
+                        "opposite_user_id": int(job["recipient_id"]),
+                    },
+                )
+                conversation = (
+                    data.get("conversation") if isinstance(data, dict) else None
+                )
+                conv_id = (
+                    identifier(conversation.get("id"))
+                    if isinstance(conversation, dict)
+                    else None
+                )
+                if not conv_id:
+                    raise OfferCheck("shape", pause=True)
+                with closing(connection()) as conn, conn:
+                    conn.execute(
+                        "UPDATE vinted_offer_jobs SET conversation_id=? WHERE id=? AND status='checking'",
+                        (conv_id, job["id"]),
+                    )
             conv_id, transaction_id = checked_conversation(
                 client.request("GET", f"/api/v2/conversations/{conv_id}"), job
             )

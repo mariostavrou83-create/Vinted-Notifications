@@ -64,3 +64,13 @@ def install(app):
             abort(409, "This offer has already started or finished. Refresh the page.")
         flash("Offer removed from the queue.", "success")
         return redirect(url_for("offers_page"))
+
+    @app.post("/offers/<int:job_id>/recheck")
+    def offers_recheck(job_id):
+        if not offers.recheck(job_id):
+            abort(409, "Only a failed check with no attempted offer can be rechecked.")
+        flash(
+            "Queued for another check. The item and recipient will be verified again.",
+            "success",
+        )
+        return redirect(url_for("offers_page"))
