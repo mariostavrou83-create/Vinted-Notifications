@@ -24,9 +24,9 @@ offer. Existing dashboard owner authentication and CSRF protection apply.
   offer for another item; there is no cross-item 24-hour prohibition.
 - The current inbox notifications gateway supplies typed `ItemFavourite`
   records (`entry_type=20`), with `subject_id` identifying the item and
-  `updated_at` the event time. The recipient comes from the explicit
-  `offering_id` action parameter or the record's `user_id`; conflicting IDs
-  are rejected. Other notification types never
+  `updated_at` the event time. The recipient comes only from the explicit
+  `offering_id` action parameter used by Vinted's own web client. Notification
+  ownership metadata (`user_id`) is not used to identify a liker. Other types never
   enter the queue. Explicit first-party favourite action links remain supported
   for older records without a type. Every queued record needs valid item,
   recipient and timestamp data. Hidden/private likes cannot be discovered.

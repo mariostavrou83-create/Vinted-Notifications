@@ -188,14 +188,14 @@ class OfferTests(DatabaseFixture, unittest.TestCase):
             "subject_id": 1001,
             "user_id": 222,
             "updated_at": "2026-10-21T11:00:00Z",
-            "link": "vinted://messaging?item_id=1001&portal=uk",
+            "link": "vinted://messaging?item_id=1001&offering_id=222&portal=uk",
         }
         parsed = offers.favourite(row)
         self.assertEqual(parsed["item_id"], "1001")
         self.assertEqual(parsed["recipient_id"], "222")
         for entry_type in (30, 50, 110, 120, 121, 300, 750, "20", True):
             self.assertIsNone(offers.favourite(dict(row, entry_type=entry_type)))
-        for field in ("subject_id", "user_id", "updated_at"):
+        for field in ("subject_id", "link", "updated_at"):
             invalid = dict(row)
             invalid.pop(field)
             self.assertIsNone(offers.favourite(invalid))
@@ -208,7 +208,9 @@ class OfferTests(DatabaseFixture, unittest.TestCase):
                 "subject_id": 1000 + index,
                 "user_id": 222,
                 "updated_at": self.now,
-                "link": "/inbox",
+                "link": "/inbox/want_it?item_id="
+                + str(1000 + index)
+                + "&offering_id=222",
             }
             for index, kind in enumerate((20, 50, 110, 121, 300))
         ]
@@ -226,18 +228,21 @@ class OfferTests(DatabaseFixture, unittest.TestCase):
         parsed = offers.favourite(row)
         self.assertEqual(parsed["item_id"], "1001")
         self.assertEqual(parsed["recipient_id"], "222")
+        self.assertEqual(
+            offers.favourite(dict(row, user_id=111))["recipient_id"], "222"
+        )
         self.assertIsNotNone(
             offers.favourite(
                 dict(row, link="/inbox/want_it?item_id=1001&offering_id=222")
             )
         )
         for changes in (
-            {"user_id": 333},
             {"subject_id": 1002},
             {"entry_type": 110},
             {"link": "https://untrusted.invalid/?offering_id=222"},
             {"link": "vinted://messaging?offering_id=222&offering_id=333"},
             {"link": "vinted://messaging?offering_id=0"},
+            {"link": "/inbox", "user_id": 222},
         ):
             self.assertIsNone(offers.favourite(dict(row, **changes)), changes)
 

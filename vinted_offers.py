@@ -275,9 +275,10 @@ def notification_time(notification):
 def favourite(notification):
     """Use typed ItemFavourite metadata, or an explicit legacy action link.
 
-    The current inbox gateway uses entry_type=20, subject_id for the item,
-    user_id for the liker and updated_at for the event time. Message, price
-    reduction and sold-item notifications must never become offer recipients.
+    The current web client uses entry_type=20, subject_id for the item,
+    offering_id from its action link for the liker, and updated_at for time.
+    A notification's user_id is not a verified action recipient. Message,
+    price reduction and sold-item notices must never become offer recipients.
     """
     if not isinstance(notification, dict):
         return None
@@ -289,10 +290,10 @@ def favourite(notification):
         ):
             return None
         item_id = identifier(notification.get("subject_id"))
-        recipient = identifier(notification.get("user_id"))
+        recipient = None
         # The current web client builds favourite actions from offering_id.
-        # Some notification versions omit user_id, so accept this explicit
-        # action recipient too. Never fetch the supplied link.
+        # Do not infer the liker from notification ownership metadata.
+        # Never fetch the supplied link.
         link = notification.get("link")
         if isinstance(link, str) and "offering_id" in link:
             if len(link) > 2048:
@@ -310,9 +311,7 @@ def favourite(notification):
                 users = query.get("offering_id", [])
                 action_recipient = identifier(users[0]) if len(users) == 1 else None
                 items = query.get("item_id")
-                if not action_recipient or (
-                    recipient and recipient != action_recipient
-                ):
+                if not action_recipient:
                     return None
                 if items is not None and (
                     len(items) != 1 or identifier(items[0]) != item_id
@@ -369,10 +368,14 @@ def notification_shape(rows, page):
     """Only structural counts, never recipient IDs, links, bodies or credentials."""
     types, formats, keys = set(), set(), set()
     updated = 0
+    favourite_subjects = favourite_actions = 0
     for row in rows:
         if not isinstance(row, dict):
             continue
         entry = row.get("entry_type")
+        if type(entry) is int and entry == 20:
+            favourite_subjects += identifier(row.get("subject_id")) is not None
+            favourite_actions += "offering_id" in str(row.get("link") or "")
         if type(entry) is int and 0 <= entry <= 1000:
             types.add(entry)
         updated += timestamp(row.get("updated_at")) is not None
@@ -402,7 +405,7 @@ def notification_shape(rows, page):
         except ValueError:
             formats.add("invalid")
     logger.info(
-        "Vinted offers notification format: page=%s rows=%s entry_types=%s links=%s query_fields=%s updated_dates=%s supported_favourites=%s",
+        "Vinted offers notification format: page=%s rows=%s entry_types=%s links=%s query_fields=%s updated_dates=%s supported_favourites=%s favourite_subjects=%s favourite_actions=%s",
         page,
         len(rows),
         ",".join(map(str, sorted(types))) or "none",
@@ -410,6 +413,8 @@ def notification_shape(rows, page):
         ",".join(sorted(keys)) or "none",
         updated,
         sum(favourite(row) is not None for row in rows),
+        favourite_subjects,
+        favourite_actions,
     )
 
 
