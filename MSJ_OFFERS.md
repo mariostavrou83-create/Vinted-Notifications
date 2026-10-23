@@ -23,8 +23,10 @@ offer. Existing dashboard owner authentication and CSRF protection apply.
   re-likes cannot create another offer for that pair. A buyer may receive an
   offer for another item; there is no cross-item 24-hour prohibition.
 - The current inbox notifications gateway supplies typed `ItemFavourite`
-  records (`entry_type=20`), with `subject_id` identifying the item, `user_id`
-  the liker and `updated_at` the event time. Other notification types never
+  records (`entry_type=20`), with `subject_id` identifying the item and
+  `updated_at` the event time. The recipient comes from the explicit
+  `offering_id` action parameter or the record's `user_id`; conflicting IDs
+  are rejected. Other notification types never
   enter the queue. Explicit first-party favourite action links remain supported
   for older records without a type. Every queued record needs valid item,
   recipient and timestamp data. Hidden/private likes cannot be discovered.
@@ -67,9 +69,13 @@ and [AliYous extension](https://github.com/AliYous/VintedAutoReply-chrome-extens
 illustrate notification-based recipient discovery, but contain older endpoints
 and are not used as runnable dependencies. [Microck's Vinted client](https://github.com/Microck/vinted-cli)
 provides a current reference for wardrobe, conversation and seller-offer shapes.
-The [Vintrack client](https://github.com/JakobAIOdev/Vintrack-Vinted-Monitor/blob/c229f812aa2c4a2e65ca31b6edd441fef886f12d/apps/vinted-service/internal/vinted/client.go)
-and its gateway test document the same-origin notifications route and web
-headers. The [Fill & Sell notification audit](https://github.com/Nelsonchatnoir/fill-sell/blob/4309aac03d3848adaa27e360b437aac02aafd43e/docs/AUDIT_BORDEREAUX_FAVORIS_2026-09-24.md)
+Vinted's own UK client, inspected on 23 October 2026, specifies the
+[`/inbox-notifications/v1/notifications` route and favourite action IDs](https://marketplace-web-assets.vinted.com/_next/static/chunks/16w2nydppmc0u.js)
+and selects the [`https://api.vinted.co.uk` base](https://marketplace-web-assets.vinted.com/_next/static/chunks/0vr46gs40b7da.js).
+Requests use normal scoped session cookies and web headers, without converting
+a web cookie to a bearer token. The same-origin `/web/gateway` route used by
+some third-party clients returned 404 in the UK live check and is not retried.
+The [Fill & Sell notification audit](https://github.com/Nelsonchatnoir/fill-sell/blob/4309aac03d3848adaa27e360b437aac02aafd43e/docs/AUDIT_BORDEREAUX_FAVORIS_2026-09-24.md)
 documents typed favourite records and distinguishes them from messages, price
 reductions and sold-item notifications. Structural diagnostics record counts
 and format classes, never notification bodies, links or recipient IDs.

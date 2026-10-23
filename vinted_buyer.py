@@ -33,7 +33,7 @@ from vinted_timing import (
 
 BASE = "https://www.vinted.co.uk"
 PICKUP_BASE = "https://api.vinted.co.uk"
-NOTIFICATIONS_PATH = "/web/gateway/inbox-notifications/v1/notifications"
+NOTIFICATIONS_PATH = "/inbox-notifications/v1/notifications"
 # Requests preserves Domain=www.vinted.co.uk as .www.vinted.co.uk. Both
 # representations are scoped to the canonical buyer host, not another site.
 COOKIE_DOMAINS = frozenset(
@@ -1394,6 +1394,7 @@ class Client:
                 "headers": {
                     "Platform": "web",
                     "X-Next-App": "marketplace-web",
+                    "Sec-Fetch-Site": "same-site",
                 },
             }
         elif pickup_gateway:
@@ -1485,7 +1486,12 @@ class Client:
                 try:
                     response = self.session.request(
                         method,
-                        (PICKUP_BASE if pickup_gateway else BASE) + path,
+                        (
+                            PICKUP_BASE
+                            if pickup_gateway or notifications_gateway
+                            else BASE
+                        )
+                        + path,
                         json=body,
                         timeout=(4, 12),
                         allow_redirects=False,

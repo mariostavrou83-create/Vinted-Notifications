@@ -290,6 +290,37 @@ def favourite(notification):
             return None
         item_id = identifier(notification.get("subject_id"))
         recipient = identifier(notification.get("user_id"))
+        # The current web client builds favourite actions from offering_id.
+        # Some notification versions omit user_id, so accept this explicit
+        # action recipient too. Never fetch the supplied link.
+        link = notification.get("link")
+        if isinstance(link, str) and "offering_id" in link:
+            if len(link) > 2048:
+                return None
+            try:
+                url = urlsplit(link)
+                if not (
+                    url.scheme in ("", "https")
+                    and url.netloc in ("", "vinted.co.uk", "www.vinted.co.uk")
+                    or url.scheme == "vinted"
+                    and url.netloc == "messaging"
+                ):
+                    return None
+                query = parse_qs(url.query)
+                users = query.get("offering_id", [])
+                action_recipient = identifier(users[0]) if len(users) == 1 else None
+                items = query.get("item_id")
+                if not action_recipient or (
+                    recipient and recipient != action_recipient
+                ):
+                    return None
+                if items is not None and (
+                    len(items) != 1 or identifier(items[0]) != item_id
+                ):
+                    return None
+                recipient = action_recipient
+            except ValueError:
+                return None
         if not (item_id and recipient and liked_at):
             return None
         return {

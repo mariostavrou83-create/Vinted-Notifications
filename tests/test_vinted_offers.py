@@ -216,6 +216,31 @@ class OfferTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual([j["item_id"] for j in self.jobs()], ["1000"])
         self.assertFalse(self.client.writes())
 
+    def test_typed_favourite_accepts_current_web_action_without_user_field(self):
+        row = {
+            "entry_type": 20,
+            "subject_id": 1001,
+            "updated_at": NOW,
+            "link": "vinted://messaging?item_id=1001&offering_id=222&portal=uk",
+        }
+        parsed = offers.favourite(row)
+        self.assertEqual(parsed["item_id"], "1001")
+        self.assertEqual(parsed["recipient_id"], "222")
+        self.assertIsNotNone(
+            offers.favourite(
+                dict(row, link="/inbox/want_it?item_id=1001&offering_id=222")
+            )
+        )
+        for changes in (
+            {"user_id": 333},
+            {"subject_id": 1002},
+            {"entry_type": 110},
+            {"link": "https://untrusted.invalid/?offering_id=222"},
+            {"link": "vinted://messaging?offering_id=222&offering_id=333"},
+            {"link": "vinted://messaging?offering_id=0"},
+        ):
+            self.assertIsNone(offers.favourite(dict(row, **changes)), changes)
+
     def test_notification_diagnostics_never_log_bodies_links_or_ids(self):
         row = notification(
             item=98765432101,
@@ -666,16 +691,25 @@ class OfferGatewayTests(DatabaseFixture, unittest.TestCase):
                 )
             self.assertEqual(result, {"notifications": []})
             self.assertEqual(
-                request.call_args.args, ("GET", buyer.BASE + buyer.NOTIFICATIONS_PATH)
+                request.call_args.args,
+                (
+                    "GET",
+                    "https://api.vinted.co.uk/inbox-notifications/v1/notifications",
+                ),
             )
             self.assertEqual(
                 request.call_args.kwargs["params"], {"page": 2, "per_page": 20}
             )
             self.assertEqual(
                 request.call_args.kwargs["headers"],
-                {"Platform": "web", "X-Next-App": "marketplace-web"},
+                {
+                    "Platform": "web",
+                    "X-Next-App": "marketplace-web",
+                    "Sec-Fetch-Site": "same-site",
+                },
             )
             self.assertFalse(request.call_args.kwargs["allow_redirects"])
+            self.assertNotIn("Authorization", client.session.headers)
         finally:
             client.session.close()
 
