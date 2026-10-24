@@ -14,6 +14,7 @@ import sqlite3
 import threading
 import time
 from contextlib import closing
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from itertools import pairwise
 from pathlib import Path
@@ -32,6 +33,7 @@ BYTE_LIMIT = 200 * 1024 * 1024
 ACTIVE_LIMIT = 175
 ADMISSION_LIMIT = 25
 DAY = 86400
+QUICK_SECONDS = DAY
 CATEGORIES = {
     "1037": "Jackets & coats",
     "12": "Tops",
@@ -46,7 +48,7 @@ CATEGORIES = {
     "576": "Sports zip tops",
 }
 ARMS = {
-    "reuse": "Existing alert data",
+    "broad": "Broad new-brand discovery",
     "sellers": "Selected seller panels",
     "hybrid": "Adaptive hybrid",
 }
@@ -85,6 +87,30 @@ STYLES = (
     "suede",
     "leather",
     "cargo",
+)
+STYLES += (
+    "cashmere",
+    "merino",
+    "linen",
+    "silk",
+    "cowl neck",
+    "ribbed",
+    "wrap",
+    "tweed",
+    "quilted",
+    "down jacket",
+    "puffer",
+    "fleece",
+    "waterproof",
+    "workwear",
+    "seamless",
+    "compression",
+    "sports bra",
+    "leggings",
+    "maternity",
+    "tailored",
+    "trench",
+    "blazer",
 )
 STOP = frozenset(
     [
@@ -251,10 +277,6 @@ def normalize(raw, category=None):
     brand = str(raw.get("brand_title") or box.get("first_line") or "Unbranded")[:100]
     if brand == title or brand in {"Not specified", "Unknown"}:
         brand = "Unbranded"
-    if any(
-        x in canonical(brand) for x in ("juicy", "true religion", "7 for all mankind")
-    ):
-        return None
     user = raw.get("user") if isinstance(raw.get("user"), dict) else {}
     seller = str(raw.get("user_id") or user.get("id") or "")
     seller = seller if seller.isdigit() else None
@@ -291,7 +313,47 @@ def phrases(item):
             and not right.isdigit()
         ):
             found.append(left + " " + right)
+    for token in text.split():
+        if token not in STOP | brand and len(token) >= 4 and not token.isdigit():
+            found.append(token)
     return list(dict.fromkeys(found))[:3]
+
+
+def already_searched(item, exclusions):
+    """Conservative novelty gate: existing brands and unbranded search types.
+
+    Price caps are deliberately ignored: premium versions of an already-saved
+    item type are still part of an existing search, not a new opportunity.
+    """
+    brand = canonical(item.get("brand"))
+    names = exclusions.get("names", [])
+    identity = str(item.get("brand_id") or "")
+    if identity and identity in exclusions.get("brand_ids", []):
+        return True
+    if brand and brand not in {"unbranded", "no brand", "not specified"}:
+        pattern = r"\b" + r"\s*".join(re.escape(w) for w in brand.split()) + r"\b"
+        if any(re.search(pattern, name) for name in names):
+            return True
+    text = canonical(item.get("title"))
+    if any(
+        re.search(r"\b" + re.escape(name) + r"\b", text)
+        for name in exclusions.get("brand_names", [])
+        if name
+    ):
+        return True
+    for scope in exclusions.get("unbranded", []):
+        if (
+            scope.get("category")
+            and item.get("category")
+            and scope["category"] != item["category"]
+        ):
+            continue
+        if any(
+            re.search(r"\b" + re.escape(word) + r"\b", text)
+            for word in scope.get("keywords", [])
+        ):
+            return True
+    return False
 
 
 def parse_listing(body, identity):
@@ -354,6 +416,15 @@ def parse_listing(body, identity):
     }
     seller = str(native.get("user_id") or (next(iter(ids)) if len(ids) == 1 else ""))
     attrs = {}
+    brand_nodes = side.xpath('.//a[starts-with(@href,"/brand/")]')
+    brand_ids = {
+        re.match(r"/brand/(\d+)", node.get("href", ""))[1]
+        for node in brand_nodes
+        if re.match(r"/brand/(\d+)", node.get("href", ""))
+    }
+    brand_label = (
+        " ".join(brand_nodes[0].text_content().split()) if len(brand_ids) == 1 else ""
+    )
     for key in ("size", "status", "condition"):
         values = side.xpath(f'.//*[@itemprop="{key}"]')
         if len(values) == 1:
@@ -368,6 +439,8 @@ def parse_listing(body, identity):
         "size": attrs.get("size", ""),
         "condition": attrs.get("status") or attrs.get("condition", ""),
         "category": category,
+        "brand": brand_label,
+        "brand_id": next(iter(brand_ids)) if len(brand_ids) == 1 else "",
         "url": item_url(canon[0], identity),
     }
 
@@ -404,12 +477,21 @@ class Store:
             CREATE TABLE IF NOT EXISTS checks(id INTEGER PRIMARY KEY,item TEXT,checked REAL,state TEXT,price INTEGER,age_upper REAL);
             CREATE TABLE IF NOT EXISTS health(checked REAL PRIMARY KEY,p95 REAL,pending REAL,errors INTEGER);
             """)
+            fields = {r[1] for r in c.execute("PRAGMA table_info(trial)")}
+            for name, declaration in {
+                "scope_version": "INTEGER NOT NULL DEFAULT 1",
+                "exclusions": "TEXT NOT NULL DEFAULT '{}'",
+                "network_cursor": "INTEGER NOT NULL DEFAULT 0",
+                "reported_at": "REAL NOT NULL DEFAULT 0",
+            }.items():
+                if name not in fields:
+                    c.execute(f"ALTER TABLE trial ADD COLUMN {name} {declaration}")
             c.executemany(
                 "INSERT OR IGNORE INTO arms(id,name) VALUES (?,?)", ARMS.items()
             )
             c.executemany(
                 "INSERT OR IGNORE INTO clocks(kind) VALUES (?)",
-                [(x,) for x in ("sellers", "explore", "reference", "focus")],
+                [(x,) for x in ("broad", "sellers", "explore", "reference", "focus")],
             )
 
     def connect(self):
@@ -429,6 +511,10 @@ class Store:
     def ingest(self, arm, items, now, *, observed=None, source=None):
         observed = now if observed is None else min(now, observed)
         with closing(self.connect()) as c, c:
+            exclusions = json.loads(
+                c.execute("SELECT exclusions FROM trial WHERE id=1").fetchone()[0]
+            )
+            items = [item for item in items if not already_searched(item, exclusions)]
             day = int(now // DAY) * DAY
             total = c.execute(
                 "SELECT COUNT(*) FROM items WHERE admitted>=?", (day,)
@@ -515,14 +601,53 @@ class Store:
             c.execute(
                 "DELETE FROM seen WHERE rowid IN (SELECT rowid FROM seen ORDER BY observed DESC LIMIT -1 OFFSET 50000)"
             )
+        return len(items)
 
     def feed(self, data, now):
-        if data.get("version") != 1 or not isinstance(data.get("health"), dict):
+        if (
+            data.get("version") != 2
+            or not isinstance(data.get("health"), dict)
+            or not isinstance(data.get("exclusions"), dict)
+        ):
             raise ValueError("Unverified alert feed")
         health = data["health"]
         p95 = health.get("interval_p95")
         count = health.get("samples", 0)
         with closing(self.connect()) as c, c:
+            old = c.execute("SELECT scope_version FROM trial WHERE id=1").fetchone()[0]
+            if old < 2:
+                # Keep the short initial setup sample as an archive, never as
+                # evidence in the corrected trial that explicitly excludes it.
+                c.execute(
+                    "CREATE TABLE IF NOT EXISTS initial_scope_archive AS SELECT * FROM items"
+                )
+                for table in (
+                    "seen",
+                    "members",
+                    "groups",
+                    "items",
+                    "checks",
+                    "sellers",
+                ):
+                    c.execute(f"DELETE FROM {table}")
+                c.execute("UPDATE arms SET last_success=NULL,error=''")
+                c.execute("UPDATE clocks SET next_due=0,cursor=0")
+                c.execute("UPDATE clocks SET next_due=1 WHERE kind!='broad'")
+                c.execute(
+                    "UPDATE trial SET scope_version=2,started=NULL,ends=NULL,phase='waiting',baseline=NULL,slow_windows=0,reported_at=0,network_cursor=0,next_network=0 WHERE id=1"
+                )
+            encoded = json.dumps(data["exclusions"], sort_keys=True)
+            previous = c.execute("SELECT exclusions FROM trial WHERE id=1").fetchone()[
+                0
+            ]
+            if encoded != previous:
+                for row in c.execute("SELECT id,payload FROM items").fetchall():
+                    if already_searched(json.loads(row["payload"]), data["exclusions"]):
+                        c.execute(
+                            "UPDATE items SET state='excluded' WHERE id=?", (row["id"],)
+                        )
+                        c.execute("DELETE FROM seen WHERE item=?", (row["id"],))
+                c.execute("UPDATE trial SET exclusions=? WHERE id=1", (encoded,))
             c.execute(
                 "UPDATE trial SET started=COALESCE(started,?),ends=COALESCE(ends,?),phase=CASE WHEN phase='waiting' THEN 'running' ELSE phase END,feed_at=?,last_heartbeat=? WHERE id=1",
                 (now, now + DURATION, now, now),
@@ -568,12 +693,8 @@ class Store:
                 "UPDATE trial SET feed_cursor=MAX(feed_cursor,?) WHERE id=1",
                 (min(now, float(data.get("cursor", now))),),
             )
-        items = []
-        for raw in data.get("items", [])[:200]:
-            item = normalize(raw, raw.get("category"))
-            if item:
-                items.append(item)
-        self.ingest("reuse", items, now)
+        # Existing alerts are exclusion evidence only. No existing alert items
+        # are admitted or followed by any of the three collection approaches.
 
     def can_read(self, kind, now):
         with closing(self.connect()) as c:
@@ -596,7 +717,7 @@ class Store:
             (day,),
         ).fetchone()
         relevant = c.execute(
-            "SELECT COUNT(*) FROM reads WHERE started>=? AND kind IN ('sellers','explore','reference','focus')",
+            "SELECT COUNT(*) FROM reads WHERE started>=? AND kind IN ('broad','sellers','explore','reference','focus')",
             (day,),
         ).fetchone()[0]
         details = c.execute(
@@ -660,11 +781,29 @@ class Store:
             price = data.get("price")
             sold_price = price if state == "sold" else None
             payload = json.loads(row["payload"])
-            for key in ("size", "condition", "category", "url", "seller"):
+            for key in (
+                "size",
+                "condition",
+                "category",
+                "url",
+                "seller",
+                "brand",
+                "brand_id",
+            ):
                 if data.get(key):
                     payload[key] = data[key]
             if price is not None:
                 payload["price"] = price
+            exclusions = json.loads(
+                c.execute("SELECT exclusions FROM trial WHERE id=1").fetchone()[0]
+            )
+            if already_searched(payload, exclusions):
+                c.execute(
+                    "UPDATE items SET payload=?,state='excluded' WHERE id=?",
+                    (json.dumps(payload), identity),
+                )
+                c.execute("DELETE FROM seen WHERE item=?", (identity,))
+                return
             seller = data.get("seller") or row["seller"]
             c.execute(
                 "UPDATE items SET payload=?,state=?,checked=?,next_check=?,published_lower=?,published_upper=?,ask_at_sold=?,sold_at=?,age_upper=?,seller=? WHERE id=?",
@@ -761,7 +900,7 @@ class Store:
                         r["state"] == "sold"
                         and r["ask_at_sold"] is not None
                         and r["age_upper"] is not None
-                        and 0 <= r["age_upper"] <= 7 * DAY
+                        and 0 <= r["age_upper"] <= QUICK_SECONDS
                     )
 
                 cs = [
@@ -777,11 +916,19 @@ class Store:
                 matured = [
                     r
                     for r in enrolled
-                    if now - (r["published_upper"] or r["admitted"]) >= 7 * DAY
+                    if now - (r["published_upper"] or r["admitted"]) >= QUICK_SECONDS
                 ]
                 cheap_enrolled = [r for r in cheap if r in matured]
                 high_enrolled = [r for r in premium if r in matured]
-                resolved = sum(r["state"] in {"sold", "unsold_7d"} for r in matured)
+                resolved = sum(
+                    bool(
+                        r["state"] in {"sold", "unsold_7d"}
+                        or r["checked"]
+                        and r["published_upper"]
+                        and r["checked"] - r["published_upper"] >= QUICK_SECONDS
+                    )
+                    for r in matured
+                )
                 mature_cs = [r for r in cs if r in matured]
                 mature_hs = [r for r in hs if r in matured]
                 arrivals = sum(r["observed"] >= now - 7 * DAY for r in cheap)
@@ -889,10 +1036,11 @@ class Store:
                 ).fetchone()[0]
                 fast = c.execute(
                     "SELECT COUNT(*) FROM seen s JOIN items i ON i.id=s.item WHERE s.arm=? AND i.state='sold' AND i.age_upper BETWEEN 0 AND ?",
-                    (key, 7 * DAY),
+                    (key, QUICK_SECONDS),
                 ).fetchone()[0]
                 reads = c.execute(
-                    "SELECT COUNT(*) FROM reads WHERE arm=?", (key,)
+                    "SELECT COUNT(*) FROM reads WHERE arm=? AND started>=?",
+                    (key, state["started"] or now),
                 ).fetchone()[0]
                 armrow = dict(
                     c.execute("SELECT * FROM arms WHERE id=?", (key,)).fetchone()
@@ -1054,10 +1202,11 @@ class Transport:
             raise ValueError("Anonymous session unavailable")
 
     def catalogue(self, params, kind):
-        self.auth("hybrid", kind)
+        arm = "broad" if kind == "broad" else "hybrid"
+        self.auth(arm, kind)
         body, _ = self.read(
             "https://api.vinted.co.uk/svc-catalogue/items",
-            "hybrid",
+            arm,
             kind,
             params=params,
         )
@@ -1134,6 +1283,12 @@ class Worker:
     def step(self, now=None):
         now = time.time() if now is None else now
         state = self.store.state(now)
+        if state["started"] and (
+            now - state["reported_at"] >= DAY
+            or state["phase"] == "completed"
+            and state["reported_at"] < state["ends"]
+        ):
+            self.report(now)
         if state["phase"] in {"paused", "completed"}:
             return
         if now >= self.feed_due:
@@ -1156,7 +1311,7 @@ class Worker:
             if state["next_network"] > now:
                 return
             c.execute(
-                "UPDATE trial SET next_network=?,last_heartbeat=? WHERE id=1",
+                "UPDATE trial SET next_network=?,last_heartbeat=?,network_cursor=network_cursor+1 WHERE id=1",
                 (now + 45, now),
             )
             c.execute(
@@ -1173,19 +1328,26 @@ class Worker:
                 "SELECT * FROM items WHERE admitted IS NOT NULL AND state IN ('pending','active','reserved','unknown') AND next_check<=? ORDER BY next_check LIMIT 1",
                 (now,),
             ).fetchone()
-            source = due if due and (not item or int(now // 45) % 3 == 0) else None
+            source = (
+                due if due and (not item or state["network_cursor"] % 3 == 0) else None
+            )
             if source:
                 interval = {
+                    "broad": 600,
                     "sellers": 1800,
-                    "explore": 720,
-                    "reference": 1200,
-                    "focus": 360,
+                    "explore": 900,
+                    "reference": 1800,
+                    "focus": 600,
                 }[source["kind"]]
                 c.execute(
                     "UPDATE clocks SET next_due=?,cursor=cursor+1 WHERE kind=?",
                     (now + interval, source["kind"]),
                 )
-        arm = "sellers" if source and source["kind"] == "sellers" else "hybrid"
+        arm = (
+            source["kind"]
+            if source and source["kind"] in {"broad", "sellers"}
+            else "hybrid"
+        )
         try:
             if source:
                 kind = source["kind"]
@@ -1200,7 +1362,7 @@ class Worker:
                     if not seller:
                         return
                     results = self.transport.wardrobe(seller["id"])
-                    self.store.ingest("sellers", results, now)
+                    accepted = self.store.ingest("sellers", results, now)
                     with closing(self.store.connect()) as c, c:
                         c.execute(
                             "UPDATE sellers SET verified=1,error='',next_due=? WHERE id=?",
@@ -1245,12 +1407,12 @@ class Worker:
                         for raw in self.transport.catalogue(params, kind)
                         if (x := normalize(raw, category))
                     ]
-                    self.store.ingest("hybrid", results, now, source=kind)
+                    accepted = self.store.ingest(arm, results, now, source=kind)
                 LOG.info(
                     "Research trial sample arm=%s kind=%s accepted=%d",
                     arm,
                     kind,
-                    len(results),
+                    accepted,
                 )
             elif item:
                 data = self.transport.outcome(json.loads(item["payload"]))
@@ -1278,6 +1440,61 @@ class Worker:
             LOG.warning(
                 "Research trial read unavailable arm=%s; no immediate retry", arm
             )
+
+    def report(self, now):
+        data = self.store.snapshot(now)
+        with closing(self.store.connect()) as c, c:
+            usage = dict(
+                c.execute(
+                    "SELECT COUNT(*) requests,COALESCE(SUM(body_bytes),0) body_bytes FROM reads WHERE started>=?",
+                    (data["trial"]["started"],),
+                ).fetchone()
+            )
+            c.execute("UPDATE trial SET reported_at=? WHERE id=1", (now,))
+        result = {
+            "scope": "new_brands_only",
+            "excluded_searches": len(
+                json.loads(data["trial"]["exclusions"]).get("names", [])
+            ),
+            "phase": data["trial"]["phase"],
+            "started": datetime.fromtimestamp(
+                data["trial"]["started"], UTC
+            ).isoformat(),
+            "ends": datetime.fromtimestamp(data["trial"]["ends"], UTC).isoformat(),
+            "usage": usage,
+            "health": data["health"],
+            "arms": [
+                {
+                    k: a[k]
+                    for k in (
+                        "id",
+                        "seen",
+                        "tracked",
+                        "fast_sold",
+                        "reads",
+                        "promising",
+                    )
+                }
+                | {
+                    "candidates": [
+                        {
+                            k: x[k]
+                            for k in (
+                                "name",
+                                "stage",
+                                "cheap_sold",
+                                "premium_sold",
+                                "sellers",
+                                "buy_limit",
+                            )
+                        }
+                        for x in a["candidates"][:3]
+                    ]
+                }
+                for a in data["arms"]
+            ],
+        }
+        LOG.info("Research trial summary %s", json.dumps(result, separators=(",", ":")))
 
     def run(self):
         while not self.stop.is_set():

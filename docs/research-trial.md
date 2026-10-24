@@ -1,14 +1,14 @@
 # Search discovery trial
 
 Three collection arms run for 14 elapsed days from the first verified feed:
-existing alert history, selected public seller wardrobes, and adaptive category
-discovery. The research container has its own small volume, HTTP sessions, CPU
+broad category discovery, selected public seller wardrobes, and adaptive category
+discovery; all exclude existing saved brands and search types. The research container has its own small volume, HTTP sessions, CPU
 and memory limits. It never loads a saved Vinted account, sends offers, buys an
 item, spends eBay quota or changes a live search.
 
 The dashboard exposes `/research` to the existing owner login. Its bounded,
 read-only `/internal/research-feed` uses a separate service key and exports only
-public listing metadata, aggregate alert health and the existing anonymous
+a negative scope of existing search names and brand filters, aggregate alert health and the existing anonymous
 collector's proxy configuration. No account cookies, solver key or order data
 are exported. The research API is private-network only and also requires the key.
 
@@ -21,7 +21,7 @@ also stop new research reads. Existing alerts retain priority.
 
 An item is checked once even if several arms find it; each arm only counts
 items it discovered. This is a comparison of operating approaches, not a
-randomised causal study. Cohort rates require a full seven-day outcome window.
+randomised causal study. Cohort rates require a full 24-hour outcome window.
 Unknowns remain in the denominator. A visible sold label and last ask are not
 a completed-order price. Comparable condition, size and item details still
 require review before activating any suggested search.

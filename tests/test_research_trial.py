@@ -34,7 +34,9 @@ class TrialTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.store = trial.Store(Path(self.directory.name) / "trial.sqlite3")
         self.now = time.time()
-        self.store.feed({"version": 1, "items": [], "health": {}}, self.now)
+        self.store.feed(
+            {"version": 2, "exclusions": {}, "items": [], "health": {}}, self.now
+        )
 
     def tearDown(self):
         self.directory.cleanup()
@@ -48,7 +50,9 @@ class TrialTests(unittest.TestCase):
         state = self.store.state(self.now)
         self.assertEqual(state["ends"] - state["started"], 14 * 86400)
         restarted = trial.Store(self.store.path)
-        restarted.feed({"version": 1, "items": [], "health": {}}, self.now + 100)
+        restarted.feed(
+            {"version": 2, "exclusions": {}, "items": [], "health": {}}, self.now + 100
+        )
         self.assertEqual(restarted.state(self.now + 100)["ends"], state["ends"])
         worker = trial.Worker(restarted, "https://unused.invalid", "x" * 40)
         worker.fetch_feed = Mock()
@@ -60,7 +64,7 @@ class TrialTests(unittest.TestCase):
 
     def test_shared_item_is_tracked_once_but_each_arm_has_its_own_discoveries(self):
         self.add()
-        self.add("reuse")
+        self.add("broad")
         snapshot = self.store.snapshot(self.now)
         self.assertEqual(snapshot["shared_tracked"], 4)
         self.assertEqual([a["seen"] for a in snapshot["arms"]], [4, 0, 4])
@@ -89,6 +93,63 @@ class TrialTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.store.reserve_read("hybrid", "explore", now=self.now)
 
+    def test_existing_brands_are_excluded_at_cheap_and_premium_prices_in_every_arm(
+        self,
+    ):
+        self.store.feed(
+            {
+                "version": 2,
+                "health": {},
+                "exclusions": {
+                    "names": ["001 example label mesh tops"],
+                    "brand_ids": [],
+                },
+            },
+            self.now,
+        )
+        for arm in trial.ARMS:
+            self.store.ingest(
+                arm,
+                [
+                    trial.normalize(raw("1", "5"), "12"),
+                    trial.normalize(raw("2", "90"), "12"),
+                ],
+                self.now,
+            )
+        self.assertTrue(
+            all(
+                a["seen"] == 0 and a["tracked"] == 0
+                for a in self.store.snapshot(self.now)["arms"]
+            )
+        )
+
+    def test_new_brand_and_modern_single_word_model_can_be_discovered(self):
+        r = raw("91")
+        r.update(title="Fresh Label Horizon jacket", brand_title="Fresh Label")
+        item = trial.normalize(r, "1037")
+        self.assertIn("horizon", trial.phrases(item))
+        self.store.ingest("broad", [item], self.now)
+        self.assertEqual(self.store.snapshot(self.now)["arms"][0]["seen"], 1)
+
+    def test_new_saved_search_retires_existing_research_cohort(self):
+        self.add()
+        self.store.feed(
+            {
+                "version": 2,
+                "health": {},
+                "exclusions": {"names": ["example label graphic tops"]},
+            },
+            self.now + 60,
+        )
+        with closing(self.store.connect()) as c:
+            self.assertEqual(
+                c.execute(
+                    "SELECT COUNT(*) FROM items WHERE state='excluded'"
+                ).fetchone()[0],
+                4,
+            )
+        self.assertEqual(self.store.snapshot(self.now + 60)["arms"][2]["seen"], 0)
+
     def test_stale_health_pauses_research_and_manual_pause_has_no_fetch(self):
         self.assertFalse(self.store.can_read("explore", self.now + 181))
         self.store.control("pause", self.now)
@@ -102,7 +163,8 @@ class TrialTests(unittest.TestCase):
         for offset, p95 in [(0, 2.5), (60, 2.9), (120, 3.1)]:
             self.store.feed(
                 {
-                    "version": 1,
+                    "version": 2,
+                    "exclusions": {},
                     "items": [],
                     "health": {"interval_p95": p95, "samples": 100},
                 },
@@ -201,7 +263,9 @@ class BridgeTests(DatabaseFixture, unittest.TestCase):
         with patch.dict(
             os.environ, {"MSJ_RESEARCH_TOKEN": "x" * 40}, clear=False
         ), patch.object(
-            bridge, "feed", return_value={"version": 1, "health": {}, "items": []}
+            bridge,
+            "feed",
+            return_value={"version": 2, "exclusions": {}, "health": {}, "items": []},
         ):
             self.assertEqual(
                 self.client.get("/internal/research-feed").status_code, 401
@@ -251,8 +315,9 @@ class BridgeTests(DatabaseFixture, unittest.TestCase):
             },
         ):
             data = bridge.feed(0, now + 1)
-        self.assertEqual(data["items"][0]["id"], "321")
-        self.assertEqual(data["items"][0]["price"]["amount"], "12.50")
+        self.assertEqual(data["items"], [])
+        self.assertEqual(data["version"], 2)
+        self.assertTrue(data["exclusions"]["names"])
         self.assertEqual(data["network"], {"proxy": "http://proxy.invalid:1234"})
         self.assertNotIn("do-not-export", str(data))
         self.assertEqual(db.get_queries(), original_queries)

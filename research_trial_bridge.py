@@ -47,78 +47,87 @@ def percentile(values, p):
 
 
 def feed(since, now):
-    # A short WAL read, bounded to eighty indexed alert rows. No main-store
-    # writes and no network request while this connection is held.
+    # Existing searches are a negative scope only; no alert items are exported.
     with closing(
         sqlite3.connect(
             f"file:{Path(db.DB_PATH).resolve()}?mode=ro", uri=True, timeout=0.3
         )
     ) as c:
         c.row_factory = sqlite3.Row
-        rows = c.execute(
-            """SELECT o.item_id,o.title,o.price,o.currency,o.url,o.found_at,q.query,
-            json_extract(v.payload,'$.brand') brand FROM alert_outbox o
-            LEFT JOIN queries q ON q.id=o.query_id LEFT JOIN vinted_alert_details v ON v.item_id=o.item_id
-            WHERE o.platform='vinted' AND o.found_at>? ORDER BY o.found_at,o.item_id LIMIT 80""",
-            (max(since, now - 86400),),
-        ).fetchall()
         health = c.execute(
             """SELECT h.actual_interval,h.error FROM search_health h
             JOIN search_platforms p ON p.query_id=h.query_id LEFT JOIN search_dashboard d ON d.query_id=h.query_id
-            WHERE p.vinted_enabled=1 AND COALESCE(d.paused,0)=0 AND COALESCE(d.archived,0)=0
-            AND h.last_attempt>?""",
+            WHERE p.vinted_enabled=1 AND COALESCE(d.paused,0)=0 AND COALESCE(d.archived,0)=0 AND h.last_attempt>?""",
             (now - 90,),
         ).fetchall()
         pending = c.execute(
             "SELECT MIN(found_at) FROM alert_outbox WHERE platform='vinted' AND status='pending'"
         ).fetchone()[0]
-        known = c.execute("SELECT query_name,query FROM queries LIMIT 1000").fetchall()
-    items = []
-    for r in rows:
-        params = parse_qs(urlsplit(r["query"] or "").query)
-        category = (
-            params.get("catalog[]") or params.get("attribute_ids[catalog]") or [""]
-        )[0]
-        items.append(
-            {
-                "id": r["item_id"],
-                "title": r["title"],
-                "price": {"amount": r["price"], "currency_code": r["currency"]},
-                "url": r["url"],
-                "brand_title": r["brand"],
-                "category": category,
-            }
+        known = c.execute(
+            "SELECT id,query_name,query FROM queries LIMIT 1000"
+        ).fetchall()
+        variants = {}
+        for row in c.execute("SELECT query_id,keyword FROM vinted_keyword_variants"):
+            variants.setdefault(row["query_id"], []).append(row["keyword"])
+
+    def canon(value):
+        return " ".join(re.findall(r"[a-z0-9]+", str(value or "").casefold()))
+
+    names = []
+    brand_names = []
+    brand_ids = set()
+    unbranded = []
+    for row in known:
+        params = parse_qs(urlsplit(row["query"] or "").query)
+        words = variants.get(row["id"], []) + params.get("search_text", [])
+        names.append(canon((row["query_name"] or "") + " " + " ".join(words)))
+        ids = {
+            piece
+            for key in ("brand_ids[]", "attribute_ids[brand]")
+            for value in params.get(key, [])
+            for piece in value.split(",")
+            if piece.isdigit()
+        }
+        brand_ids.update(ids)
+        label = re.sub(
+            r"^(?:(?:OLD|NEW)\s*[|:]?\s*)?\d*\s*",
+            "",
+            row["query_name"] or "",
+            flags=re.IGNORECASE,
         )
+        prefix = re.split(r"\s[-–—·]\s", label, maxsplit=1)
+        if ids and len(prefix) > 1 and 1 < len(prefix[0]) < 65:
+            brand_names.append(canon(prefix[0]))
+        if not ids:
+            category = (
+                params.get("catalog[]") or params.get("attribute_ids[catalog]") or [""]
+            )[0]
+            unbranded.append(
+                {
+                    "category": category,
+                    "keywords": [canon(w) for w in words if canon(w)],
+                }
+            )
     values = [
         r["actual_interval"]
         for r in health
         if type(r["actual_interval"]) in (int, float) and r["actual_interval"] > 0
     ]
-    # Export only the transport fields the independent anonymous collector needs.
-    # Never export account sessions, cookies, solver keys, notifications or offers.
     from vinted_buyer import network_configuration
 
     network = network_configuration()
     return {
-        "version": 1,
+        "version": 2,
         "server_time": now,
-        "cursor": rows[-1]["found_at"] if len(rows) == 80 else now,
-        "items": items,
-        "known_searches": [
-            " ".join(
-                re.findall(
-                    r"[a-z0-9]+",
-                    (
-                        (r["query_name"] or "")
-                        + " "
-                        + parse_qs(urlsplit(r["query"]).query).get("search_text", [""])[
-                            0
-                        ]
-                    ).casefold(),
-                )
-            )
-            for r in known
-        ],
+        "cursor": now,
+        "items": [],
+        "known_searches": names,
+        "exclusions": {
+            "names": names,
+            "brand_ids": sorted(brand_ids),
+            "brand_names": sorted(set(brand_names)),
+            "unbranded": unbranded,
+        },
         "network": {"proxy": network.get("proxy", "")},
         "health": {
             "interval_p50": percentile(values, 0.5),
