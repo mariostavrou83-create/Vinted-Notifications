@@ -158,6 +158,26 @@ class OfferTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(len(self.client.writes()), 1)
         self.assertEqual(self.jobs()[0]["sent_at"], NOW + 300)
 
+    def test_idle_recovery_does_not_open_write_transactions(self):
+        offers._recover(NOW)
+        statements = []
+        connect = search_settings.connection
+
+        def traced():
+            conn = connect()
+            conn.set_trace_callback(statements.append)
+            return conn
+
+        with patch.object(offers, "connection", side_effect=traced):
+            offers._recover(NOW + 5)
+        self.assertTrue(statements)
+        self.assertFalse(
+            any(
+                sql.lstrip().upper().startswith(("UPDATE", "BEGIN"))
+                for sql in statements
+            )
+        )
+
     def test_due_new_likes_take_priority_over_history(self):
         self.enable(history="three_months")
         old = self.add(item=1001, at=NOW - 86400)

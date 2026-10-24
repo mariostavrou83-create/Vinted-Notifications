@@ -68,12 +68,24 @@ def create_app(test_config=None):
     )
     if test_config:
         app.config.update(test_config)
+    asset_version = (
+        os.environ.get("RAILWAY_GIT_COMMIT_SHA")
+        or hashlib.sha256(
+            b"".join(
+                path.read_bytes()
+                for path in sorted(Path(app.static_folder).glob("msj*"))
+                if path.is_file()
+            )
+        ).hexdigest()[:16]
+    )
     import supabase_backend
 
     hosted_auth = supabase_backend.install_dashboard(app, lambda: db.DB_PATH)
 
     @app.before_request
     def protect():
+        if request.endpoint == "static":
+            return None
         # This single callback uses eBay's cryptographic signature instead of
         # an owner cookie/CSRF form. All dashboard routes stay protected.
         if request.endpoint == "ebay_account_deletion":
@@ -174,6 +186,10 @@ def create_app(test_config=None):
                 "Strict-Transport-Security": "max-age=31536000",
             }
         )
+        # Only versioned public assets may be shared-cached. Dashboard HTML,
+        # account responses and private images keep the no-store policy.
+        if request.endpoint == "static" and request.args.get("v") == asset_version:
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         return response
 
     @app.context_processor
@@ -183,6 +199,7 @@ def create_app(test_config=None):
             "loads": json.loads,
             "money": lambda cents: "" if cents is None else f"{cents/100:.2f}",
             "supabase_enabled": hosted_auth is not None,
+            "asset_version": asset_version,
         }
 
     def count_attempt():

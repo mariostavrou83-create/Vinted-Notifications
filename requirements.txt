@@ -1,5 +1,6 @@
 python-telegram-bot[job-queue]>=21.6
 requests
+orjson>=3.11,<4
 curl_cffi==0.16.3
 apscheduler>=3.10.0
 feedgen

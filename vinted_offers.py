@@ -673,14 +673,23 @@ def snapshot():
 
 def _recover(now):
     with closing(connection()) as conn, conn:
-        conn.execute(
-            "UPDATE vinted_offer_settings SET heartbeat=? WHERE id=1 AND (heartbeat IS NULL OR heartbeat<?)",
-            (now, now - 30),
-        )
-        conn.execute(
-            "UPDATE vinted_offer_jobs SET status='queued',lease_until=0 WHERE status='checking' AND lease_until<=?",
+        heartbeat = conn.execute(
+            "SELECT heartbeat FROM vinted_offer_settings WHERE id=1"
+        ).fetchone()[0]
+        if heartbeat is None or heartbeat < now - 30:
+            conn.execute(
+                "UPDATE vinted_offer_settings SET heartbeat=? WHERE id=1 AND (heartbeat IS NULL OR heartbeat<?)",
+                (now, now - 30),
+            )
+        expired_check = conn.execute(
+            "SELECT 1 FROM vinted_offer_jobs WHERE status='checking' AND lease_until<=? LIMIT 1",
             (now,),
-        )
+        ).fetchone()
+        if expired_check:
+            conn.execute(
+                "UPDATE vinted_offer_jobs SET status='queued',lease_until=0 WHERE status='checking' AND lease_until<=?",
+                (now,),
+            )
         rows = conn.execute(
             "SELECT id FROM vinted_offer_jobs WHERE status='sending' AND lease_until<=?",
             (now,),

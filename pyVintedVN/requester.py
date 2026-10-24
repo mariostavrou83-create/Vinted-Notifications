@@ -74,21 +74,19 @@ class Requester:
         # clients keep fresh reads on every call. Neither route holds a database
         # connection while parsing settings or making network requests.
         if self.shared_config:
-            from catalogue_config import snapshot
+            from catalogue_config import header_options
 
-            settings = snapshot()
-            user_agents_json = settings["user_agents"]
-            default_headers_json = settings["default_headers"]
+            user_agents, default_header_items = header_options()
+            default_headers = dict(default_header_items)
         else:
             with db.connection_scope():
                 user_agents_json = db.get_parameter("user_agents")
                 default_headers_json = db.get_parameter("default_headers")
 
-        # Parse JSON strings
-        user_agents = json.loads(user_agents_json) if user_agents_json else []
-        default_headers = (
-            json.loads(default_headers_json) if default_headers_json else {}
-        )
+            user_agents = json.loads(user_agents_json) if user_agents_json else []
+            default_headers = (
+                json.loads(default_headers_json) if default_headers_json else {}
+            )
 
         self.HEADER = {
             # Grabs a user agent from the database

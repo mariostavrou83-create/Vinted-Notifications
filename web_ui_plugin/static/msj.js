@@ -1,24 +1,56 @@
 const filter = document.querySelector('#filter');
 const platformFilter = document.querySelector('#platform-filter');
 const statusFilter = document.querySelector('#status-filter');
-function filterSearches() {
-  let visible = 0;
+const sortFilter = document.querySelector('#sort-filter');
+let searchPage = 1;
+const searchesPerPage = 24;
+function filterSearches(reset = true) {
+  if (reset) searchPage = 1;
   const text = filter?.value.trim().toLocaleLowerCase() || '';
   const platform = platformFilter?.value || 'all';
   const status = statusFilter?.value || 'all';
-  document.querySelectorAll('[data-search]').forEach(card => {
+  const cards = [...document.querySelectorAll('[data-search]')];
+  const visible = cards.filter(card => {
     const matchesPlatform = platform === 'all' || card.dataset.platform === platform
       || (platform !== 'both' && card.dataset.platform === 'both');
-    card.hidden = !card.dataset.search.toLocaleLowerCase().includes(text)
-      || !matchesPlatform || (status !== 'all' && card.dataset.status !== status);
-    if (!card.hidden) visible++;
+    return card.dataset.search.toLocaleLowerCase().includes(text)
+      && matchesPlatform && (status === 'all' || card.dataset.status === status);
+  });
+  if (sortFilter?.value === 'name') {
+    visible.sort((a, b) => a.querySelector('h2').textContent.localeCompare(
+      b.querySelector('h2').textContent, undefined, {numeric:true, sensitivity:'base'}));
+  } else visible.sort((a, b) => Number(b.dataset.searchId) - Number(a.dataset.searchId));
+  const pages = Math.max(1, Math.ceil(visible.length / searchesPerPage));
+  searchPage = Math.max(1, Math.min(searchPage, pages));
+  const start = (searchPage - 1) * searchesPerPage;
+  cards.forEach(card => { card.hidden = true; });
+  visible.slice(start, start + searchesPerPage).forEach(card => {
+    card.hidden = false;
+    document.querySelector('[data-search-list]')?.append(card);
   });
   const empty = document.querySelector('#no-results');
-  if (empty) empty.hidden = visible > 0 || !document.querySelector('[data-search]');
+  if (empty) empty.hidden = visible.length > 0 || !cards.length;
+  const count = document.querySelector('#search-results-count');
+  if (count) count.textContent = visible.length
+    ? `Showing ${start + 1}–${Math.min(start + searchesPerPage, visible.length)} of ${visible.length} searches`
+    : '0 matching searches';
+  const pagination = document.querySelector('.search-pagination');
+  if (pagination) pagination.hidden = pages <= 1;
+  const pageLabel = document.querySelector('#search-page-label');
+  if (pageLabel) pageLabel.textContent = `Page ${searchPage} of ${pages}`;
+  document.querySelector('[data-search-page="previous"]')?.toggleAttribute('disabled', searchPage === 1);
+  document.querySelector('[data-search-page="next"]')?.toggleAttribute('disabled', searchPage === pages);
 }
 filter?.addEventListener('input', filterSearches);
 platformFilter?.addEventListener('change', filterSearches);
 statusFilter?.addEventListener('change', filterSearches);
+sortFilter?.addEventListener('change', filterSearches);
+document.querySelectorAll('[data-search-page]').forEach(button => button.addEventListener('click', () => {
+  searchPage += button.dataset.searchPage === 'next' ? 1 : -1;
+  filterSearches(false);
+  document.querySelector('.search-toolbar')?.scrollIntoView({block:'start'});
+}));
+if (filter) filterSearches();
 const searchList = document.querySelector('[data-search-list]');
 if (searchList) {
   const buttons = [...document.querySelectorAll('[data-search-view]')];
@@ -299,3 +331,46 @@ if (buyerSettings) buyerSettings.addEventListener('submit', () => {
     timezone_offset: new Date().getTimezoneOffset()
   });
 });
+
+// Connections are sections, rather than one long page of setup forms.
+const connectionNavigation = document.querySelector('.connection-jump');
+if (connectionNavigation) {
+  const links = [...connectionNavigation.querySelectorAll('a[href^="#"]')];
+  const panels = links.map(link => document.querySelector(link.getAttribute('href'))).filter(Boolean);
+  panels.forEach(panel => panel.classList.add('connection-panel'));
+  function showConnectionSection() {
+    const selected = panels.find(panel => '#' + panel.id === location.hash) || panels[0];
+    panels.forEach(panel => {
+      panel.hidden = panel !== selected;
+      if (panel === selected && panel.tagName === 'DETAILS') panel.open = true;
+    });
+    links.forEach(link => link.setAttribute('aria-current', String(link.getAttribute('href') === '#' + selected.id)));
+  }
+  addEventListener('hashchange', showConnectionSection);
+  showConnectionSection();
+}
+
+const offerRows = [...document.querySelectorAll('[data-offer-row]')];
+if (offerRows.length) {
+  let offerPage = 1;
+  const offerFilter = document.querySelector('#offer-status-filter');
+  const previous = document.querySelector('[data-offer-page="previous"]');
+  const next = document.querySelector('[data-offer-page="next"]');
+  function showOfferPage() {
+    const status = offerFilter?.value || 'all';
+    const matches = offerRows.filter(row => status === 'all' || row.dataset.status === status
+      || (status === 'waiting' && ['queued','ready','checking','sending'].includes(row.dataset.status)));
+    const pages = Math.max(1, Math.ceil(matches.length / 20));
+    offerPage = Math.max(1, Math.min(offerPage, pages));
+    offerRows.forEach(row => { row.hidden = true; });
+    matches.slice((offerPage-1)*20, offerPage*20).forEach(row => { row.hidden = false; });
+    document.querySelector('#offer-page-label').textContent = matches.length
+      ? `Page ${offerPage} of ${pages} · ${matches.length} recent entries` : 'No matching recent entries';
+    previous.disabled = offerPage === 1;
+    next.disabled = offerPage === pages;
+  }
+  offerFilter?.addEventListener('change', () => { offerPage = 1; showOfferPage(); });
+  previous.addEventListener('click', () => { offerPage--; showOfferPage(); });
+  next.addEventListener('click', () => { offerPage++; showOfferPage(); });
+  showOfferPage();
+}

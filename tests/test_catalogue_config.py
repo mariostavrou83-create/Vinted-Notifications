@@ -94,6 +94,28 @@ class CatalogueConfigurationTests(DatabaseFixture, unittest.TestCase):
                 conn.execute("SELECT COUNT(*) FROM search_health").fetchone()[0], 0
             )
 
+    def test_parsed_headers_are_reused_without_caching_a_changed_configuration(self):
+        catalogue_config._parsed_header_options.cache_clear()
+        with patch.object(
+            catalogue_config,
+            "snapshot",
+            return_value={
+                "user_agents": '["offline UA"]',
+                "default_headers": '{"Locale":"en-GB"}',
+            },
+        ) as snapshot:
+            first = catalogue_config.header_options()
+            second = catalogue_config.header_options()
+            self.assertIs(first, second)
+            self.assertEqual(first, (("offline UA",), (("Locale", "en-GB"),)))
+            snapshot.return_value = {
+                "user_agents": '["new UA"]',
+                "default_headers": '{"Locale":"cy-GB"}',
+            }
+            self.assertEqual(
+                catalogue_config.header_options(), (("new UA",), (("Locale", "cy-GB"),))
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

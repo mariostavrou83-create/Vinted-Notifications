@@ -2,6 +2,8 @@ import threading
 import time as clock
 from urllib.parse import parse_qsl, urlparse
 
+import orjson
+
 from logger import get_logger
 from pyVintedVN.items.item import Item
 from pyVintedVN.requester import requester
@@ -88,7 +90,10 @@ class Items:
         report_catalogue_cache(response)
 
         # Parse the response
-        items = response.json()
+        # Parse the existing UTF-8 bytes directly. This avoids a second full
+        # Unicode response copy and shares repeated JSON field-name strings.
+        content = getattr(response, "content", None)
+        items = orjson.loads(content) if isinstance(content, bytes) else response.json()
         items = items["items"]
         if not isinstance(items, list):
             raise TypeError("Vinted returned an unreadable catalogue.")

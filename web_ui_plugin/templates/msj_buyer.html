@@ -22,6 +22,7 @@
 <form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="buyer_alert_examples_check">Check latest alert with examples</button></form>
 <p><small>This compares an alert sent within the last hour with its listing, checks its saved example photo and reports which controls are present. It sends no messages and preserves your photo layout. Live button behavior still needs a Telegram tap.</small></p>
 </details>
+<details class="guide-section"><summary><b>Connection history &amp; diagnostics</b></summary>
 {% if buyer_auth_results is defined %}
 {% for kind in ['buyer_login','buyer_session','buyer_verify','renewal','saved_check'] %}{% set result=buyer_auth_results.get(kind) %}{% if result %}
 <div class="guide-section" role="status" data-buyer-auth-result="{{kind}}"><b>{{result.kind}}</b><p>{{result.message}}</p><small>{% if kind == 'buyer_login' %}Last account connection attempt · {% elif kind == 'renewal' %}Saved account check · {% endif %}{{result.stage}}{% if result.http_status %} · HTTP {{result.http_status}}{% endif %} · {{result.checked}}</small></div>
@@ -31,6 +32,7 @@
 {% if buyer_connection_result %}<div class="guide-section" role="status"><b>Last account connection attempt</b><p>{{buyer_connection_result.message}}</p><small>{{buyer_connection_result.kind}} · {{buyer_connection_result.stage}}{% if buyer_connection_result.http_status %} · HTTP {{buyer_connection_result.http_status}}{% endif %} · {{buyer_connection_result.checked}}</small></div>{% endif %}
 {% if buyer.access.message %}<div class="guide-section" role="status"><b>{{'Saved account check' if buyer.access.stage_code in ['saved_session','renewal','identity'] else 'Latest access check'}}</b><p>{{buyer.access.message}}</p><small>{{buyer.access.stage}}{% if buyer.access.http_status %} · HTTP {{buyer.access.http_status}}{% endif %}</small></div>{% endif %}
 {% endif %}
+</details>
 {% if buyer.connected and (buyer.access.reason in ['refresh_rejected','signin_redirect'] or (buyer.access.reason == 'credentials' and buyer.access.stage_code == 'identity')) %}<p><b>A saved-account check could not authenticate your Vinted buyer.</b> Reconnect the same account above. Your searches and spending limits stay saved; you do not need to disconnect first.</p>{% elif buyer.connected and buyer.access.reason == 'renewal_failed' %}<p><b>The saved session renewal was not accepted.</b> This error alone does not establish its cause. If you need to restore access, use the same-account reconnect above; the bot verifies accepted credentials before saving them.</p>{% endif %}
 <details class="guide-section" {{'open' if not buyer.connected}}>
 <summary><b>{{'Reconnect your existing Vinted login' if buyer.connected else 'Connect an existing Vinted login'}}</b></summary>
@@ -114,32 +116,8 @@
 {% endif %}
 <p><small>A bank may require payment confirmation. Supported security checks use your private proxy and CapSolver settings. Nothing is charged by connecting or saving these settings.</small></p>
 {% if buying %}
-<details class="guide-section" {{'open' if buying|selectattr('state','in',['paying','unknown','needs_action'])|list}}>
-<summary><b>Recent purchase attempts</b></summary>
-<p><small>Check a listing without starting another purchase. The final delivery, fees and payment choices are checked when you tap Autobuy.</small></p>
-{% for attempt in buying %}
-<div class="guide-section">
-<b>{{attempt.title or ('Item '+attempt.item_id)}}</b><p><small>Item {{attempt.item_id}}</small></p><p>{{attempt.message}}</p>
-{% if attempt.url %}<a href="{{attempt.url}}" target="_blank" rel="noopener noreferrer">Open Vinted listing ↗</a>{% endif %}
-{% if buyer.connected and attempt.url %}<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="buyer_item_id" value="{{attempt.item_id}}"><button class="secondary" name="action" value="buyer_listing_check">Check this listing without buying</button></form>{% endif %}
-{% if buyer.connected and attempt.state in ('paying','unknown','needs_action') %}
-{% if attempt.action_url %}<a href="{{attempt.action_url}}" target="_blank" rel="noopener noreferrer">Open bank confirmation ↗</a>{% endif %}
-<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="buyer_item_id" value="{{attempt.item_id}}"><button class="secondary" name="action" value="buyer_payment_check">Check payment status</button></form>
-{% endif %}
-{% if attempt.state in ('unknown','needs_action') %}
-<form method="post" data-owner-failed-payment="{{attempt.item_id}}">
-<input type="hidden" name="csrf" value="{{csrf}}">
-<input type="hidden" name="buyer_item_id" value="{{attempt.item_id}}">
-<input type="hidden" name="buyer_attempt_updated" value="{{attempt.updated}}">
-<input type="hidden" name="action" value="buyer_payment_owned">
-<label class="checkbox"><input type="checkbox" name="buyer_failed_confirm" value="yes" required> I checked item {{attempt.item_id}} in Vinted Purchases and any pending bank payment.</label>
-<small>Your choice records your confirmation and clears this item's block on new purchases. It never buys this item again or submits a payment.</small>
-<button class="secondary" name="buyer_purchase_decision" value="got">I got it</button>
-<button class="secondary" name="buyer_purchase_decision" value="miss">I didn't get it</button>
-</form>
-{% endif %}
-</div>
-{% endfor %}
-</details>
+{% set unresolved = buying|selectattr('state','in',['paying','unknown','needs_action'])|list %}
+{% if unresolved %}<section class="purchase-attention guide-section" aria-label="Purchases needing attention"><h3>Purchases needing attention</h3><p class="muted">Resolve these before retrying a purchase.</p>{% for attempt in unresolved %}{% include 'msj_purchase_attempt.html' %}{% endfor %}</section>{% endif %}
+<details class="guide-section"><summary><b>Purchase history</b><span class="detail-count">{{buying|length - unresolved|length}}</span></summary><p class="muted">Completed and stopped attempts. No new purchase is started by viewing history.</p>{% for attempt in buying if attempt.state not in ['paying','unknown','needs_action'] %}{% include 'msj_purchase_attempt.html' %}{% endfor %}</details>
 {% endif %}
 </section>

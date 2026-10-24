@@ -4,8 +4,10 @@ Search rules, budgets, buyer credentials and seen-item state never use this
 cache. Failed refreshes propagate without extending the previous snapshot.
 """
 
+import json
 import threading
 import time
+from functools import lru_cache
 
 import db
 
@@ -25,3 +27,16 @@ def snapshot():
             _values, _path = values, db.DB_PATH
             _expires = time.monotonic() + 1
         return dict(_values)
+
+
+@lru_cache(maxsize=4)
+def _parsed_header_options(user_agents, default_headers):
+    return (
+        tuple(json.loads(user_agents) if user_agents else []),
+        tuple((json.loads(default_headers) if default_headers else {}).items()),
+    )
+
+
+def header_options():
+    values = snapshot()
+    return _parsed_header_options(values["user_agents"], values["default_headers"])

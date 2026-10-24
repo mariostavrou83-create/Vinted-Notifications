@@ -11,7 +11,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from email.utils import parsedate_to_datetime
 from html import escape
@@ -51,7 +51,7 @@ def retry_delay(value, now=None):
 
 def timestamp(value):
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        return datetime.fromisoformat(value).timestamp()
     except (AttributeError, TypeError, ValueError, OverflowError):
         return None
 
@@ -423,7 +423,7 @@ def format_alert(item, search):
             ("Listed (eBay): " + escape(item["listed_label"]) + " · minute precision")
             if item.get("public")
             else "Listed: "
-            + datetime.fromtimestamp(item["created"], timezone.utc).strftime(
+            + datetime.fromtimestamp(item["created"], UTC).strftime(
                 "%d %b %H:%M:%S UTC"
             )
         ),
@@ -810,18 +810,23 @@ async def run_delivery():
                     bot_id=config["telegram_token"].split(":")[0],
                 )
                 verification = asyncio.create_task(verify_candidates("ebay"))
+                next_configuration_check = 0
+                has_active_searches = True
                 try:
                     while True:
-                        with db.connection_scope():
-                            latest = store.configuration()
-                            changed = any(
-                                latest[k] != config[k]
-                                for k in ("telegram_token", "chat_id")
-                            ) or store.missing_configuration(latest)
-                        if changed:
-                            break
+                        if time.monotonic() >= next_configuration_check:
+                            with db.connection_scope():
+                                latest = store.configuration()
+                                changed = any(
+                                    latest[k] != config[k]
+                                    for k in ("telegram_token", "chat_id")
+                                ) or store.missing_configuration(latest)
+                                has_active_searches = bool(store.active_searches())
+                            next_configuration_check = time.monotonic() + 1
+                            if changed:
+                                break
                         if not await worker.tick():
-                            await asyncio.sleep(0.05)
+                            await asyncio.sleep(0.05 if has_active_searches else 0.5)
                 finally:
                     callbacks.cancel()
                     verification.cancel()
