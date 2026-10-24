@@ -3,9 +3,11 @@
 import sqlite3
 import unittest
 from contextlib import closing
+from datetime import datetime
 from itertools import pairwise
 from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlsplit
+from zoneinfo import ZoneInfo
 
 from test_dashboard import DashboardTests
 from test_search_controls import DatabaseFixture
@@ -122,7 +124,7 @@ class OfferTests(DatabaseFixture, unittest.TestCase):
     def enable(self, mode="live", rounding="half_pound", history="today"):
         offers.configure(mode, rounding, history, now=self.now)
 
-    def add(self, item=1001, recipient=222, at=NOW):
+    def add(self, item=1001, recipient=222, at=NOW - offers.LIKE_DELAY):
         with closing(search_settings.connection()) as conn, conn:
             return conn.execute(
                 """INSERT INTO vinted_offer_jobs
@@ -137,6 +139,159 @@ class OfferTests(DatabaseFixture, unittest.TestCase):
                 dict(r)
                 for r in conn.execute("SELECT * FROM vinted_offer_jobs ORDER BY id")
             ]
+
+    def test_new_like_waits_full_five_minutes_across_worker_restart(self):
+        self.enable(history="three_months")
+        self.add(at=NOW)
+        for offset in (0, 60, 180, 299):
+            self.now = NOW + offset
+            offers.OfferWorker(
+                client_factory=self.factory,
+                clock=lambda: self.now,
+                item_reader=self.item_read,
+            ).tick()
+            self.assertFalse(self.client.writes())
+            self.assertFalse(any(c[0] == "POST" for c in self.client.calls))
+            self.assertEqual(self.jobs()[0]["status"], "queued")
+        self.now = NOW + 300
+        self.worker.tick()
+        self.assertEqual(len(self.client.writes()), 1)
+        self.assertEqual(self.jobs()[0]["sent_at"], NOW + 300)
+
+    def test_due_new_likes_take_priority_over_history(self):
+        self.enable(history="three_months")
+        old = self.add(item=1001, at=NOW - 86400)
+        new = self.add(item=1002, at=NOW)
+        self.now += 300
+        self.worker.tick()
+        jobs = {j["id"]: j for j in self.jobs()}
+        self.assertEqual(jobs[new]["status"], "sent")
+        self.assertEqual(jobs[old]["status"], "queued")
+        self.now += 180
+        self.worker.tick()
+        self.assertEqual(self.jobs()[0]["status"], "sent")
+
+    def test_history_leaves_next_send_slot_free_for_upcoming_new_like(self):
+        self.enable(history="three_months")
+        self.add(item=1001, at=NOW - 86400)
+        self.add(item=1002, at=NOW)
+        self.now += 121
+        self.worker.tick()
+        self.assertFalse(self.client.writes())
+        self.now = NOW + 300
+        self.worker.tick()
+        self.assertEqual(self.jobs()[1]["status"], "sent")
+        self.assertEqual(self.jobs()[0]["status"], "queued")
+
+    def test_history_can_use_slot_before_new_like_is_due(self):
+        self.enable(history="three_months")
+        self.add(item=1001, at=NOW - 86400)
+        self.add(item=1002, at=NOW)
+        self.worker.tick()
+        self.assertEqual(self.jobs()[0]["status"], "sent")
+        self.now = NOW + 300
+        self.worker.tick()
+        self.assertEqual(self.jobs()[1]["status"], "sent")
+
+    def test_first_notification_page_is_checked_before_sending_history(self):
+        self.enable(history="three_months")
+        self.add(item=1001, at=NOW - 86400)
+        self.client.notifications = [notification(item=1002, at=NOW)]
+        self.now += 121
+        self.worker.tick()
+        self.assertFalse(self.client.writes())
+        self.now = NOW + 300
+        self.worker.tick()
+        self.assertEqual(self.jobs()[1]["status"], "sent")
+
+    def test_three_month_cutoff_calendar_boundaries_and_london_dst(self):
+        london = ZoneInfo("Europe/London")
+        for current, expected in (
+            ((2026, 10, 24, 12), (2026, 7, 24, 12)),
+            ((2026, 5, 31, 12), (2026, 2, 28, 12)),
+            ((2024, 5, 31, 12), (2024, 2, 29, 12)),
+            ((2026, 1, 31, 12), (2025, 10, 31, 12)),
+            ((2026, 12, 24, 12), (2026, 9, 24, 12)),
+        ):
+            now = datetime(*current, tzinfo=london).timestamp()
+            self.assertEqual(
+                datetime.fromtimestamp(offers.three_months_before(now), london),
+                datetime(*expected, tzinfo=london),
+            )
+
+    def test_history_narrowing_excludes_existing_jobs_and_rescan_deduplicates(self):
+        self.enable(history="all")
+        cutoff = offers.three_months_before(self.now)
+        self.add(item=1001, at=cutoff - 1)
+        self.add(item=1002, at=cutoff)
+        self.add(item=1003, at=cutoff + 1)
+        self.enable("preview", history="three_months")
+        self.client.notifications = [
+            notification(item=1001, at=cutoff - 1),
+            notification(item=1002, at=cutoff),
+            notification(item=1003, at=cutoff + 1),
+        ]
+        self.worker.scan(self.client, offers.state())
+        jobs = self.jobs()
+        self.assertEqual(len(jobs), 3)
+        self.assertEqual(jobs[0]["reason"], "outside_history")
+        self.assertEqual(jobs[1]["status"], "queued")
+        self.assertEqual(jobs[2]["status"], "queued")
+
+    def test_rolling_cutoff_is_rechecked_at_send_time(self):
+        self.enable(history="three_months")
+        cutoff = offers.three_months_before(self.now)
+        self.add(item=1001, at=cutoff + 30)
+
+        def slower_read(client, job):
+            self.now += 31
+            return self.item_read(client, job)
+
+        self.worker.item_reader = slower_read
+        self.worker.tick()
+        self.assertFalse(self.client.writes())
+        self.assertEqual(self.jobs()[0]["reason"], "outside_history")
+
+    def test_history_cutoff_and_priority_survive_pause_resume(self):
+        self.enable(history="three_months")
+        before = offers.state()
+        self.now += 86400
+        self.enable("paused", history="three_months")
+        self.enable(history="three_months")
+        after = offers.state()
+        self.assertEqual(after["since"], before["since"])
+        self.assertEqual(after["priority_since"], before["priority_since"])
+        self.assertGreater(offers.history_cutoff(after, self.now), before["since"])
+
+    def test_current_notifications_checked_while_history_cursor_is_deep(self):
+        self.enable(history="three_months")
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE vinted_offer_settings SET scan_page=50,next_scan=?",
+                (NOW + 100,),
+            )
+        self.client.notifications = [notification(at=NOW)]
+        self.worker.tick()
+        self.assertEqual(len(self.jobs()), 1)
+        self.assertEqual(offers.state()["scan_page"], 50)
+        self.assertFalse(self.client.writes())
+        self.now += 300
+        self.worker.tick()
+        self.assertEqual(self.jobs()[0]["status"], "sent")
+
+    def test_migration_adds_priority_without_resetting_queue_or_send_spacing(self):
+        self.enable(history="all")
+        self.add()
+        self.worker.tick()
+        before = offers.state()
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("ALTER TABLE vinted_offer_settings DROP COLUMN priority_since")
+            offers.migrate(conn)
+            offers.migrate(conn)
+        after = offers.state()
+        self.assertEqual(after["mode"], before["mode"])
+        self.assertEqual(after["next_send"], before["next_send"])
+        self.assertEqual(self.jobs()[0]["status"], "sent")
 
     def test_price_rules_and_no_float_drift(self):
         self.assertEqual(offers.offer_amount(2300, "half_pound"), 2150)
@@ -721,7 +876,7 @@ class OfferTests(DatabaseFixture, unittest.TestCase):
         ]
         worker = offers.OfferWorker(client_factory=self.factory, clock=lambda: self.now)
         worker.tick()
-        self.now += 5
+        self.now += offers.LIKE_DELAY
         worker.tick()
         self.assertEqual(self.jobs()[0]["status"], "sent")
         self.assertEqual(self.jobs()[0]["offer_price"], 2150)
@@ -897,6 +1052,29 @@ class OfferGatewayTests(DatabaseFixture, unittest.TestCase):
 
 
 class OfferRouteTests(DashboardTests):
+    def test_owner_can_enable_three_month_history_and_see_five_minute_rule(self):
+        self.owner()
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE vinted_buyer SET user_id='111',verified_at=?,session=? WHERE id=1",
+                (NOW, b"offline-sealed"),
+            )
+        response = self.client.post(
+            "/offers/settings",
+            data={
+                "csrf": "offline-csrf",
+                "mode": "live",
+                "rounding": "half_pound",
+                "history": "three_months",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(offers.state()["mode"], "live")
+        self.assertEqual(offers.state()["history"], "three_months")
+        page = self.client.get("/offers").data
+        self.assertIn(b"Last 3 months, then new favourites", page)
+        self.assertIn(b"New likes wait 5 minutes from the like", page)
+
     def test_offers_auth_csrf_render_and_pause(self):
         self.assertEqual(self.client.get("/offers").location, "/login")
         self.owner()

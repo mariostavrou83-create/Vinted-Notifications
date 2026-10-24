@@ -46,7 +46,7 @@ def install(app):
                 {
                     "paused": "Offers paused. Any send already in flight may finish.",
                     "preview": "Preview started. Favourites and prices will be checked; no offers will be sent.",
-                    "live": "5% offers started, with at least three minutes between sends.",
+                    "live": "5% offers started. New likes wait five minutes, then get priority; sends stay at least three minutes apart.",
                 }[mode],
                 "success",
             )

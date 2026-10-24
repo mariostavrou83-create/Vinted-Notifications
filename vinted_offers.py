@@ -6,6 +6,7 @@ of uncertain writes is performed here. Network calls never hold a SQLite write
 transaction. The existing account lock protects encrypted session rotations.
 """
 
+import calendar
 import logging
 import math
 import re
@@ -22,13 +23,14 @@ from search_settings import connection
 
 logger = logging.getLogger(__name__)
 SEND_GAP = 180
+LIKE_DELAY = 300
 SCAN_GAP = 60
 PAGE_GAP = 5
 PAGE_SIZE = 20
 LEASE_SECONDS = 120
 MODES = {"paused", "preview", "live"}
 ROUNDINGS = {"half_pound", "penny"}
-HISTORIES = {"today", "new", "all"}
+HISTORIES = {"today", "new", "all", "three_months"}
 
 MESSAGES = {
     "account": "Connect and verify your Vinted account in Connections.",
@@ -48,6 +50,7 @@ MESSAGES = {
     "stale": "Settings changed while this item was being checked. It will be checked again.",
     "inventory": "Checking your wardrobe for this item.",
     "crash": "The worker restarted during this send. Check Vinted; it will not be retried automatically.",
+    "outside_history": "This favourite is outside your selected history period.",
 }
 
 
@@ -148,6 +151,11 @@ def migrate(conn):
         heartbeat REAL, pause_reason TEXT NOT NULL DEFAULT '',
         unknown_notifications INTEGER NOT NULL DEFAULT 0)""")
     conn.execute("INSERT OR IGNORE INTO vinted_offer_settings(id) VALUES (1)")
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(vinted_offer_settings)")
+    }
+    if "priority_since" not in columns:
+        conn.execute("ALTER TABLE vinted_offer_settings ADD COLUMN priority_since REAL")
     conn.execute("""CREATE TABLE IF NOT EXISTS vinted_offer_jobs (
         id INTEGER PRIMARY KEY AUTOINCREMENT, account_id TEXT NOT NULL,
         item_id TEXT NOT NULL, recipient_id TEXT NOT NULL,
@@ -179,6 +187,24 @@ def event(conn, action, reason="", job_id=None, now=None):
     )
 
 
+def three_months_before(now):
+    local = datetime.fromtimestamp(now, ZoneInfo("Europe/London"))
+    year, month_index = divmod(local.year * 12 + local.month - 1 - 3, 12)
+    month = month_index + 1
+    return local.replace(
+        year=year,
+        month=month,
+        day=min(local.day, calendar.monthrange(year, month)[1]),
+    ).timestamp()
+
+
+def history_cutoff(config, now):
+    since = config["since"] or 0
+    if config["history"] == "three_months":
+        since = max(since, three_months_before(now))
+    return since
+
+
 def configure(mode, rounding, history, *, now=None):
     now = time.time() if now is None else now
     if mode not in MODES or rounding not in ROUNDINGS or history not in HISTORIES:
@@ -207,19 +233,40 @@ def configure(mode, rounding, history, *, now=None):
                 now
                 if history == "new"
                 else (
-                    0
-                    if history == "all"
-                    else datetime.fromtimestamp(now, ZoneInfo("Europe/London"))
-                    .replace(hour=0, minute=0, second=0, microsecond=0)
-                    .timestamp()
+                    three_months_before(now)
+                    if history == "three_months"
+                    else (
+                        0
+                        if history == "all"
+                        else datetime.fromtimestamp(now, ZoneInfo("Europe/London"))
+                        .replace(hour=0, minute=0, second=0, microsecond=0)
+                        .timestamp()
+                    )
                 )
             )
         conn.execute(
             """UPDATE vinted_offer_settings SET mode=?,rounding=?,history=?,
-            account_id=?,since=?,revision=revision+1,pause_reason='',next_scan=0,
+            account_id=?,since=?,priority_since=?,revision=revision+1,pause_reason='',next_scan=0,
             scan_page=1,scan_latest=0,scan_watermark=CASE WHEN ? THEN 0 ELSE scan_watermark END
             WHERE id=1""",
-            (mode, rounding, history, account_id, since, restart_scan),
+            (
+                mode,
+                rounding,
+                history,
+                account_id,
+                since,
+                (
+                    now
+                    if restart_scan or old["priority_since"] is None
+                    else old["priority_since"]
+                ),
+                restart_scan,
+            ),
+        )
+        conn.execute(
+            """UPDATE vinted_offer_jobs SET status='skipped',reason='outside_history',lease_until=0
+            WHERE account_id=? AND status IN ('queued','ready') AND liked_at<?""",
+            (account_id, history_cutoff({"since": since, "history": history}, now)),
         )
         event(conn, mode, now=now)
 
@@ -252,10 +299,10 @@ def recheck(job_id):
             WHERE id=? AND status='skipped' AND reason IN ('recipient','shape')
             AND offer_id IS NULL AND sent_at IS NULL
             AND account_id=(SELECT account_id FROM vinted_offer_settings WHERE id=1)
-            AND liked_at>=(SELECT since FROM vinted_offer_settings WHERE id=1)
+            AND liked_at>=?
             AND NOT EXISTS (SELECT 1 FROM vinted_offer_events
                             WHERE job_id=vinted_offer_jobs.id AND action='sending')""",
-            (job_id,),
+            (job_id, history_cutoff(state(), time.time())),
         ).rowcount
         if changed:
             event(conn, "recheck", job_id=job_id)
@@ -720,10 +767,12 @@ class OfferWorker:
         self.inventory = SellerItems(self.clock)
         self.item_reader = item_reader or self.inventory.read
         self.storage_notice_after = 0
+        self.recent_key = None
+        self.recent_scan = {"page": 1, "latest": 0, "watermark": 0, "next_scan": 0}
 
-    def scan(self, client, config):
+    def scan(self, client, config, *, recent=False):
         now = self.clock()
-        page = config["scan_page"]
+        page = self.recent_scan["page"] if recent else config["scan_page"]
         data = client.request(
             "GET",
             buyer.NOTIFICATIONS_PATH,
@@ -733,10 +782,20 @@ class OfferWorker:
         if not isinstance(rows, list) or len(rows) > 100:
             raise OfferCheck("shape", pause=True)
         notification_shape(rows, page)
-        cutoff = max(config["since"] or 0, config["scan_watermark"] - 300)
+        watermark = (
+            self.recent_scan["watermark"] if recent else config["scan_watermark"]
+        )
+        cutoff = max(history_cutoff(config, now), watermark - LIKE_DELAY)
+        if recent:
+            cutoff = max(cutoff, config["priority_since"] or 0)
         times = [notification_time(n) for n in rows if isinstance(n, dict)]
         valid_times = [t for t in times if t is not None]
-        latest = max([config["scan_latest"], *valid_times])
+        latest = max(
+            [
+                self.recent_scan["latest"] if recent else config["scan_latest"],
+                *valid_times,
+            ]
+        )
         pagination = data.get("pagination") or {}
         total_pages = (
             pagination.get("total_pages") if isinstance(pagination, dict) else None
@@ -757,7 +816,7 @@ class OfferWorker:
                 match = favourite(notification)
                 if (
                     match
-                    and config["since"] <= match["liked_at"] <= now + 60
+                    and cutoff <= match["liked_at"] <= now + 60
                     and match["recipient_id"] != config["account_id"]
                 ):
                     conn.execute(
@@ -782,6 +841,17 @@ class OfferWorker:
                     )
                 ):
                     unknown += 1
+            if recent:
+                self.recent_scan = {
+                    "page": 1 if finished else page + 1,
+                    "latest": 0 if finished else latest,
+                    "watermark": max(watermark, latest) if finished else watermark,
+                    "next_scan": now + (SCAN_GAP if finished else PAGE_GAP),
+                }
+                conn.execute(
+                    "UPDATE vinted_offer_settings SET last_scan=? WHERE id=1", (now,)
+                )
+                return
             conn.execute(
                 """UPDATE vinted_offer_settings SET scan_page=?,scan_latest=?,
                 scan_watermark=CASE WHEN ? THEN MAX(scan_watermark,?) ELSE scan_watermark END,
@@ -814,14 +884,49 @@ class OfferWorker:
             if fresh["next_send"] > now:
                 return None
             statuses = ("queued", "ready") if fresh["mode"] == "live" else ("queued",)
+            cutoff = history_cutoff(fresh, now)
+            conn.execute(
+                """UPDATE vinted_offer_jobs SET status='skipped',reason='outside_history'
+                WHERE account_id=? AND status IN ('queued','ready') AND liked_at<?""",
+                (fresh["account_id"], cutoff),
+            )
             row = conn.execute(
                 "SELECT * FROM vinted_offer_jobs WHERE account_id=? AND status IN ("
                 + ",".join("?" for _ in statuses)
-                + ") ORDER BY liked_at,id LIMIT 1",
-                (fresh["account_id"], *statuses),
+                + ") AND liked_at>=? AND liked_at<=? "
+                "ORDER BY CASE WHEN liked_at>=? THEN 0 ELSE 1 END,liked_at,id LIMIT 1",
+                (
+                    fresh["account_id"],
+                    *statuses,
+                    cutoff,
+                    now - LIKE_DELAY if fresh["mode"] == "live" else now + 60,
+                    (
+                        fresh["priority_since"]
+                        if fresh["priority_since"] is not None
+                        else now
+                    ),
+                ),
             ).fetchone()
             if not row:
                 return None
+            if fresh["mode"] == "live" and row["liked_at"] < (
+                fresh["priority_since"] or now
+            ):
+                # Keep the next send slot free for a new like due within the
+                # global spacing, instead of letting the history delay it.
+                upcoming = conn.execute(
+                    """SELECT MIN(liked_at) FROM vinted_offer_jobs WHERE account_id=?
+                    AND status IN ('queued','ready') AND liked_at>=?
+                    AND liked_at>? AND liked_at<?""",
+                    (
+                        fresh["account_id"],
+                        fresh["priority_since"] or now,
+                        now - LIKE_DELAY,
+                        now + SEND_GAP - LIKE_DELAY,
+                    ),
+                ).fetchone()[0]
+                if upcoming is not None:
+                    return None
             conn.execute(
                 "UPDATE vinted_offer_jobs SET status='checking',lease_until=? WHERE id=?",
                 (now + LEASE_SECONDS, row["id"]),
@@ -886,6 +991,18 @@ class OfferWorker:
                     )
                     return
                 now = self.clock()
+                if job["liked_at"] < history_cutoff(current, now):
+                    conn.execute(
+                        "UPDATE vinted_offer_jobs SET status='skipped',reason='outside_history',lease_until=0 WHERE id=?",
+                        (job["id"],),
+                    )
+                    return
+                if job["liked_at"] + LIKE_DELAY > now:
+                    conn.execute(
+                        "UPDATE vinted_offer_jobs SET status='queued',lease_until=0 WHERE id=?",
+                        (job["id"],),
+                    )
+                    return
                 if current["next_send"] > now:
                     conn.execute(
                         "UPDATE vinted_offer_jobs SET status='queued',lease_until=0 WHERE id=?",
@@ -989,13 +1106,29 @@ class OfferWorker:
             return
         if config["mode"] == "paused" or config["cooldown_until"] > now:
             return
+        recent_key = (config["account_id"], config["revision"])
+        if recent_key != self.recent_key:
+            self.recent_key = recent_key
+            self.recent_scan = {"page": 1, "latest": 0, "watermark": 0, "next_scan": 0}
         needs_scan = config["next_scan"] <= now
+        needs_recent = config["scan_page"] > 1 and self.recent_scan["next_scan"] <= now
         with closing(connection()) as conn:
             pending = conn.execute(
-                "SELECT 1 FROM vinted_offer_jobs WHERE account_id=? AND (status='queued' OR (? AND status='ready')) LIMIT 1",
-                (config["account_id"], config["mode"] == "live"),
+                """SELECT 1 FROM vinted_offer_jobs WHERE account_id=?
+                AND (status='queued' OR (? AND status='ready'))
+                AND liked_at>=? AND liked_at<=? LIMIT 1""",
+                (
+                    config["account_id"],
+                    config["mode"] == "live",
+                    history_cutoff(config, now),
+                    now - LIKE_DELAY if config["mode"] == "live" else now + 60,
+                ),
             ).fetchone()
-        if not needs_scan and (not pending or config["next_send"] > now):
+        if (
+            not needs_scan
+            and not needs_recent
+            and (not pending or config["next_send"] > now)
+        ):
             return
         client = None
         try:
@@ -1006,7 +1139,15 @@ class OfferWorker:
                     or client._verified_session[0] != config["account_id"]
                 ):
                     raise OfferCheck("account_changed", pause=True)
-                # Send first so scanning a long history cannot starve ready offers.
+                # A separate short scan keeps new likes visible while the
+                # three-month history continues from its own saved page.
+                if needs_recent:
+                    self.scan(client, config, recent=True)
+                    config = state()
+                elif needs_scan and config["scan_page"] == 1:
+                    self.scan(client, config)
+                    config = state()
+                # At most one history page per tick cannot starve ready offers.
                 job = self.claim(config)
                 if job:
                     self.process(client, config, job)

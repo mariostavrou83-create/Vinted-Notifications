@@ -82,7 +82,7 @@ class BuyerEventTests(NoticeFixture, unittest.IsolatedAsyncioTestCase):
                 conn.execute(
                     "SELECT value FROM parameters WHERE key='msj_search_schema'"
                 ).fetchone()[0],
-                "26",
+                search_settings.SCHEMA_VERSION,
             )
             self.assertEqual(
                 conn.execute(
