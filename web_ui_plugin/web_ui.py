@@ -84,6 +84,12 @@ def create_app(test_config=None):
 
     @app.before_request
     def protect():
+        if request.endpoint == "research_feed":
+            from research_trial_bridge import worker_authorized
+
+            if not worker_authorized():
+                abort(401)
+            return None
         if request.endpoint == "static":
             return None
         # This single callback uses eBay's cryptographic signature instead of
@@ -1108,6 +1114,9 @@ def create_app(test_config=None):
             return {"state": "stopped", "message": error.description}, error.code
         return render_template("msj_error.html", message=error.description), error.code
 
+    from research_trial_bridge import install as install_research_trial
+
+    install_research_trial(app)
     return app
 
 
