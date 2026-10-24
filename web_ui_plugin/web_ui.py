@@ -312,6 +312,12 @@ def create_app(test_config=None):
     def health():
         return {"status": "ok"}
 
+    @app.get("/operations.json")
+    def operations_audit():
+        import runtime_audit
+
+        return runtime_audit.snapshot()
+
     @app.get("/search-match-audit.json")
     def search_match_audit_export():
         import search_match_audit
