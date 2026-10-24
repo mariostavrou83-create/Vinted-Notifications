@@ -13,7 +13,7 @@ collector's proxy configuration. No account cookies, solver key or order data
 are exported. The research API is private-network only and also requires the key.
 
 Daily ceilings: 480 source reads, 1,200 shared outcome reads, 1,800 total HTTP
-requests, 200 MiB decoded response bodies, 25 new tracked items and 175 active
+requests, 512 MiB decoded response bodies, 25 new tracked items and 175 active
 tracked items. Redirects and anonymous authentication are counted too. Failed
 or restricted reads do not trigger immediate retries. Marketplace restrictions
 pause research for an hour; stale health data and sustained alert deterioration
@@ -23,7 +23,10 @@ An item is checked once even if several arms find it; each arm only counts
 items it discovered. This is a comparison of operating approaches, not a
 randomised causal study. Cohort rates require a full 24-hour outcome window.
 Unknowns remain in the denominator. A visible sold label and last ask are not
-a completed-order price. Comparable condition, size and item details still
+a completed-order price. Items still explicitly active after 24 hours stop
+receiving outcome reads; unresolved native states retire as unverified after
+that window. This keeps collection focused on the quick-sale criterion.
+Comparable condition, size and item details still
 require review before activating any suggested search.
 
 The start/end timestamps persist across deployments. Manual resume cannot

@@ -29,7 +29,10 @@ DURATION = 14 * 86400
 CATALOG_LIMIT = 480
 OUTCOME_LIMIT = 1200
 HTTP_LIMIT = 1800
-BYTE_LIMIT = 200 * 1024 * 1024
+# Native HTML is about 1–2 MiB decoded; ingress is not Railway egress.
+# Bound the decoded payload without exhausting the whole research day on a
+# small number of legitimate pages. Stop known-slow outcomes after 24 hours.
+BYTE_LIMIT = 512 * 1024 * 1024
 ACTIVE_LIMIT = 175
 ADMISSION_LIMIT = 25
 DAY = 86400
@@ -775,8 +778,18 @@ class Store:
                 upper = min(upper, new_upper) if upper is not None else new_upper
                 if lower > upper:
                     lower = upper = None
-            if state == "active" and upper is not None and now - upper >= 7 * DAY:
-                state = "unsold_7d"
+            if (
+                state in {"active", "reserved"}
+                and upper is not None
+                and now - upper >= QUICK_SECONDS
+            ):
+                state = "unsold_24h"
+            elif (
+                state == "unknown"
+                and row["admitted"] is not None
+                and now - row["admitted"] >= QUICK_SECONDS
+            ):
+                state = "unverified"
             age_upper = now - lower if state == "sold" and lower is not None else None
             price = data.get("price")
             sold_price = price if state == "sold" else None
@@ -922,7 +935,7 @@ class Store:
                 high_enrolled = [r for r in premium if r in matured]
                 resolved = sum(
                     bool(
-                        r["state"] in {"sold", "unsold_7d"}
+                        r["state"] in {"sold", "unsold_24h"}
                         or r["checked"]
                         and r["published_upper"]
                         and r["checked"] - r["published_upper"] >= QUICK_SECONDS

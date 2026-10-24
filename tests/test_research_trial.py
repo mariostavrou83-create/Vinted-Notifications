@@ -212,6 +212,20 @@ class TrialTests(unittest.TestCase):
             )
         self.assertEqual(self.store.snapshot(self.now)["arms"][2]["fast_sold"], 0)
 
+    def test_slow_and_unverifiable_items_stop_consuming_followups_after_one_day(self):
+        self.add()
+        later = self.now + trial.DAY + 1
+        self.store.record_outcome(
+            "1",
+            {"state": "active", "age_bounds": (2 * trial.DAY, 3 * trial.DAY)},
+            later,
+        )
+        self.store.record_outcome("2", {"state": "unknown"}, later)
+        with closing(self.store.connect()) as c:
+            states = dict(c.execute("SELECT id,state FROM items WHERE id IN ('1','2')"))
+        self.assertEqual(states, {"1": "unsold_24h", "2": "unverified"})
+        self.assertEqual(self.store.snapshot(later)["arms"][2]["fast_sold"], 0)
+
     def test_external_identity_and_wrong_sizes_are_rejected(self):
         self.assertIsNone(trial.item_url("https://evil.invalid/items/123", "123"))
         self.assertIsNone(trial.item_url("https://www.vinted.co.uk/items/124", "123"))
