@@ -9,6 +9,7 @@ transaction. The existing account lock protects encrypted session rotations.
 import logging
 import math
 import re
+import sqlite3
 import time
 from contextlib import closing
 from datetime import datetime
@@ -718,6 +719,7 @@ class OfferWorker:
         self.clock = clock or time.time
         self.inventory = SellerItems(self.clock)
         self.item_reader = item_reader or self.inventory.read
+        self.storage_notice_after = 0
 
     def scan(self, client, config):
         now = self.clock()
@@ -966,8 +968,25 @@ class OfferWorker:
 
     def tick(self):
         now = self.clock()
-        _recover(now)
-        config = state()
+        try:
+            _recover(now)
+            config = state()
+        except sqlite3.OperationalError as exc:
+            code = getattr(exc, "sqlite_errorcode", None)
+            busy = (
+                type(code) is int
+                and code & 255 in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+            ) or str(exc) in ("database is locked", "database table is locked")
+            if not busy:
+                raise
+            # No marketplace call has started. Retry the atomic recovery on
+            # the next tick, before considering any queued or expired send.
+            if now >= self.storage_notice_after:
+                logger.warning(
+                    "Vinted offers storage busy before account access; waiting"
+                )
+                self.storage_notice_after = now + 60
+            return
         if config["mode"] == "paused" or config["cooldown_until"] > now:
             return
         needs_scan = config["next_scan"] <= now

@@ -50,6 +50,11 @@ limited to two pages. Wardrobe reads also yield between pages. No network call
 holds a SQLite write transaction. Account work uses the existing non-blocking
 buyer lock; the three-minute wait is outside that lock.
 
+Temporary SQLite contention during the initial heartbeat and lease recovery
+waits for the next tick before any account request. It does not report a Vinted
+format error or restart sending before recovery has completed. Other storage
+failures retain the fail-closed behaviour.
+
 An offer write is durably marked `sending` and its spacing reserved before the
 request. Missing confirmation, interrupted writes or network errors after this
 point become **uncertain**, remain out of the queue and pause sending. They are

@@ -1,5 +1,6 @@
 """Real SQLite and Flask; all marketplace reads/writes use an offline fake."""
 
+import sqlite3
 import unittest
 from contextlib import closing
 from itertools import pairwise
@@ -638,6 +639,49 @@ class OfferTests(DatabaseFixture, unittest.TestCase):
             self.worker.tick()
         self.factory.assert_not_called()
         self.assertEqual(offers.state()["mode"], "live")
+
+    def test_busy_storage_before_account_access_waits_without_pausing(self):
+        self.enable("preview")
+        self.client.notifications = [notification()]
+        with patch.object(
+            offers,
+            "_recover",
+            side_effect=sqlite3.OperationalError("database is locked"),
+        ):
+            self.worker.tick()
+        self.factory.assert_not_called()
+        self.assertEqual(offers.state()["mode"], "preview")
+        self.worker.tick()
+        self.assertEqual(len(self.jobs()), 1)
+        self.assertFalse(self.client.writes())
+
+    def test_storage_recovery_must_finish_before_expired_sends_are_considered(self):
+        self.enable()
+        job_id = self.add()
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE vinted_offer_jobs SET status='sending',lease_until=? WHERE id=?",
+                (NOW - 1, job_id),
+            )
+        with patch.object(
+            offers,
+            "_recover",
+            side_effect=sqlite3.OperationalError("database is locked"),
+        ):
+            self.worker.tick()
+        self.factory.assert_not_called()
+        self.worker.tick()
+        self.assertEqual(self.jobs()[0]["status"], "uncertain")
+        self.assertEqual(offers.state()["mode"], "paused")
+        self.factory.assert_not_called()
+
+    def test_non_busy_storage_failure_still_fails_closed(self):
+        self.enable()
+        with patch.object(
+            offers, "_recover", side_effect=sqlite3.OperationalError("disk I/O error")
+        ), self.assertRaises(sqlite3.OperationalError):
+            self.worker.tick()
+        self.factory.assert_not_called()
 
     def test_preview_does_not_require_autobuy_permission(self):
         self.enable("preview")
