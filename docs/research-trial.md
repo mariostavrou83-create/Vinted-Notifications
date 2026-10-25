@@ -1,49 +1,79 @@
-# Search discovery trial
+# Daily sourcing and the original comparison
 
-Three collection arms run for 14 elapsed days from the first verified feed:
-broad category discovery, selected public seller wardrobes, and adaptive category
-discovery; all exclude existing saved brands and search types. The research container has its own small volume, HTTP sessions, CPU
-and memory limits. It never loads a saved Vinted account, sends offers, buys an
-item, spends eBay quota or changes a live search.
+On 25 October the user requested an ongoing system that finds actionable stock
+rather than a small research experiment. The original three-source comparison
+retains its 24 October start and 7 November finish. Its result is frozen at the
+finish; daily collection continues when `MSJ_DAILY_SOURCING=1`. A persistent
+pause applies to collection, including after the comparison finishes.
 
-The dashboard exposes `/research` to the existing owner login. Its bounded,
-read-only `/internal/research-feed` uses a separate service key and exports only
-a negative scope of existing search names and brand filters, aggregate alert health and the existing anonymous
-collector's proxy configuration. No account cookies, solver key or order data
-are exported. The research API is private-network only and also requires the key.
+The same isolated Railway worker and SQLite volume are reused. It never loads
+a Vinted account, sends messages/offers, buys stock, spends eBay quota, or changes
+live searches. The owner-only `/sourcing` page reads a bearer-protected private
+worker endpoint. `/research` retains the comparison. The existing offer cooldown
+fix and alert settings must be preserved when merging these branches.
 
-Daily ceilings: 480 source reads, 1,200 shared outcome reads, 1,800 total HTTP
-requests, 200 MiB decoded response bodies, 25 new tracked items and 175 active
-tracked items. Redirects and anonymous authentication are counted too. Failed
-or restricted reads do not trigger immediate retries. Marketplace restrictions
-pause research for an hour; stale health data and sustained alert deterioration
-also stop new research reads. Existing alerts retain priority.
+## Collection and limits
 
-An item is checked once even if several arms find it; each arm only counts
-items it discovered. This is a comparison of operating approaches, not a
-randomised causal study. Cohort rates require a full 24-hour outcome window.
-Unknowns remain in the denominator. A visible sold label and last ask are not
-a completed-order price. Comparable condition, size and item details still
-require review before activating any suggested search.
+One marketplace job at a time, with a persisted 25-second minimum gap. Daily
+ceilings are 2,800 HTTP reads, 1,700 source reads, 900 native outcome/stock reads,
+2 GiB decoded bodies, 120 new admissions and 300 active cohorts. Research may use
+100 admissions: 24 broad, 12 seller and 64 hybrid. Twenty admissions are reserved
+for verifying potential live stock. Stock refreshes have a 240-read daily cap,
+shared with the 900 outcome limit. Existing listings are checked once across
+sources; recent, already-discovered candidates can populate balanced cohorts
+without another catalogue request. Native age that remains unverified retires
+as unverified after one day, rather than consuming a week of follow-ups.
 
-The start/end timestamps persist across deployments. Manual resume cannot
-extend a completed trial. At the end, marketplace and feed work stop; the
-read-only results remain available. Detail retention is bounded to roughly
-12,000 rows plus protected cohorts, with at most 50,000 retained arm sightings.
-Images are linked rather than downloaded or stored.
+Broad categories, exploration, seller wardrobes and reference samples supply
+an adaptive watch of up to four distinct brands/patterns. Focused requests use
+four cheap passes for each premium pass; native brand/category/price filters
+and client-side price checks apply. Unproductive mature cohorts leave the
+focused watch. Source clocks do not guarantee a latency: budgets, unavailable
+marketplace data and the alert guard can delay them.
 
-Worker configuration:
+The guard stops research on polling p95 above three seconds, alert backlog over
+three seconds, excessive failures, stale or missing health. Under-three-second
+deterioration against the measured baseline needs two windows. Two stable idle
+readings can recalibrate the daily baseline after a research pause, so an old
+quiet startup sample does not suppress the service all day. Marketplace access
+backoff is never shortened by health recovery. No restriction triggers a route
+switch, challenge solver or immediate replay.
 
-- `MSJ_RESEARCH_TOKEN`: shared, private service key.
-- `MSJ_RESEARCH_FEED`: HTTPS URL of the authenticated dashboard feed.
-- `MSJ_RESEARCH_DB`: defaults to `/app/data/research_trial.sqlite3`.
-- `MSJ_RESEARCH_SELLER_SEEDS`: optional comma-separated public seller ID/category pairs.
+## Qualification
 
-Dashboard configuration:
+A stock card requires fresh native active status (15 minutes), a supported
+XS/S/M size and condition, an explicit item identity, two cheap quick-sale
+examples and three higher-price quick-sale examples, with at least two sellers
+in each band. Comparables need matching brand/category and identifying title
+or description terms. Generic brand + garment names do not suffice. A used
+item cannot be valued using higher-condition new-tag comparables.
 
-- `MSJ_RESEARCH_TOKEN`: same private service key.
-- `MSJ_RESEARCH_URL`: private worker origin, port 8000.
-- `MSJ_RESEARCH_FEED_EXPIRES`: optional Unix timestamp limiting feed access.
+Every sale requires an explicit native sold signal and publication-age bounds
+of no more than 24 hours. Removed/reserved/unknown listings are not sales.
+Prices are the last visible asks, not accepted-offer or paid prices. The resale
+estimate uses the lower quartile of matched premium sold asks less 10%. Buying
+costs assume 5% + 70p buyer fees and £2.20 postage; margin also reserves £3.
+Cards require an estimated £18 margin. The displayed buying ceiling is an item
+price, accounting for those costs. Inspection of model, condition, authenticity
+and actual checkout costs remains necessary; no automatic purchase is made.
 
-Deploy the worker using `Dockerfile.research`. Run focused validation with
-`PYTHONPATH=.:tests python -m unittest test_research_trial test_dashboard test_polling_efficiency test_resource_controls`.
+Exclusions match the saved brand/category/keyword combinations, regardless of
+price. This prevents repeating existing searches while allowing a new style
+from a familiar brand. Older feeds retain their conservative whole-brand
+exclusion until the additive `exclusions.scopes` field arrives. No account
+cookies, solver key, orders or existing alert items are exported in the feed.
+
+A `Daily sourcing summary` log is emitted every 15 minutes, including while
+paused, so scheduled daily reporting works without Chrome. It includes fresh
+stock URLs, supporting examples, actual counters and guard state. Empty results
+must be reported honestly; provisional asking-price patterns are not buying
+recommendations. Detail retention stays bounded to roughly 12,000 items plus
+protected cohorts and 50,000 source sightings; image binaries are not stored.
+
+## Operations
+
+- Worker: `MSJ_DAILY_SOURCING=1`, `MSJ_RESEARCH_TOKEN`, `MSJ_RESEARCH_FEED`.
+- Dashboard: same private token, `MSJ_RESEARCH_URL`; an empty
+  `MSJ_RESEARCH_FEED_EXPIRES` supports the newly requested ongoing service.
+- Use `Dockerfile.research` for the worker; it excludes account/offer modules.
+- Focused checks: `PYTHONPATH=.:tests python -m unittest test_daily_sourcing test_research_trial test_vinted_offers test_resource_controls test_polling_efficiency`.

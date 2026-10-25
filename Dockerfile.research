@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 WORKDIR /app
 RUN pip install --no-cache-dir requests flask waitress lxml curl_cffi==0.16.3 Pillow
-COPY research_trial.py vinted_http.py vinted_page_data.py alert_images.py listing_text.py ./
+COPY research_trial.py daily_sourcing.py vinted_http.py vinted_page_data.py alert_images.py listing_text.py ./
 RUN mkdir -p /app/data
 EXPOSE 8000
 CMD ["python", "research_trial.py"]

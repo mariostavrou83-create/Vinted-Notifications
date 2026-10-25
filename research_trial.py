@@ -7,12 +7,14 @@ are reused, but an arm only receives evidence for items it actually discovered.
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import secrets
 import sqlite3
 import threading
 import time
+from collections import Counter
 from contextlib import closing
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -24,12 +26,24 @@ import requests
 from flask import Flask, abort, request
 from lxml import html as lhtml
 
+from daily_sourcing import (
+    ARM_QUOTAS,
+    DailySourcing,
+    scope_matches,
+)
+from daily_sourcing import (
+    LIMITS as DAILY_LIMITS,
+)
+
 LOG = logging.getLogger("research_trial")
 DURATION = 14 * 86400
 CATALOG_LIMIT = 480
 OUTCOME_LIMIT = 1200
 HTTP_LIMIT = 1800
-BYTE_LIMIT = 200 * 1024 * 1024
+# Native HTML is about 1–2 MiB decoded; ingress is not Railway egress.
+# Bound the decoded payload without exhausting the whole research day on a
+# small number of legitimate pages. Stop known-slow outcomes after 24 hours.
+BYTE_LIMIT = 512 * 1024 * 1024
 ACTIVE_LIMIT = 175
 ADMISSION_LIMIT = 25
 DAY = 86400
@@ -325,6 +339,8 @@ def already_searched(item, exclusions):
     Price caps are deliberately ignored: premium versions of an already-saved
     item type are still part of an existing search, not a new opportunity.
     """
+    if "scopes" in exclusions:
+        return any(scope_matches(item, scope) for scope in exclusions["scopes"])
     brand = canonical(item.get("brand"))
     names = exclusions.get("names", [])
     identity = str(item.get("brand_id") or "")
@@ -416,6 +432,12 @@ def parse_listing(body, identity):
     }
     seller = str(native.get("user_id") or (next(iter(ids)) if len(ids) == 1 else ""))
     attrs = {}
+    descriptions = tree.xpath('//*[@data-testid="item-description"]')
+    description = (
+        " ".join(descriptions[0].text_content().split())[:3000]
+        if len(descriptions) == 1
+        else ""
+    )
     brand_nodes = side.xpath('.//a[starts-with(@href,"/brand/")]')
     brand_ids = {
         re.match(r"/brand/(\d+)", node.get("href", ""))[1]
@@ -429,6 +451,17 @@ def parse_listing(body, identity):
         values = side.xpath(f'.//*[@itemprop="{key}"]')
         if len(values) == 1:
             attrs[key] = " ".join(values[0].text_content().split())[:80]
+    if not (attrs.get("status") or attrs.get("condition")):
+        summary = " ".join(" ".join(summaries[0].itertext()).split())
+        conditions = set(
+            re.findall(
+                r"\bCondition\s*:?\s*(New with tags|New without tags|Very good|Good|Satisfactory)\b",
+                summary,
+                re.IGNORECASE,
+            )
+        )
+        if len(conditions) == 1:
+            attrs["condition"] = conditions.pop()
     cats = [re.match(r"/catalog/(\d+)", p) for p in tree.xpath("//main//a/@href")]
     category = next((m[1] for m in cats if m and m[1] in CATEGORIES), "")
     return {
@@ -442,11 +475,12 @@ def parse_listing(body, identity):
         "brand": brand_label,
         "brand_id": next(iter(brand_ids)) if len(brand_ids) == 1 else "",
         "url": item_url(canon[0], identity),
+        "description": description,
     }
 
 
 class Store:
-    def __init__(self, path):
+    def __init__(self, path, *, daily_enabled=None):
         self.path = str(path)
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with closing(self.connect()) as c, c:
@@ -483,15 +517,68 @@ class Store:
                 "exclusions": "TEXT NOT NULL DEFAULT '{}'",
                 "network_cursor": "INTEGER NOT NULL DEFAULT 0",
                 "reported_at": "REAL NOT NULL DEFAULT 0",
+                "healthy_windows": "INTEGER NOT NULL DEFAULT 0",
+                "baseline_at": "REAL NOT NULL DEFAULT 0",
+                "admission_version": "INTEGER NOT NULL DEFAULT 1",
+                "baseline_calibration_windows": "INTEGER NOT NULL DEFAULT 0",
+                "network_failures": "INTEGER NOT NULL DEFAULT 0",
             }.items():
                 if name not in fields:
                     c.execute(f"ALTER TABLE trial ADD COLUMN {name} {declaration}")
+            if "admission_policy" not in {
+                r[1] for r in c.execute("PRAGMA table_info(items)")
+            }:
+                c.execute(
+                    "ALTER TABLE items ADD COLUMN admission_policy INTEGER NOT NULL DEFAULT 1"
+                )
+            if "admission_band" not in {
+                r[1] for r in c.execute("PRAGMA table_info(items)")
+            }:
+                c.execute(
+                    "ALTER TABLE items ADD COLUMN admission_band TEXT NOT NULL DEFAULT ''"
+                )
+            if (
+                c.execute("SELECT admission_version FROM trial WHERE id=1").fetchone()[
+                    0
+                ]
+                < 2
+            ):
+                c.execute(
+                    "CREATE TABLE IF NOT EXISTS unread_admission_archive(id TEXT PRIMARY KEY,admitted REAL,admission_arm TEXT)"
+                )
+                c.execute(
+                    "INSERT OR IGNORE INTO unread_admission_archive SELECT id,admitted,admission_arm FROM items WHERE admission_policy=1 AND admitted IS NOT NULL AND checked IS NULL"
+                )
+                # No marketplace read was spent on these queued choices. Keep
+                # their discovery data, but release their biased quota slots.
+                c.execute(
+                    "UPDATE items SET admitted=NULL,admission_arm=NULL,next_check=0 WHERE admission_policy=1 AND checked IS NULL AND state='pending'"
+                )
+                c.execute("UPDATE trial SET admission_version=2 WHERE id=1")
+            # Keep historical sightings/outcomes; only trim redundant seeds.
+            c.execute(
+                "DELETE FROM sellers WHERE id IN (SELECT id FROM (SELECT id,ROW_NUMBER() OVER (PARTITION BY category ORDER BY verified DESC,next_due DESC) position FROM sellers) WHERE position>2)"
+            )
             c.executemany(
                 "INSERT OR IGNORE INTO arms(id,name) VALUES (?,?)", ARMS.items()
             )
             c.executemany(
                 "INSERT OR IGNORE INTO clocks(kind) VALUES (?)",
                 [(x,) for x in ("broad", "sellers", "explore", "reference", "focus")],
+            )
+            DailySourcing.migrate(c)
+            if daily_enabled is not None:
+                c.execute(
+                    "UPDATE sourcing_settings SET enabled=?,started=COALESCE(started,?) WHERE id=1",
+                    (int(daily_enabled), time.time()),
+                )
+
+    def daily(self):
+        with closing(self.connect()) as c:
+            return bool(
+                c.execute(
+                    "SELECT enabled FROM sourcing_settings WHERE id=1"
+                ).fetchone()[0]
             )
 
     def connect(self):
@@ -506,11 +593,26 @@ class Store:
                 "UPDATE trial SET phase='completed',reason='14-day trial complete' WHERE ends<=? AND phase!='completed'",
                 (now,),
             )
-            return dict(c.execute("SELECT * FROM trial WHERE id=1").fetchone())
+            state = dict(c.execute("SELECT * FROM trial WHERE id=1").fetchone())
+            daily = c.execute(
+                "SELECT enabled,paused FROM sourcing_settings WHERE id=1"
+            ).fetchone()
+            return state | {
+                "daily_enabled": bool(daily["enabled"]),
+                "collection_paused": bool(daily["paused"]),
+            }
 
-    def ingest(self, arm, items, now, *, observed=None, source=None):
+    def ingest(self, arm, items, now, *, observed=None, source=None, price_band=None):
         observed = now if observed is None else min(now, observed)
         with closing(self.connect()) as c, c:
+            daily = bool(
+                c.execute(
+                    "SELECT enabled FROM sourcing_settings WHERE id=1"
+                ).fetchone()[0]
+            )
+            admission_limit = 100 if daily else ADMISSION_LIMIT
+            active_limit = DAILY_LIMITS["active"] if daily else ACTIVE_LIMIT
+            arm_limit = ARM_QUOTAS[arm] if daily else 9
             exclusions = json.loads(
                 c.execute("SELECT exclusions FROM trial WHERE id=1").fetchone()[0]
             )
@@ -526,6 +628,32 @@ class Store:
             active = c.execute(
                 "SELECT COUNT(*) FROM items WHERE admitted IS NOT NULL AND state IN ('pending','active','reserved','unknown')",
             ).fetchone()[0]
+            enrolled = c.execute(
+                "SELECT entry_price,payload,seller,admission_band FROM items WHERE admitted>=? AND admission_arm=?",
+                (day, arm),
+            ).fetchall()
+            band_of = lambda price: (
+                "low" if price <= 2500 else "high" if price >= 3000 else "middle"
+            )
+            enrolled_band = lambda row: row["admission_band"] or band_of(
+                row["entry_price"]
+            )
+            bands = Counter(enrolled_band(r) for r in enrolled)
+            new_bands = Counter()
+            categories = Counter(
+                (json.loads(r["payload"]).get("category"), enrolled_band(r))
+                for r in enrolled
+            )
+            sellers = {(r["seller"], enrolled_band(r)) for r in enrolled if r["seller"]}
+            # Save room for both price bands and for later discovery windows.
+            # Missed healthy windows can catch up, within the same daily cap.
+            band_limit = arm_limit // 2 if daily else 4
+            paced_cap = min(
+                band_limit,
+                max(
+                    1, math.ceil(band_limit * (1 + int((now - day) // (6 * 3600))) / 4)
+                ),
+            )
             for item in sorted(
                 items, key=lambda x: hashlib.sha256(x["id"].encode()).digest()
             ):
@@ -562,29 +690,48 @@ class Store:
                     c.execute(
                         "INSERT OR IGNORE INTO members VALUES(?,?)", (gid, item["id"])
                     )
+                band = (
+                    price_band
+                    if price_band in {"low", "high"}
+                    else band_of(item["price"])
+                )
+                band_cap = 1 if band == "middle" else paced_cap
+                if arm == "hybrid" and source != "focus":
+                    band_cap = min(band_cap, 8 if daily else 2)
+                first_seen = c.execute(
+                    "SELECT first_seen FROM items WHERE id=?", (item["id"],)
+                ).fetchone()[0]
                 if (
                     found
-                    and active < ACTIVE_LIMIT
-                    and total < ADMISSION_LIMIT
-                    and arm_new < 9
+                    and active < active_limit
+                    and total < admission_limit
+                    and arm_new < arm_limit
+                    and bands[band] < band_cap
+                    and (
+                        arm == "hybrid"
+                        or categories[(item["category"], band)] < (6 if daily else 2)
+                    )
+                    and (
+                        not item.get("seller") or (item["seller"], band) not in sellers
+                    )
+                    and now - first_seen < QUICK_SECONDS
                 ):
                     added = c.execute(
-                        "UPDATE items SET admitted=?,admission_arm=?,next_check=? WHERE id=? AND admitted IS NULL",
-                        (now, arm, now, item["id"]),
+                        "UPDATE items SET admitted=?,admission_arm=?,next_check=?,admission_policy=?,admission_band=? WHERE id=? AND admitted IS NULL",
+                        (now, arm, now, 3 if daily else 2, band, item["id"]),
                     ).rowcount
                     active += added
                     total += added
                     arm_new += added
+                    if added:
+                        new_bands[band] += 1
+                        bands[band] += 1
+                        categories[(item["category"], band)] += 1
+                        if item.get("seller"):
+                            sellers.add((item["seller"], band))
                 seller = item.get("seller")
-                if (
-                    seller
-                    and found
-                    and c.execute("SELECT COUNT(*) FROM sellers").fetchone()[0] < 8
-                ):
-                    c.execute(
-                        "INSERT OR IGNORE INTO sellers(id,category) VALUES(?,?)",
-                        (seller, item["category"]),
-                    )
+                if seller and found:
+                    self._seed_seller(c, seller, item["category"])
             c.execute("UPDATE arms SET last_success=?,error='' WHERE id=?", (now, arm))
             # Keep the pilot comfortably inside its small volume. Outcome
             # cohorts are protected; older untracked details are expendable.
@@ -601,7 +748,65 @@ class Store:
             c.execute(
                 "DELETE FROM seen WHERE rowid IN (SELECT rowid FROM seen ORDER BY observed DESC LIMIT -1 OFFSET 50000)"
             )
+        if new_bands:
+            LOG.info(
+                "Research trial enrolled arm=%s low=%d high=%d middle=%d policy=2",
+                arm,
+                new_bands["low"],
+                new_bands["high"],
+                new_bands["middle"],
+            )
         return len(items)
+
+    def admit_stock(self, identity, now):
+        with closing(self.connect()) as c, c:
+            c.execute("BEGIN IMMEDIATE")
+            row = c.execute(
+                "SELECT admitted FROM items WHERE id=?", (identity,)
+            ).fetchone()
+            if not row:
+                return False
+            if row["admitted"] is not None:
+                return True
+            count = c.execute(
+                "SELECT COUNT(*) FROM items WHERE admitted>=?", (int(now // DAY) * DAY,)
+            ).fetchone()[0]
+            if count >= DAILY_LIMITS["admissions"]:
+                return False
+            c.execute(
+                "UPDATE items SET admitted=?,admission_arm='hybrid',admission_band='low',admission_policy=3,next_check=? WHERE id=?",
+                (now, now, identity),
+            )
+            return True
+
+    @staticmethod
+    def _seed_seller(c, seller, category):
+        if (
+            category not in CATEGORIES
+            or c.execute("SELECT 1 FROM sellers WHERE id=?", (seller,)).fetchone()
+        ):
+            return
+        count = c.execute(
+            "SELECT COUNT(*) FROM sellers WHERE category=?", (category,)
+        ).fetchone()[0]
+        if count >= 2:
+            return
+        daily = c.execute(
+            "SELECT enabled FROM sourcing_settings WHERE id=1"
+        ).fetchone()[0]
+        if c.execute("SELECT COUNT(*) FROM sellers").fetchone()[0] >= (
+            24 if daily else 8
+        ):
+            if count:
+                return
+            # Replace a redundant category, preserving eight small panels.
+            victim = c.execute(
+                "SELECT s.id FROM sellers s WHERE (SELECT COUNT(*) FROM sellers x WHERE x.category=s.category)>1 ORDER BY s.verified DESC,s.next_due LIMIT 1"
+            ).fetchone()
+            if not victim:
+                return
+            c.execute("DELETE FROM sellers WHERE id=?", (victim["id"],))
+        c.execute("INSERT INTO sellers(id,category) VALUES(?,?)", (seller, category))
 
     def feed(self, data, now):
         if (
@@ -659,35 +864,114 @@ class Store:
             state = dict(c.execute("SELECT * FROM trial WHERE id=1").fetchone())
             if type(p95) in (int, float) and count >= 20:
                 baseline = state["baseline"] or p95
+                baseline_at = state["baseline_at"] or now
+                # Compare with a stable period measured while research was off,
+                # rather than retaining one unusually quiet startup sample.
+                if (
+                    not state["baseline_calibration_windows"]
+                    or now - baseline_at >= 3600
+                ):
+                    off = [
+                        (r["checked"], r["p95"])
+                        for r in c.execute(
+                            "SELECT h.checked,h.p95 FROM health h WHERE h.checked>=? AND h.pending<=15 AND h.errors=0 AND NOT EXISTS(SELECT 1 FROM reads r WHERE r.started BETWEEN h.checked-600 AND h.checked) ORDER BY h.checked DESC LIMIT 30",
+                            (now - 1800,),
+                        )
+                    ]
+                    for offset in range(len(off) - 7):
+                        window = off[offset : offset + 8]
+                        values = [x[1] for x in window]
+                        if (
+                            window[0][0] - window[-1][0] <= 600
+                            and max(values) <= 3
+                            and max(values) - min(values) <= 0.3
+                        ):
+                            baseline = sorted(values)[len(values) // 2]
+                            baseline_at = now
+                            c.execute(
+                                "UPDATE trial SET baseline_calibration_windows=8 WHERE id=1"
+                            )
+                            LOG.info(
+                                "Research trial baseline calibrated from eight research-idle windows: p95=%.3fs ceiling=3.000s",
+                                baseline,
+                            )
+                            break
                 # A hard 3-second ceiling only applies where the measured baseline
                 # already meets it. Always protect the baseline against slowdown.
+                daily = bool(
+                    c.execute(
+                        "SELECT enabled FROM sourcing_settings WHERE id=1"
+                    ).fetchone()[0]
+                )
+                if daily:
+                    last = c.execute("SELECT MAX(started) FROM reads").fetchone()[0]
+                    idle = [
+                        r[0]
+                        for r in c.execute(
+                            "SELECT p95 FROM health WHERE checked>=? AND pending<=3 AND errors=0 ORDER BY checked DESC LIMIT 3",
+                            (max(now - 180, (last or 0) + 60),),
+                        )
+                    ]
+                    if (
+                        len(idle) >= 2
+                        and max(idle) <= 3
+                        and max(idle) - min(idle) <= 0.2
+                    ):
+                        baseline = sorted(idle)[len(idle) // 2]
+                        baseline_at = now
                 threshold = (
                     min(3.0, baseline + 0.15) if baseline < 3 else baseline + 0.15
                 )
                 slow = (
                     p95 > threshold
-                    or health.get("pending_age", 0) > 15
+                    or health.get("pending_age", 0) > (3 if daily else 15)
                     or health.get("errors", 0) > max(2, count * 0.05)
                 )
                 windows = state["slow_windows"] + 1 if slow else 0
+                healthy = 0 if slow else min(2, state["healthy_windows"] + 1)
                 c.execute(
-                    "UPDATE trial SET baseline=?,slow_windows=? WHERE id=1",
-                    (baseline, windows),
+                    "UPDATE trial SET baseline=?,baseline_at=?,slow_windows=?,healthy_windows=? WHERE id=1",
+                    (baseline, baseline_at, windows, healthy),
                 )
-                if windows >= 2:
+                hard = (
+                    p95 > 3
+                    or health.get("pending_age", 0) > (3 if daily else 15)
+                    or health.get("errors", 0) > max(2, count * 0.05)
+                )
+                if windows >= 2 or hard:
+                    restricted = (
+                        state["reason"]
+                        in {"Marketplace access backoff", "Marketplace network backoff"}
+                        and state["pause_until"] > now
+                    )
                     c.execute(
-                        "UPDATE trial SET pause_until=?,reason='Alert performance guard' WHERE id=1",
-                        (now + 600,),
+                        "UPDATE trial SET pause_until=MAX(pause_until,?),reason=? WHERE id=1",
+                        (
+                            now + 120,
+                            (
+                                state["reason"]
+                                if restricted
+                                else "Alert performance guard"
+                            ),
+                        ),
                     )
                 elif (
                     not slow
-                    and state["reason"] == "Alert performance guard"
-                    and state["pause_until"] <= now
+                    and healthy >= 2
+                    and state["reason"]
+                    in {"Alert performance guard", "Alert health unavailable"}
                 ):
-                    c.execute("UPDATE trial SET reason='' WHERE id=1")
+                    c.execute("UPDATE trial SET reason='',pause_until=0 WHERE id=1")
                 c.execute(
                     "INSERT OR REPLACE INTO health VALUES(?,?,?,?)",
                     (now, p95, health.get("pending_age", 0), health.get("errors", 0)),
+                )
+            elif c.execute(
+                "SELECT enabled FROM sourcing_settings WHERE id=1"
+            ).fetchone()[0]:
+                c.execute(
+                    "UPDATE trial SET pause_until=MAX(pause_until,?),reason=CASE WHEN reason IN ('Marketplace access backoff','Marketplace network backoff') AND pause_until>? THEN reason ELSE 'Alert health unavailable' END WHERE id=1",
+                    (now + 120, now),
                 )
             c.execute(
                 "UPDATE trial SET feed_cursor=MAX(feed_cursor,?) WHERE id=1",
@@ -702,14 +986,19 @@ class Store:
 
     def _allowed(self, c, kind, now):
         state = c.execute("SELECT * FROM trial WHERE id=1").fetchone()
+        daily = c.execute(
+            "SELECT enabled,paused FROM sourcing_settings WHERE id=1"
+        ).fetchone()
+        enabled = bool(daily["enabled"])
         if (
-            state["phase"] != "running"
+            (state["phase"] != "running" and not enabled)
+            or daily["paused"]
             or state["pause_until"] > now
             or not state["feed_at"]
             or now - state["feed_at"] > 180
         ):
             return False
-        if state["ends"] is None or state["ends"] <= now:
+        if state["ends"] is None or state["ends"] <= now and not enabled:
             return False
         day = int(now // DAY) * DAY
         n, body = c.execute(
@@ -721,15 +1010,16 @@ class Store:
             (day,),
         ).fetchone()[0]
         details = c.execute(
-            "SELECT COUNT(*) FROM reads WHERE started>=? AND kind='outcome'", (day,)
+            "SELECT COUNT(*) FROM reads WHERE started>=? AND kind IN ('outcome','stock')",
+            (day,),
         ).fetchone()[0]
         return (
-            n < HTTP_LIMIT
-            and body < BYTE_LIMIT
+            n < (DAILY_LIMITS["http"] if enabled else HTTP_LIMIT)
+            and body < (DAILY_LIMITS["bytes"] if enabled else BYTE_LIMIT)
             and (
-                details < OUTCOME_LIMIT
-                if kind == "outcome"
-                else relevant < CATALOG_LIMIT
+                details < (DAILY_LIMITS["outcome"] if enabled else OUTCOME_LIMIT)
+                if kind in {"outcome", "stock"}
+                else relevant < (DAILY_LIMITS["source"] if enabled else CATALOG_LIMIT)
             )
         )
 
@@ -755,6 +1045,28 @@ class Store:
                     "UPDATE trial SET pause_until=MAX(pause_until,?),reason=? WHERE id=1",
                     (now + 3600, "Marketplace access backoff"),
                 )
+            elif status in {
+                "read_unavailable",
+                "http_500",
+                "http_502",
+                "http_503",
+                "http_504",
+            }:
+                failures = (
+                    c.execute(
+                        "SELECT network_failures FROM trial WHERE id=1"
+                    ).fetchone()[0]
+                    + 1
+                )
+                delay = min(3600, 60 * 2 ** min(failures - 1, 6))
+                c.execute(
+                    "UPDATE trial SET network_failures=?,pause_until=MAX(pause_until,?),reason='Marketplace network backoff' WHERE id=1",
+                    (failures, now + delay),
+                )
+            elif status == "ok":
+                c.execute(
+                    "UPDATE trial SET network_failures=0 WHERE id=1 AND network_failures!=0"
+                )
 
     def record_outcome(self, identity, data, now):
         with closing(self.connect()) as c, c:
@@ -775,8 +1087,22 @@ class Store:
                 upper = min(upper, new_upper) if upper is not None else new_upper
                 if lower > upper:
                     lower = upper = None
-            if state == "active" and upper is not None and now - upper >= 7 * DAY:
-                state = "unsold_7d"
+            if (
+                state in {"active", "reserved"}
+                and upper is not None
+                and now - upper >= QUICK_SECONDS
+            ):
+                state = "unsold_24h"
+            elif (
+                (
+                    state == "unknown"
+                    or state in {"active", "reserved"}
+                    and upper is None
+                )
+                and row["admitted"] is not None
+                and now - row["admitted"] >= QUICK_SECONDS
+            ):
+                state = "unverified"
             age_upper = now - lower if state == "sold" and lower is not None else None
             price = data.get("price")
             sold_price = price if state == "sold" else None
@@ -789,6 +1115,7 @@ class Store:
                 "seller",
                 "brand",
                 "brand_id",
+                "description",
             ):
                 if data.get(key):
                     payload[key] = data[key]
@@ -825,11 +1152,8 @@ class Store:
                 "INSERT INTO checks(item,checked,state,price,age_upper) VALUES(?,?,?,?,?)",
                 (identity, now, state, price, age_upper),
             )
-            if seller and c.execute("SELECT COUNT(*) FROM sellers").fetchone()[0] < 8:
-                c.execute(
-                    "INSERT OR IGNORE INTO sellers(id,category) VALUES(?,?)",
-                    (seller, payload.get("category", "")),
-                )
+            if seller:
+                self._seed_seller(c, seller, payload.get("category", ""))
             if payload.get("category") in CATEGORIES:
                 for phrase in phrases(payload):
                     gid = hashlib.sha256(
@@ -853,6 +1177,12 @@ class Store:
         if action not in {"pause", "resume"}:
             raise ValueError("Unknown action")
         state = self.state(now)
+        if state["daily_enabled"]:
+            with closing(self.connect()) as c, c:
+                c.execute(
+                    "UPDATE sourcing_settings SET paused=? WHERE id=1",
+                    (int(action == "pause"),),
+                )
         if state["phase"] == "completed":
             return
         with closing(self.connect()) as c, c:
@@ -922,7 +1252,7 @@ class Store:
                 high_enrolled = [r for r in premium if r in matured]
                 resolved = sum(
                     bool(
-                        r["state"] in {"sold", "unsold_7d"}
+                        r["state"] in {"sold", "unsold_24h"}
                         or r["checked"]
                         and r["published_upper"]
                         and r["checked"] - r["published_upper"] >= QUICK_SECONDS
@@ -976,6 +1306,8 @@ class Store:
                         "premium_tracked": len(high_enrolled),
                         "sellers": sellers(rows),
                         "cheap_arrivals": arrivals,
+                        "premium_listings": len(premium),
+                        "high_floor": high_floor,
                         "stage": stage,
                         "buy_limit": buy_limit,
                         "resale_estimate": resale,
@@ -1020,9 +1352,53 @@ class Store:
             candidate.pop("item_ids")
         return selected
 
+    def focus_candidates(self, now):
+        daily = self.daily()
+        pool = []
+        for arm in (ARMS if daily else ["hybrid"]):
+            pool.extend(self.candidates(arm, now, 40 if daily else 80))
+        candidates = [
+            x
+            for x in pool
+            if x["cheap_arrivals"] >= 3
+            and x["premium_listings"] >= 3
+            and x["buy_limit"] >= 400
+            and not (
+                x["cheap_tracked"] + x["premium_tracked"] >= 12
+                and x["cheap_sold"] + x["premium_sold"] == 0
+            )
+        ]
+        ranked = sorted(
+            candidates,
+            key=lambda x: (
+                -(x["cheap_sold"] + x["premium_sold"]),
+                -min(x["cheap_arrivals"], x["premium_listings"]),
+            ),
+        )
+        selected = []
+        brands = set()
+        identities = set()
+        for candidate in ranked:
+            brand = candidate["name"].split(" · ")[0]
+            if candidate["id"] in identities or daily and brand in brands:
+                continue
+            selected.append(candidate)
+            identities.add(candidate["id"])
+            brands.add(brand)
+            if len(selected) >= (4 if daily else 2):
+                break
+        return selected
+
     def snapshot(self, now=None):
         now = time.time() if now is None else now
         state = self.state(now)
+        if state["daily_enabled"] and state["phase"] == "completed":
+            with closing(self.connect()) as c:
+                frozen = c.execute(
+                    "SELECT value FROM sourcing_meta WHERE key='benchmark_final'"
+                ).fetchone()
+                if frozen:
+                    return json.loads(frozen[0])
         day = int(now // DAY) * DAY
         with closing(self.connect()) as c:
             arms = []
@@ -1084,7 +1460,7 @@ class Store:
                     "SELECT started,arm,kind,status,body_bytes FROM reads ORDER BY id DESC LIMIT 8"
                 )
             ]
-        return {
+        result = {
             "version": 1,
             "checked_at": now,
             "trial": state,
@@ -1092,8 +1468,12 @@ class Store:
             "usage": usage
             | {
                 "outcome_reads": outcome,
-                "http_limit": HTTP_LIMIT,
-                "byte_limit": BYTE_LIMIT,
+                "http_limit": (
+                    DAILY_LIMITS["http"] if state["daily_enabled"] else HTTP_LIMIT
+                ),
+                "byte_limit": (
+                    DAILY_LIMITS["bytes"] if state["daily_enabled"] else BYTE_LIMIT
+                ),
             },
             "shared_tracked": shared,
             "reference_seen": reference,
@@ -1102,12 +1482,84 @@ class Store:
             "recent": recent,
             "method": "Shared collection and outcome checks; an arm only counts listings it discovered. This is an operational comparison, not a randomised experiment.",
             "limits": {
-                "active": ACTIVE_LIMIT,
-                "admissions_per_day": ADMISSION_LIMIT,
-                "catalogue_reads_per_day": CATALOG_LIMIT,
-                "outcome_reads_per_day": OUTCOME_LIMIT,
+                "active": (
+                    DAILY_LIMITS["active"] if state["daily_enabled"] else ACTIVE_LIMIT
+                ),
+                "admissions_per_day": (
+                    DAILY_LIMITS["admissions"]
+                    if state["daily_enabled"]
+                    else ADMISSION_LIMIT
+                ),
+                "catalogue_reads_per_day": (
+                    DAILY_LIMITS["source"] if state["daily_enabled"] else CATALOG_LIMIT
+                ),
+                "outcome_reads_per_day": (
+                    DAILY_LIMITS["outcome"] if state["daily_enabled"] else OUTCOME_LIMIT
+                ),
             },
         }
+        if state["daily_enabled"] and state["phase"] == "completed":
+            with closing(self.connect()) as c, c:
+                c.execute(
+                    "INSERT OR IGNORE INTO sourcing_meta VALUES('benchmark_final',?)",
+                    (json.dumps(result),),
+                )
+        return result
+
+    def diagnostics(self, now):
+        """Small private operational summary; no transport or account secrets."""
+        state = self.state(now)
+        with closing(self.connect()) as c:
+            threshold = min(3.0, (state["baseline"] or 3) + 0.15)
+            health = c.execute(
+                "SELECT COUNT(*) samples,SUM(p95>?) slow,MIN(p95) minimum,AVG(p95) average,MAX(p95) maximum FROM health WHERE checked>=?",
+                (threshold, now - DAY),
+            ).fetchone()
+            return {
+                "sampling_policy": "balanced_v2",
+                "phase": state["phase"],
+                "reason": state["reason"],
+                "pause_seconds": max(0, int(state["pause_until"] - now)),
+                "feed_age": (
+                    None if not state["feed_at"] else int(now - state["feed_at"])
+                ),
+                "baseline": state["baseline"],
+                "baseline_at": state["baseline_at"],
+                "baseline_calibration_windows": state["baseline_calibration_windows"],
+                "guard_threshold": threshold,
+                "health_24h": dict(health),
+                "last_read": c.execute("SELECT MAX(started) FROM reads").fetchone()[0],
+                "reads_24h": [
+                    dict(r)
+                    for r in c.execute(
+                        "SELECT kind,status,COUNT(*) count,SUM(body_bytes) body_bytes FROM reads WHERE started>=? GROUP BY kind,status",
+                        (now - DAY,),
+                    )
+                ],
+                "cohorts": [
+                    dict(r)
+                    for r in c.execute(
+                        "SELECT admission_policy,admission_arm arm,COALESCE(NULLIF(admission_band,''),CASE WHEN entry_price<=2500 THEN 'low' WHEN entry_price>=3000 THEN 'high' ELSE 'middle' END) band,state,COUNT(*) count FROM items WHERE admitted IS NOT NULL GROUP BY admission_policy,admission_arm,band,state"
+                    )
+                ],
+                "due_outcomes": c.execute(
+                    "SELECT COUNT(*) FROM items WHERE admitted IS NOT NULL AND state IN ('pending','active','reserved','unknown') AND next_check<=?",
+                    (now,),
+                ).fetchone()[0],
+                "clocks": [dict(r) for r in c.execute("SELECT * FROM clocks")],
+                "sold": [
+                    dict(r)
+                    for r in c.execute(
+                        "SELECT id,entry_price,ask_at_sold,age_upper,admission_arm FROM items WHERE state='sold' LIMIT 12"
+                    )
+                ],
+                "seller_panels": [
+                    dict(r)
+                    for r in c.execute(
+                        "SELECT category,verified,next_due,error FROM sellers"
+                    )
+                ],
+            }
 
 
 class Transport:
@@ -1165,6 +1617,10 @@ class Transport:
                     return None, safe
                 if r.status_code != 200:
                     status = "http_" + str(r.status_code)
+                    if r.status_code == 401:
+                        # A future read may obtain a new anonymous credential
+                        # after the full backoff; never retry this request now.
+                        self.session.cookies.clear()
                     if r.status_code in (404, 410):
                         return b"", None
                     raise ValueError(status)
@@ -1213,7 +1669,7 @@ class Transport:
         data = json.loads(body)
         if not isinstance(data, dict) or not isinstance(data.get("items"), list):
             raise TypeError("Catalogue format unavailable")
-        return data["items"][:48]
+        return data["items"][: min(96, int(params.get("per_page", 48)))]
 
     def wardrobe(self, seller):
         self.auth("sellers", "sellers")
@@ -1239,10 +1695,10 @@ class Transport:
                 results.append(item)
         return results
 
-    def outcome(self, item):
+    def outcome(self, item, kind="outcome"):
         url = item["url"]
         for _ in range(2):
-            body, redirect = self.read(url, "shared", "outcome", item=item["id"])
+            body, redirect = self.read(url, "shared", kind, item=item["id"])
             if redirect:
                 url = redirect
                 continue
@@ -1260,6 +1716,9 @@ class Worker:
         self.transport = None
         self.stop = threading.Event()
         self.feed_due = 0
+        self.diagnostics_due = 0
+        self.sourcing_due = 0
+        self.sourcing = DailySourcing(store)
 
     def fetch_feed(self, now):
         state = self.store.state(now)
@@ -1272,6 +1731,8 @@ class Worker:
             r.raise_for_status()
             data = r.json()
         self.store.feed(data, now)
+        if self.store.daily():
+            self.sourcing.enrol_recent(now)
         if self.transport is None:
             network = data.get("network") or {}
             if not network.get("proxy"):
@@ -1283,13 +1744,30 @@ class Worker:
     def step(self, now=None):
         now = time.time() if now is None else now
         state = self.store.state(now)
+        if state["daily_enabled"] and now >= self.sourcing_due:
+            self.sourcing_due = now + 900
+            LOG.info(
+                "Daily sourcing summary %s",
+                json.dumps(self.sourcing.snapshot(now), separators=(",", ":")),
+            )
+        if now >= self.diagnostics_due:
+            self.diagnostics_due = now + 3600
+            LOG.info(
+                "Research trial diagnostics %s",
+                json.dumps(self.store.diagnostics(now), separators=(",", ":")),
+            )
         if state["started"] and (
             now - state["reported_at"] >= DAY
+            and state["phase"] != "completed"
             or state["phase"] == "completed"
             and state["reported_at"] < state["ends"]
         ):
             self.report(now)
-        if state["phase"] in {"paused", "completed"}:
+        if (
+            state["collection_paused"]
+            or state["phase"] in {"paused", "completed"}
+            and not state["daily_enabled"]
+        ):
             return
         if now >= self.feed_due:
             self.feed_due = now + 60
@@ -1305,14 +1783,17 @@ class Worker:
             or state["next_network"] > now
         ):
             return
+        daily = state["daily_enabled"]
         with closing(self.store.connect()) as c, c:
             c.execute("BEGIN IMMEDIATE")
-            state = c.execute("SELECT * FROM trial WHERE id=1").fetchone()
+            state = dict(c.execute("SELECT * FROM trial WHERE id=1").fetchone()) | {
+                "daily_enabled": daily
+            }
             if state["next_network"] > now:
                 return
             c.execute(
                 "UPDATE trial SET next_network=?,last_heartbeat=?,network_cursor=network_cursor+1 WHERE id=1",
-                (now + 45, now),
+                (now + (25 if state["daily_enabled"] else 45), now),
             )
             c.execute(
                 "UPDATE items SET state='expired' WHERE admitted<? AND state IN ('pending','active','reserved','unknown')",
@@ -1328,17 +1809,30 @@ class Worker:
                 "SELECT * FROM items WHERE admitted IS NOT NULL AND state IN ('pending','active','reserved','unknown') AND next_check<=? ORDER BY next_check LIMIT 1",
                 (now,),
             ).fetchone()
-            source = (
-                due if due and (not item or state["network_cursor"] % 3 == 0) else None
+            source_turn = (
+                state["network_cursor"] % 3 != 2
+                if daily
+                else state["network_cursor"] % 3 == 0
             )
+            source = due if due and (not item or source_turn) else None
             if source:
-                interval = {
-                    "broad": 600,
-                    "sellers": 1800,
-                    "explore": 900,
-                    "reference": 1800,
-                    "focus": 600,
-                }[source["kind"]]
+                interval = (
+                    {
+                        "broad": 300,
+                        "sellers": 1800,
+                        "explore": 900,
+                        "reference": 1800,
+                        "focus": 75,
+                    }
+                    if self.store.daily()
+                    else {
+                        "broad": 600,
+                        "sellers": 1800,
+                        "explore": 900,
+                        "reference": 1800,
+                        "focus": 600,
+                    }
+                )[source["kind"]]
                 c.execute(
                     "UPDATE clocks SET next_due=?,cursor=cursor+1 WHERE kind=?",
                     (now + interval, source["kind"]),
@@ -1348,7 +1842,13 @@ class Worker:
             if source and source["kind"] in {"broad", "sellers"}
             else "hybrid"
         )
+        stock_priority = False
         try:
+            if state["daily_enabled"] and not source:
+                priority = self.sourcing.priority_item(now)
+                if priority and self.store.admit_stock(priority["id"], now):
+                    item = priority
+                    stock_priority = True
             if source:
                 kind = source["kind"]
                 cursor = source["cursor"]
@@ -1370,44 +1870,69 @@ class Worker:
                         )
                 else:
                     category = list(CATEGORIES)[(cursor // 2) % len(CATEGORIES)]
-                    band = cursor % 2
+                    band = (
+                        int((cursor // 4) % 5 == 4)
+                        if kind == "focus" and state["daily_enabled"]
+                        else cursor % 2
+                    )
                     params = {
                         "attribute_ids[catalog]": category,
                         "attribute_ids[size]": "2,3,4",
                         "currency": "GBP",
                         "order": "newest_first",
                         "page": 1,
-                        "per_page": 48,
+                        "per_page": (
+                            96
+                            if state["daily_enabled"] and kind in {"broad", "explore"}
+                            else 48
+                        ),
                     }
                     if band:
                         params["price_from"] = 30
                     else:
                         params.update(price_from=1, price_to=25)
                     if kind == "focus":
-                        candidates = self.store.candidates("hybrid", now, 2)
+                        candidates = self.store.focus_candidates(now)
                         if candidates:
+                            candidate = candidates[
+                                (cursor if state["daily_enabled"] else cursor // 2)
+                                % len(candidates)
+                            ]
                             with closing(self.store.connect()) as c:
                                 g = c.execute(
                                     "SELECT * FROM groups WHERE id=?",
-                                    (
-                                        candidates[(cursor // 2) % len(candidates)][
-                                            "id"
-                                        ],
-                                    ),
+                                    (candidate["id"],),
                                 ).fetchone()
                             category = g["category"] or category
                             params["attribute_ids[catalog]"] = category
                             params["search_text"] = (
                                 g["brand"] + " " + g["phrase"]
                             ).replace("Unbranded ", "")
+                            if band:
+                                params["price_from"] = candidate["high_floor"] / 100
+                            else:
+                                params["price_to"] = max(
+                                    1, (candidate["buy_limit"] - 290) * 100 // 105 / 100
+                                )
                     if kind == "reference":
                         params["order"] = "newest_first"
                     results = [
                         x
                         for raw in self.transport.catalogue(params, kind)
                         if (x := normalize(raw, category))
+                        and x["price"] >= money(params.get("price_from", 1))
+                        and (
+                            "price_to" not in params
+                            or x["price"] <= money(params["price_to"])
+                        )
                     ]
-                    accepted = self.store.ingest(arm, results, now, source=kind)
+                    accepted = self.store.ingest(
+                        arm,
+                        results,
+                        now,
+                        source=kind,
+                        price_band="high" if band else "low",
+                    )
                 LOG.info(
                     "Research trial sample arm=%s kind=%s accepted=%d",
                     arm,
@@ -1415,7 +1940,10 @@ class Worker:
                     accepted,
                 )
             elif item:
-                data = self.transport.outcome(json.loads(item["payload"]))
+                data = self.transport.outcome(
+                    json.loads(item["payload"]),
+                    kind="stock" if stock_priority else "outcome",
+                )
                 self.store.record_outcome(item["id"], data, now)
                 LOG.info(
                     "Research trial outcome state=%s", data.get("state", "unknown")
@@ -1452,6 +1980,7 @@ class Worker:
             )
             c.execute("UPDATE trial SET reported_at=? WHERE id=1", (now,))
         result = {
+            "sampling_policy": "balanced_v2",
             "scope": "new_brands_only",
             "excluded_searches": len(
                 json.loads(data["trial"]["exclusions"]).get("names", [])
@@ -1527,6 +2056,14 @@ def make_app(store, token):
     def snapshot():
         return store.snapshot(), 200, {"Cache-Control": "no-store"}
 
+    @app.get("/sourcing.json")
+    def sourcing():
+        return (
+            DailySourcing(store).snapshot(time.time()),
+            200,
+            {"Cache-Control": "no-store"},
+        )
+
     @app.post("/control")
     def control():
         try:
@@ -1549,7 +2086,10 @@ if __name__ == "__main__":
     token = os.environ.get("MSJ_RESEARCH_TOKEN", "")
     if len(token) < 32:
         raise RuntimeError("Research service key is missing")
-    store = Store(os.environ.get("MSJ_RESEARCH_DB", "/app/data/research_trial.sqlite3"))
+    store = Store(
+        os.environ.get("MSJ_RESEARCH_DB", "/app/data/research_trial.sqlite3"),
+        daily_enabled=os.environ.get("MSJ_DAILY_SOURCING") == "1",
+    )
     with closing(store.connect()) as c, c:
         for seed in os.environ.get("MSJ_RESEARCH_SELLER_SEEDS", "").split(","):
             seller, _, category = seed.partition(":")

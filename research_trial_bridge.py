@@ -77,6 +77,7 @@ def feed(since, now):
     brand_names = []
     brand_ids = set()
     unbranded = []
+    scopes = []
     for row in known:
         params = parse_qs(urlsplit(row["query"] or "").query)
         words = variants.get(row["id"], []) + params.get("search_text", [])
@@ -96,6 +97,23 @@ def feed(since, now):
             flags=re.IGNORECASE,
         )
         prefix = re.split(r"\s[-–—·]\s", label, maxsplit=1)
+        categories = sorted(
+            {
+                part
+                for key in ("catalog[]", "catalog_ids[]", "attribute_ids[catalog]")
+                for value in params.get(key, [])
+                for part in value.split(",")
+                if part.isdigit()
+            }
+        )
+        scopes.append(
+            {
+                "brand_ids": sorted(ids),
+                "brand_name": canon(prefix[0]) if len(prefix) > 1 else "",
+                "categories": categories,
+                "keywords": [canon(w) for w in words if canon(w)],
+            }
+        )
         if ids and len(prefix) > 1 and 1 < len(prefix[0]) < 65:
             brand_names.append(canon(prefix[0]))
         if not ids:
@@ -127,6 +145,7 @@ def feed(since, now):
             "brand_ids": sorted(brand_ids),
             "brand_names": sorted(set(brand_names)),
             "unbranded": unbranded,
+            "scopes": scopes,
         },
         "network": {"proxy": network.get("proxy", "")},
         "health": {
@@ -171,6 +190,45 @@ def snapshot():
 
 
 def install(app):
+    @app.get("/sourcing")
+    def sourcing_page():
+        data = None
+        error = None
+        try:
+            data = worker_request("/sourcing.json")
+            if data.get("version") != 1:
+                raise ValueError("Invalid sourcing snapshot")
+        except (requests.RequestException, ValueError):
+            error = "The sourcing worker is reconnecting. Refresh this page shortly."
+
+        def date(value):
+            return (
+                datetime.fromtimestamp(value, ZoneInfo("Europe/London")).strftime(
+                    "%d %b, %H:%M"
+                )
+                if value
+                else "Not yet checked"
+            )
+
+        return render_template(
+            "msj_daily_sourcing.html", data=data, error=error, source_date=date
+        )
+
+    @app.post("/sourcing/control")
+    def sourcing_control():
+        action = request.form.get("action")
+        if action not in {"pause", "resume"}:
+            abort(400)
+        try:
+            worker_request("/control", action=action)
+            flash(
+                "Daily sourcing " + ("paused." if action == "pause" else "resumed."),
+                "success",
+            )
+        except (requests.RequestException, ValueError):
+            flash("The sourcing worker is reconnecting. Try again shortly.", "error")
+        return redirect("/sourcing")
+
     @app.get("/internal/research-feed")
     def research_feed():
         if not worker_authorized():
