@@ -33,13 +33,17 @@ candidates with repeated supply in both economically viable price bands.
 Seller panels cover several categories, with at most two seeds per category
 and eight panels overall. Existing policy-1 admissions remain labelled so the
 final review can distinguish the unbalanced first-day sample.
+Unread legacy follow-up choices are archived and released from the quota;
+their discovery records and all completed checks are preserved. Redundant
+legacy seller seeds are trimmed to two per category during startup.
 
 The speed guard stops immediately above a three-second polling p95, with
 excess pending alerts or excessive errors. Lesser deterioration against the
 baseline still needs two windows. Research can recover after two healthy
 windows instead of repeated ten-minute holds. A baseline may be recalibrated
-only from eight stable readings after at least ten minutes without any research
-marketplace request, at most once per hour; it can never move the three-second
+only from eight stable readings within a recent idle period, each after at least
+ten minutes without any research marketplace request, at most once per hour;
+the idle readings must be within the preceding 30 minutes and can never move the three-second
 ceiling. Health recovery cannot shorten marketplace access backoff. Hourly
 private diagnostics expose the sampling balance, guard and request outcomes.
 

@@ -489,6 +489,7 @@ class Store:
                 "reported_at": "REAL NOT NULL DEFAULT 0",
                 "healthy_windows": "INTEGER NOT NULL DEFAULT 0",
                 "baseline_at": "REAL NOT NULL DEFAULT 0",
+                "admission_version": "INTEGER NOT NULL DEFAULT 1",
             }.items():
                 if name not in fields:
                     c.execute(f"ALTER TABLE trial ADD COLUMN {name} {declaration}")
@@ -498,6 +499,28 @@ class Store:
                 c.execute(
                     "ALTER TABLE items ADD COLUMN admission_policy INTEGER NOT NULL DEFAULT 1"
                 )
+            if (
+                c.execute("SELECT admission_version FROM trial WHERE id=1").fetchone()[
+                    0
+                ]
+                < 2
+            ):
+                c.execute(
+                    "CREATE TABLE IF NOT EXISTS unread_admission_archive(id TEXT PRIMARY KEY,admitted REAL,admission_arm TEXT)"
+                )
+                c.execute(
+                    "INSERT OR IGNORE INTO unread_admission_archive SELECT id,admitted,admission_arm FROM items WHERE admission_policy=1 AND admitted IS NOT NULL AND checked IS NULL"
+                )
+                # No marketplace read was spent on these queued choices. Keep
+                # their discovery data, but release their biased quota slots.
+                c.execute(
+                    "UPDATE items SET admitted=NULL,admission_arm=NULL,next_check=0 WHERE admission_policy=1 AND checked IS NULL AND state='pending'"
+                )
+                c.execute("UPDATE trial SET admission_version=2 WHERE id=1")
+            # Keep historical sightings/outcomes; only trim redundant seeds.
+            c.execute(
+                "DELETE FROM sellers WHERE id IN (SELECT id FROM (SELECT id,ROW_NUMBER() OVER (PARTITION BY category ORDER BY verified DESC,next_due DESC) position FROM sellers) WHERE position>2)"
+            )
             c.executemany(
                 "INSERT OR IGNORE INTO arms(id,name) VALUES (?,?)", ARMS.items()
             )
@@ -546,6 +569,7 @@ class Store:
                 "low" if price <= 2500 else "high" if price >= 3000 else "middle"
             )
             bands = Counter(band_of(r["entry_price"]) for r in enrolled)
+            new_bands = Counter()
             categories = Counter(
                 (json.loads(r["payload"]).get("category"), band_of(r["entry_price"]))
                 for r in enrolled
@@ -621,6 +645,7 @@ class Store:
                     total += added
                     arm_new += added
                     if added:
+                        new_bands[band] += 1
                         bands[band] += 1
                         categories[(item["category"], band)] += 1
                         if item.get("seller"):
@@ -643,6 +668,14 @@ class Store:
                 )
             c.execute(
                 "DELETE FROM seen WHERE rowid IN (SELECT rowid FROM seen ORDER BY observed DESC LIMIT -1 OFFSET 50000)"
+            )
+        if new_bands:
+            LOG.info(
+                "Research trial enrolled arm=%s low=%d high=%d middle=%d policy=2",
+                arm,
+                new_bands["low"],
+                new_bands["high"],
+                new_bands["middle"],
             )
         return len(items)
 
@@ -727,23 +760,24 @@ class Store:
             if type(p95) in (int, float) and count >= 20:
                 baseline = state["baseline"] or p95
                 baseline_at = state["baseline_at"] or now
-                last_read = c.execute("SELECT MAX(started) FROM reads").fetchone()[0]
                 # Compare with a stable period measured while research was off,
                 # rather than retaining one unusually quiet startup sample.
-                if (
-                    last_read is not None
-                    and now - last_read >= 600
-                    and (not state["baseline_at"] or now - baseline_at >= 3600)
-                ):
+                if not state["baseline_at"] or now - baseline_at >= 3600:
                     off = [
-                        r[0]
+                        (r["checked"], r["p95"])
                         for r in c.execute(
-                            "SELECT p95 FROM health WHERE checked>=? AND pending<=15 AND errors=0 ORDER BY checked DESC LIMIT 8",
-                            (max(last_read + 600, now - 600),),
+                            "SELECT h.checked,h.p95 FROM health h WHERE h.checked>=? AND h.pending<=15 AND h.errors=0 AND NOT EXISTS(SELECT 1 FROM reads r WHERE r.started BETWEEN h.checked-600 AND h.checked) ORDER BY h.checked DESC LIMIT 8",
+                            (now - 1800,),
                         )
                     ]
-                    if len(off) == 8 and max(off) <= 3 and max(off) - min(off) <= 0.3:
-                        baseline = sorted(off)[len(off) // 2]
+                    values = [x[1] for x in off]
+                    if (
+                        len(off) == 8
+                        and off[0][0] - off[-1][0] <= 600
+                        and max(values) <= 3
+                        and max(values) - min(values) <= 0.3
+                    ):
+                        baseline = sorted(values)[len(values) // 2]
                         baseline_at = now
                 # A hard 3-second ceiling only applies where the measured baseline
                 # already meets it. Always protect the baseline against slowdown.

@@ -154,6 +154,51 @@ class TrialTests(unittest.TestCase):
         self.assertLessEqual(max(counts), 2)
         self.assertEqual(sum(counts), 8)
 
+    def test_upgrade_releases_only_unread_legacy_choices_and_redundant_seeds(self):
+        self.add(count=4)
+        self.store.record_outcome("1", {"state": "active"}, self.now)
+        ends = self.store.state(self.now)["ends"]
+        with closing(self.store.connect()) as c, c:
+            c.execute("UPDATE trial SET admission_version=1")
+            c.execute("UPDATE items SET admission_policy=1")
+            c.execute("DELETE FROM sellers")
+            c.executemany(
+                "INSERT INTO sellers(id,category) VALUES(?,'1037')",
+                [(str(i),) for i in range(101, 109)],
+            )
+        upgraded = trial.Store(self.store.path)
+        with closing(upgraded.connect()) as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM items").fetchone()[0], 4)
+            self.assertEqual(
+                c.execute(
+                    "SELECT COUNT(*) FROM items WHERE admitted IS NOT NULL"
+                ).fetchone()[0],
+                1,
+            )
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM sellers").fetchone()[0], 2)
+            self.assertEqual(
+                c.execute("SELECT COUNT(*) FROM unread_admission_archive").fetchone()[
+                    0
+                ],
+                3,
+            )
+        self.assertEqual(upgraded.state(self.now)["ends"], ends)
+        # A later restart must keep new balanced admissions.
+        upgraded.ingest(
+            "hybrid", [trial.normalize(raw("20"), "12")], self.now, source="focus"
+        )
+        restarted = trial.Store(self.store.path)
+        with closing(restarted.connect()) as c:
+            self.assertEqual(
+                c.execute(
+                    "SELECT admission_policy FROM items WHERE id='20'"
+                ).fetchone()[0],
+                2,
+            )
+            self.assertIsNotNone(
+                c.execute("SELECT admitted FROM items WHERE id='20'").fetchone()[0]
+            )
+
     def test_focus_requires_supply_in_both_economically_viable_bands(self):
         items = [
             trial.normalize(raw(str(i), "10" if i <= 6 else "100"), "12")
@@ -293,6 +338,21 @@ class TrialTests(unittest.TestCase):
         self.assertTrue(self.store.can_read("outcome", self.now + 4201))
         self.feed_health(self.now + 4261, 3.01)
         self.assertFalse(self.store.can_read("outcome", self.now + 4261))
+
+    def test_recent_read_does_not_hide_an_earlier_clean_idle_baseline(self):
+        self.feed_health(self.now, 2.5)
+        with closing(self.store.connect()) as c, c:
+            c.execute("UPDATE trial SET baseline_at=0")
+            c.executemany(
+                "INSERT INTO health VALUES(?,?,0,0)",
+                [(self.now - 1200 + i * 60, 2.8) for i in range(8)],
+            )
+            c.execute(
+                "INSERT INTO reads(started,arm,kind,status) VALUES(?,'hybrid','explore','ok')",
+                (self.now - 60,),
+            )
+        self.feed_health(self.now + 1, 2.8)
+        self.assertEqual(self.store.state(self.now + 1)["baseline"], 2.8)
 
     def test_sold_status_requires_native_age_and_price_not_first_seen(self):
         self.add()
