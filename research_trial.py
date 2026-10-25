@@ -490,6 +490,7 @@ class Store:
                 "healthy_windows": "INTEGER NOT NULL DEFAULT 0",
                 "baseline_at": "REAL NOT NULL DEFAULT 0",
                 "admission_version": "INTEGER NOT NULL DEFAULT 1",
+                "baseline_calibration_windows": "INTEGER NOT NULL DEFAULT 0",
             }.items():
                 if name not in fields:
                     c.execute(f"ALTER TABLE trial ADD COLUMN {name} {declaration}")
@@ -762,23 +763,35 @@ class Store:
                 baseline_at = state["baseline_at"] or now
                 # Compare with a stable period measured while research was off,
                 # rather than retaining one unusually quiet startup sample.
-                if not state["baseline_at"] or now - baseline_at >= 3600:
+                if (
+                    not state["baseline_calibration_windows"]
+                    or now - baseline_at >= 3600
+                ):
                     off = [
                         (r["checked"], r["p95"])
                         for r in c.execute(
-                            "SELECT h.checked,h.p95 FROM health h WHERE h.checked>=? AND h.pending<=15 AND h.errors=0 AND NOT EXISTS(SELECT 1 FROM reads r WHERE r.started BETWEEN h.checked-600 AND h.checked) ORDER BY h.checked DESC LIMIT 8",
+                            "SELECT h.checked,h.p95 FROM health h WHERE h.checked>=? AND h.pending<=15 AND h.errors=0 AND NOT EXISTS(SELECT 1 FROM reads r WHERE r.started BETWEEN h.checked-600 AND h.checked) ORDER BY h.checked DESC LIMIT 30",
                             (now - 1800,),
                         )
                     ]
-                    values = [x[1] for x in off]
-                    if (
-                        len(off) == 8
-                        and off[0][0] - off[-1][0] <= 600
-                        and max(values) <= 3
-                        and max(values) - min(values) <= 0.3
-                    ):
-                        baseline = sorted(values)[len(values) // 2]
-                        baseline_at = now
+                    for offset in range(len(off) - 7):
+                        window = off[offset : offset + 8]
+                        values = [x[1] for x in window]
+                        if (
+                            window[0][0] - window[-1][0] <= 600
+                            and max(values) <= 3
+                            and max(values) - min(values) <= 0.3
+                        ):
+                            baseline = sorted(values)[len(values) // 2]
+                            baseline_at = now
+                            c.execute(
+                                "UPDATE trial SET baseline_calibration_windows=8 WHERE id=1"
+                            )
+                            LOG.info(
+                                "Research trial baseline calibrated from eight research-idle windows: p95=%.3fs ceiling=3.000s",
+                                baseline,
+                            )
+                            break
                 # A hard 3-second ceiling only applies where the measured baseline
                 # already meets it. Always protect the baseline against slowdown.
                 threshold = (
@@ -1289,6 +1302,8 @@ class Store:
                     None if not state["feed_at"] else int(now - state["feed_at"])
                 ),
                 "baseline": state["baseline"],
+                "baseline_at": state["baseline_at"],
+                "baseline_calibration_windows": state["baseline_calibration_windows"],
                 "guard_threshold": threshold,
                 "health_24h": dict(health),
                 "last_read": c.execute("SELECT MAX(started) FROM reads").fetchone()[0],

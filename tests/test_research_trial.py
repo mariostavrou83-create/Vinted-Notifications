@@ -342,17 +342,35 @@ class TrialTests(unittest.TestCase):
     def test_recent_read_does_not_hide_an_earlier_clean_idle_baseline(self):
         self.feed_health(self.now, 2.5)
         with closing(self.store.connect()) as c, c:
-            c.execute("UPDATE trial SET baseline_at=0")
+            # A recent timestamp from an earlier deployment is not proof that
+            # its single startup baseline was actually calibrated.
+            c.execute("UPDATE trial SET baseline_at=?", (self.now - 300,))
             c.executemany(
                 "INSERT INTO health VALUES(?,?,0,0)",
-                [(self.now - 1200 + i * 60, 2.8) for i in range(8)],
+                [(self.now - 900 + i * 60, 2.8) for i in range(8)],
             )
             c.execute(
                 "INSERT INTO reads(started,arm,kind,status) VALUES(?,'hybrid','explore','ok')",
                 (self.now - 60,),
             )
-        self.feed_health(self.now + 1, 2.8)
-        self.assertEqual(self.store.state(self.now + 1)["baseline"], 2.8)
+            # Four later idle readings do not yet form a complete baseline;
+            # select the earlier contiguous eight rather than mixing the gap.
+            c.executemany(
+                "INSERT INTO health VALUES(?,?,0,0)",
+                [(self.now + 600 + i * 60, 2.9) for i in range(4)],
+            )
+        self.feed_health(self.now + 801, 2.9)
+        self.assertEqual(self.store.state(self.now + 801)["baseline"], 2.8)
+        self.assertEqual(
+            self.store.state(self.now + 801)["baseline_calibration_windows"], 8
+        )
+        with closing(self.store.connect()) as c, c:
+            c.executemany(
+                "INSERT INTO health VALUES(?,?,0,0)",
+                [(self.now + 1200 + i * 60, 2.9) for i in range(8)],
+            )
+        self.feed_health(self.now + 2000, 2.9)
+        self.assertEqual(self.store.state(self.now + 2000)["baseline"], 2.8)
 
     def test_sold_status_requires_native_age_and_price_not_first_seen(self):
         self.add()
