@@ -18,22 +18,23 @@ from web_ui_plugin.web_ui import create_app
 
 
 def raw(identity, price="45", **kw):
-    return dict(
-        id=identity,
-        title="Example Label tattoo print mesh top",
-        brand_title="Example Label",
-        size_title="S / UK 8-10",
-        price={"amount": price, "currency_code": "GBP"},
-        user={"id": int(identity) + 100},
-        **kw
-    )
+    result = {
+        "id": identity,
+        "title": "Example Label tattoo print mesh top",
+        "brand_title": "Example Label",
+        "size_title": "S / UK 8-10",
+        "price": {"amount": price, "currency_code": "GBP"},
+        "user": {"id": int(identity) + 100},
+    }
+    result.update(kw)
+    return result
 
 
 class TrialTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.store = trial.Store(Path(self.directory.name) / "trial.sqlite3")
-        self.now = time.time()
+        self.now = int(time.time() // trial.DAY) * trial.DAY + 23 * 3600
         self.store.feed(
             {"version": 2, "exclusions": {}, "items": [], "health": {}}, self.now
         )
@@ -43,7 +44,7 @@ class TrialTests(unittest.TestCase):
 
     def add(self, arm="hybrid", count=4):
         items = [trial.normalize(raw(str(i)), "12") for i in range(1, count + 1)]
-        self.store.ingest(arm, items, self.now)
+        self.store.ingest(arm, items, self.now, source="focus")
         return items
 
     def test_exact_fourteen_day_stop_and_restart_keeps_original_dates(self):
@@ -83,7 +84,7 @@ class TrialTests(unittest.TestCase):
                 c.execute(
                     "SELECT COUNT(*) FROM items WHERE admitted IS NOT NULL"
                 ).fetchone()[0],
-                9,
+                4,
             )
         identity = self.store.reserve_read("hybrid", "explore", now=self.now)
         self.store.finish_read(
@@ -92,6 +93,80 @@ class TrialTests(unittest.TestCase):
         self.assertFalse(self.store.can_read("outcome", self.now))
         with self.assertRaises(RuntimeError):
             self.store.reserve_read("hybrid", "explore", now=self.now)
+
+    def test_tracking_reserves_equal_space_for_both_price_bands(self):
+        for band, price in [("low", "5"), ("high", "90")]:
+            items = [
+                trial.normalize(raw(str(i), price), "12")
+                for i in range(1 if band == "low" else 51, 31 if band == "low" else 81)
+            ]
+            self.store.ingest("hybrid", items, self.now, source="focus")
+        with closing(self.store.connect()) as c:
+            counts = dict(
+                c.execute(
+                    "SELECT CASE WHEN entry_price<=2500 THEN 'low' ELSE 'high' END,COUNT(*) FROM items WHERE admitted IS NOT NULL GROUP BY 1"
+                )
+            )
+        self.assertEqual(counts, {"low": 4, "high": 4})
+
+    def test_tracking_is_spread_through_the_day_and_reserves_hybrid_focus(self):
+        early = int(self.now // trial.DAY) * trial.DAY + 3600
+        low = [trial.normalize(raw(str(i), "5"), "12") for i in range(1, 31)]
+        high = [trial.normalize(raw(str(i), "90"), "12") for i in range(51, 81)]
+        self.store.ingest("hybrid", low + high, early, source="explore")
+        with closing(self.store.connect()) as c:
+            self.assertEqual(
+                c.execute(
+                    "SELECT COUNT(*) FROM items WHERE admitted IS NOT NULL"
+                ).fetchone()[0],
+                2,
+            )
+        self.store.ingest("hybrid", low + high, self.now, source="explore")
+        with closing(self.store.connect()) as c:
+            self.assertEqual(
+                c.execute(
+                    "SELECT COUNT(*) FROM items WHERE admitted IS NOT NULL"
+                ).fetchone()[0],
+                4,
+            )
+        self.store.ingest("hybrid", low + high, self.now, source="focus")
+        with closing(self.store.connect()) as c:
+            self.assertEqual(
+                c.execute(
+                    "SELECT COUNT(*) FROM items WHERE admitted IS NOT NULL"
+                ).fetchone()[0],
+                8,
+            )
+
+    def test_seller_panels_cover_more_than_the_first_category(self):
+        for offset, category in enumerate(list(trial.CATEGORIES)[:6]):
+            items = [
+                trial.normalize(raw(str(offset * 100 + i), "10"), category)
+                for i in range(1, 11)
+            ]
+            self.store.ingest("broad", items, self.now)
+        with closing(self.store.connect()) as c:
+            counts = [
+                r[0]
+                for r in c.execute("SELECT COUNT(*) FROM sellers GROUP BY category")
+            ]
+        self.assertGreaterEqual(len(counts), 4)
+        self.assertLessEqual(max(counts), 2)
+        self.assertEqual(sum(counts), 8)
+
+    def test_focus_requires_supply_in_both_economically_viable_bands(self):
+        items = [
+            trial.normalize(raw(str(i), "10" if i <= 6 else "100"), "12")
+            for i in range(1, 13)
+        ]
+        items += [
+            trial.normalize(raw(str(i), "5", brand_title="Low Margin Label"), "12")
+            for i in range(51, 81)
+        ]
+        self.store.ingest("hybrid", items, self.now)
+        focus = self.store.focus_candidates(self.now)
+        self.assertTrue(focus)
+        self.assertTrue(all("Example Label" in x["name"] for x in focus))
 
     def test_existing_brands_are_excluded_at_cheap_and_premium_prices_in_every_arm(
         self,
@@ -174,6 +249,50 @@ class TrialTests(unittest.TestCase):
         self.assertEqual(state["reason"], "Alert performance guard")
         self.assertGreater(state["pause_until"], self.now + 120)
         self.assertEqual(state["ends"], end)
+
+    def feed_health(self, now, p95):
+        self.store.feed(
+            {
+                "version": 2,
+                "exclusions": {},
+                "health": {"interval_p95": p95, "samples": 100},
+            },
+            now,
+        )
+
+    def test_two_healthy_windows_recover_without_waiting_ten_more_minutes(self):
+        self.feed_health(self.now, 2.5)
+        self.feed_health(self.now + 60, 3.1)
+        self.assertFalse(self.store.can_read("outcome", self.now + 60))
+        self.feed_health(self.now + 120, 2.5)
+        self.assertFalse(self.store.can_read("outcome", self.now + 120))
+        self.feed_health(self.now + 180, 2.5)
+        self.assertTrue(self.store.can_read("outcome", self.now + 180))
+
+    def test_health_recovery_never_shortens_marketplace_access_backoff(self):
+        identity = self.store.reserve_read("hybrid", "explore", now=self.now)
+        self.store.finish_read(identity, "http_429", 0, 0, self.now)
+        for offset, p95 in [(60, 3.2), (120, 2.5), (180, 2.5)]:
+            self.feed_health(self.now + offset, p95)
+        state = self.store.state(self.now + 180)
+        self.assertEqual(state["reason"], "Marketplace access backoff")
+        self.assertEqual(state["pause_until"], self.now + 3600)
+        self.assertFalse(self.store.can_read("outcome", self.now + 180))
+
+    def test_baseline_can_only_recalibrate_during_stable_research_idle_period(self):
+        self.feed_health(self.now, 2.5)
+        identity = self.store.reserve_read("hybrid", "explore", now=self.now)
+        self.store.finish_read(identity, "ok", 1, 1, self.now)
+        # A busy research window cannot raise its own comparison baseline.
+        for offset in range(60, 541, 60):
+            self.feed_health(self.now + offset, 2.8)
+        self.assertEqual(self.store.state(self.now + 540)["baseline"], 2.5)
+        for offset in range(3601, 4202, 60):
+            self.feed_health(self.now + offset, 2.8)
+        self.assertEqual(self.store.state(self.now + 4201)["baseline"], 2.8)
+        self.assertTrue(self.store.can_read("outcome", self.now + 4201))
+        self.feed_health(self.now + 4261, 3.01)
+        self.assertFalse(self.store.can_read("outcome", self.now + 4261))
 
     def test_sold_status_requires_native_age_and_price_not_first_seen(self):
         self.add()

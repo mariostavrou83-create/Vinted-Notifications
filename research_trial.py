@@ -13,6 +13,7 @@ import secrets
 import sqlite3
 import threading
 import time
+from collections import Counter
 from contextlib import closing
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -486,9 +487,17 @@ class Store:
                 "exclusions": "TEXT NOT NULL DEFAULT '{}'",
                 "network_cursor": "INTEGER NOT NULL DEFAULT 0",
                 "reported_at": "REAL NOT NULL DEFAULT 0",
+                "healthy_windows": "INTEGER NOT NULL DEFAULT 0",
+                "baseline_at": "REAL NOT NULL DEFAULT 0",
             }.items():
                 if name not in fields:
                     c.execute(f"ALTER TABLE trial ADD COLUMN {name} {declaration}")
+            if "admission_policy" not in {
+                r[1] for r in c.execute("PRAGMA table_info(items)")
+            }:
+                c.execute(
+                    "ALTER TABLE items ADD COLUMN admission_policy INTEGER NOT NULL DEFAULT 1"
+                )
             c.executemany(
                 "INSERT OR IGNORE INTO arms(id,name) VALUES (?,?)", ARMS.items()
             )
@@ -529,6 +538,26 @@ class Store:
             active = c.execute(
                 "SELECT COUNT(*) FROM items WHERE admitted IS NOT NULL AND state IN ('pending','active','reserved','unknown')",
             ).fetchone()[0]
+            enrolled = c.execute(
+                "SELECT entry_price,payload,seller FROM items WHERE admitted>=? AND admission_arm=?",
+                (day, arm),
+            ).fetchall()
+            band_of = lambda price: (
+                "low" if price <= 2500 else "high" if price >= 3000 else "middle"
+            )
+            bands = Counter(band_of(r["entry_price"]) for r in enrolled)
+            categories = Counter(
+                (json.loads(r["payload"]).get("category"), band_of(r["entry_price"]))
+                for r in enrolled
+            )
+            sellers = {
+                (r["seller"], band_of(r["entry_price"]))
+                for r in enrolled
+                if r["seller"]
+            }
+            # Save room for both price bands and for later discovery windows.
+            # Missed healthy windows can catch up, within the same daily cap.
+            paced_cap = min(4, 1 + int((now - day) // (6 * 3600)))
             for item in sorted(
                 items, key=lambda x: hashlib.sha256(x["id"].encode()).digest()
             ):
@@ -565,29 +594,40 @@ class Store:
                     c.execute(
                         "INSERT OR IGNORE INTO members VALUES(?,?)", (gid, item["id"])
                     )
+                band = band_of(item["price"])
+                band_cap = 1 if band == "middle" else paced_cap
+                if arm == "hybrid" and source != "focus":
+                    band_cap = min(band_cap, 2)
+                first_seen = c.execute(
+                    "SELECT first_seen FROM items WHERE id=?", (item["id"],)
+                ).fetchone()[0]
                 if (
                     found
                     and active < ACTIVE_LIMIT
                     and total < ADMISSION_LIMIT
                     and arm_new < 9
+                    and bands[band] < band_cap
+                    and (arm == "hybrid" or categories[(item["category"], band)] < 2)
+                    and (
+                        not item.get("seller") or (item["seller"], band) not in sellers
+                    )
+                    and now - first_seen < QUICK_SECONDS
                 ):
                     added = c.execute(
-                        "UPDATE items SET admitted=?,admission_arm=?,next_check=? WHERE id=? AND admitted IS NULL",
+                        "UPDATE items SET admitted=?,admission_arm=?,next_check=?,admission_policy=2 WHERE id=? AND admitted IS NULL",
                         (now, arm, now, item["id"]),
                     ).rowcount
                     active += added
                     total += added
                     arm_new += added
+                    if added:
+                        bands[band] += 1
+                        categories[(item["category"], band)] += 1
+                        if item.get("seller"):
+                            sellers.add((item["seller"], band))
                 seller = item.get("seller")
-                if (
-                    seller
-                    and found
-                    and c.execute("SELECT COUNT(*) FROM sellers").fetchone()[0] < 8
-                ):
-                    c.execute(
-                        "INSERT OR IGNORE INTO sellers(id,category) VALUES(?,?)",
-                        (seller, item["category"]),
-                    )
+                if seller and found:
+                    self._seed_seller(c, seller, item["category"])
             c.execute("UPDATE arms SET last_success=?,error='' WHERE id=?", (now, arm))
             # Keep the pilot comfortably inside its small volume. Outcome
             # cohorts are protected; older untracked details are expendable.
@@ -605,6 +645,30 @@ class Store:
                 "DELETE FROM seen WHERE rowid IN (SELECT rowid FROM seen ORDER BY observed DESC LIMIT -1 OFFSET 50000)"
             )
         return len(items)
+
+    @staticmethod
+    def _seed_seller(c, seller, category):
+        if (
+            category not in CATEGORIES
+            or c.execute("SELECT 1 FROM sellers WHERE id=?", (seller,)).fetchone()
+        ):
+            return
+        count = c.execute(
+            "SELECT COUNT(*) FROM sellers WHERE category=?", (category,)
+        ).fetchone()[0]
+        if count >= 2:
+            return
+        if c.execute("SELECT COUNT(*) FROM sellers").fetchone()[0] >= 8:
+            if count:
+                return
+            # Replace a redundant category, preserving eight small panels.
+            victim = c.execute(
+                "SELECT s.id FROM sellers s WHERE (SELECT COUNT(*) FROM sellers x WHERE x.category=s.category)>1 ORDER BY s.verified DESC,s.next_due LIMIT 1"
+            ).fetchone()
+            if not victim:
+                return
+            c.execute("DELETE FROM sellers WHERE id=?", (victim["id"],))
+        c.execute("INSERT INTO sellers(id,category) VALUES(?,?)", (seller, category))
 
     def feed(self, data, now):
         if (
@@ -662,6 +726,25 @@ class Store:
             state = dict(c.execute("SELECT * FROM trial WHERE id=1").fetchone())
             if type(p95) in (int, float) and count >= 20:
                 baseline = state["baseline"] or p95
+                baseline_at = state["baseline_at"] or now
+                last_read = c.execute("SELECT MAX(started) FROM reads").fetchone()[0]
+                # Compare with a stable period measured while research was off,
+                # rather than retaining one unusually quiet startup sample.
+                if (
+                    last_read is not None
+                    and now - last_read >= 600
+                    and (not state["baseline_at"] or now - baseline_at >= 3600)
+                ):
+                    off = [
+                        r[0]
+                        for r in c.execute(
+                            "SELECT p95 FROM health WHERE checked>=? AND pending<=15 AND errors=0 ORDER BY checked DESC LIMIT 8",
+                            (max(last_read + 600, now - 600),),
+                        )
+                    ]
+                    if len(off) == 8 and max(off) <= 3 and max(off) - min(off) <= 0.3:
+                        baseline = sorted(off)[len(off) // 2]
+                        baseline_at = now
                 # A hard 3-second ceiling only applies where the measured baseline
                 # already meets it. Always protect the baseline against slowdown.
                 threshold = (
@@ -673,21 +756,38 @@ class Store:
                     or health.get("errors", 0) > max(2, count * 0.05)
                 )
                 windows = state["slow_windows"] + 1 if slow else 0
+                healthy = 0 if slow else min(2, state["healthy_windows"] + 1)
                 c.execute(
-                    "UPDATE trial SET baseline=?,slow_windows=? WHERE id=1",
-                    (baseline, windows),
+                    "UPDATE trial SET baseline=?,baseline_at=?,slow_windows=?,healthy_windows=? WHERE id=1",
+                    (baseline, baseline_at, windows, healthy),
                 )
-                if windows >= 2:
+                hard = (
+                    p95 > 3
+                    or health.get("pending_age", 0) > 15
+                    or health.get("errors", 0) > max(2, count * 0.05)
+                )
+                if windows >= 2 or hard:
+                    restricted = (
+                        state["reason"] == "Marketplace access backoff"
+                        and state["pause_until"] > now
+                    )
                     c.execute(
-                        "UPDATE trial SET pause_until=?,reason='Alert performance guard' WHERE id=1",
-                        (now + 600,),
+                        "UPDATE trial SET pause_until=MAX(pause_until,?),reason=? WHERE id=1",
+                        (
+                            now + 120,
+                            (
+                                state["reason"]
+                                if restricted
+                                else "Alert performance guard"
+                            ),
+                        ),
                     )
                 elif (
                     not slow
+                    and healthy >= 2
                     and state["reason"] == "Alert performance guard"
-                    and state["pause_until"] <= now
                 ):
-                    c.execute("UPDATE trial SET reason='' WHERE id=1")
+                    c.execute("UPDATE trial SET reason='',pause_until=0 WHERE id=1")
                 c.execute(
                     "INSERT OR REPLACE INTO health VALUES(?,?,?,?)",
                     (now, p95, health.get("pending_age", 0), health.get("errors", 0)),
@@ -838,11 +938,8 @@ class Store:
                 "INSERT INTO checks(item,checked,state,price,age_upper) VALUES(?,?,?,?,?)",
                 (identity, now, state, price, age_upper),
             )
-            if seller and c.execute("SELECT COUNT(*) FROM sellers").fetchone()[0] < 8:
-                c.execute(
-                    "INSERT OR IGNORE INTO sellers(id,category) VALUES(?,?)",
-                    (seller, payload.get("category", "")),
-                )
+            if seller:
+                self._seed_seller(c, seller, payload.get("category", ""))
             if payload.get("category") in CATEGORIES:
                 for phrase in phrases(payload):
                     gid = hashlib.sha256(
@@ -989,6 +1086,8 @@ class Store:
                         "premium_tracked": len(high_enrolled),
                         "sellers": sellers(rows),
                         "cheap_arrivals": arrivals,
+                        "premium_listings": len(premium),
+                        "high_floor": high_floor,
                         "stage": stage,
                         "buy_limit": buy_limit,
                         "resale_estimate": resale,
@@ -1032,6 +1131,22 @@ class Store:
         for candidate in selected:
             candidate.pop("item_ids")
         return selected
+
+    def focus_candidates(self, now):
+        candidates = [
+            x
+            for x in self.candidates("hybrid", now, 80)
+            if x["cheap_arrivals"] >= 3
+            and x["premium_listings"] >= 3
+            and x["buy_limit"] >= 400
+        ]
+        return sorted(
+            candidates,
+            key=lambda x: (
+                -(x["cheap_sold"] + x["premium_sold"]),
+                -min(x["cheap_arrivals"], x["premium_listings"]),
+            ),
+        )[:2]
 
     def snapshot(self, now=None):
         now = time.time() if now is None else now
@@ -1132,6 +1247,7 @@ class Store:
                 (threshold, now - DAY),
             ).fetchone()
             return {
+                "sampling_policy": "balanced_v2",
                 "phase": state["phase"],
                 "reason": state["reason"],
                 "pause_seconds": max(0, int(state["pause_until"] - now)),
@@ -1152,7 +1268,7 @@ class Store:
                 "cohorts": [
                     dict(r)
                     for r in c.execute(
-                        "SELECT admission_arm arm,CASE WHEN entry_price<=2500 THEN 'low' WHEN entry_price>=3000 THEN 'high' ELSE 'middle' END band,state,COUNT(*) count FROM items WHERE admitted IS NOT NULL GROUP BY admission_arm,band,state"
+                        "SELECT admission_policy,admission_arm arm,CASE WHEN entry_price<=2500 THEN 'low' WHEN entry_price>=3000 THEN 'high' ELSE 'middle' END band,state,COUNT(*) count FROM items WHERE admitted IS NOT NULL GROUP BY admission_policy,admission_arm,band,state"
                     )
                 ],
                 "due_outcomes": c.execute(
@@ -1456,22 +1572,25 @@ class Worker:
                     else:
                         params.update(price_from=1, price_to=25)
                     if kind == "focus":
-                        candidates = self.store.candidates("hybrid", now, 2)
+                        candidates = self.store.focus_candidates(now)
                         if candidates:
+                            candidate = candidates[(cursor // 2) % len(candidates)]
                             with closing(self.store.connect()) as c:
                                 g = c.execute(
                                     "SELECT * FROM groups WHERE id=?",
-                                    (
-                                        candidates[(cursor // 2) % len(candidates)][
-                                            "id"
-                                        ],
-                                    ),
+                                    (candidate["id"],),
                                 ).fetchone()
                             category = g["category"] or category
                             params["attribute_ids[catalog]"] = category
                             params["search_text"] = (
                                 g["brand"] + " " + g["phrase"]
                             ).replace("Unbranded ", "")
+                            if band:
+                                params["price_from"] = candidate["high_floor"] / 100
+                            else:
+                                params["price_to"] = max(
+                                    1, (candidate["buy_limit"] - 290) * 100 // 105 / 100
+                                )
                     if kind == "reference":
                         params["order"] = "newest_first"
                     results = [
@@ -1524,6 +1643,7 @@ class Worker:
             )
             c.execute("UPDATE trial SET reported_at=? WHERE id=1", (now,))
         result = {
+            "sampling_policy": "balanced_v2",
             "scope": "new_brands_only",
             "excluded_searches": len(
                 json.loads(data["trial"]["exclusions"]).get("names", [])

@@ -19,6 +19,30 @@ or restricted reads do not trigger immediate retries. Marketplace restrictions
 pause research for an hour; stale health data and sustained alert deterioration
 also stop new research reads. Existing alerts retain priority.
 
+The first-day review on 25 October found that the original follow-up quota was
+spent on cheap items before premium samples arrived, all eight seller panels
+were seeded from one category, and a single startup speed baseline caused
+long repeated pauses even while research was idle. The original evidence stays
+in place; the trial still ends on 7 November, without resetting its clock.
+
+Admission policy 2 reserves up to four daily follow-ups in each price band per
+arm, releases quota through four six-hour windows, and preserves the global
+25/day and 175-active limits. Broad/seller cohorts also limit category and
+seller concentration. The hybrid reserves half its band quota for focused
+candidates with repeated supply in both economically viable price bands.
+Seller panels cover several categories, with at most two seeds per category
+and eight panels overall. Existing policy-1 admissions remain labelled so the
+final review can distinguish the unbalanced first-day sample.
+
+The speed guard stops immediately above a three-second polling p95, with
+excess pending alerts or excessive errors. Lesser deterioration against the
+baseline still needs two windows. Research can recover after two healthy
+windows instead of repeated ten-minute holds. A baseline may be recalibrated
+only from eight stable readings after at least ten minutes without any research
+marketplace request, at most once per hour; it can never move the three-second
+ceiling. Health recovery cannot shorten marketplace access backoff. Hourly
+private diagnostics expose the sampling balance, guard and request outcomes.
+
 An item is checked once even if several arms find it; each arm only counts
 items it discovered. This is a comparison of operating approaches, not a
 randomised causal study. Cohort rates require a full 24-hour outcome window.
