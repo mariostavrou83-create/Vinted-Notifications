@@ -30,6 +30,9 @@ arm, releases quota through four six-hour windows, and preserves the global
 25/day and 175-active limits. Broad/seller cohorts also limit category and
 seller concentration. The hybrid reserves half its band quota for focused
 candidates with repeated supply in both economically viable price bands.
+Focused admissions use the candidate's own acquisition and premium ranges,
+so a £40 bargain can still be the cheap band for a £100 comparable. Returned
+catalogue prices are checked against the requested band before ingestion.
 Seller panels cover several categories, with at most two seeds per category
 and eight panels overall. Existing policy-1 admissions remain labelled so the
 final review can distinguish the unbalanced first-day sample.

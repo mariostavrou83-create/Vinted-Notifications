@@ -109,6 +109,23 @@ class TrialTests(unittest.TestCase):
             )
         self.assertEqual(counts, {"low": 4, "high": 4})
 
+    def test_focused_price_bands_follow_the_candidate_instead_of_a_fixed_price(self):
+        for start, price, band in [(1, "45", "low"), (51, "100", "high")]:
+            items = [
+                trial.normalize(raw(str(i), price), "12")
+                for i in range(start, start + 12)
+            ]
+            self.store.ingest(
+                "hybrid", items, self.now, source="focus", price_band=band
+            )
+        with closing(self.store.connect()) as c:
+            counts = dict(
+                c.execute(
+                    "SELECT admission_band,COUNT(*) FROM items WHERE admitted IS NOT NULL GROUP BY admission_band"
+                )
+            )
+        self.assertEqual(counts, {"low": 4, "high": 4})
+
     def test_tracking_is_spread_through_the_day_and_reserves_hybrid_focus(self):
         early = int(self.now // trial.DAY) * trial.DAY + 3600
         low = [trial.normalize(raw(str(i), "5"), "12") for i in range(1, 31)]

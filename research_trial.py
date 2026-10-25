@@ -500,6 +500,12 @@ class Store:
                 c.execute(
                     "ALTER TABLE items ADD COLUMN admission_policy INTEGER NOT NULL DEFAULT 1"
                 )
+            if "admission_band" not in {
+                r[1] for r in c.execute("PRAGMA table_info(items)")
+            }:
+                c.execute(
+                    "ALTER TABLE items ADD COLUMN admission_band TEXT NOT NULL DEFAULT ''"
+                )
             if (
                 c.execute("SELECT admission_version FROM trial WHERE id=1").fetchone()[
                     0
@@ -544,7 +550,7 @@ class Store:
             )
             return dict(c.execute("SELECT * FROM trial WHERE id=1").fetchone())
 
-    def ingest(self, arm, items, now, *, observed=None, source=None):
+    def ingest(self, arm, items, now, *, observed=None, source=None, price_band=None):
         observed = now if observed is None else min(now, observed)
         with closing(self.connect()) as c, c:
             exclusions = json.loads(
@@ -563,23 +569,22 @@ class Store:
                 "SELECT COUNT(*) FROM items WHERE admitted IS NOT NULL AND state IN ('pending','active','reserved','unknown')",
             ).fetchone()[0]
             enrolled = c.execute(
-                "SELECT entry_price,payload,seller FROM items WHERE admitted>=? AND admission_arm=?",
+                "SELECT entry_price,payload,seller,admission_band FROM items WHERE admitted>=? AND admission_arm=?",
                 (day, arm),
             ).fetchall()
             band_of = lambda price: (
                 "low" if price <= 2500 else "high" if price >= 3000 else "middle"
             )
-            bands = Counter(band_of(r["entry_price"]) for r in enrolled)
+            enrolled_band = lambda row: row["admission_band"] or band_of(
+                row["entry_price"]
+            )
+            bands = Counter(enrolled_band(r) for r in enrolled)
             new_bands = Counter()
             categories = Counter(
-                (json.loads(r["payload"]).get("category"), band_of(r["entry_price"]))
+                (json.loads(r["payload"]).get("category"), enrolled_band(r))
                 for r in enrolled
             )
-            sellers = {
-                (r["seller"], band_of(r["entry_price"]))
-                for r in enrolled
-                if r["seller"]
-            }
+            sellers = {(r["seller"], enrolled_band(r)) for r in enrolled if r["seller"]}
             # Save room for both price bands and for later discovery windows.
             # Missed healthy windows can catch up, within the same daily cap.
             paced_cap = min(4, 1 + int((now - day) // (6 * 3600)))
@@ -619,7 +624,11 @@ class Store:
                     c.execute(
                         "INSERT OR IGNORE INTO members VALUES(?,?)", (gid, item["id"])
                     )
-                band = band_of(item["price"])
+                band = (
+                    price_band
+                    if price_band in {"low", "high"}
+                    else band_of(item["price"])
+                )
                 band_cap = 1 if band == "middle" else paced_cap
                 if arm == "hybrid" and source != "focus":
                     band_cap = min(band_cap, 2)
@@ -639,8 +648,8 @@ class Store:
                     and now - first_seen < QUICK_SECONDS
                 ):
                     added = c.execute(
-                        "UPDATE items SET admitted=?,admission_arm=?,next_check=?,admission_policy=2 WHERE id=? AND admitted IS NULL",
-                        (now, arm, now, item["id"]),
+                        "UPDATE items SET admitted=?,admission_arm=?,next_check=?,admission_policy=2,admission_band=? WHERE id=? AND admitted IS NULL",
+                        (now, arm, now, band, item["id"]),
                     ).rowcount
                     active += added
                     total += added
@@ -1317,7 +1326,7 @@ class Store:
                 "cohorts": [
                     dict(r)
                     for r in c.execute(
-                        "SELECT admission_policy,admission_arm arm,CASE WHEN entry_price<=2500 THEN 'low' WHEN entry_price>=3000 THEN 'high' ELSE 'middle' END band,state,COUNT(*) count FROM items WHERE admitted IS NOT NULL GROUP BY admission_policy,admission_arm,band,state"
+                        "SELECT admission_policy,admission_arm arm,COALESCE(NULLIF(admission_band,''),CASE WHEN entry_price<=2500 THEN 'low' WHEN entry_price>=3000 THEN 'high' ELSE 'middle' END) band,state,COUNT(*) count FROM items WHERE admitted IS NOT NULL GROUP BY admission_policy,admission_arm,band,state"
                     )
                 ],
                 "due_outcomes": c.execute(
@@ -1646,8 +1655,19 @@ class Worker:
                         x
                         for raw in self.transport.catalogue(params, kind)
                         if (x := normalize(raw, category))
+                        and x["price"] >= money(params.get("price_from", 1))
+                        and (
+                            "price_to" not in params
+                            or x["price"] <= money(params["price_to"])
+                        )
                     ]
-                    accepted = self.store.ingest(arm, results, now, source=kind)
+                    accepted = self.store.ingest(
+                        arm,
+                        results,
+                        now,
+                        source=kind,
+                        price_band="high" if band else "low",
+                    )
                 LOG.info(
                     "Research trial sample arm=%s kind=%s accepted=%d",
                     arm,
