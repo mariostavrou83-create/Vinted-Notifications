@@ -37,7 +37,7 @@ MESSAGES = {
     "account_changed": "The connected account changed. Review Offers before restarting.",
     "auth": "Vinted needs account attention. Check Connections and Vinted before restarting.",
     "restricted": "Vinted refused this action. Offers are paused; check your account on Vinted.",
-    "cooldown": "Vinted requested a cooldown. Offers are paused; no repeated sends were attempted.",
+    "cooldown": "Waiting for Vinted's requested cooldown.",
     "network": "The connection failed before an offer was sent. The queue will check again later.",
     "shape": "Vinted returned an unfamiliar response. Offers are paused for review.",
     "uncertain": "Vinted did not confirm this offer. Check the conversation on Vinted; it will not be retried automatically.",
@@ -156,6 +156,10 @@ def migrate(conn):
     }
     if "priority_since" not in columns:
         conn.execute("ALTER TABLE vinted_offer_settings ADD COLUMN priority_since REAL")
+    if "cooldown_recovery_version" not in columns:
+        conn.execute(
+            "ALTER TABLE vinted_offer_settings ADD COLUMN cooldown_recovery_version INTEGER NOT NULL DEFAULT 0"
+        )
     conn.execute("""CREATE TABLE IF NOT EXISTS vinted_offer_jobs (
         id INTEGER PRIMARY KEY AUTOINCREMENT, account_id TEXT NOT NULL,
         item_id TEXT NOT NULL, recipient_id TEXT NOT NULL,
@@ -278,6 +282,7 @@ def pause(reason):
             (reason,),
         )
         event(conn, "paused", reason)
+    logger.warning("Vinted offers paused: reason=%s", reason or "manual")
 
 
 def cancel(job_id):
@@ -668,14 +673,60 @@ def snapshot():
         "worker_online": bool(
             config["heartbeat"] and config["heartbeat"] > time.time() - 60
         ),
+        "cooling_down": config["mode"] in {"live", "preview"}
+        and config["cooldown_until"] > time.time(),
     }
 
 
 def _recover(now):
     with closing(connection()) as conn, conn:
-        heartbeat = conn.execute(
-            "SELECT heartbeat FROM vinted_offer_settings WHERE id=1"
-        ).fetchone()[0]
+        config = conn.execute(
+            "SELECT * FROM vinted_offer_settings WHERE id=1"
+        ).fetchone()
+        if config["cooldown_recovery_version"] < 1:
+            # Upgrade only an automatic legacy cooldown with a recorded active
+            # mode. A manual pause, account change or uncertain write stays put.
+            control = conn.execute(
+                "SELECT action,reason FROM vinted_offer_events WHERE action IN ('live','preview','paused') ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            active = conn.execute(
+                "SELECT action FROM vinted_offer_events WHERE action IN ('live','preview') ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            account = conn.execute(
+                "SELECT user_id,verified_at,session FROM vinted_buyer WHERE id=1"
+            ).fetchone()
+            uncertain = conn.execute(
+                "SELECT 1 FROM vinted_offer_jobs WHERE account_id=? AND status IN ('uncertain','sending') LIMIT 1",
+                (config["account_id"],),
+            ).fetchone()
+            if (
+                config["mode"] == "paused"
+                and config["pause_reason"] == "cooldown"
+                and config["cooldown_until"] > 0
+                and control
+                and control["action"] == "paused"
+                and control["reason"] == "cooldown"
+                and active
+                and account
+                and account["verified_at"]
+                and account["session"]
+                and str(account["user_id"]) == config["account_id"]
+                and not uncertain
+            ):
+                conn.execute(
+                    "UPDATE vinted_offer_settings SET mode=?,revision=revision+1 WHERE id=1",
+                    (active["action"],),
+                )
+                event(conn, "cooldown_recovery", now=now)
+                logger.info(
+                    "Vinted offers restored legacy cooldown: mode=%s deadline=%s",
+                    active["action"],
+                    config["cooldown_until"],
+                )
+            conn.execute(
+                "UPDATE vinted_offer_settings SET cooldown_recovery_version=1 WHERE id=1"
+            )
+        heartbeat = config["heartbeat"]
         if heartbeat is None or heartbeat < now - 30:
             conn.execute(
                 "UPDATE vinted_offer_settings SET heartbeat=? WHERE id=1 AND (heartbeat IS NULL OR heartbeat<?)",
@@ -704,6 +755,22 @@ def _recover(now):
             conn.execute(
                 "UPDATE vinted_offer_settings SET mode='paused',pause_reason='uncertain',revision=revision+1 WHERE id=1"
             )
+        if config["pause_reason"] == "cooldown":
+            current = conn.execute(
+                "SELECT mode,pause_reason,cooldown_until FROM vinted_offer_settings WHERE id=1"
+            ).fetchone()
+            if (
+                current["mode"] in {"live", "preview"}
+                and current["pause_reason"] == "cooldown"
+                and current["cooldown_until"] <= now
+            ):
+                conn.execute(
+                    "UPDATE vinted_offer_settings SET pause_reason='' WHERE id=1"
+                )
+                event(conn, "resumed", "cooldown", now=now)
+                logger.info(
+                    "Vinted offers resumed after cooldown: mode=%s", current["mode"]
+                )
 
 
 def _finish(job_id, status, reason="", **fields):
@@ -753,7 +820,7 @@ def _wait_after_failure(exc, now):
     delay = getattr(exc, "retry_after", 0)
     if type(delay) not in (int, float) or not math.isfinite(delay) or delay < 0:
         delay = 0
-    if exc.status == 429 or exc.reason == "rate_limited":
+    if exc.status == 429 or exc.reason in {"rate_limited", "renewal_cooldown"}:
         delay = max(delay, 900)
     elif exc.reason == "network":
         delay = max(delay, SCAN_GAP)
@@ -764,6 +831,24 @@ def _wait_after_failure(exc, now):
                 cooldown_until=MAX(cooldown_until,?),next_send=MAX(next_send,?),
                 next_scan=MAX(next_scan,?) WHERE id=1""",
                 (now + delay,) * 3,
+            )
+
+
+def _read_cooldown(now):
+    """Keep the owner's active mode; tick's persisted deadline blocks reads."""
+    with closing(connection()) as conn, conn:
+        row = conn.execute(
+            "SELECT mode,cooldown_until FROM vinted_offer_settings WHERE id=1"
+        ).fetchone()
+        if row["mode"] in {"live", "preview"}:
+            conn.execute(
+                "UPDATE vinted_offer_settings SET pause_reason='cooldown' WHERE id=1"
+            )
+            event(conn, "cooldown", "read", now=now)
+            logger.info(
+                "Vinted offers cooling down after read: until=%s mode=%s",
+                row["cooldown_until"],
+                row["mode"],
             )
 
 
@@ -1090,7 +1175,10 @@ class OfferWorker:
                 _finish(job["id"], "skipped", "unavailable")
             else:
                 _finish(job["id"], "queued", reason)
-                pause(reason)
+                if reason == "cooldown":
+                    _read_cooldown(self.clock())
+                else:
+                    pause(reason)
 
     def tick(self):
         now = self.clock()
@@ -1176,6 +1264,8 @@ class OfferWorker:
                         "UPDATE vinted_offer_settings SET next_scan=? WHERE id=1",
                         (self.clock() + SCAN_GAP,),
                     )
+            elif reason == "cooldown":
+                _read_cooldown(self.clock())
             else:
                 pause(reason)
         finally:

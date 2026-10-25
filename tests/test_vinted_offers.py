@@ -722,7 +722,9 @@ class OfferTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(self.jobs()[0]["status"], "queued")
         self.assertFalse(self.client.writes())
 
-    def test_rate_limit_and_security_failures_pause_without_solver_or_replay(self):
+    def test_rate_limit_waits_while_security_failures_require_review_without_replay(
+        self,
+    ):
         for status, reason in (
             (429, "rate_limited"),
             (403, "security_challenge"),
@@ -738,7 +740,9 @@ class OfferTests(DatabaseFixture, unittest.TestCase):
 
             self.client.fail = refused
             self.worker.tick()
-            self.assertEqual(offers.state()["mode"], "paused")
+            self.assertEqual(
+                offers.state()["mode"], "live" if status == 429 else "paused"
+            )
             count = len(self.client.calls)
             self.now += 200
             self.worker.tick()
@@ -967,6 +971,181 @@ class OfferTests(DatabaseFixture, unittest.TestCase):
         self.worker.tick()
         self.assertEqual(len(self.client.writes()), 1)
 
+    def test_read_cooldown_automatically_resumes_across_worker_restart(self):
+        self.enable(history="three_months")
+        self.add()
+        self.client.fail = lambda *args: (_ for _ in ()).throw(
+            buyer.BuyerError("wait", 429, reason="rate_limited", retry_after=1200)
+        )
+        self.worker.tick()
+        config = offers.state()
+        self.assertEqual(config["mode"], "live")
+        self.assertEqual(config["pause_reason"], "cooldown")
+        calls = len(self.client.calls)
+        self.client.fail = None
+        for offset in (100, 900, 1199):
+            self.now = NOW + offset
+            offers.OfferWorker(
+                client_factory=self.factory,
+                clock=lambda: self.now,
+                item_reader=self.item_read,
+            ).tick()
+        self.assertEqual(len(self.client.calls), calls)
+        self.now = NOW + 1200
+        offers.OfferWorker(
+            client_factory=self.factory,
+            clock=lambda: self.now,
+            item_reader=self.item_read,
+        ).tick()
+        self.assertEqual(self.jobs()[0]["status"], "sent")
+        self.assertEqual(len(self.client.writes()), 1)
+        self.assertEqual(offers.state()["pause_reason"], "")
+        self.assertEqual(offers.state()["history"], "three_months")
+
+    def test_cooldown_before_an_offer_write_retains_the_job_and_active_mode(self):
+        self.enable()
+        self.add()
+
+        def limited(method, path, body):
+            if path == "/api/v2/items/1001":
+                raise buyer.BuyerError(
+                    "wait", 429, reason="rate_limited", retry_after=900
+                )
+
+        self.client.fail = limited
+        self.worker.tick()
+        self.assertEqual(self.jobs()[0]["status"], "queued")
+        self.assertEqual(offers.state()["mode"], "live")
+        self.client.fail = None
+        self.now = NOW + 900
+        self.worker.tick()
+        self.assertEqual(self.jobs()[0]["status"], "sent")
+        self.assertEqual(len(self.client.writes()), 1)
+
+    def test_renewal_cooldown_has_a_deadline_and_does_not_disable_offers(self):
+        self.enable()
+        self.add()
+        self.factory.side_effect = buyer.BuyerError(
+            "wait", reason="renewal_cooldown", retry_after=3600
+        )
+        self.worker.tick()
+        self.assertEqual(offers.state()["mode"], "live")
+        self.assertEqual(offers.state()["cooldown_until"], NOW + 3600)
+        count = self.factory.call_count
+        self.now = NOW + 3599
+        self.worker.tick()
+        self.assertEqual(self.factory.call_count, count)
+        self.factory.side_effect = None
+        self.now = NOW + 3600
+        self.worker.tick()
+        self.assertEqual(len(self.client.writes()), 1)
+
+    def test_manual_pause_during_cooldown_is_not_automatically_undone(self):
+        self.enable()
+        self.add()
+        self.client.fail = lambda *args: (_ for _ in ()).throw(
+            buyer.BuyerError("wait", 429, reason="rate_limited")
+        )
+        self.worker.tick()
+        offers.pause("")
+        self.client.fail = None
+        self.now = NOW + 4000
+        self.worker.tick()
+        self.assertEqual(offers.state()["mode"], "paused")
+        self.assertFalse(self.client.writes())
+
+    def test_rate_limit_after_attempted_offer_never_auto_resumes_or_replays(self):
+        self.enable()
+        self.add()
+
+        def limited(method, path, body):
+            if path.endswith("/offers"):
+                raise buyer.BuyerError("wait", 429, reason="rate_limited")
+
+        self.client.fail = limited
+        self.worker.tick()
+        self.assertEqual(self.jobs()[0]["status"], "uncertain")
+        self.assertEqual(offers.state()["mode"], "paused")
+        attempts = len(self.client.writes())
+        self.client.fail = None
+        self.now = NOW + 4000
+        self.worker.tick()
+        self.assertEqual(offers.state()["mode"], "paused")
+        self.assertEqual(len(self.client.writes()), attempts)
+
+    def test_upgrade_recovers_expired_legacy_read_cooldown_without_resetting_history(
+        self,
+    ):
+        self.enable(history="three_months")
+        self.add()
+        since = offers.state()["since"]
+        offers.pause("cooldown")
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "ALTER TABLE vinted_offer_settings DROP COLUMN cooldown_recovery_version"
+            )
+            conn.execute(
+                "UPDATE parameters SET value='28' WHERE key='msj_search_schema'"
+            )
+            conn.execute(
+                "UPDATE vinted_offer_settings SET cooldown_until=?", (NOW - 1,)
+            )
+        backup = search_settings.ensure_schema()
+        self.assertTrue(backup)
+        self.worker.tick()
+        self.assertEqual(offers.state()["mode"], "live")
+        self.assertEqual(offers.state()["since"], since)
+        self.assertEqual(len(self.client.writes()), 1)
+
+    def test_legacy_cooldown_recovery_waits_until_the_original_deadline(self):
+        self.enable()
+        self.add()
+        offers.pause("cooldown")
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE vinted_offer_settings SET cooldown_until=?", (NOW + 1200,)
+            )
+        self.worker.tick()
+        self.assertEqual(offers.state()["mode"], "live")
+        self.factory.assert_not_called()
+        self.now = NOW + 1199
+        self.worker.tick()
+        self.factory.assert_not_called()
+        self.now = NOW + 1200
+        self.worker.tick()
+        self.assertEqual(len(self.client.writes()), 1)
+
+    def test_legacy_manual_pause_is_never_restored_from_an_older_live_setting(self):
+        self.enable()
+        self.add()
+        offers.pause("cooldown")
+        offers.pause("")
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE vinted_offer_settings SET cooldown_until=?", (NOW - 1,)
+            )
+        self.worker.tick()
+        self.assertEqual(offers.state()["mode"], "paused")
+        self.factory.assert_not_called()
+
+    def test_legacy_recovery_never_resumes_unknown_writes_or_manual_pauses(self):
+        for status in ["uncertain", "sending"]:
+            self.enable()
+            job = self.add(item=1000 + len(self.jobs()))
+            offers.pause("cooldown")
+            with closing(search_settings.connection()) as conn, conn:
+                conn.execute(
+                    "UPDATE vinted_offer_settings SET cooldown_until=?,cooldown_recovery_version=0",
+                    (NOW - 1,),
+                )
+                conn.execute(
+                    "UPDATE vinted_offer_jobs SET status=?,lease_until=? WHERE id=?",
+                    (status, NOW + 600, job),
+                )
+            self.worker.tick()
+            self.assertEqual(offers.state()["mode"], "paused")
+            self.assertFalse(self.client.writes())
+
     def test_retry_after_headers_are_carried_without_echoing_response(self):
         response = Mock(
             status_code=429, headers={"Retry-After": "1200"}, text="private body"
@@ -1072,6 +1251,21 @@ class OfferGatewayTests(DatabaseFixture, unittest.TestCase):
 
 
 class OfferRouteTests(DashboardTests):
+    def test_mode_selector_and_cooldown_notice_match_the_saved_state(self):
+        self.owner()
+        body = self.client.get("/offers").data
+        self.assertIn(b'<option value="paused" selected>', body)
+        self.assertNotIn(b'<option value="preview" selected>', body)
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE vinted_offer_settings SET mode='live',pause_reason='cooldown',cooldown_until=?",
+                (__import__("time").time() + 3600,),
+            )
+        body = self.client.get("/offers").data
+        self.assertIn(b"Cooling down", body)
+        self.assertIn(b"Offers resume automatically after", body)
+        self.assertIn(b'<option value="live" selected>', body)
+
     def test_owner_can_enable_three_month_history_and_see_five_minute_rule(self):
         self.owner()
         with closing(search_settings.connection()) as conn, conn:
