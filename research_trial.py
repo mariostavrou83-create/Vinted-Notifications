@@ -1122,6 +1122,58 @@ class Store:
             },
         }
 
+    def diagnostics(self, now):
+        """Small private operational summary; no transport or account secrets."""
+        state = self.state(now)
+        with closing(self.connect()) as c:
+            threshold = min(3.0, (state["baseline"] or 3) + 0.15)
+            health = c.execute(
+                "SELECT COUNT(*) samples,SUM(p95>?) slow,MIN(p95) minimum,AVG(p95) average,MAX(p95) maximum FROM health WHERE checked>=?",
+                (threshold, now - DAY),
+            ).fetchone()
+            return {
+                "phase": state["phase"],
+                "reason": state["reason"],
+                "pause_seconds": max(0, int(state["pause_until"] - now)),
+                "feed_age": (
+                    None if not state["feed_at"] else int(now - state["feed_at"])
+                ),
+                "baseline": state["baseline"],
+                "guard_threshold": threshold,
+                "health_24h": dict(health),
+                "last_read": c.execute("SELECT MAX(started) FROM reads").fetchone()[0],
+                "reads_24h": [
+                    dict(r)
+                    for r in c.execute(
+                        "SELECT kind,status,COUNT(*) count,SUM(body_bytes) body_bytes FROM reads WHERE started>=? GROUP BY kind,status",
+                        (now - DAY,),
+                    )
+                ],
+                "cohorts": [
+                    dict(r)
+                    for r in c.execute(
+                        "SELECT admission_arm arm,CASE WHEN entry_price<=2500 THEN 'low' WHEN entry_price>=3000 THEN 'high' ELSE 'middle' END band,state,COUNT(*) count FROM items WHERE admitted IS NOT NULL GROUP BY admission_arm,band,state"
+                    )
+                ],
+                "due_outcomes": c.execute(
+                    "SELECT COUNT(*) FROM items WHERE admitted IS NOT NULL AND state IN ('pending','active','reserved','unknown') AND next_check<=?",
+                    (now,),
+                ).fetchone()[0],
+                "clocks": [dict(r) for r in c.execute("SELECT * FROM clocks")],
+                "sold": [
+                    dict(r)
+                    for r in c.execute(
+                        "SELECT id,entry_price,ask_at_sold,age_upper,admission_arm FROM items WHERE state='sold' LIMIT 12"
+                    )
+                ],
+                "seller_panels": [
+                    dict(r)
+                    for r in c.execute(
+                        "SELECT category,verified,next_due,error FROM sellers"
+                    )
+                ],
+            }
+
 
 class Transport:
     def __init__(self, store, proxy, user_agent=None):
@@ -1273,6 +1325,7 @@ class Worker:
         self.transport = None
         self.stop = threading.Event()
         self.feed_due = 0
+        self.diagnostics_due = 0
 
     def fetch_feed(self, now):
         state = self.store.state(now)
@@ -1296,6 +1349,12 @@ class Worker:
     def step(self, now=None):
         now = time.time() if now is None else now
         state = self.store.state(now)
+        if now >= self.diagnostics_due:
+            self.diagnostics_due = now + 3600
+            LOG.info(
+                "Research trial diagnostics %s",
+                json.dumps(self.store.diagnostics(now), separators=(",", ":")),
+            )
         if state["started"] and (
             now - state["reported_at"] >= DAY
             or state["phase"] == "completed"
