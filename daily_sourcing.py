@@ -181,8 +181,9 @@ class DailySourcing:
             groups = c.execute(
                 """SELECT g.*,COUNT(*) n FROM groups g JOIN members m ON m.group_id=g.id
                 JOIN items i ON i.id=m.item WHERE i.state!='excluded' GROUP BY g.id
-                HAVING COUNT(*)>=6 AND SUM(i.state='sold' AND i.age_upper BETWEEN 0 AND 86400 AND i.ask_at_sold IS NOT NULL)>=5
-                ORDER BY SUM(i.state='sold' AND i.age_upper BETWEEN 0 AND 86400) DESC LIMIT 60"""
+                HAVING COUNT(*)>=6 AND SUM(i.state='sold' AND i.age_upper BETWEEN 0 AND 86400 AND i.ask_at_sold IS NOT NULL AND i.sold_at>=?)>=5
+                ORDER BY SUM(i.state='sold' AND i.age_upper BETWEEN 0 AND 86400 AND i.sold_at>=?) DESC LIMIT 60""",
+                (now - 14 * DAY, now - 14 * DAY),
             ).fetchall()
             for group in groups:
                 rows = [
@@ -200,6 +201,8 @@ class DailySourcing:
                     and 0 <= r["age_upper"] <= DAY
                     and r["ask_at_sold"]
                     and r["seller"]
+                    and r["sold_at"] is not None
+                    and r["sold_at"] >= now - 14 * DAY
                 ]
                 if len(sold) < 5:
                     continue
@@ -357,6 +360,18 @@ class DailySourcing:
             c.execute(
                 "INSERT INTO sourcing_meta VALUES('seeded_at',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (str(now),),
+            )
+            c.execute("DELETE FROM reads WHERE started<?", (now - 30 * DAY,))
+            c.execute("DELETE FROM checks WHERE checked<?", (now - 60 * DAY,))
+            c.execute("DELETE FROM health WHERE checked<?", (now - 30 * DAY,))
+            c.execute(
+                "DELETE FROM items WHERE last_seen<? AND state NOT IN ('pending','active','reserved','unknown')",
+                (now - 60 * DAY,),
+            )
+            c.execute("DELETE FROM members WHERE item NOT IN (SELECT id FROM items)")
+            c.execute("DELETE FROM seen WHERE item NOT IN (SELECT id FROM items)")
+            c.execute(
+                "DELETE FROM groups WHERE id NOT IN (SELECT group_id FROM members)"
             )
         for target in self.store.focus_candidates(now):
             for band in ("low", "high"):

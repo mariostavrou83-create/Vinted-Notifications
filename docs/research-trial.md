@@ -48,8 +48,9 @@ in each band. Comparables need matching brand/category and identifying title
 or description terms. Generic brand + garment names do not suffice. A used
 item cannot be valued using higher-condition new-tag comparables.
 
-Every sale requires an explicit native sold signal and publication-age bounds
-of no more than 24 hours. Removed/reserved/unknown listings are not sales.
+Every sale requires an explicit native sold signal from the past 14 days and
+publication-age bounds of no more than 24 hours. Removed/reserved/unknown
+listings are not sales.
 Prices are the last visible asks, not accepted-offer or paid prices. The resale
 estimate uses the lower quartile of matched premium sold asks less 10%. Buying
 costs assume 5% + 70p buyer fees and £2.20 postage; margin also reserves £3.
@@ -69,6 +70,9 @@ stock URLs, supporting examples, actual counters and guard state. Empty results
 must be reported honestly; provisional asking-price patterns are not buying
 recommendations. Detail retention stays bounded to roughly 12,000 items plus
 protected cohorts and 50,000 source sightings; image binaries are not stored.
+Hourly maintenance removes read/health logs after 30 days, native check history
+after 60 days, and settled item records not seen for 60 days. The frozen
+comparison result is retained separately.
 
 ## Operations
 

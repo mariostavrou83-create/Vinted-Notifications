@@ -132,6 +132,15 @@ class DailyTests(unittest.TestCase):
             )
         self.assertFalse(self.engine.snapshot(self.now)["ready"])
 
+    def test_old_sales_do_not_claim_that_last_months_market_is_still_fast(self):
+        self.evidence()
+        with closing(self.store.connect()) as c, c:
+            c.execute(
+                "UPDATE items SET sold_at=? WHERE state='sold'",
+                (self.now - 15 * trial.DAY,),
+            )
+        self.assertFalse(self.engine.snapshot(self.now)["ready"])
+
     def test_same_brand_new_type_is_allowed_but_existing_type_is_excluded_at_every_price(
         self,
     ):
