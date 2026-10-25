@@ -156,6 +156,24 @@ class DailyTests(unittest.TestCase):
             )
         )
 
+    def test_research_looks_for_bargains_before_three_bargains_are_already_observed(
+        self,
+    ):
+        for brand in range(5):
+            items = []
+            for offset, price in enumerate((30, 40, 40)):
+                item = self.item(100 + brand * 10 + offset, price)
+                item.update(
+                    brand="Label" + str(brand),
+                    title="Label" + str(brand) + " Horizon zip jacket",
+                )
+                items.append(item)
+            self.store.ingest("broad", items, self.now, price_band="high")
+        targets = self.store.focus_candidates(self.now)
+        self.assertEqual(len(targets), 4)
+        self.assertTrue(all(x["cheap_arrivals"] == 0 for x in targets))
+        self.assertFalse(self.engine.snapshot(self.now)["ready"])
+
     def test_daily_cohort_budget_and_reserved_stock_slots_survive_restart(self):
         items = [self.item(i, 10) for i in range(100, 230)]
         self.store.ingest("hybrid", items, self.now, source="focus", price_band="low")
@@ -214,15 +232,20 @@ class DailyTests(unittest.TestCase):
 
     def test_network_backoff_does_not_get_shortened_by_healthy_alert_samples(self):
         for i in range(5):
-            with closing(self.store.connect()) as c,c:
-                identity=c.execute("INSERT INTO reads(started,arm,kind) VALUES(?,'shared','outcome')",(self.now,)).lastrowid
-            self.store.finish_read(identity,'read_unavailable',0,0,self.now)
-        deadline=self.store.state(self.now)['pause_until']
-        self.assertGreater(deadline,self.now+180)
-        for offset,p95 in [(60,3.1),(120,2.5),(180,2.5)]:
-            self.feed(self.now+offset,p95)
-        self.assertGreaterEqual(self.store.state(self.now+180)['pause_until'],deadline)
-        self.assertFalse(self.store.can_read('broad',self.now+180))
+            with closing(self.store.connect()) as c, c:
+                identity = c.execute(
+                    "INSERT INTO reads(started,arm,kind) VALUES(?,'shared','outcome')",
+                    (self.now,),
+                ).lastrowid
+            self.store.finish_read(identity, "read_unavailable", 0, 0, self.now)
+        deadline = self.store.state(self.now)["pause_until"]
+        self.assertGreater(deadline, self.now + 180)
+        for offset, p95 in [(60, 3.1), (120, 2.5), (180, 2.5)]:
+            self.feed(self.now + offset, p95)
+        self.assertGreaterEqual(
+            self.store.state(self.now + 180)["pause_until"], deadline
+        )
+        self.assertFalse(self.store.can_read("broad", self.now + 180))
 
     def test_scheduler_keeps_one_network_job_and_a_persisted_gap(self):
         worker = trial.Worker(self.store, "https://unused.invalid", "x" * 40)

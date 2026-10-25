@@ -1360,8 +1360,15 @@ class Store:
         candidates = [
             x
             for x in pool
-            if x["cheap_arrivals"] >= 3
-            and x["premium_listings"] >= 3
+            if (
+                daily
+                and x["count"] >= 3
+                and x["sellers"] >= 3
+                and x["high_floor"] >= 3500
+                or not daily
+                and x["cheap_arrivals"] >= 3
+                and x["premium_listings"] >= 3
+            )
             and x["buy_limit"] >= 400
             and not (
                 x["cheap_tracked"] + x["premium_tracked"] >= 12
@@ -1373,6 +1380,7 @@ class Store:
             key=lambda x: (
                 -(x["cheap_sold"] + x["premium_sold"]),
                 -min(x["cheap_arrivals"], x["premium_listings"]),
+                -x["count"],
             ),
         )
         selected = []
