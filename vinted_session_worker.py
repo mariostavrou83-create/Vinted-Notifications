@@ -15,6 +15,7 @@ from contextlib import closing
 
 import vinted_buyer as buyer
 from search_settings import connection
+from vinted_buyer_priority import yield_to_purchase
 
 logger = logging.getLogger(__name__)
 # Start early enough for the longest normal cooldown and next 60-second tick
@@ -160,6 +161,7 @@ def check_account_health():
     client = None
     try:
         with buyer.exclusive():
+            yield_to_purchase()
             now = time.time()
             with closing(connection()) as conn, conn:
                 conn.execute("BEGIN IMMEDIATE")
@@ -383,6 +385,7 @@ def maintain_connection():
     """No purchases: renew only when due, cool down ambiguous failures."""
     try:
         with buyer.exclusive():
+            yield_to_purchase()
             now = time.time()
             with closing(connection()) as conn:
                 row = conn.execute(

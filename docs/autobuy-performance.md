@@ -1,5 +1,40 @@
 # Autobuy latency investigation — 9 October 2026
 
+## Owner stop and purchase priority — 26 October 2026
+
+An active Telegram purchase now shows **Stop autobuy** on the same item alert,
+including purchases started by a BUY reply. The button is bound to that alert,
+item and a fresh attempt token. It withdraws permission before payment and waits
+for any current request to finish. The account-lock wait checks Stop every 50 ms.
+The worker retains its locks until it exits; duplicate taps/replies acknowledge
+the running attempt immediately and cannot queue an unintended retry.
+
+Stop and the durable `paying` write share one atomic gate. If Stop wins, there is
+no payment POST; if submission has already begun, Stop explicitly reports that it
+is too late and leaves reconciliation intact. No bank action or completed order
+is cancelled. A stopped claimed attempt is saved as `cancelled`; only a fresh
+owner action can retry it. Old stop tokens cannot cancel a later attempt. UI task
+cancellation still drains the original worker as before; it is not an owner Stop.
+
+The 19:52 UTC owner purchase took 15.199 seconds in purchase work, including
+2.464 seconds building checkout, 1.278 seconds loading choices, 2.861 seconds
+applying choices and 4.687 seconds awaiting payment. Another tap waited 1.152
+seconds for the buyer lock. These timings establish upstream wait and shared
+account contention; they do not prove that all missed items were sold due to it.
+
+Waiting owner purchases now register a shared local file lock. Background offer
+work yields between account, inventory, conversation and send preparation steps;
+idle account checks yield before making requests. An in-flight write is finished
+and saved before yielding. Deferred offer jobs remain queued, with no false
+network failure or retry of an uncertain offer. Lock markers disappear when their
+file descriptors close, including process exit.
+
+This removes avoidable background queueing without adding workers, faster scans,
+HTTP requests or replicas. It cannot shorten Vinted's own payment response. All
+existing fresh account, listing, checkout, delivery/card, total-cost and uncertain
+payment guards remain. Testing uses fictional purchases and races; a live speed
+improvement requires subsequent owner-triggered purchases, not test purchases.
+
 The goal is a 5–10 second manual Telegram purchase without weakening the working
 UK buyer session, delivery preferences, spending limits or payment idempotency.
 That latency has not yet been demonstrated by a live purchase with these changes.

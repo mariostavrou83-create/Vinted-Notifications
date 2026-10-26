@@ -68,8 +68,11 @@ class LeRobot:
             self.app.add_handler(
                 CallbackQueryHandler(
                     buy_callback,
-                    pattern=r"^buy:(click|status)$|^buy:resolve:(got|miss):[0-9]{1,24}:[0-9a-f]{16}$",
+                    pattern=r"^buy:(click|status)$|^buy:stop:[0-9a-f]{16}$|^buy:resolve:(got|miss):[0-9]{1,24}:[0-9a-f]{16}$",
                 )
+            )
+            logger.info(
+                "Telegram Autobuy stop controls ready; cancellation before payment; owner purchases have background priority"
             )
 
             # BUY replies use the same private alert and purchase controls.

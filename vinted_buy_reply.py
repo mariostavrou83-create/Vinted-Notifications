@@ -10,7 +10,7 @@ import photo_cards
 import vinted_buyer as buyer
 import vinted_buying as buying
 from logger import get_logger
-from vinted_telegram_progress import TelegramProgress
+from vinted_telegram_progress import TelegramProgress, active_item
 
 logger = get_logger(__name__)
 BUY_REPLY = re.compile(r"\A\s*buy\s*\Z", re.IGNORECASE)
@@ -68,7 +68,14 @@ async def reply_buy(update, context):
         return
 
     # Use the replied-to message ID, never a newer alert or a caption's URL.
-    async with buying.purchase_lock(source.message_id):
+    lock = buying.purchase_lock(source.message_id)
+    if lock.locked():
+        await send_status(
+            message,
+            "This autobuy is already running. Use Stop autobuy on its alert to cancel before payment.",
+        )
+        return
+    async with lock:
         saved = photo_cards.recover("vinted", source)
         if not saved:
             await send_status(
@@ -78,10 +85,20 @@ async def reply_buy(update, context):
             )
             return
         row, _, _ = saved
+        if active_item(row["item_id"]):
+            await send_status(
+                message,
+                "This autobuy is already running. Check its latest status or use Stop autobuy before payment.",
+            )
+            return
         photo_cards.control_health("vinted", "click")
         previous = buying.result(row["item_id"])
         progress = None
-        if previous and previous["state"] not in ("failed_before_payment", "preparing"):
+        if previous and previous["state"] not in (
+            "failed_before_payment",
+            "preparing",
+            "cancelled",
+        ):
             outcome = previous
             text = previous["message"] + "\nNo payment was sent again."
         else:
@@ -140,6 +157,7 @@ async def reply_buy(update, context):
             if previous and previous["state"] not in (
                 "failed_before_payment",
                 "preparing",
+                "cancelled",
             ):
                 text += "\nNo payment was sent again."
         notification = send_status(message, text)

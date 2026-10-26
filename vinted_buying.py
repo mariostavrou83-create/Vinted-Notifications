@@ -19,6 +19,14 @@ import vinted_buyer as buyer
 from logger import get_logger
 from search_settings import connection
 from vinted_progress import bind_progress, report
+from vinted_purchase_control import (
+    STOPPED,
+    checkpoint,
+    payment_gate,
+)
+from vinted_purchase_control import (
+    current as purchase_control,
+)
 from vinted_timing import timed_operation
 
 logger = get_logger(__name__)
@@ -92,12 +100,13 @@ def history():
 
 
 def claim(row, *, recover_preparing=False):
+    checkpoint()
     with closing(connection()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
         saved = conn.execute(
             "SELECT * FROM vinted_buy_attempts WHERE item_id=?", (row["item_id"],)
         ).fetchone()
-        retryable = {"failed_before_payment"}
+        retryable = {"failed_before_payment", "cancelled"}
         if recover_preparing:
             # Only the caller holding buyer.exclusive() may recover this state:
             # no live checkout can hold the same process-wide lock. Payment is
@@ -890,6 +899,7 @@ def preferred_payment(payment, last4):
 
 def configure_checkout_choices(client, checkout, config):
     """Select only the owner's preferences through the current first-party API."""
+    checkpoint()
     preferences = choice_preferences(config)
     if preferences == {"pickup_mode": "saved", "preferred_card_last4": ""}:
         return checkout
@@ -931,6 +941,7 @@ def configure_checkout_choices(client, checkout, config):
         if change:
             changes["payment_method"] = change
     if changes:
+        checkpoint()
         updated = client.request(
             "PUT", f"/api/v2/purchases/{purchase_id}/checkout", {"components": changes}
         )
@@ -1440,7 +1451,16 @@ def buy_checkout_quote(token, *, alert_row=None):
     item_id, purchase_id = quote["item_id"], quote["checkout_id"]
     report("waiting")
     with buyer.exclusive(wait_seconds=45):
+        checkpoint()
         saved = result(item_id)
+        control = purchase_control()
+        if (
+            saved
+            and saved["state"] == "cancelled"
+            and control
+            and saved["updated"] >= control.started
+        ):
+            return saved
         if saved and saved["state"] == "closed":
             return saved
         config = buyer.settings()
@@ -1494,7 +1514,9 @@ def buy_checkout_quote(token, *, alert_row=None):
         phase = "checking your buyer account"
         try:
             report("checking_account")
+            checkpoint()
             client = buyer.connected_client()
+            checkpoint()
             record(
                 item_id,
                 "preparing",
@@ -1503,12 +1525,14 @@ def buy_checkout_quote(token, *, alert_row=None):
             )
             phase = "checking the quoted checkout"
             report("loading_choices")
+            checkpoint()
             data = client.request("PUT", f"/api/v2/purchases/{purchase_id}/checkout")
             checkout = data.get("checkout")
             if not isinstance(checkout, dict) or str(checkout.get("id")) != purchase_id:
                 raise buyer.BuyerError("Vinted did not confirm the selected checkout.")
             phase = "confirming your delivery and payment preferences"
             report("selecting_delivery")
+            checkpoint()
             checkout = configure_checkout_choices(client, checkout, config)
             if checkout_choice_details(checkout)["signature"] != quote.get("choices"):
                 raise buyer.BuyerError(
@@ -1547,14 +1571,15 @@ def buy_checkout_quote(token, *, alert_row=None):
                 )
             info = saved_browser_info()
             guard_new_payment(item_id)
-            record(
-                item_id,
-                "paying",
-                "Payment submitted; awaiting Vinted confirmation",
-                total=total,
-                buyer_id=current["user_id"],
-                transaction_id=quote.get("transaction_id"),
-            )
+            with payment_gate():
+                record(
+                    item_id,
+                    "paying",
+                    "Payment submitted; awaiting Vinted confirmation",
+                    total=total,
+                    buyer_id=current["user_id"],
+                    transaction_id=quote.get("transaction_id"),
+                )
             payment_started = True
             phase = "submitting payment"
             report("submitting_payment")
@@ -1591,7 +1616,15 @@ def buy_checkout_quote(token, *, alert_row=None):
                 )
             record(
                 item_id,
-                "unknown" if payment_started else "failed_before_payment",
+                (
+                    "unknown"
+                    if payment_started
+                    else (
+                        "cancelled"
+                        if getattr(exc, "reason", None) == "cancelled"
+                        else "failed_before_payment"
+                    )
+                ),
                 outcome,
             )
         finally:
@@ -1659,7 +1692,15 @@ def check_listing(item_id):
 def buy(row, *, progress=None):
     """Run the unchanged authorised purchase once with optional stage feedback."""
     with bind_progress(progress):
-        return _buy(row)
+        try:
+            checkpoint()
+            return _buy(row)
+        except buyer.BuyerError as exc:
+            if exc.reason != "cancelled":
+                raise
+            # A stop while waiting for the account lock has no claimed attempt
+            # to overwrite. It is still persisted on the exact Telegram card.
+            return {"state": "cancelled", "message": STOPPED, "reason": "cancelled"}
 
 
 def _buy(row):
@@ -1678,6 +1719,16 @@ def _buy(row):
     # making the owner tap again. Maintenance itself never waits on a purchase.
     report("waiting")
     with buyer.exclusive(wait_seconds=45):
+        checkpoint()
+        saved = result(item_id)
+        control = purchase_control()
+        if (
+            saved
+            and saved["state"] == "cancelled"
+            and control
+            and saved["updated"] >= control.started
+        ):
+            return saved
         config, limits = ready(row)
         guard_new_payment(item_id)
         if not claim(row, recover_preparing=True):
@@ -1688,12 +1739,16 @@ def _buy(row):
         reason = None
         try:
             report("checking_account")
+            checkpoint()
             client = buyer.connected_client()
+            checkpoint()
             phase = "checking the listing"
             report("checking_item")
+            checkpoint()
             current_price, seller = verified_listing(client, row, config, limits)
             phase = "preparing the purchase"
             report("opening_checkout")
+            checkpoint()
             conversation = client.request(
                 "POST",
                 "/api/v2/conversations",
@@ -1708,6 +1763,7 @@ def _buy(row):
                     "Vinted did not prepare a purchase for this item."
                 )
             phase = "building the checkout"
+            checkpoint()
             built = client.request(
                 "POST",
                 "/api/v2/purchases/checkout/build",
@@ -1725,6 +1781,7 @@ def _buy(row):
             )
             phase = "loading delivery and payment choices"
             report("loading_choices")
+            checkpoint()
             updated = client.request(
                 "PUT",
                 f"/api/v2/purchases/{purchase_id}/checkout",
@@ -1765,6 +1822,7 @@ def _buy(row):
             if not config["enabled"] or not config["connected"]:
                 raise buyer.BuyerError("Autobuy was disabled before payment.")
             report("selecting_delivery")
+            checkpoint()
             checkout = configure_checkout_choices(client, checkout, config)
             current = buyer.settings()
             if (
@@ -1783,14 +1841,15 @@ def _buy(row):
             )
             info = saved_browser_info()
             guard_new_payment(item_id)
-            record(
-                item_id,
-                "paying",
-                "Payment submitted; awaiting Vinted confirmation",
-                total=total,
-                buyer_id=current["user_id"],
-                transaction_id=str(transaction_id),
-            )
+            with payment_gate():
+                record(
+                    item_id,
+                    "paying",
+                    "Payment submitted; awaiting Vinted confirmation",
+                    total=total,
+                    buyer_id=current["user_id"],
+                    transaction_id=str(transaction_id),
+                )
             payment_started = True
             phase = "submitting payment"
             report("submitting_payment")
@@ -1828,7 +1887,15 @@ def _buy(row):
             )
             record(
                 item_id,
-                "unknown" if payment_started else "failed_before_payment",
+                (
+                    "unknown"
+                    if payment_started
+                    else (
+                        "cancelled"
+                        if getattr(exc, "reason", None) == "cancelled"
+                        else "failed_before_payment"
+                    )
+                ),
                 (
                     "Payment result is unconfirmed. Check Vinted before retrying."
                     if payment_started
@@ -1845,7 +1912,15 @@ def _buy(row):
             )
             record(
                 item_id,
-                "unknown" if payment_started else "failed_before_payment",
+                (
+                    "unknown"
+                    if payment_started
+                    else (
+                        "cancelled"
+                        if getattr(exc, "reason", None) == "cancelled"
+                        else "failed_before_payment"
+                    )
+                ),
                 (
                     "Payment result is unconfirmed. Check Vinted before retrying."
                     if payment_started
@@ -2034,6 +2109,8 @@ def feedback_buttons(row, feedback=None):
     reason = feedback.get("reason")
     label = {
         "in_progress": "Autobuy running · latest stage",
+        "stopping": "Stopping autobuy…",
+        "cancelled": "Autobuy cancelled · no payment sent",
         "setup_required": "Autobuy needs setup · see why",
         "failed_before_payment": "Autobuy stopped · see why",
         "paid": "Paid ✓ · details",
@@ -2074,8 +2151,25 @@ def feedback_buttons(row, feedback=None):
             "unexpected_error": "Checkout error · details",
         }.get(reason, label)
     buttons = [[InlineKeyboardButton(label, callback_data="buy:status")]]
-    if state in ("in_progress", "closed"):
-        # Live stages are informational, with no resume or payment action.
+    if state in ("in_progress", "stopping", "closed"):
+        token = feedback.get("stop_token")
+        if (
+            state == "in_progress"
+            and isinstance(token, str)
+            and re.fullmatch(r"[0-9a-f]{16}", token)
+        ):
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        "Stop autobuy", callback_data="buy:stop:" + token
+                    )
+                ]
+            )
+        return buttons
+    if state == "cancelled":
+        buttons.append(
+            [InlineKeyboardButton("Retry Autobuy", callback_data="buy:click")]
+        )
         return buttons
     if state == "preparing":
         buttons.append(
@@ -2176,6 +2270,10 @@ async def show_purchase_feedback(bot, message, outcome):
                 and type(latest_updated) in (int, float)
                 and math.isfinite(latest_updated)
                 and latest_updated > updated
+                and not (
+                    outcome.get("state") == "stopping"
+                    and latest.get("state") == "preparing"
+                )
             ):
                 # A status check may have reconciled payment while the photo
                 # edit delayed this display. Its newer durable state wins;
@@ -2206,6 +2304,7 @@ async def show_alert_feedback(bot, message, outcome):
             "reason",
             "action_url",
             "owner_resolution",
+            "stop_token",
         )
     }
     details = dict(details, buy_feedback=feedback)
@@ -2278,7 +2377,13 @@ async def show_alert_feedback(bot, message, outcome):
 
 async def callback(update, context):
     import photo_cards
-    from vinted_telegram_progress import TelegramProgress, active_status
+    from vinted_telegram_progress import (
+        TelegramProgress,
+        active_item,
+        active_status,
+        show_stop_feedback,
+        stop_purchase,
+    )
 
     query = update.callback_query
     chat_id = str(db.get_parameter("telegram_chat_id") or "").strip()
@@ -2318,6 +2423,32 @@ async def callback(update, context):
         return
     row, details, _card = saved
     previous = result(row["item_id"])
+    if (getattr(query, "data", "") or "").startswith("buy:stop:"):
+        token = query.data.removeprefix("buy:stop:")
+        outcome = stop_purchase(query.message.message_id, row["item_id"], token)
+        logger.info("Autobuy stop item=%s state=%s", row["item_id"], outcome["state"])
+        if (
+            outcome["state"] == "finished"
+            and previous
+            and previous["state"]
+            in ("paying", "unknown", "needs_action", "paid", "payment_failed")
+        ):
+            outcome["message"] = (
+                "Payment has already started or finished, so the bot cannot stop it. Check the result and your Vinted purchases."
+            )
+        await photo_cards.answer(query, outcome["message"][:190], alert=True)
+        if outcome["state"] == "stopping":
+            await show_stop_feedback(
+                context.bot, query.message, row["item_id"], token, outcome
+            )
+        elif previous and outcome["state"] == "finished":
+            await show_purchase_feedback(context.bot, query.message, previous)
+        return
+    if (
+        getattr(query, "data", "") != "buy:click"
+        and getattr(query, "data", "") != "buy:status"
+    ):
+        return
     if getattr(query, "data", "") == "buy:status":
         stage = active_status(query.message.message_id, row["item_id"], previous)
         if stage:
@@ -2356,8 +2487,19 @@ async def callback(update, context):
             query, (message or "Check your Vinted purchases.")[:190], alert=True
         )
         return
+    if active_item(row["item_id"]):
+        await photo_cards.answer(
+            query,
+            "This autobuy is already running. Check its latest status or use Stop autobuy before payment.",
+            alert=True,
+        )
+        return
     logger.info("Autobuy tap item=%s search=%s", row["item_id"], row.get("query_id"))
-    if previous and previous["state"] not in ("failed_before_payment", "preparing"):
+    if previous and previous["state"] not in (
+        "failed_before_payment",
+        "preparing",
+        "cancelled",
+    ):
         await photo_cards.answer(query, previous["message"][:190], alert=True)
         await show_purchase_feedback(context.bot, query.message, previous)
         return
@@ -2374,11 +2516,23 @@ async def callback(update, context):
             {"state": "setup_required", "message": str(exc), "reason": exc.reason},
         )
         return
-    async with purchase_lock(query.message.message_id):
+    lock = purchase_lock(query.message.message_id)
+    if lock.locked():
+        await photo_cards.answer(
+            query,
+            "This autobuy is already running. Use Stop autobuy on its alert to cancel before payment.",
+            alert=True,
+        )
+        return
+    async with lock:
         # Another tap may have completed while this callback waited for the
         # same alert. Reuse its durable result rather than start buying again.
         previous = result(row["item_id"])
-        if previous and previous["state"] not in ("failed_before_payment", "preparing"):
+        if previous and previous["state"] not in (
+            "failed_before_payment",
+            "preparing",
+            "cancelled",
+        ):
             await photo_cards.answer(query, previous["message"][:190], alert=True)
             await show_purchase_feedback(context.bot, query.message, previous)
             return

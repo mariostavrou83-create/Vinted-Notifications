@@ -253,7 +253,7 @@ class FeedbackTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             photo_cards.load("vinted", 42)[1]["buy_feedback"]["state"], "paid"
         )
 
-    async def test_queued_duplicate_tap_reads_saved_result_under_same_alert_lock(self):
+    async def test_duplicate_tap_acknowledges_running_without_queueing_a_retry(self):
         self.enable()
         loop = asyncio.get_running_loop()
         purchase_started = asyncio.Event()
@@ -283,7 +283,7 @@ class FeedbackTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         buy.assert_called_once()
         self.query.answer.assert_awaited()
         self.assertEqual(self.query.answer.await_count, 2)
-        self.assertIn("Paid", self.query.answer.call_args.args[0])
+        self.assertIn("already running", self.query.answer.call_args.args[0])
         self.assertEqual(buying.result("110")["state"], "paid")
 
     async def test_gallery_image_wait_does_not_delay_purchase_or_acknowledgement(self):

@@ -8,9 +8,70 @@ import time
 
 from logger import get_logger
 from vinted_progress import STAGE_LABELS
+from vinted_purchase_control import PurchaseControl, bind_control
 
 logger = get_logger(__name__)
 _active = {}
+
+
+def active_item(item_id):
+    loop = asyncio.get_running_loop()
+    return next(
+        (
+            bridge
+            for (owner_loop, _), bridge in _active.items()
+            if owner_loop is loop and bridge.item_id == str(item_id) and bridge.running
+        ),
+        None,
+    )
+
+
+def stop_purchase(message_id, item_id, token):
+    """Only the exact active card and attempt token can withdraw permission."""
+    bridge = _active.get((asyncio.get_running_loop(), message_id))
+    if not bridge or bridge.item_id != str(item_id) or bridge.control.token != token:
+        return {
+            "state": "finished",
+            "message": "This stop button belongs to an earlier attempt. Check the latest autobuy status.",
+        }
+    state = bridge.control.stop()
+    if state == "stopping":
+        return {
+            "state": state,
+            "message": "Stopping autobuy. No payment will be sent; waiting for the current request to finish.",
+            "updated": bridge.control.stopped_at,
+        }
+    if state == "too_late":
+        return {
+            "state": state,
+            "message": "Payment has already started, so the bot cannot stop it. Check the payment result and your Vinted purchases.",
+        }
+    return {
+        "state": state,
+        "message": "This autobuy has finished. Check its latest result.",
+    }
+
+
+async def show_stop_feedback(bot, message, item_id, token, outcome):
+    import photo_cards
+    import vinted_buying as buying
+
+    async with photo_cards.lock("vinted", message.message_id):
+        bridge = _active.get((asyncio.get_running_loop(), message.message_id))
+        if (
+            not bridge
+            or bridge.item_id != str(item_id)
+            or bridge.control.token != token
+            or bridge.control.finished
+            or not bridge.control.requested.is_set()
+        ):
+            return
+        durable = buying.result(item_id)
+        if durable and durable.get("state") != "preparing":
+            return
+        # Recheck under the card lock after the acknowledgement. A completed
+        # stop before any durable claim must also beat this transient display.
+        await buying.show_alert_feedback(bot, message, outcome)
 
 
 def _display_error(exc):
@@ -32,6 +93,8 @@ def active_status(message_id, item_id, durable):
     ):
         return None
     event = bridge.latest
+    if bridge.control.requested.is_set():
+        return "Stopping autobuy. No payment will be sent."
     if event:
         _, stage, published = event
         updated = durable.get("updated") if durable else None
@@ -61,6 +124,7 @@ class TelegramProgress:
         self._last_edit = None
         self._purchase_task = None
         self.cancelled = False
+        self.control = PurchaseControl(item_id)
         _active[self.key] = self
         self._task = asyncio.create_task(self._run())
 
@@ -74,9 +138,12 @@ class TelegramProgress:
 
     async def execute(self, purchase, row):
         """Keep the one authorised invocation independent of UI cancellation."""
-        self._purchase_task = asyncio.create_task(
-            asyncio.to_thread(purchase, row, progress=self.publish)
-        )
+
+        def run():
+            with bind_control(self.control):
+                return purchase(row, progress=self.publish)
+
+        self._purchase_task = asyncio.create_task(asyncio.to_thread(run))
         self._purchase_task.add_done_callback(self._purchase_finished)
         return await self.settle(self._purchase_task)
 
@@ -97,6 +164,7 @@ class TelegramProgress:
                 self.close()
 
     def _purchase_finished(self, task):
+        self.control.finish()
         if _active.get(self.key) is self:
             _active.pop(self.key)
         # A cancelled UI caller may no longer be awaiting this task. Consume
@@ -159,7 +227,7 @@ class TelegramProgress:
             if delay:
                 try:
                     await asyncio.wait_for(self._wake.wait(), delay)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
                 else:
                     continue
@@ -180,6 +248,8 @@ class TelegramProgress:
 
         async with photo_cards.lock("vinted", self.message.message_id):
             if self.closed or _active.get(self.key) is not self:
+                return False
+            if self.control.requested.is_set():
                 return False
             # An image edit may have delayed us while several stages arrived.
             if self._pending and self._pending[0] > event[0]:
@@ -209,6 +279,15 @@ class TelegramProgress:
             await buying.show_alert_feedback(
                 self.bot,
                 self.message,
-                {"state": "in_progress", "message": STAGE_LABELS[stage]},
+                {
+                    "state": "in_progress",
+                    "message": STAGE_LABELS[stage],
+                    "stop_token": (
+                        None
+                        if self.control.paying
+                        or (durable and durable.get("state") == "paying")
+                        else self.control.token
+                    ),
+                },
             )
             return True

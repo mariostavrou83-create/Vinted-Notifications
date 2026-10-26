@@ -714,26 +714,31 @@ def migrate(conn):
 @contextmanager
 def exclusive(*, wait_seconds=0):
     path = Path(db.DB_PATH).resolve().parent / "vinted-buyer.lock"
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        started = time.perf_counter()
-        deadline = time.monotonic() + wait_seconds
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise BuyerError(
-                        "A buyer request is already running. Please wait for it to finish.",
-                        reason="busy",
-                    ) from None
-                time.sleep(min(0.05, remaining))
-        log_duration("buyer_lock_wait", started)
-        yield
-    finally:
-        os.close(fd)
+    from vinted_buyer_priority import purchase_waiter
+    from vinted_purchase_control import checkpoint
+
+    with purchase_waiter() if wait_seconds > 0 else nullcontext():
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            started = time.perf_counter()
+            deadline = time.monotonic() + wait_seconds
+            while True:
+                checkpoint()
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise BuyerError(
+                            "A buyer request is already running. Please wait for it to finish.",
+                            reason="busy",
+                        ) from None
+                    time.sleep(min(0.05, remaining))
+            log_duration("buyer_lock_wait", started)
+            yield
+        finally:
+            os.close(fd)
 
 
 def cipher():
@@ -1165,6 +1170,9 @@ class Client:
             or self.solver_attempted
         ):
             return False
+        from vinted_purchase_control import checkpoint
+
+        checkpoint()
         guard = getattr(self, "_reconnect_guard", None)
         if guard is not None:
             # Reconnect cancellation must stop a new paid solver after an
@@ -1368,6 +1376,9 @@ class Client:
             public.session.close()
 
     def request(self, method, path, body=None, *, allow_challenge=False, params=None):
+        from vinted_purchase_control import checkpoint
+
+        checkpoint()
         notifications_gateway = path == NOTIFICATIONS_PATH
         pickup_gateway = bool(
             re.fullmatch(
@@ -2498,13 +2509,13 @@ def connected_client(
             except (sqlite3.Error, OSError):
                 # Optional recovery metadata must not obscure the auth failure.
                 pass
-        if renewal_started:
+        if renewal_started and exc.reason != "cancelled":
             from vinted_session_worker import record_renewal_result
 
             record_renewal_result(exc, session_fingerprint=exc.session_fingerprint)
         # A local backoff decision is not a new Vinted refusal. Keep the
         # original upstream reason/status and notice incident unchanged.
-        if exc.reason not in ("renewal_cooldown", "renewal_blocked"):
+        if exc.reason not in ("renewal_cooldown", "renewal_blocked", "cancelled"):
             record_auth(exc.reason, exc.stage, exc.status)
             from vinted_connection_notices import record_failure
 

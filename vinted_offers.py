@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 import vinted_buyer as buyer
 from search_settings import connection
+from vinted_buyer_priority import yield_to_purchase
 
 logger = logging.getLogger(__name__)
 SEND_GAP = 180
@@ -115,6 +116,7 @@ class SellerItems:
         # Ownership must be explicit on both records. Do not infer it merely
         # because a recommendation appeared in the wardrobe response.
         checked_item({"item": record}, job, "penny")
+        yield_to_purchase()
         data = client.listing_page(
             buyer.BASE + "/items/" + job["item_id"], job["item_id"]
         )
@@ -1030,7 +1032,9 @@ class OfferWorker:
     def process(self, client, config, job):
         sending = False
         try:
+            yield_to_purchase()
             info = checked_item(self.item_reader(client, job), job, config["rounding"])
+            yield_to_purchase()
             if config["mode"] == "preview":
                 _finish(job["id"], "ready", checked_at=self.clock(), **info)
                 return
@@ -1060,9 +1064,11 @@ class OfferWorker:
                         "UPDATE vinted_offer_jobs SET conversation_id=? WHERE id=? AND status='checking'",
                         (conv_id, job["id"]),
                     )
+            yield_to_purchase()
             conv_id, transaction_id = checked_conversation(
                 client.request("GET", f"/api/v2/conversations/{conv_id}"), job
             )
+            yield_to_purchase()
             with closing(connection()) as conn, conn:
                 conn.execute("BEGIN IMMEDIATE")
                 current = dict(
@@ -1164,7 +1170,9 @@ class OfferWorker:
                 # Even a refused/errored write is never automatically replayed.
                 _finish(job["id"], "uncertain", "uncertain")
                 pause(reason if reason != "network" else "uncertain")
-            elif reason == "network" or exc.reason == "busy":
+            elif exc.reason == "busy":
+                _finish(job["id"], "queued")
+            elif reason == "network":
                 _finish(job["id"], "queued", "network")
                 with closing(connection()) as conn, conn:
                     conn.execute(
@@ -1230,7 +1238,9 @@ class OfferWorker:
         client = None
         try:
             with buyer.exclusive():
+                yield_to_purchase()
                 client = self.client_factory()
+                yield_to_purchase()
                 if (
                     not client._verified_session
                     or client._verified_session[0] != config["account_id"]
@@ -1245,11 +1255,13 @@ class OfferWorker:
                     self.scan(client, config)
                     config = state()
                 # At most one history page per tick cannot starve ready offers.
+                yield_to_purchase()
                 job = self.claim(config)
                 if job:
                     self.process(client, config, job)
                 config = state()
                 if config["mode"] != "paused" and config["next_scan"] <= self.clock():
+                    yield_to_purchase()
                     self.scan(client, config)
         except OfferCheck as exc:
             pause(exc.reason)

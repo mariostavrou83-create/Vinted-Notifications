@@ -81,12 +81,13 @@ class TelegramLifecycleTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             request=self.request,
             get_updates_request=self.request,
         )
-        with patch.object(
-            ApplicationBuilder, "_build_request", return_value=self.request
-        ), patch("telegram.Bot", return_value=legacy_bot), patch(
-            "db.get_parameter", side_effect=lambda key: values[key]
-        ), patch.object(
-            Application, "run_polling"
+        with (
+            patch.object(
+                ApplicationBuilder, "_build_request", return_value=self.request
+            ),
+            patch("telegram.Bot", return_value=legacy_bot),
+            patch("db.get_parameter", side_effect=lambda key: values[key]),
+            patch.object(Application, "run_polling"),
         ):
             self.robot = LeRobot(None)
         self.app = self.robot.app
@@ -103,8 +104,9 @@ class TelegramLifecycleTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
 
     async def start_worker(self):
         worker = ParkedWorker(self.app.bot, "123")
-        with patch("alert_delivery.VintedDeliveryWorker", return_value=worker), patch(
-            "db.get_parameter", return_value="123"
+        with (
+            patch("alert_delivery.VintedDeliveryWorker", return_value=worker),
+            patch("db.get_parameter", return_value="123"),
         ):
             await self.app.post_init(self.app)
         await asyncio.wait_for(worker.started.wait(), timeout=1)
@@ -172,24 +174,78 @@ class TelegramLifecycleTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
                         "message_id": 777,
                         "date": 1,
                         "chat": {"id": 123, "type": "private"},
-                        "from": {"id": 123456, "is_bot": True, "first_name": "Offline bot"},
+                        "from": {
+                            "id": 123456,
+                            "is_bot": True,
+                            "first_name": "Offline bot",
+                        },
                         "text": "Original Vinted alert",
                     },
                 },
             },
             self.app.bot,
         )
-        with patch.object(
-            photo_cards, "recover", return_value=({"item_id": "123"}, {}, {})
-        ) as recover, patch.object(
-            buying, "ready", side_effect=buyer.BuyerError("Autobuy is off.", reason="disabled")
-        ), patch.object(buying, "buy") as buy, patch.object(
-            buying, "show_alert_feedback", new_callable=AsyncMock
-        ), patch.object(Message, "reply_text", new_callable=AsyncMock) as status:
+        with (
+            patch.object(
+                photo_cards, "recover", return_value=({"item_id": "123"}, {}, {})
+            ) as recover,
+            patch.object(
+                buying,
+                "ready",
+                side_effect=buyer.BuyerError("Autobuy is off.", reason="disabled"),
+            ),
+            patch.object(buying, "buy") as buy,
+            patch.object(buying, "show_alert_feedback", new_callable=AsyncMock),
+            patch.object(Message, "reply_text", new_callable=AsyncMock) as status,
+        ):
             await self.app.process_update(update)
         recover.assert_called_once_with("vinted", update.message.reply_to_message)
         buy.assert_not_called()
         self.assertIn("Autobuy is off", status.call_args.args[0])
+
+    async def test_real_ptb_routes_stop_without_starting_a_purchase(self):
+        import photo_cards
+        import vinted_buying as buying
+        import vinted_telegram_progress
+
+        update = Update.de_json(
+            {
+                "update_id": 2,
+                "callback_query": {
+                    "id": "offline-stop",
+                    "chat_instance": "offline-private-chat",
+                    "from": {"id": 123, "is_bot": False, "first_name": "Owner"},
+                    "data": "buy:stop:" + "a" * 16,
+                    "message": {
+                        "message_id": 777,
+                        "date": 1,
+                        "chat": {"id": 123, "type": "private"},
+                        "from": {
+                            "id": 123456,
+                            "is_bot": True,
+                            "first_name": "Offline bot",
+                        },
+                        "text": "Original Vinted alert",
+                    },
+                },
+            },
+            self.app.bot,
+        )
+        with (
+            patch.object(
+                photo_cards, "recover", return_value=({"item_id": "123"}, {}, {})
+            ),
+            patch.object(photo_cards, "answer", new_callable=AsyncMock),
+            patch.object(
+                vinted_telegram_progress,
+                "stop_purchase",
+                return_value={"state": "finished", "message": "Finished"},
+            ) as stop,
+            patch.object(buying, "buy") as buy,
+        ):
+            await self.app.process_update(update)
+        stop.assert_called_once_with(777, "123", "a" * 16)
+        buy.assert_not_called()
 
 
 if __name__ == "__main__":

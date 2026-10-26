@@ -130,9 +130,13 @@ class BuyReplyTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_buy_replies_submit_one_payment(self):
         await asyncio.gather(self.send_buy(), self.send_buy())
         self.assertEqual(len(self.payments()), 1)
-        self.assertIn(
-            "No payment was sent again", self.message.reply_text.call_args.args[0]
+        self.assertTrue(
+            any(
+                "already running" in c.args[0]
+                for c in self.message.reply_text.call_args_list
+            )
         )
+        self.assertIn("Paid", self.message.reply_text.call_args.args[0])
 
     async def test_cancelled_final_reply_finishes_without_repeating_payment(self):
         final_started = asyncio.Event()
@@ -197,7 +201,9 @@ class BuyReplyTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
                 reply = asyncio.create_task(self.send_buy())
                 await asyncio.sleep(0)
                 buy.assert_called_once()
-                self.message.reply_text.assert_not_awaited()
+                self.assertIn(
+                    "already running", self.message.reply_text.call_args.args[0]
+                )
             finally:
                 release_purchase.set()
                 await asyncio.wait_for(
@@ -210,9 +216,7 @@ class BuyReplyTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             photo_cards.load("vinted", 777)[1]["buy_feedback"]["state"], "paid"
         )
-        self.assertIn(
-            "No payment was sent again", self.message.reply_text.call_args.args[0]
-        )
+        self.assertIn("already running", self.message.reply_text.call_args.args[0])
 
     async def test_buy_reply_pays_while_gallery_ui_lock_is_held(self):
         loop = asyncio.get_running_loop()
@@ -406,9 +410,13 @@ class BuyReplyTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(task, 2)
                 if duplicate:
                     await asyncio.wait_for(duplicate, 2)
-            self.assertIn(
-                "No payment was sent again", self.message.reply_text.call_args.args[0]
+            self.assertTrue(
+                any(
+                    "already running" in c.args[0]
+                    for c in self.message.reply_text.call_args_list
+                )
             )
+            self.assertIn("Paid", self.message.reply_text.call_args.args[0])
             await self.send_buy()
         buy.assert_called_once()
         self.assertEqual(buying.result("123")["state"], "paid")

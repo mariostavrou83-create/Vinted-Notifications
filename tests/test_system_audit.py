@@ -355,7 +355,7 @@ class ContentionTests(DatabaseFixture, unittest.TestCase):
             results = list(pool.map(lambda _: vinted_buying.claim(row), range(1000)))
         self.assertFalse(any(results))
 
-    def test_1000_shared_budget_attempts_never_exceed_reserve_across_callers(self):
+    def test_1000_shared_budget_attempts_never_exceed_allowance_across_callers(self):
         config = dict(ebay_store.configuration(), source="browse", daily_budget=100)
         accepted = 0
         for index in range(1000):
@@ -370,8 +370,9 @@ class ContentionTests(DatabaseFixture, unittest.TestCase):
                     ]
                     or 0
                 )
-            self.assertLessEqual(count, 90)
-        self.assertGreater(accepted, 90)  # The rolling window legitimately renews.
+            self.assertLessEqual(count, config["daily_budget"])
+        # The rolling window legitimately renews without the old 10% reserve.
+        self.assertGreater(accepted, config["daily_budget"])
         with ThreadPoolExecutor(max_workers=12) as pool:
             results = list(
                 pool.map(
