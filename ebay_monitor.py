@@ -10,6 +10,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from collections import Counter
 from contextlib import closing
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -254,10 +255,15 @@ def listing_url_matches(parsed, item_id):
     return view_item and params.get("item") == [item_id]
 
 
-def parse_item(raw, config, now, *, fresh_only=True):
+def parse_item(raw, config, now, *, fresh_only=True, rejections=None):
     """Return eligible data only. Unknown dates/prices never qualify as fresh bargains."""
-    if not isinstance(raw, dict):
+    def reject(reason):
+        if rejections is not None:
+            rejections[reason] += 1
         return None
+
+    if not isinstance(raw, dict):
+        return reject("invalid_result")
     created = timestamp(raw.get("itemOriginDate")) or timestamp(
         raw.get("itemCreationDate")
     )
@@ -271,13 +277,13 @@ def parse_item(raw, config, now, *, fresh_only=True):
         or len(url) > 4096
         or re.search(r"[\x00-\x20\x7f]", url)
     ):
-        return None
+        return reject("invalid_url")
     try:
         parsed = urlparse(url)
         if parsed.username or parsed.password or parsed.port not in (None, 443):
-            return None
+            return reject("invalid_url")
     except (TypeError, ValueError, AttributeError):
-        return None
+        return reject("invalid_url")
     if (
         not item_id.isdigit()
         or parsed.scheme != "https"
@@ -285,45 +291,45 @@ def parse_item(raw, config, now, *, fresh_only=True):
         not in ("www.ebay.co.uk", "www.ebay.com", "ebay.co.uk", "ebay.com")
         or not listing_url_matches(parsed, item_id)
     ):
-        return None
+        return reject("invalid_identity")
     public = raw.get("_dateSource") == "publicSearchMinute"
     # Browse includes the listing's leaf and ancestor category IDs. Never let
     # an unrelated result through an explicit saved category constraint.
     if config["category"] and not public:
         categories_raw = raw.get("categories") or []
         if not isinstance(categories_raw, list):
-            return None
+            return reject("category_unknown")
         categories = {
             str(category.get("categoryId"))
             for category in categories_raw
             if isinstance(category, dict)
         }
         if config["category"] not in categories:
-            return None
+            return reject("category_mismatch")
     precision = 59 if public else 0
     if (
         created is None
         or created > now + 60
         or (fresh_only and created + precision < now - MAX_AGE)
     ):
-        return None
+        return reject("listing_age_unverified_or_outside_window")
     end = timestamp(raw.get("itemEndDate"))
     if end is not None and end <= now:
-        return None
+        return reject("listing_ended")
     options = raw.get("buyingOptions") or []
     if not isinstance(options, list):
-        return None
+        return reject("invalid_buying_options")
     auction = config["buying"] == "auction" or "FIXED_PRICE" not in options
     if config["buying"] == "fixed" and "FIXED_PRICE" not in options:
-        return None
+        return reject("buying_option_mismatch")
     if config["buying"] == "auction" and "AUCTION" not in options:
-        return None
+        return reject("buying_option_mismatch")
     price = money(raw.get("currentBidPrice") if auction else raw.get("price"))
     # No current bid is sometimes supplied before the first bid; use start price.
     if price is None and auction:
         price = money(raw.get("price"))
     if price is None:
-        return None
+        return reject("price_unknown")
     shipping_options = raw.get("shippingOptions") or []
     shipping_values = [
         money(option.get("shippingCost"))
@@ -335,7 +341,7 @@ def parse_item(raw, config, now, *, fresh_only=True):
     compare = price
     if config["include_shipping"]:
         if shipping is None:
-            return None
+            return reject("shipping_unknown")
         compare += shipping
     shared = config.get("shared_alert_version") == 1
     allowance = buyer_protection_allowance(raw, price, public=public) if shared else 0
@@ -343,12 +349,12 @@ def parse_item(raw, config, now, *, fresh_only=True):
         # Shared total budgets always need a supplied delivery amount. Unknown
         # postage cannot become free just because a saved config is incomplete.
         if shipping is None:
-            return None
+            return reject("shipping_unknown")
         compare = price + shipping + allowance
     if config["min_price"] is not None and compare < config["min_price"]:
-        return None
+        return reject("below_minimum_budget")
     if config["max_price"] is not None and compare > config["max_price"]:
-        return None
+        return reject("above_maximum_budget")
     title = str(raw.get("title", ""))[:500]
     from ebay_images import extract
     from listing_text import clean_description
@@ -494,28 +500,42 @@ def record_snapshot(
             ):
                 warning = ""  # The newest page overlaps the preceding successful check.
         created_count = 0
+        flow = Counter(returned=len(items))
         for raw in items:
             if not isinstance(raw, dict):
+                flow["invalid_result"] += 1
                 continue
+            listed = timestamp(raw.get("itemOriginDate")) or timestamp(raw.get("itemCreationDate"))
+            if listed is not None and now - MAX_AGE <= listed <= now + 60:
+                flow["returned_recent"] += 1
             raw_id = str(raw.get("itemId") or raw.get("legacyItemId") or "")
             if not raw_id:
+                flow["invalid_identity"] += 1
                 continue
             from ebay_privacy import track_item
 
             if not track_item(conn, raw, raw_id):
+                flow["privacy_excluded"] += 1
                 continue
             inserted = conn.execute(
                 "INSERT OR IGNORE INTO ebay_seen VALUES (?,?,?)",
                 (search["id"], raw_id, now),
             ).rowcount
-            if not inserted or baseline is None:
+            if not inserted:
+                flow["already_seen"] += 1
                 continue
-            item = parse_item(raw, search["ebay"], now)
-            if (
-                not item
-                or item["created"] + (59 if item.get("public") else 0) <= baseline
-                or excluded_by(item["title"], search["exclusions"])
-            ):
+            if baseline is None:
+                flow["initial_baseline"] += 1
+                continue
+            flow["new_unseen"] += 1
+            item = parse_item(raw, search["ebay"], now, rejections=flow)
+            if not item:
+                continue
+            if item["created"] + (59 if item.get("public") else 0) <= baseline:
+                flow["predates_activation"] += 1
+                continue
+            if excluded_by(item["title"], search["exclusions"]):
+                flow["title_excluded"] += 1
                 continue
             from shared_matching import keyword_evidence
 
@@ -526,8 +546,10 @@ def record_snapshot(
                 description_complete=item.get("description_complete", False),
             )
             if proof["state"] == "absent":
+                flow["keywords_absent"] += 1
                 continue
             if proof["state"] == "unverified":
+                flow["description_verification"] += 1
                 from ebay_alerts import snapshot
                 from keyword_candidates import stage
 
@@ -579,6 +601,7 @@ def record_snapshot(
                 ),
             ).rowcount
             created_count += inserted
+            flow["queued" if inserted else "duplicate_alert"] += 1
             if inserted:
                 from ebay_alerts import snapshot
 
@@ -604,6 +627,9 @@ def record_snapshot(
                         received_at,
                     ),
                 )
+        from ebay_runtime_audit import record_flow
+
+        record_flow(conn, search["id"], flow, now)
         conn.execute(
             """INSERT INTO ebay_state(query_id,generation,baseline_at,last_attempt,last_success,next_poll,warning,actual_interval)
             VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(query_id) DO UPDATE SET generation=excluded.generation,
@@ -675,6 +701,8 @@ class Poller:
         self.workers, self.inflight = workers, {}
         self.dispatch_deadlines = {}
         self.local = threading.local()
+        self.audit_due = 0
+        self.audit_started = False
         self.cached_groups, self.cached_config, self.last_reload = (
             [],
             None,
@@ -738,6 +766,15 @@ class Poller:
             }
             self.last_reload = now
         config = self.cached_config
+        if now >= self.audit_due:
+            self.audit_due = now + (900 if self.audit_started else 180)
+            self.audit_started = True
+            try:
+                from ebay_runtime_audit import runtime_summary
+
+                logger.info("eBay runtime summary %s", json.dumps(runtime_summary(config, self.cached_groups, now), separators=(",", ":")))
+            except Exception as exc:
+                logger.warning("eBay runtime audit unavailable: %s", type(exc).__name__)
         if store.missing_configuration(config):
             return 2
         groups = self.cached_groups
@@ -844,8 +881,14 @@ async def run_delivery():
 def ebay_process():
     threading.Thread(target=lambda: asyncio.run(run_delivery()), daemon=True).start()
     poller = Poller()
+    allowance_due = 0
     while True:
         try:
+            if time.monotonic() >= allowance_due:
+                allowance_due = time.monotonic() + 3600
+                from ebay_runtime_audit import refresh_native_allowance
+
+                threading.Thread(target=refresh_native_allowance, daemon=True, name="ebay-usage-audit").start()
             time.sleep(poller.tick())
         except Exception as exc:  # noqa: BLE001
             logger.warning("eBay monitor recovering after %s", type(exc).__name__)

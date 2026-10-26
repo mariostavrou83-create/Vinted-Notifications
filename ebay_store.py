@@ -445,7 +445,7 @@ def connection_summary():
         "alert_target": ALERT_TARGET_SECONDS,
         "timing": delivery_timing(),
         "target_interval": target,
-        "required_budget": math.ceil(groups * 86400 / target / 0.9),
+        "required_budget": math.ceil(groups * 86400 / target),
         "meets_target": capacity_interval <= target,
         "has_delivery_headroom": max(target, capacity_interval) < ALERT_TARGET_SECONDS,
         "missing": missing_configuration(config),
@@ -521,8 +521,9 @@ def delivery_timing(now=None):
 def call_spacing(config):
     if config.get("source") == "public":
         return 0.1  # A local ceiling of 10 public requests/second, not an eBay quota grant.
-    # Ten percent headroom; rolling 24h accounting also survives restarts.
-    return max(0.02, 86400 / (config["daily_budget"] * 0.9))
+    # Use the full approved allowance. All search, diagnostic and media reads
+    # still share the hard rolling cap below, including across restarts.
+    return max(0.02, 86400 / config["daily_budget"])
 
 
 def reserve_call(config, now, *, diagnostic=False, media=False):
@@ -580,7 +581,7 @@ def reserve_call(config, now, *, diagnostic=False, media=False):
                 "SELECT value FROM delivery_runtime WHERE key='ebay_last_diagnostic'"
             ).fetchone()
             wait_until = max(wait_until, last_check[0] + 30 if last_check else 0)
-        if count >= math.floor(config["daily_budget"] * 0.9):
+        if count >= config["daily_budget"]:
             wait_until = max(wait_until, (oldest + 1) * 60 + 86400)
         if now < wait_until:
             return wait_until

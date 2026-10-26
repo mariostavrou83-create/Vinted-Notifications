@@ -287,7 +287,7 @@ class QuotaTests(EbayFixture, unittest.TestCase):
         self.assertIsNone(store.reserve_call(config, 1000))
         self.assertIsNone(store.reserve_call(config, 1002, diagnostic=True))
         self.assertEqual(store.reserve_call(config, 1003, diagnostic=True), 1032)
-        self.assertGreater(store.reserve_call(config, 1003), 1020)
+        self.assertAlmostEqual(store.reserve_call(config, 1003), 1019.28)
         with closing(search_settings.connection()) as conn, conn:
             self.assertEqual(
                 conn.execute("SELECT SUM(calls) FROM ebay_call_buckets").fetchone()[0],
@@ -298,7 +298,7 @@ class QuotaTests(EbayFixture, unittest.TestCase):
             )
         self.assertEqual(store.reserve_call(config, 1040, diagnostic=True), 1100)
         with closing(search_settings.connection()) as conn, conn:
-            conn.execute("UPDATE ebay_call_buckets SET calls=4500")
+            conn.execute("UPDATE ebay_call_buckets SET calls=5000")
         self.assertGreater(store.reserve_call(config, 1200, diagnostic=True), 86400)
 
     def test_rolling_budget_pacing_restart_and_429_cooldown(self):
@@ -306,7 +306,7 @@ class QuotaTests(EbayFixture, unittest.TestCase):
         self.assertIsNone(store.reserve_call(config, 1000))
         self.assertGreater(store.reserve_call(config, 1001), 1001)
         with closing(search_settings.connection()) as conn, conn:
-            conn.execute("UPDATE ebay_call_buckets SET calls=90")
+            conn.execute("UPDATE ebay_call_buckets SET calls=100")
         self.assertEqual(store.reserve_call(config, 2000), 87420)
         self.assertIsNone(store.reserve_call(config, 87421))
         search = self.enable()
@@ -325,13 +325,13 @@ class QuotaTests(EbayFixture, unittest.TestCase):
         self.assertEqual(sorted(map(len, groups)), [1, 2])
         self.assertNotIn("price", monitor.search_params(groups[0][0]["ebay"])["filter"])
 
-    def test_100_search_15_second_capacity_is_640000_with_headroom(self):
-        self.assertAlmostEqual(store.call_spacing({"daily_budget": 640000}) * 100, 15)
-        self.assertGreater(store.call_spacing({"daily_budget": 50000}) * 100, 190)
+    def test_100_search_15_second_capacity_uses_the_full_allowance(self):
+        self.assertAlmostEqual(store.call_spacing({"daily_budget": 576000}) * 100, 15)
+        self.assertGreater(store.call_spacing({"daily_budget": 50000}) * 100, 170)
 
     def test_5_second_poll_default_and_approved_capacity_for_100_searches(self):
         self.assertEqual(store.configuration()["target_interval"], 5)
-        store.save_configuration({"daily_budget": "1920000"})
+        store.save_configuration({"daily_budget": "1728000"})
         self.assertAlmostEqual(store.call_spacing(store.configuration()) * 100, 5)
         self.assertEqual(store.connection_summary()["alert_target"], 15)
 

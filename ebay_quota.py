@@ -162,7 +162,7 @@ def allowance_summary(config, groups, now=None):
         complete = bool(daily) and not observation.get("incomplete")
         capacity = min(
             (
-                math.floor(r["limit"] * 0.9 * config["target_interval"] / r["window"])
+                math.floor(r["limit"] * config["target_interval"] / r["window"])
                 for r in rows
             ),
             default=0,

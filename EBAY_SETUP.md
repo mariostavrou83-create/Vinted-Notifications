@@ -79,21 +79,22 @@ For the optional Browse API source, with `G` distinct requests and target `T` se
 
 ```
 daily search calls = G * 86,400 / T
-configured allowance with 10% headroom = ceil(daily search calls / 0.9)
+configured allowance = ceil(daily search calls)
 ```
 
 For the current maximum of 10 distinct searches at 5 seconds, that is
-**172,800 search calls/day**, requiring **192,000 approved calls/day** with
-headroom before item lookups or diagnostics. With the default configured
+**172,800 search calls/day** before item lookups or diagnostics. Those reads
+share the same hard rolling cap and displace search slots. With the configured
 5,000/day budget, those ten groups have a capacity-supported start cycle of
-at least 192 seconds. This is a configured scheduler calculation, not an
+at least 172.8 seconds. The 10% reserve was removed at the owner's request on
+26 October 2026. This is a configured scheduler calculation, not an
 observation of the owner's granted quota.
 
 For a future 100 distinct searches at 5 seconds, that is **1,728,000 search calls/day**,
-requiring about **1,920,000 approved calls/day** with headroom. For 150 distinct
-searches it is 2,592,000 search calls/day, or 2,880,000 with headroom. At a
-15-second polling interval, the earlier 100-search estimate was 576,000 calls,
-or 640,000 with headroom; that uses the entire alert window just waiting for
+before item lookups or diagnostics. For 150 distinct
+searches it is 2,592,000 search calls/day. At a
+15-second polling interval, 100 searches require 576,000 calls;
+that uses the entire alert window just waiting for
 the next check. Actual HTTP latency, errors and indexing delays also matter.
 A 50,000-call allowance cannot support either configuration.
 
@@ -119,7 +120,7 @@ Suggested application-review information, to finalize against the real keyset:
 - Private UK/GBP sourcing dashboard linking directly to eBay listings.
 - No automated checkout, seller messaging or item changes.
 - 100 distinct saved searches checked every 5 seconds: 1,200 calls/minute,
-  72,000/hour, 1,728,000/day; request at least 1,920,000/day with headroom.
+  72,000/hour, 1,728,000/day, plus any necessary item lookups or diagnostics.
 - OAuth application-token caching, equivalent-query sharing, bounded concurrency,
   persistent quota tracking, and respect for `Retry-After`.
 - Persistent deduplication and quiet first checks to avoid replaying inventory.

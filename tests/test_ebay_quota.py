@@ -82,7 +82,7 @@ class QuotaTests(EbayFixture, unittest.TestCase):
         payload["rateLimits"][0]["resources"].pop()
         self.check(payload)
         result = ebay_quota.allowance_summary(self.config, 100, now=1001)
-        self.assertEqual(result["capacity"], 100)
+        self.assertEqual(result["capacity"], 111)
         self.assertTrue(result["meets_target"])
         self.assertIn("01 Oct 2026, 07:00:00 UTC", result["rows"][0]["reset_label"])
 
