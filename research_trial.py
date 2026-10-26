@@ -944,10 +944,12 @@ class Store:
                         in {"Marketplace access backoff", "Marketplace network backoff"}
                         and state["pause_until"] > now
                     )
+                    # A health feed must not repeatedly renew a marketplace
+                    # cooldown. Preserve that deadline and its full wait.
                     c.execute(
                         "UPDATE trial SET pause_until=MAX(pause_until,?),reason=? WHERE id=1",
                         (
-                            now + 120,
+                            state["pause_until"] if restricted else now + 120,
                             (
                                 state["reason"]
                                 if restricted
@@ -970,8 +972,8 @@ class Store:
                 "SELECT enabled FROM sourcing_settings WHERE id=1"
             ).fetchone()[0]:
                 c.execute(
-                    "UPDATE trial SET pause_until=MAX(pause_until,?),reason=CASE WHEN reason IN ('Marketplace access backoff','Marketplace network backoff') AND pause_until>? THEN reason ELSE 'Alert health unavailable' END WHERE id=1",
-                    (now + 120, now),
+                    "UPDATE trial SET pause_until=CASE WHEN reason IN ('Marketplace access backoff','Marketplace network backoff') AND pause_until>? THEN pause_until ELSE MAX(pause_until,?) END,reason=CASE WHEN reason IN ('Marketplace access backoff','Marketplace network backoff') AND pause_until>? THEN reason ELSE 'Alert health unavailable' END WHERE id=1",
+                    (now, now + 120, now),
                 )
             c.execute(
                 "UPDATE trial SET feed_cursor=MAX(feed_cursor,?) WHERE id=1",
@@ -1304,6 +1306,8 @@ class Store:
                         "premium_sold": len(hs),
                         "cheap_tracked": len(cheap_enrolled),
                         "premium_tracked": len(high_enrolled),
+                        "cheap_followups": sum(r in cheap for r in enrolled),
+                        "premium_followups": sum(r in premium for r in enrolled),
                         "sellers": sellers(rows),
                         "cheap_arrivals": arrivals,
                         "premium_listings": len(premium),
@@ -1524,7 +1528,7 @@ class Store:
                 (threshold, now - DAY),
             ).fetchone()
             return {
-                "sampling_policy": "balanced_v2",
+                "sampling_policy": "paired_focus_v3",
                 "phase": state["phase"],
                 "reason": state["reason"],
                 "pause_seconds": max(0, int(state["pause_until"] - now)),
@@ -1807,21 +1811,17 @@ class Worker:
                 "UPDATE items SET state='expired' WHERE admitted<? AND state IN ('pending','active','reserved','unknown')",
                 (now - 8 * DAY,),
             )
-            # One source discovery slot followed by several outcome slots, with
-            # independent source clocks. No parallel marketplace requests.
+            # Spend two of three busy slots on sale proof. Unused outcome
+            # slots return to discovery; requests stay serial and capped.
             due = c.execute(
                 "SELECT * FROM clocks WHERE next_due<=? ORDER BY next_due LIMIT 1",
                 (now,),
             ).fetchone()
             item = c.execute(
-                "SELECT * FROM items WHERE admitted IS NOT NULL AND state IN ('pending','active','reserved','unknown') AND next_check<=? ORDER BY next_check LIMIT 1",
+                "SELECT * FROM items WHERE admitted IS NOT NULL AND state IN ('pending','active','reserved','unknown') AND next_check<=? ORDER BY checked IS NOT NULL,next_check LIMIT 1",
                 (now,),
             ).fetchone()
-            source_turn = (
-                state["network_cursor"] % 3 != 2
-                if daily
-                else state["network_cursor"] % 3 == 0
-            )
+            source_turn = state["network_cursor"] % 3 == 0
             source = due if due and (not item or source_turn) else None
             if source:
                 interval = (
@@ -1878,8 +1878,9 @@ class Worker:
                         )
                 else:
                     category = list(CATEGORIES)[(cursor // 2) % len(CATEGORIES)]
+                    # Each candidate gets a pair of reads, premium first.
                     band = (
-                        int((cursor // 4) % 5 == 4)
+                        1 - cursor % 2
                         if kind == "focus" and state["daily_enabled"]
                         else cursor % 2
                     )
@@ -1902,10 +1903,7 @@ class Worker:
                     if kind == "focus":
                         candidates = self.store.focus_candidates(now)
                         if candidates:
-                            candidate = candidates[
-                                (cursor if state["daily_enabled"] else cursor // 2)
-                                % len(candidates)
-                            ]
+                            candidate = candidates[(cursor // 2) % len(candidates)]
                             with closing(self.store.connect()) as c:
                                 g = c.execute(
                                     "SELECT * FROM groups WHERE id=?",
@@ -1988,7 +1986,7 @@ class Worker:
             )
             c.execute("UPDATE trial SET reported_at=? WHERE id=1", (now,))
         result = {
-            "sampling_policy": "balanced_v2",
+            "sampling_policy": "paired_focus_v3",
             "scope": "new_brands_only",
             "excluded_searches": len(
                 json.loads(data["trial"]["exclusions"]).get("names", [])

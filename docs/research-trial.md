@@ -26,7 +26,7 @@ as unverified after one day, rather than consuming a week of follow-ups.
 
 Broad categories, exploration, seller wardrobes and reference samples supply
 an adaptive watch of up to four distinct brands/patterns. Focused requests use
-four cheap passes for each premium pass; native brand/category/price filters
+a higher-price pass and a cheap pass for each candidate; native brand/category/price filters
 and client-side price checks apply. Unproductive mature cohorts leave the
 focused watch. Source clocks do not guarantee a latency: budgets, unavailable
 marketplace data and the alert guard can delay them.
@@ -38,6 +38,13 @@ readings can recalibrate the daily baseline after a research pause, so an old
 quiet startup sample does not suppress the service all day. Marketplace access
 backoff is never shortened by health recovery. No restriction triggers a route
 switch, challenge solver or immediate replay.
+
+When sale outcomes are due, two out of three network slots check outcomes and
+one discovers stock. Initial native checks take priority over repeat checks;
+unused outcome slots return to discovery. Alert-health feeds never extend a
+marketplace cooldown: its original deadline remains intact, after which the
+alert guard can take over independently. Candidate summaries include the
+number of enrolled cheap and premium follow-ups, including immature cohorts.
 
 ## Qualification
 

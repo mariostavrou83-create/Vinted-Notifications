@@ -256,6 +256,83 @@ class DailyTests(unittest.TestCase):
         )
         self.assertFalse(self.store.can_read("broad", self.now + 180))
 
+    def test_alert_health_does_not_renew_a_marketplace_cooldown(self):
+        for status in ("http_429", "read_unavailable"):
+            with self.subTest(status=status):
+                with closing(self.store.connect()) as c, c:
+                    c.execute("UPDATE trial SET pause_until=0,reason='',network_failures=0")
+                identity = self.store.reserve_read("hybrid", "focus", now=self.now)
+                self.store.finish_read(identity, status, 0, 0, self.now)
+                deadline = self.store.state(self.now)["pause_until"]
+                self.feed(deadline - 30, 3.2)
+                self.assertEqual(self.store.state(deadline - 30)["pause_until"], deadline)
+                self.store.feed({"version": 2, "exclusions": {}, "health": {}}, deadline - 10)
+                self.assertEqual(self.store.state(deadline - 10)["pause_until"], deadline)
+                self.assertFalse(self.store.can_read("outcome", deadline - 1))
+                self.feed(deadline + 1, 3.2)
+                self.assertEqual(self.store.state(deadline + 1)["reason"], "Alert performance guard")
+                self.assertFalse(self.store.can_read("outcome", deadline + 1))
+                self.feed(deadline + 61)
+                self.feed(deadline + 121)
+                self.assertTrue(self.store.can_read("outcome", deadline + 121))
+
+    def worker(self):
+        worker = trial.Worker(self.store, "https://unused.invalid", "x" * 40)
+        worker.transport = Mock()
+        worker.transport.catalogue.return_value = []
+        worker.transport.outcome.return_value = {"state": "active", "age_bounds": (3600, 7200)}
+        worker.fetch_feed = Mock()
+        worker.feed_due = worker.diagnostics_due = worker.sourcing_due = self.now + trial.DAY
+        return worker
+
+    def test_focused_collection_pairs_both_prices_for_every_watch_size(self):
+        targets = [dict(id=str(i), high_floor=8000, buy_limit=4000) for i in range(4)]
+        with closing(self.store.connect()) as c, c:
+            c.executemany("INSERT INTO groups VALUES(?,?,'1037','Horizon',?)", [(str(i), 'Label' + str(i), self.now) for i in range(4)])
+        worker = self.worker()
+        for count in range(1, 5):
+            with self.subTest(watch_size=count):
+                worker.transport.reset_mock()
+                self.store.focus_candidates = Mock(return_value=targets[:count])
+                for cursor in range(count * 2):
+                    now = self.now + cursor * 25
+                    self.feed(now)
+                    with closing(self.store.connect()) as c, c:
+                        c.execute("UPDATE clocks SET next_due=?", (now + trial.DAY,))
+                        c.execute("UPDATE clocks SET next_due=0,cursor=? WHERE kind='focus'", (cursor,))
+                        c.execute("UPDATE trial SET next_network=0")
+                    worker.step(now)
+                calls = worker.transport.catalogue.call_args_list
+                self.assertEqual(len(calls), count * 2)
+                for i in range(count):
+                    high = calls[2 * i].args[0]
+                    low = calls[2 * i + 1].args[0]
+                    self.assertEqual(high['search_text'], 'Label' + str(i) + ' Horizon')
+                    self.assertEqual(high['search_text'], low['search_text'])
+                    self.assertEqual(high['price_from'], 80)
+                    self.assertNotIn('price_to', high)
+                    self.assertLess(low['price_to'], 40)
+
+    def test_two_busy_slots_follow_sales_and_one_continues_discovery(self):
+        self.store.ingest('hybrid', [self.item(i, 10) for i in (1, 2, 3)], self.now, source='focus')
+        worker = self.worker()
+        with closing(self.store.connect()) as c, c:
+            c.execute("UPDATE clocks SET next_due=?", (self.now + trial.DAY,))
+            c.execute("UPDATE clocks SET next_due=0 WHERE kind='broad'")
+        for offset in (0, 25, 50):
+            worker.step(self.now + offset)
+        self.assertEqual(worker.transport.outcome.call_count, 2)
+        self.assertEqual(worker.transport.catalogue.call_count, 1)
+
+    def test_initial_native_age_check_precedes_an_overdue_repeat(self):
+        self.store.ingest('hybrid', [self.item(i, 10) for i in (1, 2)], self.now, source='focus')
+        self.store.record_outcome('1', {'state': 'active', 'age_bounds': (3600, 7200)}, self.now - 5 * 3600)
+        with closing(self.store.connect()) as c, c:
+            c.execute('UPDATE trial SET network_cursor=1')
+        worker = self.worker()
+        worker.step(self.now)
+        self.assertEqual(worker.transport.outcome.call_args.args[0]['id'], '2')
+
     def test_scheduler_keeps_one_network_job_and_a_persisted_gap(self):
         worker = trial.Worker(self.store, "https://unused.invalid", "x" * 40)
         worker.transport = Mock()

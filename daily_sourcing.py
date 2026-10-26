@@ -451,6 +451,8 @@ class DailySourcing:
                     "premium_seen": t["premium_listings"],
                     "cheap_quick_sales": t["cheap_sold"],
                     "premium_quick_sales": t["premium_sold"],
+                    "cheap_followups": t["cheap_followups"],
+                    "premium_followups": t["premium_followups"],
                     "buy_limit": t["buy_limit"],
                     "stage": t["stage"],
                 }
