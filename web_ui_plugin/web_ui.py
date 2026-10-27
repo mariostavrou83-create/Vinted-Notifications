@@ -358,6 +358,19 @@ def create_app(test_config=None):
             },
         )
 
+    @app.get("/search-review.json")
+    def search_review_export():
+        from search_review_export import collect
+
+        return (
+            collect(Path(db.DB_PATH)),
+            200,
+            {
+                "Cache-Control": "no-store",
+                "Content-Disposition": "attachment; filename=search-review.json",
+            },
+        )
+
     @app.get("/")
     def dashboard():
         archived = request.args.get("view") == "archive"
@@ -1144,3 +1157,4 @@ def web_ui_process():
         )
     finally:
         MANAGER.shutdown()
+
