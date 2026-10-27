@@ -749,6 +749,196 @@ class OfferTests(DatabaseFixture, unittest.TestCase):
             self.assertEqual(len(self.client.calls), count)
             self.assertFalse(self.client.writes())
 
+    def test_identity_503_waits_then_sends_once_after_restart(self):
+        self.enable(history="three_months")
+        self.add()
+        self.factory.side_effect = buyer.response_error(
+            Mock(status_code=503, headers={"Retry-After": "120"}, text="unavailable"),
+            {},
+            "identity",
+        )
+        self.worker.tick()
+        self.assertEqual(offers.state()["mode"], "live")
+        self.assertEqual(offers.state()["cooldown_until"], NOW + 120)
+        self.assertEqual(self.jobs()[0]["status"], "queued")
+        self.assertFalse(self.client.calls)
+        self.factory.side_effect = None
+        self.now = NOW + 119
+        self.worker = offers.OfferWorker(
+            client_factory=self.factory,
+            clock=lambda: self.now,
+            item_reader=self.item_read,
+        )
+        self.worker.tick()
+        self.assertEqual(self.factory.call_count, 1)
+        self.now += 1
+        self.worker.tick()
+        self.now += 400
+        self.worker.tick()
+        self.assertEqual(len(self.client.writes()), 1)
+        self.assertEqual(self.jobs()[0]["status"], "sent")
+
+    def test_temporary_server_errors_before_offer_keep_the_job_queued(self):
+        self.enable()
+        self.add()
+
+        def unavailable(method, path, body):
+            if path == "/api/v2/conversations/7001":
+                raise buyer.BuyerError("unavailable", 502)
+
+        self.client.fail = unavailable
+        self.worker.tick()
+        self.assertEqual(offers.state()["mode"], "live")
+        self.assertEqual(self.jobs()[0]["status"], "queued")
+        self.assertFalse(self.client.writes())
+        self.client.fail = None
+        self.now += offers.SCAN_GAP
+        self.worker.tick()
+        self.assertEqual(len(self.client.writes()), 1)
+
+    def test_auth_recovery_preserves_history_delays_and_same_account(self):
+        self.enable(history="three_months")
+        self.add(at=NOW - 86400)
+        self.add(item=1002, at=NOW)
+        since = offers.state()["since"]
+        self.factory.side_effect = buyer.BuyerError(
+            "expired", 401, reason="credentials", stage="identity"
+        )
+        with patch.object(offers.time, "time", return_value=NOW):
+            self.worker.tick()
+        self.assertEqual(offers.state()["pause_reason"], "auth")
+        self.factory.side_effect = None
+        self.now = NOW + 100
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_buyer SET verified_at=?", (self.now,))
+            conn.execute(
+                "UPDATE vinted_offer_settings SET next_send=?,cooldown_until=?",
+                (NOW + 180, NOW + 120),
+            )
+        self.worker.tick()
+        config = offers.state()
+        self.assertEqual((config["mode"], config["pause_reason"]), ("live", ""))
+        self.assertEqual(config["since"], since)
+        self.assertEqual(config["history"], "three_months")
+        self.assertEqual(config["next_send"], NOW + 180)
+        self.assertEqual(config["cooldown_until"], NOW + 120)
+        self.assertEqual(self.factory.call_count, 1)
+        self.now = NOW + 180
+        self.worker.tick()
+        # Preserve the existing reservation for a new like due within one slot.
+        self.assertEqual([j["status"] for j in self.jobs()], ["queued", "queued"])
+        self.now = NOW + 299
+        self.worker.tick()
+        self.assertFalse(self.client.writes())
+        self.now = NOW + 300
+        self.worker.tick()
+        self.assertEqual([j["status"] for j in self.jobs()], ["queued", "sent"])
+        self.assertEqual(len(self.client.writes()), 1)
+        self.now = NOW + 480
+        self.worker.tick()
+        self.assertEqual(len(self.client.writes()), 2)
+
+    def test_auth_recovery_restores_preview_without_sending(self):
+        self.enable("preview")
+        self.add()
+        with patch.object(offers.time, "time", return_value=NOW):
+            offers.pause("auth")
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_buyer SET verified_at=?", (NOW + 1,))
+        self.now = NOW + 1
+        self.worker.tick()
+        self.assertEqual(offers.state()["mode"], "preview")
+        self.assertEqual(self.jobs()[0]["status"], "ready")
+        self.assertFalse(self.client.writes())
+
+    def test_auth_recovery_requires_fresh_verification_and_automatic_pause(self):
+        for reason, user_id, verified_at, session in (
+            ("", "111", NOW + 1, b"offline"),
+            ("restricted", "111", NOW + 1, b"offline"),
+            ("uncertain", "111", NOW + 1, b"offline"),
+            ("shape", "111", NOW + 1, b"offline"),
+            ("auth", "999", NOW + 1, b"offline"),
+            ("auth", "111", NOW, b"offline"),
+            ("auth", "111", NOW + 1000, b"offline"),
+            ("auth", "111", NOW + 1, None),
+        ):
+            with self.subTest(reason=reason, user_id=user_id, verified_at=verified_at):
+                with closing(search_settings.connection()) as conn, conn:
+                    conn.execute(
+                        "UPDATE vinted_buyer SET user_id='111',verified_at=?,session=?",
+                        (NOW, b"offline"),
+                    )
+                self.enable()
+                with patch.object(offers.time, "time", return_value=NOW):
+                    offers.pause(reason)
+                with closing(search_settings.connection()) as conn, conn:
+                    conn.execute(
+                        "UPDATE vinted_buyer SET user_id=?,verified_at=?,session=?",
+                        (user_id, verified_at, session),
+                    )
+                self.now = NOW + 2
+                self.worker.tick()
+                self.assertEqual(offers.state()["mode"], "paused")
+                self.factory.assert_not_called()
+
+    def test_auth_failure_after_offer_never_auto_resumes_on_session_refresh(self):
+        self.enable()
+        self.add()
+
+        def expired(method, path, body):
+            if path.endswith("/offers"):
+                raise buyer.BuyerError("expired", 401, reason="credentials")
+
+        self.client.fail = expired
+        with patch.object(offers.time, "time", return_value=NOW):
+            self.worker.tick()
+        self.assertEqual(self.jobs()[0]["status"], "uncertain")
+        self.add(item=1002)
+        self.client.fail = None
+        self.now = NOW + 400
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_buyer SET verified_at=?", (self.now,))
+        self.worker.tick()
+        self.assertEqual(offers.state()["mode"], "paused")
+        self.assertEqual(len(self.client.writes()), 1)
+
+    def test_owner_reviewed_old_uncertain_offer_stays_quarantined_after_recovery(self):
+        self.enable()
+        old = self.add()
+        with patch.object(offers.time, "time", return_value=NOW):
+            offers._finish(old, "uncertain", "network")
+            offers.pause("uncertain")
+        self.now = NOW + 400
+        self.enable()
+        self.add(item=1002)
+        with patch.object(offers.time, "time", return_value=self.now):
+            offers.pause("auth")
+        self.now += 1
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_buyer SET verified_at=?", (self.now,))
+        self.worker.tick()
+        self.assertEqual(offers.state()["mode"], "live")
+        self.assertEqual([j["status"] for j in self.jobs()], ["uncertain", "sent"])
+        self.assertEqual(len(self.client.writes()), 1)
+
+    def test_503_after_offer_write_is_uncertain_and_never_replayed(self):
+        self.enable()
+        self.add()
+
+        def unavailable(method, path, body):
+            if path.endswith("/offers"):
+                raise buyer.BuyerError("unavailable", 503)
+
+        self.client.fail = unavailable
+        self.worker.tick()
+        self.assertEqual(self.jobs()[0]["status"], "uncertain")
+        self.assertEqual(offers.state()["pause_reason"], "uncertain")
+        self.client.fail = None
+        self.now += 400
+        self.worker.tick()
+        self.assertEqual(offers.state()["mode"], "paused")
+        self.assertEqual(len(self.client.writes()), 1)
+
     def test_network_failure_after_offer_is_uncertain_and_never_replayed(self):
         self.enable()
         self.add()
@@ -1341,3 +1531,4 @@ class OfferRouteTests(DashboardTests):
 
 if __name__ == "__main__":
     unittest.main()
+

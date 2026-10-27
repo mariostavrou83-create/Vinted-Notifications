@@ -680,6 +680,59 @@ def snapshot():
     }
 
 
+def _recover_auth(conn, now):
+    """Restore only an automatic read pause after a newer identity check."""
+    config = conn.execute(
+        "SELECT * FROM vinted_offer_settings WHERE id=1"
+    ).fetchone()
+    if config["mode"] != "paused" or config["pause_reason"] != "auth":
+        return
+    control = conn.execute(
+        "SELECT id,action,reason,happened FROM vinted_offer_events WHERE action IN ('live','preview','paused') ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    active = conn.execute(
+        "SELECT id,action FROM vinted_offer_events WHERE action IN ('live','preview') ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    account = conn.execute(
+        "SELECT user_id,verified_at,session FROM vinted_buyer WHERE id=1"
+    ).fetchone()
+    if not (
+        control
+        and control["action"] == "paused"
+        and control["reason"] == "auth"
+        and active
+        and account
+        and account["session"]
+        and str(account["user_id"]) == config["account_id"]
+        and account["verified_at"]
+        and control["happened"] < account["verified_at"] <= now
+    ):
+        return
+    # Older uncertain jobs remain quarantined after an explicit owner resume.
+    # A current/unrecorded uncertain write or any in-flight write blocks recovery.
+    uncertain = conn.execute(
+        """SELECT 1 FROM vinted_offer_jobs j WHERE account_id=? AND (
+        status='sending' OR (status='uncertain' AND COALESCE(
+            (SELECT MAX(e.id) FROM vinted_offer_events e
+             WHERE e.job_id=j.id AND e.action='uncertain'), ?
+        )>=?)) LIMIT 1""",
+        (config["account_id"], active["id"], active["id"]),
+    ).fetchone()
+    if uncertain:
+        return
+    updated = conn.execute(
+        """UPDATE vinted_offer_settings SET mode=?,pause_reason='',revision=revision+1
+        WHERE id=1 AND revision=? AND mode='paused' AND pause_reason='auth'""",
+        (active["action"], config["revision"]),
+    ).rowcount
+    if updated:
+        event(conn, "resumed", "auth", now=now)
+        logger.info(
+            "Vinted offers resumed after verified same-account session recovery: mode=%s",
+            active["action"],
+        )
+
+
 def _recover(now):
     with closing(connection()) as conn, conn:
         config = conn.execute(
@@ -757,6 +810,8 @@ def _recover(now):
             conn.execute(
                 "UPDATE vinted_offer_settings SET mode='paused',pause_reason='uncertain',revision=revision+1 WHERE id=1"
             )
+        if config["mode"] == "paused" and config["pause_reason"] == "auth":
+            _recover_auth(conn, now)
         if config["pause_reason"] == "cooldown":
             current = conn.execute(
                 "SELECT mode,pause_reason,cooldown_until FROM vinted_offer_settings WHERE id=1"
@@ -809,7 +864,7 @@ def _error_reason(exc):
         "renewal_blocked",
     ):
         return "restricted"
-    if exc.reason == "network":
+    if exc.reason == "network" or exc.status in (408, 500, 502, 503, 504):
         return "network"
     return (
         "auth"
@@ -824,8 +879,14 @@ def _wait_after_failure(exc, now):
         delay = 0
     if exc.status == 429 or exc.reason in {"rate_limited", "renewal_cooldown"}:
         delay = max(delay, 900)
-    elif exc.reason == "network":
+    elif _error_reason(exc) == "network":
         delay = max(delay, SCAN_GAP)
+        logger.warning(
+            "Vinted offers waiting after temporary service failure: http=%s stage=%s retry_in=%ss",
+            exc.status,
+            exc.stage,
+            delay,
+        )
     if delay:
         with closing(connection()) as conn, conn:
             conn.execute(
@@ -1297,3 +1358,4 @@ def run():
             logger.error("Vinted offers: unexpected worker failure; paused for review")
             pause("shape")
         time.sleep(5)
+

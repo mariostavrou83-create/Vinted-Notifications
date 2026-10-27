@@ -59,9 +59,17 @@ An offer write is durably marked `sending` and its spacing reserved before the
 request. Missing confirmation, interrupted writes or network errors after this
 point become **uncertain**, remain out of the queue and pause sending. They are
 never automatically retried. Open the saved Vinted conversation to inspect it.
-HTTP 401/403, restrictions and unfamiliar responses pause the queue. HTTP 429
-also persists `Retry-After` (or a conservative 15-minute minimum); changing mode
-cannot clear that wait. No offer request solves or replays a security challenge.
+Temporary read/connection failures (network errors and HTTP 408/500/502/503/504)
+retain the active mode and wait at least 60 seconds, respecting `Retry-After`,
+before retrying. This includes temporary failures during the identity check.
+HTTP 401 pauses the queue; an automatic authentication pause can resume its
+previous live/preview mode only after a newer successful same-account identity
+verification. Manual pauses, account changes, restrictions, and uncertain writes
+since the owner's last explicit resume cannot recover this way. Old uncertain
+jobs remain quarantined. Recovery preserves history, like delay and send deadlines.
+HTTP 403, restrictions and unfamiliar responses require review. HTTP 429 also
+persists `Retry-After` (or a conservative 15-minute minimum); changing mode cannot
+clear that wait. No offer request solves or replays a security challenge.
 
 The feature uses the existing encrypted, same-account verified Vinted session.
 It does not require Autobuy permission to be enabled. A replacement account must
@@ -96,3 +104,4 @@ These are unofficial interfaces. Their continued availability must be checked
 against live responses. Pacing does not make external automation approved or
 guarantee against account restrictions; Vinted's [terms](https://www.vinted.co.uk/terms-and-conditions)
 restrict external tools unless authorised or otherwise allowed by Vinted.
+
