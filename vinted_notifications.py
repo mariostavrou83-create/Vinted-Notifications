@@ -267,6 +267,16 @@ if __name__ == "__main__":
     if audit_release:
         logger.info("Approved search audit applied: %s", audit_release)
 
+    from search_review_release import apply_once as apply_search_review
+
+    try:
+        review_release = apply_search_review()
+    except Exception:
+        logger.exception("Reviewed search edits not applied; saved settings retained")
+        review_release = None
+    if review_release:
+        logger.info("Reviewed search edits applied: %s", review_release)
+
     from vinted_buyer import import_auth_results_once
 
     import_auth_results_once()
@@ -458,3 +468,4 @@ if __name__ == "__main__":
                 if process:
                     stop_process(process, name=process.name)
         logger.info("All processes terminated")
+
