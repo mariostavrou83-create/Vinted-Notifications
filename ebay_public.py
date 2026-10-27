@@ -118,8 +118,7 @@ def search_url(config):
         params["LH_BIN"] = "1"
     elif config["buying"] == "auction":
         params["LH_Auction"] = "1"
-    if config["uk_only"]:
-        params["LH_PrefLoc"] = "1"
+    params["LH_PrefLoc"] = "1"
     if config["condition"] == "new":
         params["LH_ItemCondition"] = "1000|1500|1750"
     elif config["condition"] == "used":
@@ -210,9 +209,12 @@ def parse_page(body, config, now=None):
         if created is None:
             invalid += 1
             continue
-        if config["uk_only"] and re.search(
-            r"\bfrom (?!United Kingdom\b|UK\b)[A-Z]", card_text
-        ):
+        location = first(card, "s-card__location", "s-item__location")
+        location_text = text(location) if location is not None else ""
+        country = "GB" if re.fullmatch(
+            r"(?:from\s+)?(?:United Kingdom|UK)", location_text, re.IGNORECASE
+        ) else None
+        if location_text and country is None:
             continue
         auction = (
             bool(re.search(r"\b\d+ bids?\b", card_text))
@@ -254,6 +256,7 @@ def parse_page(body, config, now=None):
         items.append(
             {
                 "legacyItemId": item_id,
+                "itemLocation": {"country": country},
                 "itemId": f"v1|{item_id}|0",
                 "title": title,
                 "itemWebUrl": f"https://www.ebay.co.uk/itm/{item_id}",
@@ -443,3 +446,4 @@ class PublicClient:
             raise EbayError(
                 "eBay public search connection failed; will retry.", 15
             ) from None
+

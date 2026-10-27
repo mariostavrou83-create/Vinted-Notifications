@@ -28,6 +28,7 @@ def item(number, created=1010, price="15.00", **fields):
     result = {
         "itemId": f"v1|{number}|0",
         "legacyItemId": str(number),
+        "itemLocation": {"country": "GB"},
         "title": "Hollister fur gilet",
         "itemCreationDate": iso(created),
         "itemOriginDate": iso(created),
@@ -594,3 +595,4 @@ class SeparateBotTests(EbayFixture, unittest.IsolatedAsyncioTestCase):
                 conn.execute("SELECT file_id FROM platform_media_cache").fetchone()[0],
                 "ebay-file-id",
             )
+

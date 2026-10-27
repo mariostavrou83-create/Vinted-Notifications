@@ -25,8 +25,9 @@ def card(
     date="30-Sep 09:33",
     extra="",
     domain="www.ebay.co.uk",
+    location="United Kingdom",
 ):
-    return f"""<li class="s-card" data-listingid="{number}"><a class="s-card__link" href="https://{domain}/itm/{number}?tracking=ignored"><div class="s-card__title">{title}</div></a><span>Pre-owned</span><span class="s-card__price">{price}</span><span>Buy It Now</span><span>+£3.50 delivery</span><span>{date}</span>{extra}</li>"""
+    return f"""<li class="s-card" data-listingid="{number}"><a class="s-card__link" href="https://{domain}/itm/{number}?tracking=ignored"><div class="s-card__title">{title}</div></a><span>Pre-owned</span><span class="s-card__price">{price}</span><span>Buy It Now</span><span>+£3.50 delivery</span><span>{date}</span><span class="s-item__location">{('from ' + location) if location else ''}</span>{extra}</li>"""
 
 
 def page(cards, sort="Newly listed", heading="60 results"):
@@ -98,7 +99,7 @@ class PublicParserTests(unittest.TestCase):
 
     def test_placeholder_and_foreign_location_do_not_alert(self):
         results, _ = public.parse_page(
-            page(card("237098542047", extra="<span>from United States</span>")),
+            page(card("237098542047", location="United States")),
             self.config,
             NOW,
         )
@@ -274,3 +275,4 @@ class PublicDeliveryTests(EbayFixture, unittest.TestCase):
             search, monitor.EbayError("Access denied", 3600, True, halt=True), 1010
         )
         self.assertGreater(store.reserve_call(config, 9000), 9000)
+

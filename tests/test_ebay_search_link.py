@@ -46,7 +46,7 @@ class LinkParserTests(unittest.TestCase):
         self.assertIn("conditionIds:{1000|1500}", params["filter"])
         self.assertIn("maxDeliveryCost:0", params["filter"])
         self.assertEqual(config["buying"], "both")
-        self.assertFalse(config["uk_only"])
+        self.assertTrue(config["uk_only"])
 
     def test_dcat_category_with_zero_sacat_and_aspect_encoding(self):
         config = links.parse_link(
@@ -293,3 +293,4 @@ class LinkDashboardTests(EbayFixture, unittest.TestCase):
         self.assertEqual(response.json["eligible"], 0)
         self.assertEqual(response.json["samples"][0]["categories"], ["Jeans"])
         self.assertEqual(self.outbox(), [])
+

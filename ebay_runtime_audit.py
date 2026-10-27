@@ -88,6 +88,8 @@ def runtime_summary(config, groups, now):
                 "max_price": filters.get("max_price"),
                 "condition_ids": filters.get("condition_ids"),
                 "buying": filters.get("buying"),
+                "item_location_country": "GB",
+                "uk_only": filters.get("uk_only"),
                 "seen_24h": conn.execute("SELECT COUNT(*) FROM ebay_seen WHERE query_id=? AND first_seen>=?", (identity, now - 86400)).fetchone()[0],
             })
     return {
@@ -106,3 +108,4 @@ def runtime_summary(config, groups, now):
         "filter_window": "Complete/current hourly buckets, up to 24 hours; starts at deployment.",
         "searches": health,
     }
+

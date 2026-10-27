@@ -54,9 +54,10 @@
 <small>Auction prices are current bids and can increase.</small>
 <label for="ebay_condition">Condition</label><select id="ebay_condition" name="ebay_condition">{% for value,label in [('any','Any condition'),('new','New'),('used','Used')] %}<option value="{{value}}" {{'selected' if row.ebay.condition==value}}>{{label}}</option>{% endfor %}</select>
 <label for="ebay_category">eBay category ID <span>optional</span></label><input id="ebay_category" name="ebay_category" inputmode="numeric" maxlength="10" value="{{row.ebay.category}}" placeholder="Leave blank for all categories">
-<label class="checkbox"><input type="checkbox" name="ebay_uk_only" value="yes" {{'checked' if row.ebay.uk_only}}> Items located in the UK only</label>
+<p class="muted">Items located in the UK only. This applies to every eBay alert.</p>
 <small>Results must ship to the UK. Vinted brand, size and category IDs do not map to eBay; review your eBay keywords and category separately.</small>
 </div>
 <p class="shared-note">New listings only. The first check is quiet. Changes to these filters start a fresh baseline without replaying old items. After saving, select this search in Connections → Your live eBay searches to start monitoring.</p>
 {% if row.id %}<div class="guide-section"><button type="button" class="secondary" id="check-saved-ebay" data-url="/search/{{row.id}}/check-ebay">Check saved eBay search</button><small>Uses one API call. Tests the saved filters, not unsaved changes. Sends no Telegram alerts.</small><div id="ebay-check-result" role="status"></div></div>{% endif %}
 </section></div>
+

@@ -166,7 +166,7 @@ def parse_link(link, *, keywords=None, ignore_prices=False):
         # The dashboard's complete budget replaces both URL item-price limits.
         params.pop("_udlo", None)
         params.pop("_udhi", None)
-    config = dict(DEFAULTS, filter_mode="url", buying="both", uk_only=False)
+    config = dict(DEFAULTS, filter_mode="url", buying="both")
     config["keywords"] = params.get("_nkw", "")
     if len(config["keywords"]) > 100:
         raise ValueError("Use eBay search keywords up to 100 characters.")
@@ -213,9 +213,10 @@ def parse_link(link, *, keywords=None, ignore_prices=False):
     location = params.get("LH_PrefLoc", "")
     if location not in {"", "0", "1", "3"}:
         raise ValueError(
-            "This location filter cannot be imported. Choose UK only or Worldwide on eBay."
+            "This location filter cannot be imported. Choose UK only on eBay."
         )
-    config["uk_only"] = location == "1"
+    config["uk_only"] = True
+    params["LH_PrefLoc"] = "1"
     config["free_shipping"] = params.get("LH_FS") == "1"
     conditions = sorted(set(params.get("LH_ItemCondition", "").split("|")) - {""})
     if any(
@@ -321,3 +322,4 @@ def describe(config):
         lines.append("Postage: free only")
     lines.append("Monitoring: newest first, regardless of the link's display order")
     return lines
+

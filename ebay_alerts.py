@@ -48,7 +48,9 @@ def prepare_listing(row):
     with closing(connection()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
         current = conn.execute(
-            "SELECT * FROM alert_outbox WHERE item_id=? AND platform='ebay'",
+            """SELECT o.*,d.payload AS ebay_details FROM alert_outbox o
+            LEFT JOIN ebay_alert_details d ON d.item_id=o.item_id
+            WHERE o.item_id=? AND o.platform='ebay'""",
             (row["item_id"],),
         ).fetchone()
         if (
@@ -68,6 +70,13 @@ def prepare_listing(row):
             reason = "Search no longer active for eBay"
         elif excluded_by(current["title"], json.loads(rules["exclusions"])):
             reason = "Blocked by current exclusions"
+        else:
+            try:
+                details = json.loads(current["ebay_details"] or "{}")
+            except (ValueError, TypeError):
+                details = {}
+            if not isinstance(details, dict) or details.get("item_location_country") != "GB":
+                reason = "Item location is not confirmed UK"
         if reason:
             conn.execute(
                 """UPDATE alert_outbox SET status='cancelled',error=?,lease_token=NULL,
@@ -114,6 +123,7 @@ def snapshot(item, search):
     )
     details.update(
         platform="ebay",
+        item_location_country=item.get("item_location_country"),
         native_photo=not vinted_native.separate_panels(),
         single_message=True,
         auction=item["auction"],
@@ -258,3 +268,4 @@ async def preview(query_id, *, phone_mode=None):
         "eBay layout preview sent: separate listing and example panels, with readable notes in one message."
         + (" A listing or reference image was unavailable." if not complete else "")
     )
+

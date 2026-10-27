@@ -6,7 +6,7 @@ import os
 import re
 import time
 from contextlib import closing
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import db
 from search_settings import connection
@@ -42,6 +42,34 @@ CONFIG_KEYS = (
 )
 
 
+def uk_config(config):
+    """Apply the owner's UK-stock rule to old and newly imported searches."""
+    result = dict(config, uk_only=True)
+    if result.get("search_url"):
+        url = urlsplit(result["search_url"])
+        params = dict(parse_qsl(url.query, keep_blank_values=True))
+        params["LH_PrefLoc"] = "1"
+        result["search_url"] = url._replace(query=urlencode(sorted(params.items()))).geturl()
+    return result
+
+
+def enforce_uk_only():
+    """Narrow saved searches without resetting baselines, seen items or pacing."""
+    changed = 0
+    with closing(connection()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        for row in conn.execute("SELECT query_id,ebay_config FROM search_platforms").fetchall():
+            old = json.loads(row["ebay_config"])
+            new = uk_config(old)
+            if old != new:
+                conn.execute(
+                    "UPDATE search_platforms SET ebay_config=? WHERE query_id=?",
+                    (json.dumps(new, sort_keys=True), row["query_id"]),
+                )
+                changed += 1
+    return changed
+
+
 def platform_details(query_id):
     with closing(connection()) as conn:
         row = conn.execute(
@@ -55,7 +83,7 @@ def platform_details(query_id):
         if row
         else {"vinted_enabled": 1, "ebay_enabled": 0, "ebay_generation": 0}
     )
-    result["ebay"] = dict(DEFAULTS, **json.loads(result.pop("ebay_config", "{}")))
+    result["ebay"] = uk_config(dict(DEFAULTS, **json.loads(result.pop("ebay_config", "{}"))))
     result["ebay_health"] = dict(health) if health else {}
     result["platform_mode"] = (
         "both"
@@ -70,7 +98,7 @@ def platform_details(query_id):
 
 def search_url(config):
     if config.get("filter_mode") == "url":
-        return config["search_url"]
+        return uk_config(config)["search_url"]
     params = {"_nkw": config["keywords"], "_sop": "10"}
     if config["buying"] == "fixed":
         params["LH_BIN"] = "1"
@@ -81,8 +109,7 @@ def search_url(config):
     for field, key in [("min_price", "_udlo"), ("max_price", "_udhi")]:
         if config[field] is not None:
             params[key] = f"{config[field] / 100:.2f}"
-    if config["uk_only"]:
-        params["LH_PrefLoc"] = "1"
+    params["LH_PrefLoc"] = "1"
     return "https://www.ebay.co.uk/sch/i.html?" + urlencode(params)
 
 
@@ -121,7 +148,7 @@ def parse_form(form, previous=None):
     config["category"] = form.get("ebay_category", "").strip()
     config["buying"] = form.get("ebay_buying", "fixed")
     config["condition"] = form.get("ebay_condition", "any")
-    config["uk_only"] = form.get("ebay_uk_only") == "yes"
+    config["uk_only"] = True
     config["include_shipping"] = form.get("ebay_include_shipping") == "yes"
     for key in ("min_price", "max_price"):
         config[key] = parse_money(form.get("ebay_" + key, ""))
@@ -192,6 +219,7 @@ def parse_shared_form(form, previous=None, maximum=None):
 
 
 def save_platforms(conn, query_id, vinted, ebay, config):
+    config = uk_config(config)
     old = conn.execute(
         "SELECT * FROM search_platforms WHERE query_id=?", (query_id,)
     ).fetchone()
@@ -605,3 +633,4 @@ def reserve_call(config, now, *, diagnostic=False, media=False):
                 (now,),
             )
         return None
+

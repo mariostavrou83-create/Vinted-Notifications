@@ -97,9 +97,7 @@ def buyer_protection_allowance(raw, price, *, public=False):
 
 
 def search_params(config):
-    filters = ["deliveryCountry:GB"]
-    if config["uk_only"]:
-        filters.append("itemLocationCountry:GB")
+    filters = ["deliveryCountry:GB", "itemLocationCountry:GB"]
     buying = {
         "fixed": "FIXED_PRICE",
         "auction": "AUCTION",
@@ -264,6 +262,12 @@ def parse_item(raw, config, now, *, fresh_only=True, rejections=None):
 
     if not isinstance(raw, dict):
         return reject("invalid_result")
+    location = raw.get("itemLocation")
+    country = location.get("country") if isinstance(location, dict) else None
+    if not isinstance(country, str) or not country:
+        return reject("item_location_unknown")
+    if country != "GB":
+        return reject("item_location_not_uk")
     created = timestamp(raw.get("itemOriginDate")) or timestamp(
         raw.get("itemCreationDate")
     )
@@ -377,6 +381,7 @@ def parse_item(raw, config, now, *, fresh_only=True, rejections=None):
     keyword_description, complete = description_text(supplied_description, html=True)
     result = {
         "item_id": "ebay:" + item_id,
+        "item_location_country": country,
         "title": title,
         "price": price,
         "shipping": shipping,
@@ -879,6 +884,8 @@ async def run_delivery():
 
 
 def ebay_process():
+    updated = store.enforce_uk_only()
+    logger.info("eBay UK-only item location enforced: saved_searches_updated=%s", updated)
     threading.Thread(target=lambda: asyncio.run(run_delivery()), daemon=True).start()
     poller = Poller()
     allowance_due = 0
@@ -893,3 +900,4 @@ def ebay_process():
         except Exception as exc:  # noqa: BLE001
             logger.warning("eBay monitor recovering after %s", type(exc).__name__)
             time.sleep(5)
+
