@@ -358,6 +358,21 @@ def create_app(test_config=None):
             },
         )
 
+    @app.get("/search-review/photos")
+    def search_photo_review():
+        from flask import render_template_string
+        page = max(0, request.args.get("page", 0, type=int))
+        rows = [row for row in store.list_searches(False) if row.get("reference_id")]
+        rows.sort(key=lambda row: row["id"])
+        selected = [{"id": row["id"], "name": row["query_name"],
+                     "photos": store.reference_photos(row["id"])} for row in rows[page*12:(page+1)*12]]
+        return render_template_string('''<!doctype html><title>Reference photo review</title>
+        <style>body{font:14px sans-serif;margin:16px}section{border-top:1px solid #ccc;padding:8px 0}h2{font-size:16px;margin:4px}figure{display:inline-block;margin:4px;text-align:center}img{width:110px;height:125px;object-fit:contain}figcaption{font-size:12px}</style>
+        <h1>Reference photo review</h1><p>Page {{page+1}} · {{total}} searches with examples</p>
+        {% for row in rows %}<section><h2>#{{row.id}} · {{row.name}}</h2>
+        {% for photo in row.photos %}<figure><img src="/reference/{{photo.media_id}}" alt="Search {{row.id}} photo {{photo.position+1}}"><figcaption>{{photo.position+1}}</figcaption></figure>{% endfor %}</section>{% endfor %}
+        <a href="?page={{page+1}}">Next page</a>''', rows=selected, page=page, total=len(rows))
+
     @app.route("/search-review/apply", methods=["GET", "POST"])
     def search_review_apply():
         if request.method == "POST":
