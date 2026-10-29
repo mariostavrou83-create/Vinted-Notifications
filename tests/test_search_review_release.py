@@ -112,3 +112,22 @@ class ReviewReleaseTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(result['pending_cancelled'],1)
         with closing(sqlite3.connect(db.DB_PATH)) as conn:
             self.assertEqual(list(conn.execute('SELECT item_id,status FROM alert_outbox ORDER BY item_id')), [('101','cancelled'),('102','sent'),('103','pending')])
+
+    def test_owner_restore_protects_originals_and_preserves_urls_and_budgets(self):
+        self.manifest['protect_original_ids'] = [1]
+        self.manifest['edits'][0].update(keywords=[], exclusions=[])
+        result = release.apply_once(manifest_data=self.manifest, now=1234)
+        self.assertEqual(result['edits'], 1)
+        with closing(sqlite3.connect(db.DB_PATH)) as conn:
+            self.assertEqual(conn.execute('SELECT value FROM parameters WHERE key="protected_original_search_ids"').fetchone()[0], '[1]')
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM vinted_keyword_variants WHERE query_id=1').fetchone()[0], 0)
+            self.assertEqual(conn.execute('SELECT max_total FROM vinted_search_budgets WHERE query_id=1').fetchone()[0], 2000)
+            self.assertEqual(conn.execute('SELECT query FROM queries WHERE id=1').fetchone()[0], self.expected['queries']['query'])
+
+    def test_protection_refuses_an_audit_that_adds_rules_to_an_original(self):
+        self.manifest['protect_original_ids'] = [1]
+        with self.assertRaisesRegex(RuntimeError, 'Original searches must retain empty'):
+            release.apply_once(manifest_data=self.manifest)
+        with closing(sqlite3.connect(db.DB_PATH)) as conn:
+            conn.row_factory = sqlite3.Row
+            self.assertEqual(release._state(conn, 1), self.expected)

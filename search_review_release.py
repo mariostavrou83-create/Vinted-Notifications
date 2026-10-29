@@ -23,8 +23,8 @@ from ebay_search_link import shared_keyword_query
 from search_review_export import CONFIG, project
 from search_settings import excluded_by, parse_exclusions
 
-RELEASE = "msj-search-review-20261027-v1"
-MARKER = "search_review_release_20261027_v1"
+RELEASE = "msj-search-review-20261029-v2"
+MARKER = "search_review_release_20261029_v2"
 RULE_TABLES = (
     "queries", "search_preferences", "search_dashboard",
     "search_buying_guide", "vinted_search_budgets", "search_platforms",
@@ -104,14 +104,18 @@ def _backup(conn):
     return str(path)
 
 
-def apply_once(*, manifest_path=None, now=None):
-    if os.environ.get("MSJ_SEARCH_REVIEW_RELEASE") != RELEASE:
+def apply_once(*, manifest_path=None, manifest_data=None, now=None):
+    if manifest_data is None and os.environ.get("MSJ_SEARCH_REVIEW_RELEASE") != RELEASE:
         return None
     with db.connection_scope() as conn:
         conn.row_factory = sqlite3.Row
         if conn.execute("SELECT 1 FROM parameters WHERE key=?", (MARKER,)).fetchone():
             return None
-        raw = Path(manifest_path).read_bytes() if manifest_path else _private_manifest()
+        raw = (json.dumps(manifest_data, sort_keys=True, separators=(",", ":")).encode()
+               if manifest_data is not None else
+               Path(manifest_path).read_bytes() if manifest_path else _private_manifest())
+        if len(raw) > 500000:
+            raise RuntimeError("Oversized review configuration")
         manifest = json.loads(raw)
         edits = manifest["edits"]
         ids = [r["id"] for r in edits]
@@ -123,6 +127,14 @@ def apply_once(*, manifest_path=None, now=None):
             if [r[0] for r in conn.execute("SELECT id FROM queries ORDER BY id")] != manifest["query_ids"]:
                 raise RuntimeError("Saved search membership changed since review")
             prepared = []
+            saved_protection = conn.execute("SELECT value FROM parameters WHERE key='protected_original_search_ids'").fetchone()
+            protected_originals = set(json.loads(saved_protection[0]) if saved_protection else [])
+            requested_protection = set(manifest.get("protect_original_ids", []))
+            for qid in requested_protection:
+                original = _state(conn, qid)
+                if not original["queries"] or conn.execute("SELECT 1 FROM search_reference_photos WHERE query_id=?", (qid,)).fetchone():
+                    raise RuntimeError("Original-search protection requires an existing search without references")
+            protected_originals |= requested_protection
             for edit in edits:
                 qid = edit["id"]
                 state = _state(conn, qid)
@@ -134,6 +146,8 @@ def apply_once(*, manifest_path=None, now=None):
                 blocks = parse_exclusions("\n".join(edit["exclusions"]))
                 if words != edit["keywords"] or blocks != edit["exclusions"]:
                     raise RuntimeError("Non-canonical reviewed rules")
+                if qid in protected_originals and (words or blocks):
+                    raise RuntimeError("Original searches must retain empty keyword alternatives and exclusions")
                 if words == state["keywords"] and blocks == json.loads((state["search_preferences"] or {}).get("exclusions", "[]")):
                     raise RuntimeError("Unchanged search in review edit list")
                 platform = conn.execute("SELECT * FROM search_platforms WHERE query_id=?", (qid,)).fetchone()
@@ -177,6 +191,12 @@ def apply_once(*, manifest_path=None, now=None):
                         cancelled += conn.execute("UPDATE alert_outbox SET status='cancelled',error='Saved search changed in reviewed edit',lease_token=NULL,leased_until=0 WHERE item_id=? AND platform=? AND status='pending'", (pending_row["item_id"], pending_row["platform"])).rowcount
             if _protected(conn, set(ids)) != protected:
                 raise RuntimeError("A protected search setting changed; rolling back")
+            for qid in requested_protection:
+                original = _state(conn, qid)
+                if original["keywords"] or json.loads((original["search_preferences"] or {}).get("exclusions", "[]")):
+                    raise RuntimeError("An original search was not restored")
+            if requested_protection:
+                conn.execute("INSERT INTO parameters(key,value) VALUES('protected_original_search_ids',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(sorted(protected_originals)),))
             summary = {"id": RELEASE, "applied_at": now or time.time(), "edits": len(edits),
                 "keyword_edits": keyword_edits, "exclusion_edits": exclusion_edits,
                 "variants_before": variants_before,

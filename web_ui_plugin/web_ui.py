@@ -358,6 +358,24 @@ def create_app(test_config=None):
             },
         )
 
+    @app.route("/search-review/apply", methods=["GET", "POST"])
+    def search_review_apply():
+        if request.method == "POST":
+            import json
+            from search_review_release import apply_once
+            try:
+                manifest = json.loads(request.form.get("manifest", ""))
+                result = apply_once(manifest_data=manifest)
+            except (ValueError, TypeError, KeyError, RuntimeError) as exc:
+                return {"error": str(exc)}, 409
+            return {"result": result}, 200, {"Cache-Control": "no-store"}
+        from flask import render_template_string
+        return render_template_string('''<!doctype html><title>Private search repair</title>
+        <h1>Apply reviewed search repair</h1><p>Exact expected settings are checked before any change. A backup is saved first.</p>
+        <form method="post"><input type="hidden" name="csrf" value="{{csrf}}">
+        <label>Reviewed changes<textarea name="manifest" rows="20" cols="100" required></textarea></label>
+        <button>Apply reviewed changes</button></form>''', csrf=session.get("csrf"))
+
     @app.get("/search-review.json")
     def search_review_export():
         from search_review_export import bounded_view, collect
