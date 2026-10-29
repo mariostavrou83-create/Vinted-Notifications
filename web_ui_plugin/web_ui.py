@@ -367,7 +367,7 @@ def create_app(test_config=None):
             200,
             {
                 "Cache-Control": "no-store",
-                "Content-Disposition": "attachment; filename=search-review.json",
+                "Content-Disposition": ("inline" if request.args.get("view") == "inline" else "attachment; filename=search-review.json"),
             },
         )
 
