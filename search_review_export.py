@@ -123,3 +123,49 @@ def collect(path):
         result["backups"].append(entry)
     return result
 
+
+def bounded_view(path, section, *, offset=0, limit=100, backup=None):
+    """Small owner-only slices; avoid rendering the full historical export."""
+    offset, limit = max(0, offset), max(1, min(200, limit))
+    directory = path.resolve().parent / "backups"
+    if section == "backups":
+        return {"backups": [{"name": p.name, "modified_at": p.stat().st_mtime}
+                            for p in sorted(directory.glob("*.sqlite3"))]}
+    source = path
+    if backup is not None:
+        matches = {p.name: p for p in directory.glob("*.sqlite3")}
+        if backup not in matches:
+            raise ValueError("Unknown saved snapshot")
+        source = matches[backup]
+    with closing(sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("BEGIN")
+        if section == "config":
+            result = {name: read_table(conn, name, columns, limit=2000) for name, columns in CONFIG.items()}
+            result["search_reference_photos"] = read_table(conn, "search_reference_photos", "query_id position media_id", limit=2000)
+            return result
+        if section == "traffic":
+            since = time.time() - 7 * 86400
+            return {"since": since, "alerts": [dict(r) for r in conn.execute(
+                "SELECT query_id,platform,status,COUNT(*) n,MAX(found_at) latest FROM alert_outbox WHERE found_at>=? GROUP BY query_id,platform,status", (since,))],
+                "candidates": [dict(r) for r in conn.execute(
+                "SELECT query_id,status,reason,COUNT(*) n FROM keyword_candidates WHERE found_at>=? GROUP BY query_id,status,reason", (since,))],
+                "health": read_table(conn, "search_health", EVIDENCE["search_health"], limit=2000)}
+        if section in {"alerts", "candidates"}:
+            table = "alert_outbox" if section == "alerts" else "keyword_candidates"
+            columns = EVIDENCE[table].split()
+            available = {r[1] for r in conn.execute(f'PRAGMA table_info("{table}")')}
+            columns = [c for c in columns if c in available]
+            rows = []
+            for row in conn.execute(f'SELECT {",".join(columns)} FROM "{table}" ORDER BY found_at DESC LIMIT ? OFFSET ?', (limit, offset)):
+                result = dict(row)
+                for key in JSON_FIELDS & result.keys():
+                    try:
+                        result[key] = project(json.loads(result[key]))
+                    except (ValueError, TypeError):
+                        result[key] = {"unreadable": True}
+                rows.append(result)
+            return {"offset": offset, "rows": rows}
+        raise ValueError("Unknown review section")
+

@@ -360,7 +360,18 @@ def create_app(test_config=None):
 
     @app.get("/search-review.json")
     def search_review_export():
-        from search_review_export import collect
+        from search_review_export import bounded_view, collect
+
+        section = request.args.get("section")
+        if section:
+            try:
+                data = bounded_view(Path(db.DB_PATH), section,
+                    offset=int(request.args.get("offset", 0)),
+                    limit=int(request.args.get("limit", 100)),
+                    backup=request.args.get("backup"))
+            except (ValueError, TypeError):
+                abort(400)
+            return data, 200, {"Cache-Control": "no-store"}
 
         return (
             collect(Path(db.DB_PATH)),
