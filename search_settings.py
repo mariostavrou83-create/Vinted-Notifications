@@ -336,8 +336,8 @@ def parse_exclusions(text):
             if phrase.strip()
         )
     )
-    if len(phrases) > 30 or any(len(p) > 60 for p in phrases):
-        raise ValueError("Use up to 30 phrases, each at most 60 characters.")
+    if len(phrases) > 60 or any(len(p) > 60 for p in phrases):
+        raise ValueError("Use up to 60 phrases, each at most 60 characters.")
     if any(not tokens(p) for p in phrases):
         raise ValueError("Each exclusion must contain a word.")
     return phrases
