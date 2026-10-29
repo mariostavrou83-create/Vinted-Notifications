@@ -92,6 +92,9 @@ def create_app(test_config=None):
             return None
         if request.endpoint == "static":
             return None
+        if request.endpoint == "search_review_apply":
+            request.max_content_length = 600_000
+            request.max_form_memory_size = 600_000
         # This single callback uses eBay's cryptographic signature instead of
         # an owner cookie/CSRF form. All dashboard routes stay protected.
         if request.endpoint == "ebay_account_deletion":
