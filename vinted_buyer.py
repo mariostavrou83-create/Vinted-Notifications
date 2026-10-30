@@ -1319,14 +1319,15 @@ class Client:
             raise
 
     def update_tokens(self, response, data):
-        """Keep one current token per name after a normal refresh-cookie rotation."""
+        """Keep accepted token rotations without inventing broader cookie scope."""
         returned = getattr(response, "cookies", None)
         returned = (
             list(returned)
             if isinstance(returned, requests.cookies.RequestsCookieJar)
             else []
         )
-        access_updated = False
+        updates = []
+        now = time.time()
         for field, cookie in (
             ("access_token", "access_token_web"),
             ("refresh_token", "refresh_token_web"),
@@ -1345,24 +1346,69 @@ class Client:
                 continue
             if received is not None and (
                 (received.domain and received.domain not in COOKIE_DOMAINS)
-                or (received.expires is not None and received.expires <= time.time())
+                or (received.expires is not None and received.expires <= now)
             ):
                 continue
+            replacement = copy(received) if received is not None and received.domain else None
+            if received is None:
+                previous = [entry for entry in self.session.cookies if entry.name == cookie]
+                if len(previous) > 1:
+                    raise BuyerError(
+                        "The saved Vinted cookie scope is ambiguous. Reconnect using the original browser cookie records.",
+                        reason="saved_session", stage="saved_session",
+                    )
+                if previous:
+                    original = previous[0]
+                    if (
+                        original.domain not in COOKIE_DOMAINS
+                        or not isinstance(original.path, str)
+                        or not original.path.startswith("/")
+                        or len(original.path) > 2048
+                        or any(ord(char) <= 32 or ord(char) > 126 for char in original.path)
+                        or any(type(getattr(original, flag)) is not bool for flag in (
+                            "secure", "domain_specified", "domain_initial_dot", "path_specified", "discard",
+                        ))
+                    ):
+                        raise BuyerError(
+                            AUTH_REASONS["saved_session"], reason="saved_session", stage="saved_session",
+                        )
+                    replacement = copy(original)
+                    replacement.value = value
+                    # The body supplies a new credential, not a new destination.
+                    # Retain the original domain/path/flags. A persistent cookie
+                    # may use a fresh bounded token expiry instead of retaining
+                    # the previous credential's stale absolute expiry. Session
+                    # cookies stay session-only; maintenance reads their claims.
+                    expiry = token_expiry_timestamp(value)
+                    if expiry is not None and expiry <= now:
+                        continue
+                    if original.expires is not None:
+                        if expiry is not None:
+                            if int(expiry) <= now:
+                                continue
+                            replacement.expires = int(expiry)
+                        elif original.expires <= now:
+                            # An opaque replacement supplies no new lifetime.
+                            # Do not claim that an already expired cookie became
+                            # usable merely because its value changed.
+                            continue
+            updates.append((cookie, value, replacement))
+        # Validate both rotations before mutating either credential. A rejected
+        # response also rolls back requests' automatic Set-Cookie merge.
+        for cookie, value, replacement in updates:
             # requests can retain both the imported host cookie and a new
             # domain cookie. Sending both lets the old token shadow the new one.
             for saved in list(self.session.cookies):
                 if saved.name == cookie:
                     self.session.cookies.clear(saved.domain, saved.path, saved.name)
-            if received is not None and received.domain:
-                self.session.cookies.set_cookie(copy(received))
+            if replacement is not None:
+                self.session.cookies.set_cookie(replacement)
             else:
                 self.session.cookies.set(
                     cookie, value, domain="www.vinted.co.uk", secure=True
                 )
-            if cookie == "access_token_web":
-                access_updated = True
         self.headers()
-        return access_updated
+        return any(cookie == "access_token_web" for cookie, _, _ in updates)
 
     def refresh_security_token(self):
         """Read the current public bootstrap before renewing an expired session.

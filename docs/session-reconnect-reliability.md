@@ -80,6 +80,13 @@ reconnect. Routine identity checks cannot clear a cookie-scope or security
 refusal. An uncertain send remains quarantined and cannot be replayed. Scope
 compatibility does not establish that checkout or payment will be accepted.
 
+Accepted token values returned without `Set-Cookie` retain the existing cookie's
+domain, path and security flags. A fresh, bounded token expiry updates an
+existing persistent cookie's old expiry; session cookies remain session-only.
+Explicit `Set-Cookie` metadata remains authoritative. Ambiguous saved scopes
+stop the rotation instead of guessing a destination. This prevents ordinary
+token maintenance from undoing the corrected browser import.
+
 The optional unpacked Chrome helper exports only the two original auth cookie
 records to the owner's clipboard. Its declared permissions are `cookies` and
 `clipboardWrite`, with host access limited to `https://www.vinted.co.uk/*` and
