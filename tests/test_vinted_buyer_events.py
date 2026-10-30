@@ -113,6 +113,58 @@ class BuyerEventTests(NoticeFixture, unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("NEVER-PUBLISH", text)
         self.assertIsNone(self.notice_row()["checked"])
 
+    async def test_numeric_api_error_reaches_checkout_warning_and_dashboard_only(self):
+        error = buyer.BuyerError(
+            "NEVER-PUBLISH private provider detail", 403,
+            reason="forbidden", stage="request", api_code=106,
+        )
+        self.assertTrue(events.record_checkout_failure(
+            self.client, error, "submitting payment", payment_started=True,
+        ))
+        self.assertEqual(self.rows()[0]["api_code"], 106)
+        health = buyer.settings()["checkout_health"]
+        self.assertEqual(health["api_code"], 106)
+        self.assertEqual(health["phase"], "submitting payment")
+        self.assertEqual(health["payment_started"], 1)
+        self.assertIsNone(self.notice_row()["checked"])
+        self.assertEqual(await self.events.check(), "sent")
+        text = self.bot.send_message.await_args.kwargs["text"]
+        self.assertIn("Vinted code 106", text)
+        self.assertIn("Payment may have been submitted", text)
+        self.assertNotIn("No payment was sent", text)
+        self.assertNotIn("NEVER-PUBLISH", text)
+
+    def test_new_failure_updates_numeric_evidence_without_resetting_incident(self):
+        self.failure()
+        original = self.rows()[0]["event_id"]
+        error = buyer.BuyerError("offline", 403, reason="forbidden", api_code=106)
+        self.assertTrue(events.record_checkout_failure(self.client, error, "building the checkout"))
+        self.assertEqual(self.rows()[0]["event_id"], original)
+        self.assertEqual(self.rows()[0]["api_code"], 106)
+        self.failure()
+        self.assertIsNone(self.rows()[0]["api_code"])
+
+    def test_mutated_error_code_cannot_store_arbitrary_provider_text(self):
+        error = buyer.BuyerError("offline", 403, reason="forbidden")
+        error.api_code = "NEVER-PUBLISH provider detail"
+        self.assertTrue(events.record_checkout_failure(self.client, error, "building the checkout"))
+        self.assertIsNone(self.rows()[0]["api_code"])
+        self.assertIsNone(buyer.settings()["checkout_health"]["api_code"])
+
+    def test_schema30_upgrade_adds_api_evidence_and_preserves_existing_event(self):
+        self.failure(payment_started=True)
+        before = dict(self.rows()[0])
+        before.pop("api_code")
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("ALTER TABLE vinted_buyer_event DROP COLUMN api_code")
+            conn.execute("UPDATE parameters SET value='30' WHERE key='msj_search_schema'")
+        backup = search_settings.ensure_schema()
+        self.assertIsNotNone(backup)
+        after = dict(self.rows()[0])
+        self.assertIsNone(after.pop("api_code"))
+        self.assertEqual(after, before)
+        self.assertIsNone(search_settings.ensure_schema())
+
     async def test_identity_success_and_cookie_rotation_do_not_hide_checkout_failure(
         self,
     ):

@@ -141,6 +141,32 @@ class PickupCookieEvidenceTests(DatabaseFixture, unittest.TestCase):
         self.assertTrue(any("available=False" in line for line in logs.output))
         self.assertNotIn("private diagnostic error", " ".join(logs.output))
 
+    def test_notifications_evidence_distinguishes_original_cookie_scope_without_retry(self):
+        for domain, expected in (("www.vinted.co.uk", 0), (".vinted.co.uk", 1)):
+            with self.subTest(domain=domain):
+                client = self.client(domain)
+                before = client.exported()
+                sent = []
+
+                def transport(adapter, prepared, **kwargs):
+                    sent.append(prepared)
+                    return self.response(prepared)
+
+                with (
+                    patch.object(requests.adapters.HTTPAdapter, "send", autospec=True, side_effect=transport),
+                    patch.object(client, "solve_challenge") as solver,
+                    self.assertLogs("vinted_buyer", level="INFO") as logs,
+                    self.assertRaises(buyer.BuyerError),
+                ):
+                    client.request("GET", buyer.NOTIFICATIONS_PATH, params={"page": 1, "per_page": 20})
+                self.assertEqual(len(sent), 1)
+                solver.assert_not_called()
+                self.assertEqual(client.exported(), before)
+                evidence = next(line for line in logs.output if "notifications cookie evidence" in line)
+                self.assertIn(f"access_sent={expected}", evidence)
+                for secret in (*self.secrets.values(), self.csrf):
+                    self.assertNotIn(secret, " ".join(logs.output))
+
 
 if __name__ == "__main__":
     unittest.main()

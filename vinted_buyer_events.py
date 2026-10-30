@@ -46,9 +46,13 @@ def migrate(conn):
         channel TEXT PRIMARY KEY CHECK(channel IN ('connection','checkout')),
         event_id TEXT NOT NULL, buyer_id TEXT NOT NULL, kind TEXT NOT NULL,
         checked REAL NOT NULL, reason TEXT, stage TEXT, http_status INTEGER,
+        api_code INTEGER,
         phase TEXT, payment_started INTEGER NOT NULL DEFAULT 0,
         sent INTEGER NOT NULL DEFAULT 0, lease_id TEXT,
         lease_until REAL NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0)""")
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(vinted_buyer_event)")}
+    if "api_code" not in columns:
+        conn.execute("ALTER TABLE vinted_buyer_event ADD COLUMN api_code INTEGER")
 
 
 def _current(conn, reference):
@@ -144,17 +148,18 @@ def record_checkout_failure(client, error, phase, *, payment_started=False):
                 if type(error.status) is int and 100 <= error.status <= 599
                 else None
             )
+            api_code = buyer.api_error_code(getattr(error, "api_code", None))
             if same:
                 conn.execute(
-                    "UPDATE vinted_buyer_event SET checked=?,reason=?,stage=?,http_status=?,phase=? "
+                    "UPDATE vinted_buyer_event SET checked=?,reason=?,stage=?,http_status=?,phase=?,api_code=? "
                     "WHERE channel='checkout'",
-                    (time.time(), error.reason, error.stage, status, phase),
+                    (time.time(), error.reason, error.stage, status, phase, api_code),
                 )
             else:
                 conn.execute(
                     """INSERT OR REPLACE INTO vinted_buyer_event
-                    (channel,event_id,buyer_id,kind,checked,reason,stage,http_status,phase,payment_started)
-                    VALUES ('checkout',?,?,'blocked',?,?,?,?,?,?)""",
+                    (channel,event_id,buyer_id,kind,checked,reason,stage,http_status,phase,payment_started,api_code)
+                    VALUES ('checkout',?,?,'blocked',?,?,?,?,?,?,?)""",
                     (
                         uuid.uuid4().hex,
                         current[1],
@@ -164,6 +169,7 @@ def record_checkout_failure(client, error, phase, *, payment_started=False):
                         status,
                         phase,
                         int(bool(payment_started)),
+                        api_code,
                     ),
                 )
         return True
@@ -191,13 +197,14 @@ def clear_checkout_failure(client):
 
 def checkout_health(conn, user_id):
     row = conn.execute(
-        "SELECT checked,reason,http_status,phase,payment_started FROM vinted_buyer_event "
+        "SELECT checked,reason,http_status,phase,payment_started,api_code FROM vinted_buyer_event "
         "WHERE channel='checkout' AND buyer_id=? AND kind='blocked'",
         (user_id,),
     ).fetchone()
     if row is None:
         return None
     value = dict(row)
+    value["api_code"] = buyer.api_error_code(value["api_code"])
     value["checked_display"] = buyer._display_auth_time(value["checked"])
     return value
 
@@ -289,12 +296,15 @@ class BuyerEventNotifier(ConnectionNotifier):
                 text += " Your last checkout failure has not yet been cleared by a successful purchase."
         else:
             status = f" (HTTP {row['http_status']})" if row["http_status"] else ""
+            api_code = buyer.api_error_code(row.get("api_code"))
             text = (
                 "⚠️ Vinted Autobuy needs attention\n\nThe last attempt stopped while "
                 + row["phase"]
                 + status
                 + "."
             )
+            if api_code is not None:
+                text += f" Vinted code {api_code}."
             if row["reason"] == "security_challenge":
                 text += " Vinted requested a security check. Complete any required check in your Vinted account."
             elif row["reason"] == "forbidden":

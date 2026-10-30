@@ -1872,6 +1872,19 @@ def _buy(row):
             record_checkout_failure(client, exc, phase, payment_started=payment_started)
             reason = exc.reason
             message = str(exc)
+            if not payment_started and client and getattr(client, "_verified_session", None):
+                if reason == "security_challenge":
+                    message = (
+                        "Vinted requested a checkout security check. Your account check passed; "
+                        "this does not mean your login disconnected. Use Continue in Vinted "
+                        "to complete any required check and review the purchase there."
+                    )
+                elif reason == "forbidden":
+                    message = (
+                        "Vinted refused the checkout request. Your account check passed; "
+                        "this does not establish a disconnected login. Use Continue in Vinted "
+                        "to review the purchase in your normal Vinted session."
+                    )
             if reason in buyer.AUTH_REASONS:
                 http = f" (HTTP {exc.status})" if isinstance(exc.status, int) else ""
                 message = f"Autobuy stopped while {phase}{http}: {message}"
@@ -2146,6 +2159,7 @@ def feedback_buttons(row, feedback=None):
             "unreadable": "Vinted response unreadable · details",
             "network": "Vinted connection error · details",
             "security_challenge": "Vinted security check required · details",
+            "forbidden": "Vinted checkout refused · details",
             "rate_limited": "Vinted cooldown required · details",
             "credentials": "Vinted session expired · details",
             "unexpected_error": "Checkout error · details",
@@ -2179,6 +2193,7 @@ def feedback_buttons(row, feedback=None):
         "item_sold",
         "item_closed",
         "security_challenge",
+        "forbidden",
         "earlier_payment_uncertain",
     ):
         buttons.append(
@@ -2213,7 +2228,9 @@ def feedback_buttons(row, feedback=None):
                 )
             ]
         )
-    elif feedback.get("checkout_id"):
+    elif feedback.get("checkout_id") and not (
+        state == "failed_before_payment" and reason in ("security_challenge", "forbidden")
+    ):
         buttons.append(
             [
                 InlineKeyboardButton(
@@ -2222,6 +2239,20 @@ def feedback_buttons(row, feedback=None):
                 )
             ]
         )
+    if state == "failed_before_payment" and reason in ("security_challenge", "forbidden"):
+        # A refused server request is not permission to retry around it. Let
+        # the owner continue in Vinted's ordinary UI, without moving cookies
+        # or automatically submitting a second request or payment.
+        checkout_id = feedback.get("checkout_id")
+        item_id = str(row.get("item_id", ""))
+        if isinstance(checkout_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,100}", checkout_id):
+            continuation = buyer.BASE + "/checkout?purchase_id=" + checkout_id
+        elif re.fullmatch(r"[0-9]{1,24}", item_id):
+            continuation = buyer.BASE + "/items/" + item_id
+        else:
+            continuation = None
+        if continuation and not any(button.url == continuation for line in buttons for button in line):
+            buttons.append([InlineKeyboardButton("Continue in Vinted ↗", url=continuation)])
     from vinted_owner_controls import buttons as owner_buttons
 
     buttons.extend(owner_buttons(feedback))

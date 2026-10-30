@@ -874,6 +874,12 @@ def create_app(test_config=None):
                         ),
                         "success",
                     )
+                elif action == "buyer_session_records":
+                    records = vinted_buyer.parse_browser_session_records(
+                        request.form.get("buyer_session_records", "")
+                    )
+                    flash(vinted_buyer.link_browser_session_records(records), "success")
+                    return redirect(url_for("connections"), code=303)
                 elif action == "buyer_connection_notice_test":
                     import asyncio
 

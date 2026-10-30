@@ -93,6 +93,13 @@ def csrf_from_html(html):
     return None
 
 
+def api_error_code(value):
+    """Retain only bounded numeric API evidence, never arbitrary provider text."""
+    if isinstance(value, str) and re.fullmatch(r"[0-9]{1,4}", value):
+        value = int(value)
+    return value if type(value) is int and 0 <= value <= 1000 else None
+
+
 class BuyerError(ValueError):
     def __init__(
         self,
@@ -102,12 +109,14 @@ class BuyerError(ValueError):
         reason="not_confirmed",
         stage="request",
         retry_after=0,
+        api_code=None,
     ):
         super().__init__(message)
         self.status = status
         self.reason = reason
         self.stage = stage
         self.retry_after = retry_after
+        self.api_code = api_error_code(api_code)
 
 
 def token_expiry_timestamp(value):
@@ -372,6 +381,7 @@ def response_error(response, data, stage):
         reason=reason,
         stage=stage,
         retry_after=retry_after,
+        api_code=numeric_code,
     )
 
 
@@ -1468,7 +1478,7 @@ class Client:
         else:
             referer = self.session.headers.get("Referer", BASE + "/")
         self.session.headers["Referer"] = referer
-        if pickup_gateway:
+        if pickup_gateway or notifications_gateway:
             # Observe cookie scope for this validated API-host request without
             # copying credentials between hosts or changing the actual request.
             # Identity on www does not establish that cookies apply to api.
@@ -1486,13 +1496,17 @@ class Client:
                     for part in prepared_pickup.headers.get("Cookie", "").split(";")
                 ]
                 logger.info(
-                    "Vinted pickup cookie evidence: access_sent=%s refresh_sent=%s csrf_sent=%s",
+                    "Vinted %s cookie evidence: access_sent=%s refresh_sent=%s csrf_sent=%s",
+                    "pickup" if pickup_gateway else "notifications",
                     pickup_cookie_names.count("access_token_web"),
                     pickup_cookie_names.count("refresh_token_web"),
                     bool(prepared_pickup.headers.get("X-CSRF-Token")),
                 )
             except Exception:  # noqa: BLE001 -- optional evidence cannot stop buying
-                logger.info("Vinted pickup cookie evidence: available=False")
+                logger.info(
+                    "Vinted %s cookie evidence: available=False",
+                    "pickup" if pickup_gateway else "notifications",
+                )
         previous_access = self.session.cookies.get_dict().get("access_token_web")
         previous_refresh = self.session.cookies.get_dict().get("refresh_token_web")
         if renewal:
@@ -2091,6 +2105,19 @@ def replace_browser_session(
                 "checkout_created": False,
                 "payment_submitted": False,
             }
+            # Cookie applicability is observable without an API request. It is
+            # not evidence that Vinted will accept notifications or checkout.
+            try:
+                prepared = client.session.prepare_request(
+                    requests.Request("GET", PICKUP_BASE + NOTIFICATIONS_PATH)
+                )
+                names = [
+                    part.split("=", 1)[0].strip()
+                    for part in prepared.headers.get("Cookie", "").split(";")
+                ]
+                result["api_access_cookie_present"] = names.count("access_token_web") == 1
+            except Exception:  # noqa: BLE001 -- optional evidence cannot undo the save
+                result["api_access_cookie_present"] = None
             try:
                 client.bind_verified_session(user_id, sealed, current)
                 from vinted_buyer_events import record_connected
@@ -2125,6 +2152,64 @@ def replace_browser_session(
                     logger.warning(
                         "Vinted browser reconnect client cleanup did not confirm closure."
                     )
+
+
+def parse_browser_session_records(raw_json):
+    """Parse only an owner's two original scoped authentication cookie records."""
+    message = (
+        "Paste a JSON array containing only your two original Vinted authentication "
+        "cookie records, including their original domain and path."
+    )
+    if (
+        not isinstance(raw_json, str)
+        or not raw_json.strip()
+        or not raw_json.isascii()
+        or len(raw_json) > 32768
+    ):
+        raise BuyerError(message)
+
+    def unique_fields(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Ambiguous cookie metadata")
+            result[key] = value
+        return result
+
+    try:
+        records = json.loads(raw_json, object_pairs_hook=unique_fields)
+        return _browser_auth_cookie_records(records)
+    except (ValueError, TypeError, RecursionError, OverflowError):
+        # Cookie values and parser excerpts must never reach logs or the page.
+        raise BuyerError(message) from None
+
+
+def link_browser_session_records(cookie_records):
+    """Reconnect the existing buyer while preserving original browser scope."""
+    records = _browser_auth_cookie_records(cookie_records)
+    snapshot = browser_session_snapshot()
+    result = replace_browser_session(
+        records,
+        expected_user_id=snapshot["user_id"],
+        expected_session_fingerprint=snapshot["session_fingerprint"],
+    )
+    scope = result.get("api_access_cookie_present")
+    applicability = (
+        "The saved access cookie applies to Vinted's API host. "
+        if scope is True
+        else (
+            "The saved access cookie does not apply to Vinted's API host; "
+            "offers may remain unavailable. Its original scope was preserved. "
+            if scope is False
+            else "API cookie applicability was not confirmed. "
+        )
+    )
+    return (
+        "Vinted verified the same buyer account and saved its original cookie metadata. "
+        + applicability
+        + "Autobuy permission was preserved. This does not verify checkout or payment; "
+        "no checkout or payment was created."
+    )
 
 
 def link_session(access_token, refresh_token):
