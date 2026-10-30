@@ -593,6 +593,57 @@ class CatalogueHeaderBatchTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(self.requester.HEADER, previous)
 
 
+class DecodedCataloguePollingTests(EfficientPollingTests):
+    """Replay the consumer regression scenarios through the cheaper decoder."""
+
+    def page(self, ids, now, scheduler_id=1, process=True):
+        from pyVintedVN.items.items import _parsed_items
+
+        query = vinted_keywords.expand(search_settings.active_queries())[scheduler_id]
+        self.poller.processing_states = search_settings.processing_states()
+        state = self.poller.processing_states.get(scheduler_id)
+        floor = state["max_item_id"] if state and state["primed"] and state["url"] == query[1] else None
+        fixture = [
+            {"id": i, "title": "Hollister jacket", "url": f"/items/{i}",
+             "price": {"amount": "15", "currency_code": "GBP"},
+             "item_box": {"first_line": "Hollister", "second_line": "S · Good"}}
+            for i in ids
+        ]
+        items = polling.FetchedPage(_parsed_items(fixture, "www.vinted.co.uk", floor), now, now, frontier=state)
+        for item in items:
+            item.observed_at = now
+        items.restore_if_changed(state)
+        accepted = self.poller.process_page(scheduler_id, query[1], items, now)
+        if accepted:
+            self.queue.put((self.poller.queue_items(scheduler_id, query[1], items), query[0], query[1], query[4] if len(query) > 4 else None))
+            if process:
+                self.core.clear_item_queue(self.queue, self.output)
+        return accepted
+
+    def test_unsorted_burst_keeps_every_new_id_without_a_new_page_limit(self):
+        self.page(list(range(100, 4, -1)), 100)
+        burst = list(range(101, 221))
+        self.assertTrue(self.page(burst[::2] + [98, 100] + burst[1::2], 101))
+        self.assertEqual(self.output.qsize(), 120)
+        self.assertFalse(self.page([100, 220, 102], 102))
+
+    def test_edit_while_fetch_is_in_flight_restores_all_raw_entries(self):
+        from pyVintedVN.items.items import _parsed_items
+
+        self.page([100], 100)
+        state = search_settings.processing_states()[1]
+        raw = [{"id": 100, "title": "jacket", "url": "/items/100",
+                "price": {"amount": "15", "currency_code": "GBP"}}]
+        page = polling.FetchedPage(_parsed_items(raw, "www.vinted.co.uk", 100), 100, 101, frontier=state)
+        self.assertFalse(page)
+        for changed in (dict(state, revision=state["revision"] + 1), dict(state, primed=False), None):
+            candidate = polling.FetchedPage(page.catalogue_page, 100, 101, frontier=state, observed_at=1000)
+            candidate.restore_if_changed(changed)
+            self.assertEqual([i.id for i in candidate], [100])
+            self.assertIsNone(candidate.catalogue_page)
+            self.assertEqual(candidate[0].observed_at, 1000)
+
+
 class ScaledPollingCapacityTests(DatabaseFixture, unittest.TestCase):
     def test_574_checks_gain_capacity_without_overlap_or_lost_coverage(self):
         with closing(search_settings.connection()) as conn, conn:

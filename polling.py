@@ -96,13 +96,34 @@ _local = threading.local()
 class FetchedPage(list):
     """Separate HTTP-worker time from waiting for the scheduler to collect it."""
 
-    def __init__(self, items, started, completed):
+    def __init__(self, items, started, completed, frontier=None, observed_at=None):
         super().__init__(items)
         self.fetch_elapsed = completed - started
         self.completed_monotonic = completed
+        self.catalogue_page = items if hasattr(items, "catalogue_ids") else None
+        self.frontier = frontier
+        self.observed_at = observed_at
+
+    def restore_if_changed(self, current):
+        # An edit, resume or changed keyword baseline while HTTP was in flight
+        # must use the full response. Never let an old frontier hide its page.
+        if self.catalogue_page is not None and current != self.frontier:
+            self[:] = self.catalogue_page.complete()
+            if self.observed_at is not None:
+                for item in self:
+                    item.observed_at = self.observed_at
+            self.catalogue_page = None
+
+    @property
+    def catalogue_ids(self):
+        return (
+            self.catalogue_page.catalogue_ids
+            if self.catalogue_page is not None
+            else tuple(str(item.id) for item in self)
+        )
 
 
-def fetch_query(query, count, *, deadline=None):
+def fetch_query(query, count, *, deadline=None, frontier=None):
     # Each worker keeps a separate requester for each market. Cookies, locale and
     # headers are never mutated by another thread or copied between markets.
     from urllib.parse import urlparse
@@ -117,11 +138,16 @@ def fetch_query(query, count, *, deadline=None):
     if host not in _local.clients:
         _local.clients[host] = Items(client=Requester(shared_config=True))
     _local.clients[host].requester.request_deadline = deadline
-    items = _local.clients[host].search(query[1], nbr_items=count)
+    after_id = (
+        frontier["max_item_id"]
+        if frontier and frontier["url"] == query[1] and frontier["primed"]
+        else None
+    )
+    items = _local.clients[host].search(query[1], nbr_items=count, after_id=after_id)
     observed = time.time()
     for item in items:
         item.observed_at = observed
-    return FetchedPage(items, started, time.monotonic())
+    return FetchedPage(items, started, time.monotonic(), frontier=frontier, observed_at=observed)
 
 
 class Poller:
@@ -147,6 +173,7 @@ class Poller:
         self.worker_durations = []
         self.processing_lags = []
         self.trimmed_items = 0
+        self.skipped_item_objects = 0
         self.backoff_target = 0.0
         self.was_restricted = False
         self.recover_at = 0.0
@@ -236,6 +263,9 @@ class Poller:
             try:
                 items = future.result()
                 if isinstance(items, FetchedPage):
+                    items.restore_if_changed(self.processing_states.get(query_id))
+                    if items.catalogue_page is not None:
+                        self.skipped_item_objects += items.catalogue_page.omitted
                     self.worker_durations.append(items.fetch_elapsed)
                     self.processing_lags.append(
                         max(0, time.monotonic() - items.completed_monotonic)
@@ -400,8 +430,12 @@ class Poller:
                 previous = self.previous_start.get(query_id)
                 actual_interval = None if previous is None else now - previous
                 self.previous_start[query_id] = now
+                fetch = self.fetch
+                if self.base_fetch is fetch_query and not self.shadow:
+                    state = self.processing_states.get(query_id)
+                    fetch = partial(fetch, frontier=dict(state) if state else None)
                 self.pending[query_id] = (
-                    self.executor.submit(self.fetch, queries[query_id], count),
+                    self.executor.submit(fetch, queries[query_id], count),
                     now,
                     time.time(),
                     actual_interval,
@@ -425,7 +459,7 @@ class Poller:
                 )
 
             logger.info(
-                "Poller: %s searches; target %.1fs; %s successes/%s errors in last %.1fs; cooldown %.1fs; interval median %.3fs p95 %.3fs; fetch p95 %.3fs; %s unchanged pages reused; workers %s; interval max %.3fs; over 5s %s/%s; worker p95 %.3fs; process lag p95 %.3fs; %s committed old items omitted from IPC",
+                "Poller: %s searches; target %.1fs; %s successes/%s errors in last %.1fs; cooldown %.1fs; interval median %.3fs p95 %.3fs; fetch p95 %.3fs; %s unchanged pages reused; workers %s; interval max %.3fs; over 5s %s/%s; worker p95 %.3fs; process lag p95 %.3fs; %s committed old items omitted from IPC; %s committed item objects not rebuilt",
                 len(queries),
                 target,
                 self.successes,
@@ -443,6 +477,7 @@ class Poller:
                 percentile(worker_durations, 0.95),
                 percentile(processing_lags, 0.95),
                 self.trimmed_items,
+                self.skipped_item_objects,
             )
             self.successes = self.errors = 0
             self.reused_pages = 0
@@ -451,6 +486,7 @@ class Poller:
             self.worker_durations.clear()
             self.processing_lags.clear()
             self.trimmed_items = 0
+            self.skipped_item_objects = 0
             self.last_report = now
 
     def queue_items(self, query_id, url, items):
@@ -480,7 +516,11 @@ class Poller:
         30–60 second heartbeats retain freshness without synchronized writes.
         """
         state = self.processing_states.get(query_id)
-        ids = tuple(str(item.id) for item in items)
+        ids = (
+            items.catalogue_ids
+            if isinstance(items, FetchedPage)
+            else tuple(str(item.id) for item in items)
+        )
         if not state or state["url"] != url or any(not i.isdigit() for i in ids):
             return True
         signature = (url, state["revision"], ids)

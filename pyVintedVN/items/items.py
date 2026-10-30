@@ -1,5 +1,6 @@
 import threading
 import time as clock
+from functools import lru_cache
 from urllib.parse import parse_qsl, urlparse
 
 import orjson
@@ -12,6 +13,80 @@ from pyVintedVN.settings import Urls
 _cache_report_lock = threading.Lock()
 _cache_report_at = 0.0
 _logger = get_logger(__name__)
+
+
+def _committed_plain_item(raw, after_id):
+    """Recognize only ordinary, readable JSON entries below a committed ID.
+
+    Unusual shapes and real timestamps retain the original Item parser. In
+    particular, a corrupt old entry cannot turn an unreadable response into a
+    successful empty page. This fast path is never used without a consumer
+    frontier, or by normal Items.search callers.
+    """
+    if after_id is None or not isinstance(raw, dict):
+        return False
+    item_id = raw.get("id")
+    if not str(item_id).isdigit():
+        return False
+    try:
+        if int(item_id) > after_id:
+            return False
+    except (TypeError, ValueError, OverflowError):
+        return False
+    price, photo, box = raw.get("price"), raw.get("photo") or {}, raw.get("item_box") or {}
+    if not (
+        isinstance(raw.get("title"), str)
+        and isinstance(raw.get("url"), str)
+        and isinstance(price, dict)
+        and "amount" in price
+        and "currency_code" in price
+        and isinstance(photo, dict)
+        and isinstance(box, dict)
+    ):
+        return False
+    high_resolution = photo.get("high_resolution") or {}
+    if not isinstance(high_resolution, dict) or high_resolution.get("timestamp") is not None:
+        return False
+    second_line = box.get("second_line") or ""
+    return bool(raw.get("size_title")) or isinstance(second_line, str)
+
+
+def _parsed_items(raw_items, locale, after_id=None):
+    parsed, ids, omitted = [], [], 0
+    for raw in raw_items:
+        if _committed_plain_item(raw, after_id):
+            ids.append(str(raw["id"]))
+            omitted += 1
+            continue
+        try:
+            candidate = Item(raw, locale)
+            if not str(candidate.id).isdigit() or not isinstance(candidate.title, str):
+                raise ValueError("Invalid listing fields")
+            parsed.append(candidate)
+            ids.append(str(candidate.id))
+        except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+            # One incomplete listing must not discard other new results.
+            continue
+    if raw_items and not ids:
+        raise ValueError("Vinted returned no readable catalogue items.")
+    if len(ids) != len(raw_items):
+        _logger.warning("Skipped %s unreadable Vinted catalogue items", len(raw_items) - len(ids))
+    if omitted:
+        return CataloguePage(parsed, ids, raw_items, locale, omitted)
+    return parsed
+
+
+class CataloguePage(list):
+    """New objects plus the full readable ID page and an in-flight fallback."""
+
+    def __init__(self, items, ids, raw_items, locale, omitted):
+        super().__init__(items)
+        self.catalogue_ids = tuple(ids)
+        self.omitted = omitted
+        self._raw_items, self._locale = raw_items, locale
+
+    def complete(self):
+        return _parsed_items(self._raw_items, self._locale)
 
 
 def report_catalogue_cache(response):
@@ -51,6 +126,8 @@ class Items:
         page: int = 1,
         time: int | None = None,
         json: bool = False,
+        *,
+        after_id: int | None = None,
     ) -> list[Item]:
         """
         Retrieve items from a given search URL on Vinted.
@@ -100,26 +177,7 @@ class Items:
 
         # Return either Item objects or raw JSON data
         if not json:
-            parsed = []
-            for raw in items:
-                try:
-                    candidate = Item(raw, locale)
-                    if not str(candidate.id).isdigit() or not isinstance(
-                        candidate.title, str
-                    ):
-                        raise ValueError("Invalid listing fields")
-                    parsed.append(candidate)
-                except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
-                    # One incomplete listing must not discard other new results.
-                    continue
-            if items and not parsed:
-                raise ValueError("Vinted returned no readable catalogue items.")
-            if len(parsed) != len(items):
-                _logger.warning(
-                    "Skipped %s unreadable Vinted catalogue items",
-                    len(items) - len(parsed),
-                )
-            return parsed
+            return _parsed_items(items, locale, after_id)
         else:
             return items
 
@@ -138,6 +196,15 @@ class Items:
         Returns:
             Dict: A dictionary of parameters for the Vinted API.
         """
+        # These arguments fully describe the outbound filters. Reuse only their
+        # translation, never a catalogue response or a live search's state.
+        # Return a fresh dictionary so request preparation cannot mutate the
+        # template shared by concurrent catalogue workers.
+        return dict(self._query_parameters(url, nbr_items, page, time))
+
+    @staticmethod
+    @lru_cache(maxsize=2048)
+    def _query_parameters(url, nbr_items, page, time):
         # Parse the query parameters from the URL
         queries = parse_qsl(urlparse(url).query)
 
@@ -206,7 +273,7 @@ class Items:
         }
 
         # The legacy API ignored blank filters; svc-catalogue answers 400 to them.
-        return {k: v for k, v in params.items() if v not in ("", None)}
+        return tuple((k, v) for k, v in params.items() if v not in ("", None))
 
     # Aliases for backward compatibility
     parseUrl = parse_url

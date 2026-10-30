@@ -1468,6 +1468,31 @@ class Client:
         else:
             referer = self.session.headers.get("Referer", BASE + "/")
         self.session.headers["Referer"] = referer
+        if pickup_gateway:
+            # Observe cookie scope for this validated API-host request without
+            # copying credentials between hosts or changing the actual request.
+            # Identity on www does not establish that cookies apply to api.
+            try:
+                prepared_pickup = self.session.prepare_request(
+                    requests.Request(
+                        method,
+                        PICKUP_BASE + path,
+                        params=extra.get("params"),
+                        headers=extra.get("headers"),
+                    )
+                )
+                pickup_cookie_names = [
+                    part.split("=", 1)[0].strip()
+                    for part in prepared_pickup.headers.get("Cookie", "").split(";")
+                ]
+                logger.info(
+                    "Vinted pickup cookie evidence: access_sent=%s refresh_sent=%s csrf_sent=%s",
+                    pickup_cookie_names.count("access_token_web"),
+                    pickup_cookie_names.count("refresh_token_web"),
+                    bool(prepared_pickup.headers.get("X-CSRF-Token")),
+                )
+            except Exception:  # noqa: BLE001 -- optional evidence cannot stop buying
+                logger.info("Vinted pickup cookie evidence: available=False")
         previous_access = self.session.cookies.get_dict().get("access_token_web")
         previous_refresh = self.session.cookies.get_dict().get("refresh_token_web")
         if renewal:
