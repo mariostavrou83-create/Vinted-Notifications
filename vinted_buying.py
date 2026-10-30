@@ -1196,7 +1196,7 @@ def checkout_item_evidence(items):
     return json.dumps(evidence, separators=(",", ":"))
 
 
-def check_checkout(url, *, prepare_test=False):
+def check_checkout(url, *, prepare_test=False, solve_challenges=True):
     """Load a selected existing checkout; never claim or submit a payment."""
     purchase_id = checkout_link_id(url)
     transaction_id = parse_qs(urlsplit(url.strip()).query)["order_id"][0]
@@ -1214,7 +1214,10 @@ def check_checkout(url, *, prepare_test=False):
         phase = "checking your buyer account"
         try:
             quoted_account = buyer.settings()
-            client = buyer.connected_client()
+            client = (
+                buyer.connected_client() if solve_challenges
+                else buyer.connected_client(solve_challenges=False)
+            )
             phase = "loading the existing checkout"
             # Current first-party fetchInitialSingleCheckoutData uses PUT with
             # no options to load a purchase already opened by the owner.
@@ -1285,6 +1288,7 @@ def check_checkout(url, *, prepare_test=False):
                     f"Checkout total £{total/100:.2f} including fees and delivery; saved choices need attention: {exc}",
                     reason=exc.reason,
                     status=exc.status,
+                    api_code=exc.api_code,
                 ) from None
             logger.info("Autobuy checkout check: result=verified")
             target = (
@@ -1357,6 +1361,7 @@ def check_checkout(url, *, prepare_test=False):
                 f"Checkout check stopped while {phase}{http}: {exc} No payment was submitted.",
                 reason=exc.reason,
                 status=exc.status,
+                api_code=exc.api_code,
             ) from None
         finally:
             if client:
