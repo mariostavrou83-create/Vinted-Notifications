@@ -132,6 +132,9 @@ async def run(notifier=None):
         logger.info(
             "Vinted connection warnings enabled; stored-failure checks every 60s"
         )
+        logger.info(
+            "Vinted offers warnings enabled; stored-state checks every 60s"
+        )
     while True:
         try:
             await asyncio.to_thread(maintain_connection)
@@ -149,6 +152,18 @@ async def run(notifier=None):
             logger.warning(
                 "Vinted buyer worker tick unavailable: %s", type(exc).__name__
             )
+        # Offers have separate failure states: a healthy buyer identity does
+        # not prove that notifications or seller offers are still working.
+        # Check their stored state even if this tick's account work failed.
+        if notifier is not None:
+            try:
+                from vinted_offer_notices import OfferNotifier
+
+                await OfferNotifier(notifier.bot, notifier.chat_id).check()
+            except Exception as exc:  # noqa: BLE001 -- preserve maintenance
+                logger.warning(
+                    "Vinted offers warning tick unavailable: %s", type(exc).__name__
+                )
         await asyncio.sleep(60)
 
 

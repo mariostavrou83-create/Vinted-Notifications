@@ -8,6 +8,8 @@
   <div><span>Sent</span><b>{{counts.get('sent',0)}}</b><small>{{counts.get('uncertain',0)}} need checking on Vinted</small></div>
 </div>
 {% if config.mode!='paused' and not worker_online %}<div class="notice" role="status">Waiting for the offers worker to check in. No recent worker heartbeat has been confirmed.</div>{% endif %}
+<p class="offer-help">Automatic pauses trigger a Telegram warning. Temporary connection errors and cooldowns retry automatically. After a Vinted refusal, a verified reconnect of the same account allows one fresh check; another refusal pauses again.</p>
+<form method="post" action="{{url_for('offers_test_warning')}}"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary">Test offers warning</button></form>
 {% if cooling_down %}<div class="notice" role="status">Vinted requested a break. Offers resume automatically after {{display_time(config.cooldown_until)}}.</div>{% elif pause_message %}<div class="notice error" role="status">{{pause_message}}</div>{% endif %}
 {% if counts.get('uncertain',0) %}<div class="notice" role="status">An offer needs checking on Vinted. Open its conversation below. Uncertain offers stay out of the queue, including after a restart.</div>{% endif %}
 <div class="offer-layout">

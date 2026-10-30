@@ -1,5 +1,6 @@
 """Owner-only offer controls; never make Vinted network requests in Flask."""
 
+import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -56,6 +57,16 @@ def install(app):
     def offers_pause():
         offers.pause("")
         flash("Offers paused. Any send already in flight may finish.", "success")
+        return redirect(url_for("offers_page"))
+
+    @app.post("/offers/test-warning")
+    def offers_test_warning():
+        from vinted_offer_notices import send_test
+
+        try:
+            flash(asyncio.run(send_test()), "success")
+        except ValueError as exc:
+            flash(str(exc), "error")
         return redirect(url_for("offers_page"))
 
     @app.post("/offers/<int:job_id>/cancel")

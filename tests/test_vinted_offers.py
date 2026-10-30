@@ -851,6 +851,95 @@ class OfferTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(self.jobs()[0]["status"], "ready")
         self.assertFalse(self.client.writes())
 
+    def manual_reconnect(self, *, at, user_id="111"):
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE vinted_buyer SET user_id=?,verified_at=?,session=?",
+                (user_id, at, b"fresh-offline-session"),
+            )
+            conn.execute(
+                """INSERT OR REPLACE INTO vinted_buyer_event
+                (channel,event_id,buyer_id,kind,checked,sent)
+                VALUES ('connection','offline-reconnect',?,'reconnected',?,1)""",
+                (user_id, at + 0.01),
+            )
+
+    def test_restricted_read_recovers_once_after_explicit_same_account_reconnect(self):
+        self.enable(history="three_months")
+        self.add(at=NOW - 86400)
+        since = offers.state()["since"]
+        with patch.object(offers.time, "time", return_value=NOW):
+            offers.pause("restricted")
+        self.manual_reconnect(at=NOW + 1)
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE vinted_offer_settings SET next_send=?,cooldown_until=?",
+                (NOW + 180, NOW + 120),
+            )
+        self.now = NOW + 2
+        self.worker.tick()
+        config = offers.state()
+        self.assertEqual((config["mode"], config["pause_reason"]), ("live", ""))
+        self.assertEqual(config["since"], since)
+        self.assertEqual(config["history"], "three_months")
+        self.assertEqual((config["next_send"], config["cooldown_until"]), (NOW + 180, NOW + 120))
+        self.factory.assert_not_called()
+
+        # The explicit reconnect authorizes one normal check, not a retry loop.
+        def refused(method, path, body):
+            if path == buyer.NOTIFICATIONS_PATH:
+                raise buyer.BuyerError("refused", 403, reason="forbidden")
+
+        self.client.fail = refused
+        self.now = NOW + 180
+        with patch.object(offers.time, "time", return_value=self.now):
+            self.worker.tick()
+        self.assertEqual(offers.state()["pause_reason"], "restricted")
+        self.now += 400
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_buyer SET verified_at=?", (self.now,))
+        self.worker.tick()
+        self.assertEqual(offers.state()["mode"], "paused")
+        self.assertEqual(self.factory.call_count, 1)
+        self.assertFalse(self.client.writes())
+
+    def test_manual_reconnect_does_not_resume_manual_pause_changed_account_or_uncertain_send(self):
+        for reason, user_id, uncertain in (
+            ("", "111", False),
+            ("restricted", "999", False),
+            ("restricted", "111", True),
+        ):
+            with self.subTest(reason=reason, user_id=user_id, uncertain=uncertain):
+                self.now = NOW
+                with closing(search_settings.connection()) as conn, conn:
+                    conn.execute("DELETE FROM vinted_offer_jobs")
+                    conn.execute("DELETE FROM vinted_offer_events")
+                    conn.execute("UPDATE vinted_buyer SET user_id='111',verified_at=?", (NOW,))
+                self.enable()
+                if uncertain:
+                    job = self.add()
+                    with patch.object(offers.time, "time", return_value=NOW):
+                        offers._finish(job, "uncertain", "uncertain")
+                with patch.object(offers.time, "time", return_value=NOW):
+                    offers.pause(reason)
+                self.manual_reconnect(at=NOW + 1, user_id=user_id)
+                self.now = NOW + 2
+                self.worker.tick()
+                self.assertEqual(offers.state()["mode"], "paused")
+        self.factory.assert_not_called()
+
+    def test_automatic_connection_confirmation_does_not_reopen_refused_offers(self):
+        self.enable()
+        with patch.object(offers.time, "time", return_value=NOW):
+            offers.pause("restricted")
+        self.manual_reconnect(at=NOW + 1)
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_buyer_event SET kind='recovered'")
+        self.now = NOW + 2
+        self.worker.tick()
+        self.assertEqual(offers.state()["mode"], "paused")
+        self.factory.assert_not_called()
+
     def test_auth_recovery_requires_fresh_verification_and_automatic_pause(self):
         for reason, user_id, verified_at, session in (
             ("", "111", NOW + 1, b"offline"),
@@ -1441,6 +1530,26 @@ class OfferGatewayTests(DatabaseFixture, unittest.TestCase):
 
 
 class OfferRouteTests(DashboardTests):
+    def test_offers_warning_test_is_owner_only_csrf_protected_and_does_not_change_queue(self):
+        from unittest.mock import AsyncMock
+
+        self.assertEqual(self.client.post("/offers/test-warning").status_code, 400)
+        self.owner()
+        with self.client.session_transaction() as session:
+            session.pop("owner")
+        self.assertEqual(
+            self.client.post("/offers/test-warning", data={"csrf": "offline-csrf"}).location,
+            "/login",
+        )
+        self.owner()
+        self.assertEqual(self.client.post("/offers/test-warning").status_code, 400)
+        before = offers.state()
+        with patch("vinted_offer_notices.send_test", new_callable=AsyncMock, return_value="Test accepted") as send:
+            response = self.client.post("/offers/test-warning", data={"csrf": "offline-csrf"})
+        self.assertEqual(response.status_code, 302)
+        send.assert_awaited_once()
+        self.assertEqual(offers.state(), before)
+
     def test_mode_selector_and_cooldown_notice_match_the_saved_state(self):
         self.owner()
         body = self.client.get("/offers").data

@@ -681,11 +681,17 @@ def snapshot():
 
 
 def _recover_auth(conn, now):
-    """Restore only an automatic read pause after a newer identity check."""
+    """Restore a read pause using evidence newer than that exact pause.
+
+    Authentication expiry can recover after a verified account check. A
+    refusal requires an explicit, verified owner reconnect; routine identity
+    checks must never keep reopening a refused offers endpoint.
+    """
     config = conn.execute(
         "SELECT * FROM vinted_offer_settings WHERE id=1"
     ).fetchone()
-    if config["mode"] != "paused" or config["pause_reason"] != "auth":
+    reason = config["pause_reason"]
+    if config["mode"] != "paused" or reason not in ("auth", "restricted"):
         return
     control = conn.execute(
         "SELECT id,action,reason,happened FROM vinted_offer_events WHERE action IN ('live','preview','paused') ORDER BY id DESC LIMIT 1"
@@ -699,7 +705,7 @@ def _recover_auth(conn, now):
     if not (
         control
         and control["action"] == "paused"
-        and control["reason"] == "auth"
+        and control["reason"] == reason
         and active
         and account
         and account["session"]
@@ -708,6 +714,17 @@ def _recover_auth(conn, now):
         and control["happened"] < account["verified_at"] <= now
     ):
         return
+    if reason == "restricted":
+        reconnect = conn.execute(
+            "SELECT buyer_id,checked FROM vinted_buyer_event "
+            "WHERE channel='connection' AND kind='reconnected'"
+        ).fetchone()
+        if not (
+            reconnect
+            and reconnect["buyer_id"] == config["account_id"]
+            and control["happened"] < reconnect["checked"] <= now
+        ):
+            return
     # Older uncertain jobs remain quarantined after an explicit owner resume.
     # A current/unrecorded uncertain write or any in-flight write blocks recovery.
     uncertain = conn.execute(
@@ -722,14 +739,20 @@ def _recover_auth(conn, now):
         return
     updated = conn.execute(
         """UPDATE vinted_offer_settings SET mode=?,pause_reason='',revision=revision+1
-        WHERE id=1 AND revision=? AND mode='paused' AND pause_reason='auth'""",
-        (active["action"], config["revision"]),
+        WHERE id=1 AND revision=? AND mode='paused' AND pause_reason=?
+        AND EXISTS (SELECT 1 FROM vinted_buyer WHERE id=1
+                    AND user_id=? AND session=? AND verified_at=?)""",
+        (
+            active["action"], config["revision"], reason,
+            account["user_id"], account["session"], account["verified_at"],
+        ),
     ).rowcount
     if updated:
-        event(conn, "resumed", "auth", now=now)
+        event(conn, "resumed", reason, now=now)
         logger.info(
-            "Vinted offers resumed after verified same-account session recovery: mode=%s",
+            "Vinted offers resumed after verified same-account session recovery: mode=%s reason=%s",
             active["action"],
+            reason,
         )
 
 
@@ -810,7 +833,8 @@ def _recover(now):
             conn.execute(
                 "UPDATE vinted_offer_settings SET mode='paused',pause_reason='uncertain',revision=revision+1 WHERE id=1"
             )
-        if config["mode"] == "paused" and config["pause_reason"] == "auth":
+            event(conn, "paused", "uncertain", now=now)
+        if config["mode"] == "paused" and config["pause_reason"] in ("auth", "restricted"):
             _recover_auth(conn, now)
         if config["pause_reason"] == "cooldown":
             current = conn.execute(
@@ -1353,9 +1377,12 @@ def run():
     while True:
         try:
             worker.tick()
-        except Exception:  # noqa: BLE001 -- contain failures in this independent worker
+        except Exception as exc:  # noqa: BLE001 -- contain failures in this independent worker
             # Keep the listing poller running. Crash leases prevent send replays.
-            logger.error("Vinted offers: unexpected worker failure; paused for review")
+            logger.error(
+                "Vinted offers: unexpected worker failure; paused for review: %s",
+                type(exc).__name__,
+            )
             pause("shape")
         time.sleep(5)
 
