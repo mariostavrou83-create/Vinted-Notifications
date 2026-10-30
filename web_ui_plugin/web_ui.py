@@ -6,6 +6,7 @@ import json
 import os
 import secrets
 import time
+import zipfile
 from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -689,6 +690,28 @@ def create_app(test_config=None):
                 "error",
             )
         return redirect(url_for("edit", query_id=query_id, platform="ebay"))
+
+    @app.get("/connections/vinted-cookie-helper.zip")
+    def vinted_cookie_helper_download():
+        # Package only reviewed source files. Never read account state, cookie
+        # records, environment settings, arbitrary paths, or runtime data.
+        base = Path(__file__).resolve().parent.parent / "browser_cookie_helper"
+        names = ("manifest.json", "popup.html", "popup.js", "cookie_records.mjs", "README.md")
+        payload = io.BytesIO()
+        with zipfile.ZipFile(payload, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for name in names:
+                path = base / name
+                if not path.is_file() or path.is_symlink():
+                    abort(503, "The browser cookie helper is not available in this deployment.")
+                archive.writestr("msj-vinted-cookie-helper/" + name, path.read_bytes())
+        payload.seek(0)
+        response = send_file(
+            payload, mimetype="application/zip", as_attachment=True,
+            download_name="msj-vinted-cookie-helper.zip", max_age=0,
+        )
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
 
     @app.route("/connections", methods=["GET", "POST"])
     def connections():

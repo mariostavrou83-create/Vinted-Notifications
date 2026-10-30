@@ -134,6 +134,21 @@ class BuyerEventTests(NoticeFixture, unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("No payment was sent", text)
         self.assertNotIn("NEVER-PUBLISH", text)
 
+    async def test_api_cookie_scope_failure_is_separate_from_login_failure(self):
+        error = buyer.BuyerError(
+            buyer.AUTH_REASONS["api_cookie_scope"], reason="api_cookie_scope", stage="pickup_points",
+        )
+        self.assertTrue(events.record_checkout_failure(
+            self.client, error, "checking the final total and delivery choice",
+        ))
+        self.assertEqual(await self.events.check(), "sent")
+        text = self.bot.send_message.await_args.kwargs["text"]
+        self.assertIn("original Vinted browser cookies", text)
+        self.assertIn("No API request was sent", text)
+        self.assertIn("No payment was sent", text)
+        self.assertNotIn("HTTP 403", text)
+        self.assertIsNone(self.notice_row()["checked"])
+
     def test_new_failure_updates_numeric_evidence_without_resetting_incident(self):
         self.failure()
         original = self.rows()[0]["event_id"]

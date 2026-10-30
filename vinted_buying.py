@@ -30,6 +30,7 @@ from vinted_purchase_control import (
 from vinted_timing import timed_operation
 
 logger = get_logger(__name__)
+VINTED_CONTINUATION_REASONS = frozenset({"security_challenge", "forbidden", "api_cookie_scope"})
 
 
 def cents(value):
@@ -2160,6 +2161,7 @@ def feedback_buttons(row, feedback=None):
             "network": "Vinted connection error · details",
             "security_challenge": "Vinted security check required · details",
             "forbidden": "Vinted checkout refused · details",
+            "api_cookie_scope": "Vinted cookie details need reconnecting · details",
             "rate_limited": "Vinted cooldown required · details",
             "credentials": "Vinted session expired · details",
             "unexpected_error": "Checkout error · details",
@@ -2194,6 +2196,7 @@ def feedback_buttons(row, feedback=None):
         "item_closed",
         "security_challenge",
         "forbidden",
+        "api_cookie_scope",
         "earlier_payment_uncertain",
     ):
         buttons.append(
@@ -2229,7 +2232,7 @@ def feedback_buttons(row, feedback=None):
             ]
         )
     elif feedback.get("checkout_id") and not (
-        state == "failed_before_payment" and reason in ("security_challenge", "forbidden")
+        state == "failed_before_payment" and reason in VINTED_CONTINUATION_REASONS
     ):
         buttons.append(
             [
@@ -2239,7 +2242,7 @@ def feedback_buttons(row, feedback=None):
                 )
             ]
         )
-    if state == "failed_before_payment" and reason in ("security_challenge", "forbidden"):
+    if state == "failed_before_payment" and reason in VINTED_CONTINUATION_REASONS:
         # A refused server request is not permission to retry around it. Let
         # the owner continue in Vinted's ordinary UI, without moving cookies
         # or automatically submitting a second request or payment.
@@ -2253,6 +2256,15 @@ def feedback_buttons(row, feedback=None):
             continuation = None
         if continuation and not any(button.url == continuation for line in buttons for button in line):
             buttons.append([InlineKeyboardButton("Continue in Vinted ↗", url=continuation)])
+        if reason == "api_cookie_scope":
+            from vinted_connection_notices import dashboard_url
+
+            repair = dashboard_url()
+            if repair:
+                buttons.append([InlineKeyboardButton(
+                    "Repair Vinted connection ↗",
+                    url=repair.split("#", 1)[0] + "#vinted-browser-cookie-details",
+                )])
     from vinted_owner_controls import buttons as owner_buttons
 
     buttons.extend(owner_buttons(feedback))

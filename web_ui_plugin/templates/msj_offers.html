@@ -11,6 +11,7 @@
 <p class="offer-help">Automatic pauses trigger a Telegram warning. Temporary connection errors and cooldowns retry automatically. After a Vinted refusal, a verified reconnect of the same account allows one fresh check; another refusal pauses again.</p>
 <form method="post" action="{{url_for('offers_test_warning')}}"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary">Test offers warning</button></form>
 {% if cooling_down %}<div class="notice" role="status">Vinted requested a break. Offers resume automatically after {{display_time(config.cooldown_until)}}.</div>{% elif pause_message %}<div class="notice error" role="status">{{pause_message}}</div>{% endif %}
+{% if config.pause_reason=='cookie_scope' %}<p><a class="secondary" href="/connections#vinted-browser-cookie-details">Reconnect with original cookie details →</a></p>{% endif %}
 {% if counts.get('uncertain',0) %}<div class="notice" role="status">An offer needs checking on Vinted. Open its conversation below. Uncertain offers stay out of the queue, including after a restart.</div>{% endif %}
 <div class="offer-layout">
 <section class="form-card offer-settings"><h2>Your offer rules</h2>

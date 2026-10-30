@@ -59,6 +59,38 @@ promised if Vinted or Supabase revokes a session.
 
 ## Telegram connection warnings
 
+### Manual browser cookie scope
+
+Token-only linking has no browser domain or path metadata and retains its
+existing `www.vinted.co.uk` scope. A successful identity check on that host
+does not prove that authentication accompanies the API-host notifications or
+pickup request. Production confirmed an offers request with zero applicable
+access cookies after token-only reconnection.
+
+Connections also accepts exactly two original authentication cookie records.
+The importer preserves domain, path, expiry and host-only flags, verifies the
+same buyer, and saves with the existing compare-and-swap guard. It preserves
+buying permission, preferences, budgets and unresolved payments. No security
+cookies are accepted or cookie domains guessed. A verified client with no
+applicable access cookie stops before an API-host marketplace request and
+reports `api_cookie_scope`.
+
+Eligible automatic offers pauses resume after a newer explicit same-account
+reconnect. Routine identity checks cannot clear a cookie-scope or security
+refusal. An uncertain send remains quarantined and cannot be replayed. Scope
+compatibility does not establish that checkout or payment will be accepted.
+
+The optional unpacked Chrome helper exports only the two original auth cookie
+records to the owner's clipboard. Its declared permissions are `cookies` and
+`clipboardWrite`, with host access limited to `https://www.vinted.co.uk/*` and
+`https://vinted.co.uk/*`. Both exact hosts are needed to read the original
+www and parent-domain authentication cookies; there is no wildcard host grant.
+It has no background process, storage, content script or upload endpoint;
+its extension CSP blocks network connections. The owner installs and grants
+that access in Chrome, pastes only into the authenticated Connections form,
+then clears the clipboard. The download route is owner-protected and packages
+an explicit static-file allowlist, never runtime data or credentials.
+
 The existing session worker observes fixed saved-account failure metadata every
 60 seconds after its normal maintenance tick. It sends only to the configured
 Vinted Telegram chat, with the reason, operation, numeric HTTP status, timestamp

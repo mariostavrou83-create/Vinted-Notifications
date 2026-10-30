@@ -13,7 +13,7 @@ class CheckoutContinuationTests(unittest.TestCase):
         return [button for line in buying.feedback_buttons(row or self.row, feedback) for button in line]
 
     def test_pre_payment_refusal_opens_canonical_item_without_retrying_the_server(self):
-        for reason in ("security_challenge", "forbidden"):
+        for reason in ("security_challenge", "forbidden", "api_cookie_scope"):
             with self.subTest(reason=reason):
                 buttons = self.buttons({"state": "failed_before_payment", "reason": reason})
                 self.assertEqual([b.url for b in buttons if b.url], [buyer.BASE + "/items/123"])

@@ -28,6 +28,7 @@ FAILURES = frozenset(
     {
         "security_challenge",
         "forbidden",
+        "api_cookie_scope",
         "credentials",
         "signin_redirect",
         "account_restricted",
@@ -309,6 +310,8 @@ class BuyerEventNotifier(ConnectionNotifier):
                 text += " Vinted requested a security check. Complete any required check in your Vinted account."
             elif row["reason"] == "forbidden":
                 text += " Vinted refused the request. This does not mean your login disconnected."
+            elif row["reason"] == "api_cookie_scope":
+                text += " The saved access cookie does not apply to Vinted's API host. Reconnect using the original Vinted browser cookies. No API request was sent."
             elif row["reason"] == "rate_limited":
                 text += " Vinted requested a cooldown."
             else:

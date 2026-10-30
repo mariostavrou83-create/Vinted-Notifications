@@ -167,6 +167,81 @@ class PickupCookieEvidenceTests(DatabaseFixture, unittest.TestCase):
                 for secret in (*self.secrets.values(), self.csrf):
                     self.assertNotIn(secret, " ".join(logs.output))
 
+    def test_verified_api_requests_without_applicable_access_cookie_stop_before_http(self):
+        for path, params, stage in (
+            (self.path, self.params, "pickup_points"),
+            (buyer.NOTIFICATIONS_PATH, {"page": 1, "per_page": 20}, "request"),
+        ):
+            with self.subTest(path=path):
+                client = self.client("www.vinted.co.uk", domain_specified=False)
+                client._verified_session = ("99", b"offline-verified-session", {})
+                before = client.exported()
+                with (
+                    patch.object(client.session, "request") as network,
+                    patch.object(client, "solve_challenge") as solver,
+                    self.assertRaises(buyer.BuyerError) as failure,
+                ):
+                    client.request("GET", path, params=params)
+                self.assertEqual(failure.exception.reason, "api_cookie_scope")
+                self.assertEqual(failure.exception.stage, stage)
+                self.assertIsNone(failure.exception.status)
+                self.assertIsNone(failure.exception.api_code)
+                network.assert_not_called()
+                solver.assert_not_called()
+                self.assertEqual(client.exported(), before)
+
+    def test_verified_api_requests_with_original_parent_scope_can_reach_vinted(self):
+        for path, params in (
+            (self.path, self.params),
+            (buyer.NOTIFICATIONS_PATH, {"page": 1, "per_page": 20}),
+        ):
+            with self.subTest(path=path):
+                client = self.client(".vinted.co.uk")
+                client._verified_session = ("99", b"offline-verified-session", {})
+                original = client.exported()
+                response = self.response(requests.Request("GET", buyer.PICKUP_BASE + path).prepare(), status=200)
+                with (
+                    patch.object(client.session, "request", return_value=response) as network,
+                    patch.object(client, "persist_session") as persist,
+                    patch.object(client, "solve_challenge") as solver,
+                ):
+                    result = client.request("GET", path, params=params)
+                self.assertEqual(result, {"shipping_points": []})
+                network.assert_called_once()
+                persist.assert_called_once()
+                solver.assert_not_called()
+                self.assertEqual(client.exported(), original)
+
+    def test_verified_client_diagnostic_failure_does_not_stop_the_real_request(self):
+        client = self.client(".vinted.co.uk")
+        client._verified_session = ("99", b"offline-verified-session", {})
+        response = self.response(requests.Request("GET", buyer.PICKUP_BASE + self.path).prepare(), status=200)
+        with (
+            patch.object(client.session, "prepare_request", side_effect=RuntimeError("private-evidence-error")),
+            patch.object(client.session, "request", return_value=response) as network,
+            patch.object(client, "persist_session"),
+            self.assertLogs("vinted_buyer", level="INFO") as logs,
+        ):
+            result = client.request("GET", self.path, params=self.params)
+        self.assertEqual(result, {"shipping_points": []})
+        network.assert_called_once()
+        self.assertNotIn("private-evidence-error", " ".join(logs.output))
+
+    def test_api_cookie_gate_does_not_replay_or_intercept_www_payment(self):
+        client = self.client("www.vinted.co.uk", domain_specified=False)
+        client._verified_session = ("99", b"offline-verified-session", {})
+        path = "/api/v2/purchases/offline/checkout/payment"
+        response = self.response(requests.Request("POST", buyer.BASE + path).prepare())
+        with (
+            patch.object(client.session, "request", return_value=response) as network,
+            patch.object(client, "solve_challenge") as solver,
+            self.assertRaises(buyer.BuyerError) as failure,
+        ):
+            client.request("POST", path, {"checksum": "offline"})
+        self.assertEqual(failure.exception.reason, "forbidden")
+        network.assert_called_once()
+        solver.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -21,7 +21,7 @@ COOLDOWN_GRACE = 15 * 60
 STALE_HEARTBEAT = 3 * 60
 PAUSE_REASONS = frozenset({
     "account", "account_changed", "auth", "restricted", "shape", "uncertain",
-    "cooldown", "network", "recipient",
+    "cooldown", "network", "recipient", "cookie_scope",
 })
 
 
@@ -192,6 +192,7 @@ class OfferNotifier(ConnectionNotifier):
             detail = {
                 "restricted": "Vinted refused an offers request. Check your Vinted account for any required security check or restriction, then review Offers.",
                 "auth": "Offers need attention to the saved Vinted connection. Open Connections and review Offers.",
+                "cookie_scope": "The saved access cookie does not apply to Vinted's offers service. Open Connections and reconnect preserving the original browser cookie details. A token-only login check cannot confirm this API access.",
                 "account": "Offers need a verified Vinted account. Open Connections and review Offers.",
                 "account_changed": "The connected Vinted account changed. Review the account and Offers before restarting.",
                 "uncertain": "Vinted did not confirm an attempted offer. Check its conversation before restarting; that uncertain offer will not be sent again automatically.",

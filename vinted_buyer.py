@@ -56,6 +56,7 @@ AUTH_REASONS = {
     "credentials": "Vinted did not accept the sign-in credentials or the session has expired.",
     "account_restricted": "Vinted reports an account restriction. Check the account on Vinted before trying to connect it.",
     "forbidden": "Vinted refused the request (HTTP 403), without a recognised reason. This does not establish whether your password is correct.",
+    "api_cookie_scope": "This saved connection does not include an access cookie that applies to Vinted's API host. Reconnect using the original Vinted browser cookies; a manually pasted token cannot supply their original scope. No API request was sent.",
     "rate_limited": "Vinted requested a cooldown. Wait before trying again.",
     "unreadable": "Vinted returned a response the bot could not read.",
     "session_refresh": "Vinted requested renewal of the saved buyer session.",
@@ -1482,6 +1483,7 @@ class Client:
             # Observe cookie scope for this validated API-host request without
             # copying credentials between hosts or changing the actual request.
             # Identity on www does not establish that cookies apply to api.
+            api_access_missing = False
             try:
                 prepared_pickup = self.session.prepare_request(
                     requests.Request(
@@ -1495,6 +1497,10 @@ class Client:
                     part.split("=", 1)[0].strip()
                     for part in prepared_pickup.headers.get("Cookie", "").split(";")
                 ]
+                api_access_missing = (
+                    bool(self._verified_session)
+                    and pickup_cookie_names.count("access_token_web") == 0
+                )
                 logger.info(
                     "Vinted %s cookie evidence: access_sent=%s refresh_sent=%s csrf_sent=%s",
                     "pickup" if pickup_gateway else "notifications",
@@ -1506,6 +1512,16 @@ class Client:
                 logger.info(
                     "Vinted %s cookie evidence: available=False",
                     "pickup" if pickup_gateway else "notifications",
+                )
+            if api_access_missing:
+                # A www identity check cannot authenticate an API-host request
+                # when the preserved cookie scope excludes that host. Stop the
+                # known unauthenticated call locally; never widen credentials,
+                # switch routes, solve a challenge or retry this request.
+                raise BuyerError(
+                    AUTH_REASONS["api_cookie_scope"],
+                    reason="api_cookie_scope",
+                    stage=stage,
                 )
         previous_access = self.session.cookies.get_dict().get("access_token_web")
         previous_refresh = self.session.cookies.get_dict().get("refresh_token_web")

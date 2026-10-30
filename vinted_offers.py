@@ -37,6 +37,7 @@ MESSAGES = {
     "account": "Connect and verify your Vinted account in Connections.",
     "account_changed": "The connected account changed. Review Offers before restarting.",
     "auth": "Vinted needs account attention. Check Connections and Vinted before restarting.",
+    "cookie_scope": "The saved access cookie does not apply to Vinted's offers service. Reconnect using the original browser cookie details in Connections.",
     "restricted": "Vinted refused this action. Offers are paused; check your account on Vinted.",
     "cooldown": "Waiting for Vinted's requested cooldown.",
     "network": "The connection failed before an offer was sent. The queue will check again later.",
@@ -691,7 +692,7 @@ def _recover_auth(conn, now):
         "SELECT * FROM vinted_offer_settings WHERE id=1"
     ).fetchone()
     reason = config["pause_reason"]
-    if config["mode"] != "paused" or reason not in ("auth", "restricted"):
+    if config["mode"] != "paused" or reason not in ("auth", "restricted", "cookie_scope"):
         return
     control = conn.execute(
         "SELECT id,action,reason,happened FROM vinted_offer_events WHERE action IN ('live','preview','paused') ORDER BY id DESC LIMIT 1"
@@ -714,7 +715,7 @@ def _recover_auth(conn, now):
         and control["happened"] < account["verified_at"] <= now
     ):
         return
-    if reason == "restricted":
+    if reason in ("restricted", "cookie_scope"):
         reconnect = conn.execute(
             "SELECT buyer_id,checked FROM vinted_buyer_event "
             "WHERE channel='connection' AND kind='reconnected'"
@@ -834,7 +835,7 @@ def _recover(now):
                 "UPDATE vinted_offer_settings SET mode='paused',pause_reason='uncertain',revision=revision+1 WHERE id=1"
             )
             event(conn, "paused", "uncertain", now=now)
-        if config["mode"] == "paused" and config["pause_reason"] in ("auth", "restricted"):
+        if config["mode"] == "paused" and config["pause_reason"] in ("auth", "restricted", "cookie_scope"):
             _recover_auth(conn, now)
         if config["pause_reason"] == "cooldown":
             current = conn.execute(
@@ -878,6 +879,8 @@ def _finish(job_id, status, reason="", **fields):
 
 
 def _error_reason(exc):
+    if exc.reason == "api_cookie_scope":
+        return "cookie_scope"
     if exc.reason == "account_changed":
         return "account_changed"
     if exc.status == 429 or exc.reason in ("rate_limited", "renewal_cooldown"):

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MSJ Vinted connection</title>
+  <style>
+    :root { color-scheme: light; font: 14px/1.5 system-ui, sans-serif; color: #24372b; background: #f7f7f2; }
+    body { width: 350px; margin: 0; padding: 22px; box-sizing: border-box; }
+    h1 { font-size: 21px; line-height: 1.25; margin: 0 0 12px; }
+    p { margin: 12px 0; }
+    .private { padding: 10px; background: #fff1d8; border-radius: 8px; }
+    button, a { display: block; box-sizing: border-box; width: 100%; padding: 10px; margin-top: 10px; border-radius: 8px; text-align: center; font: inherit; }
+    button { cursor: pointer; border: 1px solid #bbc6b8; background: white; color: inherit; }
+    #copy { background: #294b35; color: white; border-color: #294b35; }
+    button:disabled { opacity: .6; cursor: wait; }
+    a { color: #294b35; text-underline-offset: 3px; }
+    #status { min-height: 42px; }
+  </style>
+</head>
+<body>
+  <h1>Connect your existing Vinted login</h1>
+  <p>Copies only your two original login cookie records, including their original scope. Nothing is uploaded or sent to Vinted.</p>
+  <p>Cookie access is limited to vinted.co.uk and www.vinted.co.uk.</p>
+  <p class="private">The clipboard will contain private login credentials. Paste them only into your private MSJ Connections form, then clear the clipboard.</p>
+  <button id="copy" type="button">Copy original login cookies</button>
+  <button id="clear" type="button">Clear clipboard</button>
+  <a href="https://msj-vinted-fixed-production.up.railway.app/connections#vinted-buying" target="_blank" rel="noopener noreferrer">Open private MSJ Connections</a>
+  <p id="status" role="status" aria-live="polite">Sign in normally to your own UK Vinted account in this browser first.</p>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

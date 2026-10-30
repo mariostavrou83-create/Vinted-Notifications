@@ -940,6 +940,30 @@ class OfferTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(offers.state()["mode"], "paused")
         self.factory.assert_not_called()
 
+    def test_cookie_scope_pause_requires_manual_reconnect_and_keeps_queue(self):
+        self.enable()
+        self.add()
+        self.factory.side_effect = buyer.BuyerError(
+            "Original cookie details required", reason="api_cookie_scope"
+        )
+        with patch.object(offers.time, "time", return_value=NOW):
+            self.worker.tick()
+        self.assertEqual(offers.state()["pause_reason"], "cookie_scope")
+        self.assertEqual(self.jobs()[0]["status"], "queued")
+        self.factory.side_effect = None
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_buyer SET verified_at=?", (NOW + 1,))
+        self.now = NOW + 2
+        self.worker.tick()
+        self.assertEqual(offers.state()["mode"], "paused")
+        self.assertEqual(self.factory.call_count, 1)
+        self.manual_reconnect(at=NOW + 3)
+        self.now = NOW + 4
+        self.worker.tick()
+        self.assertEqual(offers.state()["mode"], "live")
+        self.assertEqual(self.jobs()[0]["status"], "sent")
+        self.assertEqual(len(self.client.writes()), 1)
+
     def test_auth_recovery_requires_fresh_verification_and_automatic_pause(self):
         for reason, user_id, verified_at, session in (
             ("", "111", NOW + 1, b"offline"),

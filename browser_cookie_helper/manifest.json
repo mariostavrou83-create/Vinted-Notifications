@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "MSJ Vinted Cookie Export",
+  "version": "1.0.0",
+  "description": "Copy your two original Vinted login cookie records for your private MSJ connection. No uploads or background activity.",
+  "permissions": ["cookies", "clipboardWrite"],
+  "host_permissions": ["https://vinted.co.uk/*", "https://www.vinted.co.uk/*"],
+  "action": {
+    "default_title": "Copy original Vinted login cookies",
+    "default_popup": "popup.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; connect-src 'none'"
+  }
+}
