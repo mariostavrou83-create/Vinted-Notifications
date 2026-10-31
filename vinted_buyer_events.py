@@ -1,6 +1,7 @@
 """Durable buyer confirmations and checkout failures, separate from login health."""
 
 import logging
+import re
 import time
 import uuid
 from contextlib import closing
@@ -54,6 +55,8 @@ def migrate(conn):
     columns = {row[1] for row in conn.execute("PRAGMA table_info(vinted_buyer_event)")}
     if "api_code" not in columns:
         conn.execute("ALTER TABLE vinted_buyer_event ADD COLUMN api_code INTEGER")
+    if "checkout_id" not in columns:
+        conn.execute("ALTER TABLE vinted_buyer_event ADD COLUMN checkout_id TEXT")
 
 
 def _current(conn, reference):
@@ -117,7 +120,7 @@ def record_connected(reference, *, manual=False):
         return False
 
 
-def record_checkout_failure(client, error, phase, *, payment_started=False):
+def record_checkout_failure(client, error, phase, *, payment_started=False, checkout_id=None):
     """Capture only failures from the exact verified client which made the request."""
     if (
         not isinstance(error, buyer.BuyerError)
@@ -127,6 +130,12 @@ def record_checkout_failure(client, error, phase, *, payment_started=False):
     ):
         return False
     reference = getattr(client, "_verified_session", None)
+    checkout_id = (
+        checkout_id
+        if isinstance(checkout_id, str)
+        and re.fullmatch(r"[A-Za-z0-9_-]{1,100}", checkout_id)
+        else None
+    )
     try:
         with closing(connection()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -152,15 +161,15 @@ def record_checkout_failure(client, error, phase, *, payment_started=False):
             api_code = buyer.api_error_code(getattr(error, "api_code", None))
             if same:
                 conn.execute(
-                    "UPDATE vinted_buyer_event SET checked=?,reason=?,stage=?,http_status=?,phase=?,api_code=? "
+                    "UPDATE vinted_buyer_event SET checked=?,reason=?,stage=?,http_status=?,phase=?,api_code=?,checkout_id=? "
                     "WHERE channel='checkout'",
-                    (time.time(), error.reason, error.stage, status, phase, api_code),
+                    (time.time(), error.reason, error.stage, status, phase, api_code, checkout_id),
                 )
             else:
                 conn.execute(
                     """INSERT OR REPLACE INTO vinted_buyer_event
-                    (channel,event_id,buyer_id,kind,checked,reason,stage,http_status,phase,payment_started,api_code)
-                    VALUES ('checkout',?,?,'blocked',?,?,?,?,?,?,?)""",
+                    (channel,event_id,buyer_id,kind,checked,reason,stage,http_status,phase,payment_started,api_code,checkout_id)
+                    VALUES ('checkout',?,?,'blocked',?,?,?,?,?,?,?,?)""",
                     (
                         uuid.uuid4().hex,
                         current[1],
@@ -171,6 +180,7 @@ def record_checkout_failure(client, error, phase, *, payment_started=False):
                         phase,
                         int(bool(payment_started)),
                         api_code,
+                        checkout_id,
                     ),
                 )
         return True
@@ -179,17 +189,28 @@ def record_checkout_failure(client, error, phase, *, payment_started=False):
         return False
 
 
-def clear_checkout_failure(client):
+def clear_checkout_failure(client, *, checkout_id=None):
     """A confirmed purchase, never an identity GET, closes checkout evidence."""
+    if checkout_id is not None and (
+        not isinstance(checkout_id, str)
+        or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", checkout_id)
+    ):
+        return
     try:
         with closing(connection()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             current = _current(conn, getattr(client, "_verified_session", None))
             if current is not None:
-                conn.execute(
-                    "DELETE FROM vinted_buyer_event WHERE channel='checkout' AND buyer_id=?",
-                    (current[1],),
-                )
+                # A status read may resolve an older payment. It must not
+                # erase a refusal from another checkout or an unbound legacy
+                # warning. A newly completed purchase retains the existing
+                # unscoped recovery behavior.
+                sql = "DELETE FROM vinted_buyer_event WHERE channel='checkout' AND buyer_id=?"
+                params = (current[1],)
+                if checkout_id is not None:
+                    sql += " AND checkout_id=?"
+                    params += (checkout_id,)
+                conn.execute(sql, params)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "Vinted checkout recovery metadata unavailable: %s", type(exc).__name__

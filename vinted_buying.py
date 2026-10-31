@@ -16,6 +16,7 @@ from telegram.error import BadRequest, TelegramError
 import db
 import vinted_budget
 import vinted_buyer as buyer
+from vinted_buyer_priority import yield_to_purchase
 from logger import get_logger
 from search_settings import connection
 from vinted_progress import bind_progress, report
@@ -64,9 +65,10 @@ def record(
     action_url=None,
     buyer_id=None,
     transaction_id=None,
+    reconciled=False,
 ):
     with closing(connection()) as conn, conn:
-        conn.execute(
+        changed = conn.execute(
             "UPDATE vinted_buy_attempts SET state=?,message=?,checkout_id=COALESCE(?,checkout_id),total=COALESCE(?,total),action_url=?,buyer_id=COALESCE(?,buyer_id),transaction_id=COALESCE(?,transaction_id),updated=? WHERE item_id=?",
             (
                 state,
@@ -79,7 +81,11 @@ def record(
                 time.time(),
                 item_id,
             ),
-        )
+        ).rowcount
+        if reconciled is True and changed:
+            from vinted_payment_recovery import record_verified
+
+            record_verified(conn, item_id, state)
 
 
 def result(item_id):
@@ -1219,6 +1225,7 @@ def check_checkout(url, *, prepare_test=False, solve_challenges=True):
                 else buyer.connected_client(solve_challenges=False)
             )
             phase = "loading the existing checkout"
+            client.set_checkout_context(purchase_id, transaction_id)
             # Current first-party fetchInitialSingleCheckoutData uses PUT with
             # no options to load a purchase already opened by the owner.
             data = client.request("PUT", f"/api/v2/purchases/{purchase_id}/checkout")
@@ -1349,7 +1356,7 @@ def check_checkout(url, *, prepare_test=False, solve_challenges=True):
         except buyer.BuyerError as exc:
             from vinted_buyer_events import record_checkout_failure
 
-            record_checkout_failure(client, exc, phase)
+            record_checkout_failure(client, exc, phase, checkout_id=purchase_id)
             logger.info(
                 "Autobuy checkout check: phase=%s reason=%s http=%s",
                 phase,
@@ -1532,6 +1539,7 @@ def buy_checkout_quote(token, *, alert_row=None):
             phase = "checking the quoted checkout"
             report("loading_choices")
             checkpoint()
+            client.set_checkout_context(purchase_id, quote["transaction_id"])
             data = client.request("PUT", f"/api/v2/purchases/{purchase_id}/checkout")
             checkout = data.get("checkout")
             if not isinstance(checkout, dict) or str(checkout.get("id")) != purchase_id:
@@ -1605,7 +1613,7 @@ def buy_checkout_quote(token, *, alert_row=None):
         except Exception as exc:  # noqa: BLE001 -- preserve uncertain payments
             from vinted_buyer_events import record_checkout_failure
 
-            record_checkout_failure(client, exc, phase, payment_started=payment_started)
+            record_checkout_failure(client, exc, phase, payment_started=payment_started, checkout_id=purchase_id)
             logger.info(
                 "Autobuy test stopped: phase=%s error_type=%s",
                 phase,
@@ -1741,6 +1749,7 @@ def _buy(row):
             return result(item_id)
         client = None
         payment_started = False
+        purchase_id = None
         phase = "checking your buyer account"
         reason = None
         try:
@@ -1788,6 +1797,7 @@ def _buy(row):
             phase = "loading delivery and payment choices"
             report("loading_choices")
             checkpoint()
+            client.set_checkout_context(purchase_id, str(transaction_id))
             updated = client.request(
                 "PUT",
                 f"/api/v2/purchases/{purchase_id}/checkout",
@@ -1875,7 +1885,7 @@ def _buy(row):
         except buyer.BuyerError as exc:
             from vinted_buyer_events import record_checkout_failure
 
-            record_checkout_failure(client, exc, phase, payment_started=payment_started)
+            record_checkout_failure(client, exc, phase, payment_started=payment_started, checkout_id=purchase_id)
             reason = exc.reason
             message = str(exc)
             if not payment_started and client and getattr(client, "_verified_session", None):
@@ -2000,10 +2010,27 @@ def transaction_binding(transaction, transaction_id, item_id, buyer_id):
     )
 
 
-def check_payment(item_id, *, verify_paid=False):
+def check_payment(item_id, *, verify_paid=False, background=False, expected_payment=None):
     """Read an existing bound order/payment; never create or replay payment."""
     with buyer.exclusive():
+        if background:
+            yield_to_purchase()
         saved = result(item_id)
+        if saved is not None and expected_payment is not None:
+            if (
+                type(expected_payment) is not tuple
+                or len(expected_payment) != 3
+                or any(not isinstance(value, str) for value in expected_payment)
+                or not re.fullmatch(r"[0-9]{1,24}", expected_payment[0])
+                or not re.fullmatch(r"[0-9]{1,24}", expected_payment[1])
+                or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", expected_payment[2])
+                or expected_payment != (
+                    saved.get("buyer_id"), saved.get("transaction_id"), saved.get("checkout_id"),
+                )
+            ):
+                # A worker's retry budget belongs to this exact payment, not
+                # a later attempt created for the same listing while it waits.
+                return reconciliation_unverified(saved, "attempt_replaced")
         checkable = ("paying", "unknown", "needs_action") + (
             ("paid",) if verify_paid else ()
         )
@@ -2029,9 +2056,13 @@ def check_payment(item_id, *, verify_paid=False):
         if buyer.settings()["user_id"] != buyer_id:
             return reconciliation_unverified(saved, "buyer_account_changed")
         stage = "buyer_identity"
+        if background:
+            yield_to_purchase()
         client = buyer.connected_client(solve_challenges=False)
         try:
             stage = "bound_transaction"
+            if background:
+                yield_to_purchase()
             data = client.request("GET", "/api/v2/transactions/" + transaction_id)
             transaction = data.get("transaction")
             if not transaction_binding(
@@ -2054,7 +2085,12 @@ def check_payment(item_id, *, verify_paid=False):
                         if type(total) is int
                         else "Vinted confirmed this order paid. Check your purchases."
                     ),
+                    reconciled=True,
                 )
+                if saved["state"] in ("paying", "unknown", "needs_action"):
+                    from vinted_buyer_events import clear_checkout_failure
+
+                    clear_checkout_failure(client, checkout_id=purchase_id)
                 logger.info(
                     "Autobuy payment reconciliation: stage=bound_transaction outcome=paid"
                 )
@@ -2064,6 +2100,8 @@ def check_payment(item_id, *, verify_paid=False):
                     reconciliation_outcome="verified",
                 )
             stage = "bound_payment"
+            if background:
+                yield_to_purchase()
             data = client.request(
                 "GET", f"/api/v2/purchases/{purchase_id}/checkout/payment"
             )
@@ -2083,12 +2121,18 @@ def check_payment(item_id, *, verify_paid=False):
                         if type(total) is int
                         else "Vinted confirmed payment. Check your purchases."
                     ),
+                    reconciled=True,
                 )
+                if saved["state"] in ("paying", "unknown", "needs_action"):
+                    from vinted_buyer_events import clear_checkout_failure
+
+                    clear_checkout_failure(client, checkout_id=purchase_id)
             elif status in ("failure", "failed"):
                 record(
                     item_id,
                     "payment_failed",
                     "Vinted reports that payment failed. Check your Vinted purchases before buying again.",
+                    reconciled=True,
                 )
             elif status in ("pending", "preparing", "requires_action"):
                 action = payment_action_url(data) or saved.get("action_url")
@@ -2097,6 +2141,7 @@ def check_payment(item_id, *, verify_paid=False):
                     "needs_action",
                     "Payment is awaiting Vinted or bank confirmation. Check again after completing any confirmation; do not buy again.",
                     action_url=action,
+                    reconciled=True,
                 )
             else:
                 return reconciliation_unverified(saved, "payment_status_unverified")

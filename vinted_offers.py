@@ -904,8 +904,12 @@ def _wait_after_failure(exc, now):
     delay = getattr(exc, "retry_after", 0)
     if type(delay) not in (int, float) or not math.isfinite(delay) or delay < 0:
         delay = 0
-    if exc.status == 429 or exc.reason in {"rate_limited", "renewal_cooldown"}:
+    if exc.status == 429 or exc.reason == "rate_limited":
         delay = max(delay, 900)
+    elif exc.reason == "renewal_cooldown":
+        # This is the remaining deadline of our own persisted renewal guard,
+        # not a new upstream rate limit. Do not restart a 15-minute pause.
+        delay = delay or 900
     elif _error_reason(exc) == "network":
         delay = max(delay, SCAN_GAP)
         logger.warning(

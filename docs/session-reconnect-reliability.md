@@ -115,6 +115,36 @@ after an already-delivered account warning queues one recovery notice. Routine
 healthy checks stay quiet. Confirmation states the current Autobuy permission
 and explicitly separates verified account access from checkout readiness.
 
+## Checkout context and payment recovery
+
+The existing Railway/API checkout route remains in use. A verified listing sets
+the request's page context, and a built checkout binds its purchase and
+transaction identifiers to the canonical checkout URL. Loading choices and
+submitting payment retain that context; a different checkout identifier is
+rejected locally. The initial checkout load and all price, delivery, account,
+Stop and payment-idempotency checks remain required.
+
+Canonical CSRF metadata takes priority over token-like text in listing content.
+Conflicting canonical values are rejected. The legacy quoted Next.js fallback
+remains for compatibility until the current live bootstrap structure can be
+verified; it requires one unique valid value and is not a fully trusted HTML
+configuration parser.
+
+The Telegram process owns a separate payment-status recovery task. It checks
+only recent `unknown` or `needs_action` attempts with complete buyer, item,
+transaction and checkout provenance. Each immutable payment identity has a
+durable maximum of three status checks, including across restarts. Checks yield
+to owner purchases, use no challenge solver, and cannot submit payment. Active
+`paying` attempts and older or unbound records are not automatically inspected.
+
+A failed or unreadable status check retains the payment quarantine. A verified
+change is stored with its notification receipt in the same database transaction,
+then delivered to the configured private owner chat. Owner-entered resolutions
+are never described as Vinted confirmations. Reconciliation clears only a
+warning bound to that checkout, so checking an old paid order cannot clear a
+newer refusal. These changes do not establish that Vinted will accept a future
+checkout or payment.
+
 Checkout, delivery and payment-request refusals now have a separate durable
 episode and owner notice. These failures previously bypassed the connection
 warning recorder. The failure is accepted only from the exact currently saved,

@@ -166,6 +166,54 @@ class BuyerEventTests(NoticeFixture, unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.rows()[0]["api_code"])
         self.assertIsNone(buyer.settings()["checkout_health"]["api_code"])
 
+    def test_reconciled_payment_clears_only_its_bound_checkout_warning(self):
+        error = self.error("forbidden", "request", 403)
+        self.assertTrue(events.record_checkout_failure(
+            self.client, error, "submitting payment", payment_started=True,
+            checkout_id="checkout-one",
+        ))
+        events.clear_checkout_failure(self.client, checkout_id="checkout-other")
+        self.assertEqual(len(self.rows()), 1)
+        events.clear_checkout_failure(self.client, checkout_id="checkout-one")
+        self.assertEqual(self.rows(), [])
+
+    def test_later_failure_replaces_checkout_binding_even_in_same_incident(self):
+        error = self.error("forbidden", "request", 403)
+        events.record_checkout_failure(self.client, error, "submitting payment",
+                                       payment_started=True, checkout_id="checkout-one")
+        original = self.rows()[0]["event_id"]
+        events.record_checkout_failure(self.client, error, "submitting payment",
+                                       payment_started=True, checkout_id="checkout-two")
+        self.assertEqual(self.rows()[0]["event_id"], original)
+        events.clear_checkout_failure(self.client, checkout_id="checkout-one")
+        self.assertEqual(self.rows()[0]["checkout_id"], "checkout-two")
+        events.record_checkout_failure(self.client, error, "submitting payment",
+                                       payment_started=True)
+        events.clear_checkout_failure(self.client, checkout_id="checkout-two")
+        self.assertIsNone(self.rows()[0]["checkout_id"])
+
+    def test_scoped_recovery_keeps_legacy_warning_and_rejects_invalid_binding(self):
+        self.failure(payment_started=True)
+        events.clear_checkout_failure(self.client, checkout_id="checkout-one")
+        self.assertEqual(len(self.rows()), 1)
+        for invalid in ("", "https://private.example", 123, True, "x" * 101):
+            events.clear_checkout_failure(self.client, checkout_id=invalid)
+            self.assertEqual(len(self.rows()), 1)
+        # The ordinary newly completed purchase still closes prior incidents.
+        events.clear_checkout_failure(self.client)
+        self.assertEqual(self.rows(), [])
+
+    def test_checkout_binding_upgrade_preserves_existing_event(self):
+        self.failure(payment_started=True)
+        before = dict(self.rows()[0])
+        before.pop("checkout_id")
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("ALTER TABLE vinted_buyer_event DROP COLUMN checkout_id")
+            events.migrate(conn)
+        after = dict(self.rows()[0])
+        self.assertIsNone(after.pop("checkout_id"))
+        self.assertEqual(after, before)
+
     def test_schema30_upgrade_adds_api_evidence_and_preserves_existing_event(self):
         self.failure(payment_started=True)
         before = dict(self.rows()[0])

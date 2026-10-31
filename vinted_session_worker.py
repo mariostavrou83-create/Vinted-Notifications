@@ -310,6 +310,7 @@ def reserve_renewal(client, *, reservation=None):
                     buyer.AUTH_REASONS["renewal_cooldown"],
                     reason="renewal_cooldown",
                     stage="renewal",
+                    retry_after=math.ceil(state["retry_at"] - now),
                 )
                 error.retry_after_seconds = math.ceil(state["retry_at"] - now)
                 logger.info(

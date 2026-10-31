@@ -14,6 +14,7 @@ from contextlib import closing, contextmanager, nullcontext
 from copy import copy
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -78,20 +79,119 @@ AUTH_REASONS = {
 }
 
 
-def csrf_from_html(html):
-    # Next.js serializes the bootstrap object inside a quoted script string.
-    # Normalize its quote escaping without evaluating any page JavaScript.
+class _CSRFDocument(HTMLParser):
+    """Read canonical metadata and named bootstrap JSON, never seller text."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.meta = []
+        self.invalid_meta = False
+        self.in_body = False
+        self.current = None
+        self.bootstraps = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "body":
+            self.in_body = True
+        if tag == "meta" and not self.in_body:
+            names = [value for key, value in attrs if key == "name"]
+            if any(isinstance(value, str) and value.lower() == "csrf-token" for value in names):
+                contents = [value for key, value in attrs if key == "content"]
+                if len(names) != 1 or len(contents) != 1:
+                    self.invalid_meta = True
+                else:
+                    self.meta.append(contents[0])
+        if tag == "script":
+            ids = [value for key, value in attrs if key == "id"]
+            if ids == ["__NEXT_DATA__"] and not any(key == "src" for key, _ in attrs):
+                self.current = []
+
+    def handle_data(self, value):
+        if self.current is not None:
+            self.current.append(value)
+
+    def handle_endtag(self, tag):
+        if tag == "script" and self.current is not None:
+            if len(self.bootstraps) < 8:
+                self.bootstraps.append("".join(self.current))
+            self.current = None
+
+
+def _csrf_bootstrap_values(text):
+    """Decode complete JSON values and fixed config containers only."""
+    def unique_fields(pairs):
+        value = {}
+        for key, entry in pairs:
+            if key in value:
+                raise ValueError("Duplicate bootstrap field")
+            value[key] = entry
+        return value
+
+    value = text
     for _ in range(3):
-        html = html.replace('\\"', '"')
-    for pattern in (
-        r'"(?:CSRF_TOKEN|csrf_token|csrfToken)"\s*:\s*"([A-Za-z0-9._~+/=-]{16,1024})"',
-        r'<meta\s+name="csrf-token"\s+content="([A-Za-z0-9._~+/=-]{16,1024})"',
-        r'<meta\s+content="([A-Za-z0-9._~+/=-]{16,1024})"\s+name="csrf-token"',
+        if not isinstance(value, str):
+            break
+        try:
+            value = json.loads(value, object_pairs_hook=unique_fields)
+        except (ValueError, TypeError, RecursionError):
+            return []
+    if not isinstance(value, dict):
+        return []
+    scopes = [value]
+    for path in (
+        ("config",), ("runtimeConfig",), ("publicRuntimeConfig",),
+        ("props", "pageProps"), ("props", "pageProps", "config"),
     ):
-        match = re.search(pattern, html, re.IGNORECASE)
-        if match:
-            return match[1]
-    return None
+        current = value
+        for key in path:
+            current = current.get(key) if isinstance(current, dict) else None
+        if isinstance(current, dict):
+            scopes.append(current)
+    return [
+        scope[key] for scope in scopes
+        for key in ("CSRF_TOKEN", "csrf_token", "csrfToken") if key in scope
+    ]
+
+
+def csrf_from_html(html):
+    if not isinstance(html, str) or len(html) > 4 * 1024 * 1024:
+        return None
+    if html.lstrip().startswith(("{", "[", '"')):
+        # A complete JSON document is not HTML. Do not turn markup embedded
+        # inside a quoted description into a canonical metadata element.
+        values = _csrf_bootstrap_values(html)
+    else:
+        parser = _CSRFDocument()
+        try:
+            parser.feed(html)
+            parser.close()
+        except (ValueError, RecursionError):
+            return None
+        if parser.invalid_meta:
+            return None
+        values = parser.meta
+        if not values:
+            for bootstrap in parser.bootstraps:
+                values.extend(_csrf_bootstrap_values(bootstrap))
+            if not values:
+                # Keep the existing quoted Next.js bootstrap compatibility
+                # until its current live container shape is independently
+                # confirmed. Canonical metadata above is authoritative. This
+                # compatibility path is not a trusted-container parser.
+                quoted = html
+                for _ in range(3):
+                    quoted = quoted.replace('\\"', '"')
+                values = re.findall(
+                    r'"(?:CSRF_TOKEN|csrf_token|csrfToken)"\s*:\s*"([A-Za-z0-9._~+/=-]{16,1024})"',
+                    quoted,
+                    re.IGNORECASE,
+                )
+    if not values or any(
+        not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9._~+/=-]{16,1024}", value)
+        for value in values
+    ):
+        return None
+    return values[0] if len(set(values)) == 1 else None
 
 
 def api_error_code(value):
@@ -1033,6 +1133,7 @@ class Client:
             }
         )
         self.csrf = ""
+        self._checkout_context = None
         self._verified_session = None
         self._loaded_session_reference = None
         if saved:
@@ -1120,6 +1221,26 @@ class Client:
             self.session.headers["X-Anon-Id"] = anonymous_id
         else:
             self.session.headers.pop("X-Anon-Id", None)
+
+    def set_checkout_context(self, purchase_id, transaction_id):
+        """Set the canonical page context for one already identified checkout."""
+        if (
+            not isinstance(purchase_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", purchase_id)
+            or type(transaction_id) not in (str, int)
+            or not re.fullmatch(r"[0-9]{1,24}", str(transaction_id))
+        ):
+            raise BuyerError(
+                "The Vinted checkout page context could not be verified.",
+                reason="checkout_mismatch",
+            )
+        referer = (
+            BASE + "/checkout?purchase_id=" + purchase_id
+            + "&order_id=" + str(transaction_id) + "&order_type=transaction"
+        )
+        self._checkout_context = (purchase_id, referer)
+        self.session.headers["Referer"] = referer
+        return referer
 
     @timed_operation("security_check")
     def solve_challenge(self, response, data=None):
@@ -1514,7 +1635,17 @@ class Client:
                 )
             )
         )
-        if path.endswith("/payment"):
+        checkout_path = re.fullmatch(
+            r"/api/v2/purchases/([A-Za-z0-9_-]{1,100})/checkout(?:/payment)?", path
+        )
+        if checkout_path and self._checkout_context is not None:
+            purchase_id, referer = self._checkout_context
+            if checkout_path[1] != purchase_id:
+                raise BuyerError(
+                    "The Vinted request did not match the selected checkout.",
+                    reason="checkout_mismatch",
+                )
+        elif path.endswith("/payment"):
             referer = BASE + "/checkout?purchase_id=" + path.split("/")[4]
         elif path.startswith("/api/v2/items/"):
             referer = BASE + "/items/" + path.split("/")[4]
@@ -1784,6 +1915,7 @@ class Client:
                             and urlsplit(redirected).netloc == "www.vinted.co.uk"
                             and _url_id(canonical) == str(item_id)
                         ):
+                            target = canonical
                             response = self.session.get(
                                 canonical,
                                 headers=navigation,
@@ -1817,6 +1949,8 @@ class Client:
                 "Vinted's current page did not confirm this item's price, seller and availability. No payment was sent.",
                 reason="item_unavailable",
             )
+        self._checkout_context = None
+        self.session.headers["Referer"] = target
         logger.info("Vinted listing page: result=verified http=200")
         return {"item": item}
 

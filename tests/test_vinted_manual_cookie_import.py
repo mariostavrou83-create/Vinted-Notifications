@@ -196,6 +196,9 @@ class ManualCookieImportTests(buying_tests.SessionRotationFixture, unittest.Test
 class ManualCookieImportRouteTests(DatabaseFixture, unittest.TestCase):
     def setUp(self):
         super().setUp()
+        clock = patch.object(buyer.time, "time", return_value=NOW)
+        clock.start()
+        self.addCleanup(clock.stop)
         self.app = create_app({"TESTING": True, "SESSION_COOKIE_SECURE": False})
         self.client = self.app.test_client()
         with closing(search_settings.connection()) as conn, conn:

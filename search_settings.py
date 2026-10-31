@@ -11,7 +11,7 @@ from pathlib import Path
 
 import db
 
-SCHEMA_VERSION = "31"
+SCHEMA_VERSION = "32"
 
 
 def connection():
@@ -212,6 +212,9 @@ def ensure_schema():
             from vinted_offer_notices import migrate as migrate_offer_notices
 
             migrate_offer_notices(conn)
+            from vinted_payment_recovery import migrate as migrate_payment_recovery
+
+            migrate_payment_recovery(conn)
             conn.execute("""INSERT OR IGNORE INTO parameters
                 VALUES ('vinted_single_message_alerts', '0')""")
             conn.execute(
