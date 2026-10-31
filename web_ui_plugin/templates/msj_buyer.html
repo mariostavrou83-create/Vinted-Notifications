@@ -6,7 +6,7 @@
 <div class="guide-section" role="alert"><b>Autobuy checkout needs attention{% if buyer.checkout_health.http_status %} · HTTP {{buyer.checkout_health.http_status}}{% endif %}{% if buyer.checkout_health.api_code is defined and buyer.checkout_health.api_code is not none %} · Vinted code {{buyer.checkout_health.api_code}}{% endif %}</b>
 <p>The last attempt stopped while {{buyer.checkout_health.phase}}. {% if buyer.checkout_health.payment_started %}Payment may have been submitted; check Vinted before retrying.{% else %}No payment was sent.{% endif %}</p>
 {% if buyer.checkout_health.reason=='api_cookie_scope' %}<p>The saved access cookie does not apply to the required Vinted API service. No API request was sent. <a href="#vinted-browser-cookie-details">Reconnect with original browser cookie details.</a></p>
-{% elif buyer.checkout_health.reason in ('security_challenge','forbidden') %}<p>Vinted refused this checkout request. This alone does not mean your login disconnected. For a refusal before payment, use Continue in Vinted on the alert to review the item in your normal Vinted app or browser and complete any required check there.</p>{% endif %}
+{% elif buyer.checkout_health.reason in ('security_challenge','forbidden') %}<p>Vinted refused this checkout request. This alone does not mean your login disconnected. For a refusal before payment, review the item in your normal Vinted app or browser and complete any required check there.</p>{% endif %}
 <p>A successful account check or reconnect does not confirm that checkout works. This warning clears after a confirmed purchase.</p><small>{{buyer.checkout_health.checked_display}}</small></div>
 {% endif %}
 <details class="guide-section"><summary><b>Telegram connection warnings</b></summary><p>The bot confirms successful reconnects and warns your Vinted Telegram chat about account or checkout failures. The warning explains the reason and links here. An unconfirmed renewal is reported separately from a rejected login. Repeated warnings for the same unresolved problem are suppressed. Account recovery is confirmed separately from checkout readiness.</p><p><small>Idle buyer accounts are checked about every five minutes, alongside normal account requests and expiry-driven maintenance. Delivery is checked every minute. A remote logout cannot be detected immediately. Temporary request failures are reported if no later successful account check has been recorded for 15 minutes.</small></p><form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="buyer_connection_notice_test">Send connection-warning test</button></form><p><small>This sends one labelled test message, without checking Vinted or changing your connection or buying settings.</small></p></details>
@@ -83,23 +83,6 @@
 {% if buyer.pending_code %}<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><label for="buyer_code">Vinted verification code</label><input id="buyer_code" name="buyer_code" autocomplete="one-time-code" maxlength="12" required><button class="primary" name="action" value="buyer_verify">Verify buyer account</button></form>{% endif %}
 {% if buyer.connected %}
 <form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="buyer_recheck">Check saved buyer connection</button><p><small>Verifies the saved account session without preparing a checkout or sending payment.</small></p></form>
-{% if not telegram_review_mode %}
-<details class="guide-section" id="autobuy-checkout-test" {{'open' if checkout_probe_result}}>
-<summary><b>Test Autobuy checkout without paying</b></summary>
-<p>Check a fresh Telegram alert through checkout, delivery, payment choices and its final total. This can create a checkout but never submits payment or approves a purchase. Your Autobuy permission and search budgets are kept.</p>
-<form method="post" autocomplete="off"><input type="hidden" name="csrf" value="{{csrf}}">
-<label for="buyer_probe_item">Telegram item ID (optional)</label><input id="buyer_probe_item" name="buyer_item_id" inputmode="numeric" pattern="[0-9]{1,24}" maxlength="24" placeholder="Leave empty to check the latest alert">
-<button class="secondary" name="action" value="buyer_checkout_probe">Check checkout without paying</button></form>
-{% if checkout_probe_result %}{% set probe=checkout_probe_result %}
-<div role="status"><p><b>{{'Checkout prepared; payment acceptance is untested.' if probe.outcome=='quoted' else 'Checkout check stopped.'}}</b> No payment was sent.</p>
-{% if probe.title %}<p>{{probe.title}} · item {{probe.item_id}}</p>{% endif %}
-{% if probe.outcome=='quoted' %}<p>Item £{{'%.2f'|format(probe.item_price/100)}} · <b>Total £{{'%.2f'|format(probe.total/100)}}</b>. Saved search limits passed.</p>
-{% else %}<p>Stopped while {{probe.stage|replace('_',' ')}}{% if probe.http_status %} · HTTP {{probe.http_status}}{% endif %}{% if probe.api_code is defined and probe.api_code is not none %} · Vinted code {{probe.api_code}}{% endif %}{% if probe.reason %} · {{probe.reason|replace('_',' ')}}{% endif %}.</p>{% endif %}
-{% if probe.checkout_url %}<p><a href="{{probe.checkout_url}}" target="_blank" rel="noopener noreferrer">Review this checkout in Vinted →</a></p>{% elif probe.item_url %}<p><a href="{{probe.item_url}}" target="_blank" rel="noopener noreferrer">Open this Vinted listing →</a></p>{% endif %}
-{% if probe.outcome=='quoted' %}<details><summary>Quoted delivery and payment choices</summary><p>Delivery: {{probe.delivery_choice}}{% if probe.pickup_name %} · {{probe.pickup_name}}{% endif %}. Payment: {{probe.payment_method}}.</p></details>{% endif %}
-<p><small>This check does not prove that Vinted or your payment provider will accept payment.</small></p></div>
-{% endif %}</details>
-{% endif %}
 {% if telegram_review_mode %}
 <details class="guide-section" {{'open' if telegram_review and telegram_review.outcome == 'quoted' and not telegram_review.approved}}>
 <summary><b>Initial checkout checks</b></summary>

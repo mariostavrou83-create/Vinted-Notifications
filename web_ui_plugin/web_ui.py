@@ -779,22 +779,6 @@ def create_app(test_config=None):
                         "success" if result["outcome"] == "quoted" else "error",
                     )
                     return redirect(url_for("connections"), code=303)
-                elif action == "buyer_checkout_probe":
-                    import vinted_telegram_review
-
-                    result = vinted_telegram_review.probe_latest(
-                        item_id=request.form.get("buyer_item_id", "").strip() or None,
-                    )
-                    flash(
-                        (
-                            f"Checkout checked for {result.get('title', 'the selected item')}: "
-                            f"£{result['total']/100:.2f} including fees and delivery. No payment was sent."
-                            if result["outcome"] == "quoted"
-                            else "Checkout diagnostic stopped at " + result["stage"] + ". No payment was sent."
-                        ),
-                        "success" if result["outcome"] == "quoted" else "error",
-                    )
-                    return redirect(url_for("connections"), code=303)
                 elif action == "buyer_telegram_reconcile":
                     import vinted_telegram_review
 
@@ -1036,7 +1020,6 @@ def create_app(test_config=None):
             checkout_test=session.get("buyer_test_quote"),
             telegram_review=__import__("vinted_telegram_review").public_review(),
             telegram_review_mode=__import__("vinted_telegram_review").restricted(),
-            checkout_probe_result=__import__("vinted_telegram_review").public_probe_result(),
         )
 
     @app.route("/folders", methods=["GET", "POST"])

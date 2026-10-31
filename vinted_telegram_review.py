@@ -19,7 +19,6 @@ from search_settings import connection
 
 logger = logging.getLogger(__name__)
 REVIEW_KEY = "buyer_telegram_review"
-PROBE_KEY = "buyer_checkout_probe_result"
 ARCHIVE_PREFIX = "buyer_telegram_review_archive:"
 MAX_AGE = 1800
 PAYMENT_STATES = ("paying", "unknown", "needs_action", "paid", "payment_failed")
@@ -116,29 +115,6 @@ def public_review(review=None):
     )
 
 
-def public_probe_result():
-    """Return only the owner's stored diagnostic; never run account requests."""
-    try:
-        with closing(connection()) as conn:
-            row = conn.execute("SELECT value FROM parameters WHERE key=?", (PROBE_KEY,)).fetchone()
-        result = buyer.decrypt(row[0].encode("ascii")) if row else None
-        return result if isinstance(result, dict) else None
-    except buyer.BuyerError:
-        return None
-
-
-def probe_latest(*, item_id=None):
-    """Persist one explicit full-checkout diagnostic without approving payment."""
-    result = review_latest(item_id=item_id, preserve_autobuy=True)
-    result["checked_at"] = time.time()
-    with closing(connection()) as conn, conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO parameters(key,value) VALUES (?,?)",
-            (PROBE_KEY, buyer.encrypt(result).decode("ascii")),
-        )
-    return result
-
-
 def verify_limits(row, item_price, total, initial=None):
     limits = vinted_budget.purchase_limits(row)
     if initial is not None:
@@ -152,7 +128,7 @@ def verify_limits(row, item_price, total, initial=None):
     return limits
 
 
-def review_latest(*, item_id=None, preserve_autobuy=False):
+def review_latest(*, item_id=None):
     """Create or reuse one selected checkout, never submit or approve payment."""
     result = {
         "outcome": "unverified",
@@ -166,28 +142,17 @@ def review_latest(*, item_id=None, preserve_autobuy=False):
     client = None
     draft = None
     try:
-        if preserve_autobuy:
-            result["diagnostic_only"] = True
-            result["stage"] = "configuration"
-            result["autobuy_off"] = not buyer.settings()["enabled"]
-            if restricted():
-                raise buyer.BuyerError(
-                    "Use the existing item review while one-item review mode is enabled.",
-                    reason="review_mode_enabled",
-                )
         verified_network = network_signature()
-        if not preserve_autobuy:
-            connection_result = vinted_network_check.check_connection()
-            result["connection_verified"] = connection_result.get("outcome") == "verified"
-            if not result["connection_verified"]:
-                result["stage"] = "connection_" + connection_result.get(
-                    "stage", "unverified"
-                )
-                return result
+        connection_result = vinted_network_check.check_connection()
+        result["connection_verified"] = connection_result.get("outcome") == "verified"
+        if not result["connection_verified"]:
+            result["stage"] = "connection_" + connection_result.get(
+                "stage", "unverified"
+            )
+            return result
         with buyer.exclusive(wait_seconds=45):
-            if not preserve_autobuy:
-                with closing(connection()) as conn, conn:
-                    conn.execute("UPDATE vinted_buyer SET enabled=0 WHERE id=1")
+            with closing(connection()) as conn, conn:
+                conn.execute("UPDATE vinted_buyer SET enabled=0 WHERE id=1")
             if network_signature() != verified_network:
                 raise buyer.BuyerError(
                     "The private connection settings changed. Check again."
@@ -204,17 +169,11 @@ def review_latest(*, item_id=None, preserve_autobuy=False):
                 ).isoformat(),
             )
             previous_attempt = buying.result(row["item_id"])
-            if preserve_autobuy and previous_attempt and previous_attempt["state"] == "closed":
-                result.update(stage="closed_alert", reason="closed_alert")
-                return result
             if previous_attempt and previous_attempt["state"] in PAYMENT_STATES:
                 result.update(
                     stage="existing_payment", payment_state=previous_attempt["state"]
                 )
                 return result
-            if preserve_autobuy:
-                result["stage"] = "payment_guard"
-                buying.guard_new_payment(row["item_id"])
             config = buyer.settings()
             limits = vinted_budget.purchase_limits(row)
             result.update(
@@ -235,11 +194,7 @@ def review_latest(*, item_id=None, preserve_autobuy=False):
                 save_review(draft)
             else:
                 result["stage"] = "listing"
-                client = (
-                    buyer.connected_client(solve_challenges=False)
-                    if preserve_autobuy else buyer.connected_client()
-                )
-                result["connection_verified"] = True
+                client = buyer.connected_client()
                 item_price, seller = buying.verified_listing(
                     client, row, config, limits
                 )
@@ -322,12 +277,7 @@ def review_latest(*, item_id=None, preserve_autobuy=False):
             + draft["transaction_id"]
             + "&order_type=transaction"
         )
-        if preserve_autobuy:
-            result["checkout_url"] = checkout_url
-            prepared = buying.check_checkout(checkout_url, prepare_test=True, solve_challenges=False)
-        else:
-            prepared = buying.check_checkout(checkout_url, prepare_test=True)
-        result["connection_verified"] = True
+        prepared = buying.check_checkout(checkout_url, prepare_test=True)
         quote = buyer.decrypt(prepared["token"].encode("ascii"))
         if (
             prepared["item_id"] != row["item_id"]
@@ -348,16 +298,6 @@ def review_latest(*, item_id=None, preserve_autobuy=False):
         )
         with buyer.exclusive(wait_seconds=45):
             current = buyer.settings()
-            if preserve_autobuy:
-                attempt = buying.result(row["item_id"])
-                if attempt and attempt["state"] == "closed":
-                    result.update(stage="closed_alert", reason="closed_alert")
-                    return result
-                if attempt and attempt["state"] in PAYMENT_STATES:
-                    result.update(stage="existing_payment", payment_state=attempt["state"])
-                    return result
-                result["stage"] = "payment_guard"
-                buying.guard_new_payment(row["item_id"])
             if (
                 current["user_id"] != quote["buyer_id"]
                 or buying.choice_preferences(current) != quote["preferences"]
@@ -388,7 +328,7 @@ def review_latest(*, item_id=None, preserve_autobuy=False):
                 result["browser_info_ready"] = False
             result.update(
                 outcome="quoted",
-                stage="checkout_verified" if preserve_autobuy else "awaiting_item_approval",
+                stage="awaiting_item_approval",
                 search_limit_passed=True,
             )
             draft.update(
@@ -418,8 +358,6 @@ def review_latest(*, item_id=None, preserve_autobuy=False):
         )
         if isinstance(exc.status, int):
             result["http_status"] = exc.status
-        if buyer.api_error_code(getattr(exc, "api_code", None)) is not None:
-            result["api_code"] = exc.api_code
         return result
     except Exception:  # noqa: BLE001 -- no upstream payloads, identities or credentials
         return result
@@ -450,8 +388,7 @@ def review_latest(*, item_id=None, preserve_autobuy=False):
             except Exception:  # noqa: BLE001 -- diagnostics never expose private state
                 logger.info("Vinted Telegram review persistence: outcome=unverified")
         logger.info(
-            "Vinted Telegram checkout review: %s",
-            json.dumps({key: value for key, value in result.items() if key != "checkout_url"}, sort_keys=True),
+            "Vinted Telegram checkout review: %s", json.dumps(result, sort_keys=True)
         )
 
 

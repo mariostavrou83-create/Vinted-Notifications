@@ -7,7 +7,6 @@ import os
 import re
 import time
 from contextlib import closing
-from contextvars import copy_context
 from decimal import Decimal, InvalidOperation
 from urllib.parse import parse_qs, urlsplit
 
@@ -17,7 +16,6 @@ from telegram.error import BadRequest, TelegramError
 import db
 import vinted_budget
 import vinted_buyer as buyer
-from vinted_buyer_priority import yield_to_purchase
 from logger import get_logger
 from search_settings import connection
 from vinted_progress import bind_progress, report
@@ -32,7 +30,6 @@ from vinted_purchase_control import (
 from vinted_timing import timed_operation
 
 logger = get_logger(__name__)
-VINTED_CONTINUATION_REASONS = frozenset({"security_challenge", "forbidden", "api_cookie_scope"})
 
 
 def cents(value):
@@ -66,10 +63,9 @@ def record(
     action_url=None,
     buyer_id=None,
     transaction_id=None,
-    reconciled=False,
 ):
     with closing(connection()) as conn, conn:
-        changed = conn.execute(
+        conn.execute(
             "UPDATE vinted_buy_attempts SET state=?,message=?,checkout_id=COALESCE(?,checkout_id),total=COALESCE(?,total),action_url=?,buyer_id=COALESCE(?,buyer_id),transaction_id=COALESCE(?,transaction_id),updated=? WHERE item_id=?",
             (
                 state,
@@ -82,11 +78,7 @@ def record(
                 time.time(),
                 item_id,
             ),
-        ).rowcount
-        if reconciled is True and changed:
-            from vinted_payment_recovery import record_verified
-
-            record_verified(conn, item_id, state)
+        )
 
 
 def result(item_id):
@@ -1203,7 +1195,7 @@ def checkout_item_evidence(items):
     return json.dumps(evidence, separators=(",", ":"))
 
 
-def check_checkout(url, *, prepare_test=False, solve_challenges=True):
+def check_checkout(url, *, prepare_test=False):
     """Load a selected existing checkout; never claim or submit a payment."""
     purchase_id = checkout_link_id(url)
     transaction_id = parse_qs(urlsplit(url.strip()).query)["order_id"][0]
@@ -1221,12 +1213,8 @@ def check_checkout(url, *, prepare_test=False, solve_challenges=True):
         phase = "checking your buyer account"
         try:
             quoted_account = buyer.settings()
-            client = (
-                buyer.connected_client() if solve_challenges
-                else buyer.connected_client(solve_challenges=False)
-            )
+            client = buyer.connected_client()
             phase = "loading the existing checkout"
-            client.set_checkout_context(purchase_id, transaction_id)
             # Current first-party fetchInitialSingleCheckoutData uses PUT with
             # no options to load a purchase already opened by the owner.
             data = client.request("PUT", f"/api/v2/purchases/{purchase_id}/checkout")
@@ -1296,7 +1284,6 @@ def check_checkout(url, *, prepare_test=False, solve_challenges=True):
                     f"Checkout total £{total/100:.2f} including fees and delivery; saved choices need attention: {exc}",
                     reason=exc.reason,
                     status=exc.status,
-                    api_code=exc.api_code,
                 ) from None
             logger.info("Autobuy checkout check: result=verified")
             target = (
@@ -1357,7 +1344,7 @@ def check_checkout(url, *, prepare_test=False, solve_challenges=True):
         except buyer.BuyerError as exc:
             from vinted_buyer_events import record_checkout_failure
 
-            record_checkout_failure(client, exc, phase, checkout_id=purchase_id)
+            record_checkout_failure(client, exc, phase)
             logger.info(
                 "Autobuy checkout check: phase=%s reason=%s http=%s",
                 phase,
@@ -1369,7 +1356,6 @@ def check_checkout(url, *, prepare_test=False, solve_challenges=True):
                 f"Checkout check stopped while {phase}{http}: {exc} No payment was submitted.",
                 reason=exc.reason,
                 status=exc.status,
-                api_code=exc.api_code,
             ) from None
         finally:
             if client:
@@ -1540,7 +1526,6 @@ def buy_checkout_quote(token, *, alert_row=None):
             phase = "checking the quoted checkout"
             report("loading_choices")
             checkpoint()
-            client.set_checkout_context(purchase_id, quote["transaction_id"])
             data = client.request("PUT", f"/api/v2/purchases/{purchase_id}/checkout")
             checkout = data.get("checkout")
             if not isinstance(checkout, dict) or str(checkout.get("id")) != purchase_id:
@@ -1614,7 +1599,7 @@ def buy_checkout_quote(token, *, alert_row=None):
         except Exception as exc:  # noqa: BLE001 -- preserve uncertain payments
             from vinted_buyer_events import record_checkout_failure
 
-            record_checkout_failure(client, exc, phase, payment_started=payment_started, checkout_id=purchase_id)
+            record_checkout_failure(client, exc, phase, payment_started=payment_started)
             logger.info(
                 "Autobuy test stopped: phase=%s error_type=%s",
                 phase,
@@ -1750,7 +1735,6 @@ def _buy(row):
             return result(item_id)
         client = None
         payment_started = False
-        purchase_id = None
         phase = "checking your buyer account"
         reason = None
         try:
@@ -1798,7 +1782,6 @@ def _buy(row):
             phase = "loading delivery and payment choices"
             report("loading_choices")
             checkpoint()
-            client.set_checkout_context(purchase_id, str(transaction_id))
             updated = client.request(
                 "PUT",
                 f"/api/v2/purchases/{purchase_id}/checkout",
@@ -1886,22 +1869,9 @@ def _buy(row):
         except buyer.BuyerError as exc:
             from vinted_buyer_events import record_checkout_failure
 
-            record_checkout_failure(client, exc, phase, payment_started=payment_started, checkout_id=purchase_id)
+            record_checkout_failure(client, exc, phase, payment_started=payment_started)
             reason = exc.reason
             message = str(exc)
-            if not payment_started and client and getattr(client, "_verified_session", None):
-                if reason == "security_challenge":
-                    message = (
-                        "Vinted requested a checkout security check. Your account check passed; "
-                        "this does not mean your login disconnected. Use Continue in Vinted "
-                        "to complete any required check and review the purchase there."
-                    )
-                elif reason == "forbidden":
-                    message = (
-                        "Vinted refused the checkout request. Your account check passed; "
-                        "this does not establish a disconnected login. Use Continue in Vinted "
-                        "to review the purchase in your normal Vinted session."
-                    )
             if reason in buyer.AUTH_REASONS:
                 http = f" (HTTP {exc.status})" if isinstance(exc.status, int) else ""
                 message = f"Autobuy stopped while {phase}{http}: {message}"
@@ -2011,27 +1981,10 @@ def transaction_binding(transaction, transaction_id, item_id, buyer_id):
     )
 
 
-def check_payment(item_id, *, verify_paid=False, background=False, expected_payment=None):
+def check_payment(item_id, *, verify_paid=False):
     """Read an existing bound order/payment; never create or replay payment."""
     with buyer.exclusive():
-        if background:
-            yield_to_purchase()
         saved = result(item_id)
-        if saved is not None and expected_payment is not None:
-            if (
-                type(expected_payment) is not tuple
-                or len(expected_payment) != 3
-                or any(not isinstance(value, str) for value in expected_payment)
-                or not re.fullmatch(r"[0-9]{1,24}", expected_payment[0])
-                or not re.fullmatch(r"[0-9]{1,24}", expected_payment[1])
-                or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", expected_payment[2])
-                or expected_payment != (
-                    saved.get("buyer_id"), saved.get("transaction_id"), saved.get("checkout_id"),
-                )
-            ):
-                # A worker's retry budget belongs to this exact payment, not
-                # a later attempt created for the same listing while it waits.
-                return reconciliation_unverified(saved, "attempt_replaced")
         checkable = ("paying", "unknown", "needs_action") + (
             ("paid",) if verify_paid else ()
         )
@@ -2057,13 +2010,9 @@ def check_payment(item_id, *, verify_paid=False, background=False, expected_paym
         if buyer.settings()["user_id"] != buyer_id:
             return reconciliation_unverified(saved, "buyer_account_changed")
         stage = "buyer_identity"
-        if background:
-            yield_to_purchase()
         client = buyer.connected_client(solve_challenges=False)
         try:
             stage = "bound_transaction"
-            if background:
-                yield_to_purchase()
             data = client.request("GET", "/api/v2/transactions/" + transaction_id)
             transaction = data.get("transaction")
             if not transaction_binding(
@@ -2086,12 +2035,7 @@ def check_payment(item_id, *, verify_paid=False, background=False, expected_paym
                         if type(total) is int
                         else "Vinted confirmed this order paid. Check your purchases."
                     ),
-                    reconciled=True,
                 )
-                if saved["state"] in ("paying", "unknown", "needs_action"):
-                    from vinted_buyer_events import clear_checkout_failure
-
-                    clear_checkout_failure(client, checkout_id=purchase_id)
                 logger.info(
                     "Autobuy payment reconciliation: stage=bound_transaction outcome=paid"
                 )
@@ -2101,8 +2045,6 @@ def check_payment(item_id, *, verify_paid=False, background=False, expected_paym
                     reconciliation_outcome="verified",
                 )
             stage = "bound_payment"
-            if background:
-                yield_to_purchase()
             data = client.request(
                 "GET", f"/api/v2/purchases/{purchase_id}/checkout/payment"
             )
@@ -2122,18 +2064,12 @@ def check_payment(item_id, *, verify_paid=False, background=False, expected_paym
                         if type(total) is int
                         else "Vinted confirmed payment. Check your purchases."
                     ),
-                    reconciled=True,
                 )
-                if saved["state"] in ("paying", "unknown", "needs_action"):
-                    from vinted_buyer_events import clear_checkout_failure
-
-                    clear_checkout_failure(client, checkout_id=purchase_id)
             elif status in ("failure", "failed"):
                 record(
                     item_id,
                     "payment_failed",
                     "Vinted reports that payment failed. Check your Vinted purchases before buying again.",
-                    reconciled=True,
                 )
             elif status in ("pending", "preparing", "requires_action"):
                 action = payment_action_url(data) or saved.get("action_url")
@@ -2142,7 +2078,6 @@ def check_payment(item_id, *, verify_paid=False, background=False, expected_paym
                     "needs_action",
                     "Payment is awaiting Vinted or bank confirmation. Check again after completing any confirmation; do not buy again.",
                     action_url=action,
-                    reconciled=True,
                 )
             else:
                 return reconciliation_unverified(saved, "payment_status_unverified")
@@ -2211,8 +2146,6 @@ def feedback_buttons(row, feedback=None):
             "unreadable": "Vinted response unreadable · details",
             "network": "Vinted connection error · details",
             "security_challenge": "Vinted security check required · details",
-            "forbidden": "Vinted checkout refused · details",
-            "api_cookie_scope": "Vinted cookie details need reconnecting · details",
             "rate_limited": "Vinted cooldown required · details",
             "credentials": "Vinted session expired · details",
             "unexpected_error": "Checkout error · details",
@@ -2246,8 +2179,6 @@ def feedback_buttons(row, feedback=None):
         "item_sold",
         "item_closed",
         "security_challenge",
-        "forbidden",
-        "api_cookie_scope",
         "earlier_payment_uncertain",
     ):
         buttons.append(
@@ -2282,9 +2213,7 @@ def feedback_buttons(row, feedback=None):
                 )
             ]
         )
-    elif feedback.get("checkout_id") and not (
-        state == "failed_before_payment" and reason in VINTED_CONTINUATION_REASONS
-    ):
+    elif feedback.get("checkout_id"):
         buttons.append(
             [
                 InlineKeyboardButton(
@@ -2293,29 +2222,6 @@ def feedback_buttons(row, feedback=None):
                 )
             ]
         )
-    if state == "failed_before_payment" and reason in VINTED_CONTINUATION_REASONS:
-        # A refused server request is not permission to retry around it. Let
-        # the owner continue in Vinted's ordinary UI, without moving cookies
-        # or automatically submitting a second request or payment.
-        checkout_id = feedback.get("checkout_id")
-        item_id = str(row.get("item_id", ""))
-        if isinstance(checkout_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,100}", checkout_id):
-            continuation = buyer.BASE + "/checkout?purchase_id=" + checkout_id
-        elif re.fullmatch(r"[0-9]{1,24}", item_id):
-            continuation = buyer.BASE + "/items/" + item_id
-        else:
-            continuation = None
-        if continuation and not any(button.url == continuation for line in buttons for button in line):
-            buttons.append([InlineKeyboardButton("Continue in Vinted ↗", url=continuation)])
-        if reason == "api_cookie_scope":
-            from vinted_connection_notices import dashboard_url
-
-            repair = dashboard_url()
-            if repair:
-                buttons.append([InlineKeyboardButton(
-                    "Repair Vinted connection ↗",
-                    url=repair.split("#", 1)[0] + "#vinted-browser-cookie-details",
-                )])
     from vinted_owner_controls import buttons as owner_buttons
 
     buttons.extend(owner_buttons(feedback))
@@ -2377,110 +2283,10 @@ async def show_purchase_feedback(bot, message, outcome):
     return outcome
 
 
-def _card_feedback(outcome):
-    feedback = {
-        key: outcome.get(key)
-        for key in (
-            "state", "message", "checkout_id", "total", "reason", "action_url",
-            "owner_resolution", "stop_token",
-        )
-    }
-    if outcome.get("_live_progress") is True:
-        feedback["_live_progress"] = True
-    return feedback
-
-
-def merge_live_feedback(row, details, message_id):
-    """Overlay exact live progress when another view reloads this alert."""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return details
-    from vinted_telegram_progress import live_feedback
-
-    durable = result(str(row["item_id"]))
-    current = live_feedback(message_id, row["item_id"], durable)
-    if current is not None:
-        return dict(details, buy_feedback=_card_feedback(current))
-    saved = details.get("buy_feedback") or {}
-    authoritative = durable and durable.get("state") not in ("preparing", "paying")
-    if saved.get("state") != "in_progress" or not (
-        saved.get("_live_progress") is True or authoritative
-    ):
-        return details
-    # An actual photo/notes edit may have saved an overlaid stage. Once its
-    # bridge ends, use the durable attempt rather than retain stale Stop tokens.
-    if durable:
-        from vinted_owner_controls import with_offer
-
-        return dict(details, buy_feedback=_card_feedback(with_offer(row, durable)))
-    return dict(details, buy_feedback=None)
-
-
-def _save_alert_feedback(message_id, item_id, details):
-    with closing(connection()) as conn, conn:
-        conn.execute(
-            "UPDATE telegram_photo_cards SET details=? WHERE platform='vinted' AND message_id=? AND item_id=?",
-            (json.dumps(details), message_id, item_id),
-        )
-
-
-def _feedback_bookkeeping(message_id, view, changed):
-    import photo_cards
-
-    if changed:
-        photo_cards.after_edit("vinted", message_id, view=view)
-    photo_cards.control_health("vinted", "success")
-
-
-async def _feedback_storage(function, *args):
-    """Drain this same write before cancellation can release the card lock."""
-    operation = asyncio.get_running_loop().run_in_executor(
-        None, copy_context().run, function, *args
-    )
-    cancelled = False
-    while True:
-        try:
-            value = await asyncio.shield(operation)
-            break
-        except asyncio.CancelledError:
-            if operation.cancelled():
-                raise
-            cancelled = True
-    if cancelled:
-        raise asyncio.CancelledError
-    return value
-
-
-def _log_feedback_timing(started, edit_started, edit_finished, *, transient, stage):
-    """UI latency is separate from the timed, durable purchase operation."""
-    try:
-        finished = time.perf_counter()
-        spans = (
-            (edit_started if edit_started is not None else finished) - started,
-            (edit_finished - edit_started)
-            if edit_finished is not None and edit_started is not None else 0,
-            finished - edit_finished if edit_finished is not None else 0,
-            finished - started,
-        )
-        if not all(math.isfinite(value) for value in spans):
-            return
-        logger.info(
-            "Autobuy feedback timing: transient=%s stage=%s prepare_ms=%.3f telegram_ms=%.3f bookkeeping_ms=%.3f elapsed_ms=%.3f",
-            transient, stage,
-            *(min(86400000, max(0, value * 1000)) for value in spans),
-        )
-    except Exception:  # noqa: BLE001,S110 -- optional timing cannot alter feedback
-        pass
-
-
 async def show_alert_feedback(bot, message, outcome):
     """Share durable alert feedback between buttons and notification replies."""
     import photo_cards
-    from vinted_progress import STAGE_LABELS
 
-    started = time.perf_counter()
-    edit_started = edit_finished = None
     saved = photo_cards.load("vinted", message.message_id)
     if not saved:
         return
@@ -2488,21 +2294,25 @@ async def show_alert_feedback(bot, message, outcome):
     from vinted_owner_controls import with_offer
 
     outcome = with_offer(row, outcome)
-    feedback = _card_feedback(outcome)
-    transient = (
-        feedback["state"] == "in_progress" and feedback.get("_live_progress") is True
-    )
-    stage = outcome.get("_progress_stage")
-    stage = stage if isinstance(stage, str) and stage in STAGE_LABELS else (
-        "progress" if transient else "result"
-    )
+    feedback = {
+        key: outcome.get(key)
+        for key in (
+            "state",
+            "message",
+            "checkout_id",
+            "total",
+            "reason",
+            "action_url",
+            "owner_resolution",
+            "stop_token",
+        )
+    }
     details = dict(details, buy_feedback=feedback)
     try:
-        if not transient:
-            # The caller keeps this card's UI lock until this awaited commit
-            # completes. Slow local storage must not stall other Telegram work.
-            await _feedback_storage(
-                _save_alert_feedback, message.message_id, row["item_id"], details
+        with closing(connection()) as conn, conn:
+            conn.execute(
+                "UPDATE telegram_photo_cards SET details=? WHERE platform='vinted' AND message_id=? AND item_id=?",
+                (json.dumps(details), message.message_id, row["item_id"]),
             )
         # Picture and notes controls re-use these details, preserving buy status.
         view = card.get("view", "listing")
@@ -2523,7 +2333,6 @@ async def show_alert_feedback(bot, message, outcome):
             ),
             **photo_cards.TIMEOUTS,
         )
-        edit_started = time.perf_counter()
         try:
             if photo_cards.has_photo(card, details):
                 await bot.edit_message_caption(
@@ -2538,13 +2347,8 @@ async def show_alert_feedback(bot, message, outcome):
         except BadRequest as exc:
             if "message is not modified" not in str(exc).lower():
                 raise
-        finally:
-            edit_finished = time.perf_counter()
-        if not transient:
-            await _feedback_storage(
-                _feedback_bookkeeping, message.message_id, view,
-                view != card.get("view", "listing"),
-            )
+        photo_cards.after_edit("vinted", message.message_id, view=view)
+        photo_cards.control_health("vinted", "success")
         offer = feedback.get("owner_resolution")
         if offer:
             logger.info(
@@ -2554,27 +2358,20 @@ async def show_alert_feedback(bot, message, outcome):
                 message.message_id,
             )
     except TelegramError as exc:
-        if not transient:
-            await _feedback_storage(
-                photo_cards.control_health,
-                "vinted", "error", "Could not display Autobuy status"
-            )
+        photo_cards.control_health(
+            "vinted", "error", "Could not display Autobuy status"
+        )
         logger.warning(
             "Autobuy result display failed item=%s error=%s",
             row["item_id"],
             type(exc).__name__,
         )
         # Never repeat a payment because its Telegram display failed.
-    finally:
-        _log_feedback_timing(
-            started, edit_started, edit_finished, transient=transient, stage=stage
-        )
     logger.info(
-        "Autobuy status item=%s search=%s state=%s stage=%s",
+        "Autobuy status item=%s search=%s state=%s",
         row["item_id"],
         row.get("query_id"),
         feedback["state"],
-        stage,
     )
 
 

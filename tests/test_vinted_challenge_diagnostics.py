@@ -111,7 +111,6 @@ class PaymentRefusalEvidenceTests(unittest.TestCase):
         self.addCleanup(self.fixture.tearDown)
         self.fixture.configure()
         self.client = self.fixture.client(fixture.SAVED)
-        self.client.set_checkout_context("checkout-123", "456")
 
     def test_payment_challenge_logs_only_fixed_evidence_and_never_solves_or_replays(self):
         data = {"url": URL}

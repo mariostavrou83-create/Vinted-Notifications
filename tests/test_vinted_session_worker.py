@@ -696,33 +696,6 @@ class MaintenanceTests(buying_tests.SessionRotationFixture, unittest.TestCase):
         )
         self.assertNotIn("private-error", " ".join(logs.output))
 
-    def test_private_repair_failure_does_not_skip_regular_maintenance(self):
-        import vinted_security_cookie_repair as repair
-
-        calls = []
-
-        async def thread_call(function):
-            calls.append(function)
-            if function is requested:
-                return function()
-            return "fresh"
-
-        async def sleep(_seconds):
-            raise asyncio.CancelledError
-
-        with (
-            patch.dict(worker.os.environ, {repair.VARIABLE: "private-request"}),
-            patch.object(repair, "run_once", side_effect=RuntimeError("private-detail")) as requested,
-            patch.object(worker.asyncio, "to_thread", side_effect=thread_call),
-            patch.object(worker.asyncio, "sleep", side_effect=sleep),
-            self.assertRaises(asyncio.CancelledError),
-            self.assertLogs(worker.logger, level="WARNING") as logs,
-        ):
-            asyncio.run(worker.run())
-        self.assertEqual(calls, [requested, worker.maintain_connection, worker.check_account_health])
-        self.assertNotIn("private-detail", " ".join(logs.output))
-        self.assertNotIn("private-request", " ".join(logs.output))
-
     def test_startup_does_not_clear_an_existing_terminal_block(self):
         fingerprint = hashlib.sha256(self.saved()[0]["session"]).hexdigest()
         with closing(search_settings.connection()) as conn, conn:

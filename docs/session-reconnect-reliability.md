@@ -1,5 +1,17 @@
 # Dashboard login and private buyer reconnect
 
+## Autobuy rollback, 31 October 2026
+
+At the owner's request, the purchase flow, Telegram progress and checkout review
+were restored to commit `13eae2521834c10c7a758ed03a8ca6c85a34d2d5`, the version
+live before 13:46 UTC on 30 October. Later checkout Referer/context changes,
+security-cookie normalization, one-time security repair and automatic payment
+recovery were withdrawn. Existing payment records and uncertainty guards remain.
+The newer offers reconnect/recovery, original cookie scope preservation, shared
+CSRF handling, owner notifications and alert efficiency changes are retained.
+The later sections describing the withdrawn checkout experiments are historical;
+this rollback does not establish that Vinted will accept a future payment.
+
 The dashboard Supabase owner login and the Vinted buyer session are separate.
 The dashboard keeps only an opaque browser reference and encrypted server-side
 credentials; no dashboard or Vinted password is persisted by these changes.

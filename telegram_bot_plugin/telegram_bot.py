@@ -39,7 +39,6 @@ class LeRobot:
             self._delivery_task = None
             self._delivery_worker = None
             self._buyer_maintenance_task = None
-            self._payment_recovery_task = None
             self.bot = Bot(db.get_parameter("telegram_token"))
             self.app = (
                 ApplicationBuilder()
@@ -450,12 +449,6 @@ class LeRobot:
             ),
             name="vinted-buyer-session-maintenance",
         )
-        from vinted_payment_recovery import run as recover_payment_status
-
-        self._payment_recovery_task = asyncio.create_task(
-            recover_payment_status(application.bot, db.get_parameter("telegram_chat_id")),
-            name="vinted-payment-status-recovery",
-        )
         from vinted_owner_controls import refresh_existing
 
         self._owner_controls_task = asyncio.create_task(
@@ -467,15 +460,13 @@ class LeRobot:
         task, worker = self._delivery_task, self._delivery_worker
         maintenance = self._buyer_maintenance_task
         owner_controls = getattr(self, "_owner_controls_task", None)
-        payment_recovery = getattr(self, "_payment_recovery_task", None)
         self._delivery_task = None
         self._delivery_worker = None
         self._buyer_maintenance_task = None
         self._owner_controls_task = None
-        self._payment_recovery_task = None
         tasks = [
             running
-            for running in (task, maintenance, owner_controls, payment_recovery)
+            for running in (task, maintenance, owner_controls)
             if running is not None
         ]
         for running in tasks:
