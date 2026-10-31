@@ -326,6 +326,7 @@ class TelegramProgress:
                     "state": "in_progress",
                     "message": STAGE_LABELS[stage],
                     "_live_progress": True,
+                    "_progress_stage": stage,
                     "stop_token": (
                         None
                         if self.control.paying

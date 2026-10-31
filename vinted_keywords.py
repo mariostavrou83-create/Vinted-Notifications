@@ -149,21 +149,23 @@ def cutoff(variant, item_ids, now):
     return floor
 
 
-def finish(variant, item_ids, watermark, now):
+def finish(variant, item_ids, watermark, now, *, conn=None):
+    if conn is None:
+        with closing(connection()) as opened, opened:
+            return finish(variant, item_ids, watermark, now, conn=opened)
     maximum = max([0] + [int(i) for i in item_ids if str(i).isdigit()])
-    with closing(connection()) as conn, conn:
-        conn.execute(
-            """UPDATE vinted_keyword_variants SET primed=1,
-            last_item=MAX(COALESCE(last_item,0),?), max_item_id=MAX(max_item_id,?),last_check=?
-            WHERE id=? AND url=?""",
-            (
-                watermark if watermark is not None else int(now),
-                maximum,
-                now,
-                variant["id"],
-                variant["url"],
-            ),
-        )
+    conn.execute(
+        """UPDATE vinted_keyword_variants SET primed=1,
+        last_item=MAX(COALESCE(last_item,0),?), max_item_id=MAX(max_item_id,?),last_check=?
+        WHERE id=? AND url=?""",
+        (
+            watermark if watermark is not None else int(now),
+            maximum,
+            now,
+            variant["id"],
+            variant["url"],
+        ),
+    )
 
 
 def health(variant_id, attempted, interval, error, *, conn=None):

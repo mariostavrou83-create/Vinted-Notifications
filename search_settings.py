@@ -378,16 +378,33 @@ def filtered_ids(query_id, item_ids=None):
         return {row[0] for row in conn.execute(sql, params)}
 
 
-def remember_filtered(query_id, item_ids):
+def remember_filtered(query_id, item_ids, *, conn=None):
     if not item_ids:
         return
-    with closing(connection()) as conn, conn:
-        # A search can be deleted while a response is being processed.
-        if conn.execute("SELECT 1 FROM queries WHERE id=?", (query_id,)).fetchone():
-            conn.executemany(
-                "INSERT OR IGNORE INTO search_filtered_items VALUES (?, ?)",
-                [(query_id, str(item_id)) for item_id in item_ids],
+    if conn is None:
+        with closing(connection()) as opened, opened:
+            return remember_filtered(query_id, item_ids, conn=opened)
+    identities = tuple(dict.fromkeys(str(item_id) for item_id in item_ids))
+    present = set()
+    # Keep every query bounded even if a larger catalogue batch is supplied.
+    for start in range(0, len(identities), 500):
+        chunk = identities[start:start + 500]
+        present.update(
+            row[0] for row in conn.execute(
+                "SELECT item FROM search_filtered_items WHERE query_id=? AND item IN ("
+                + ",".join("?" for _ in chunk) + ")",
+                (query_id, *chunk),
             )
+        )
+    missing = [(query_id, identity) for identity in identities if identity not in present]
+    # An unchanged heartbeat must not reserve SQLite's writer for repeated
+    # INSERT OR IGNOREs. Races remain safe: new inserts are still idempotent.
+    if missing and conn.execute("SELECT 1 FROM queries WHERE id=?", (query_id,)).fetchone():
+        conn.executemany(
+            """INSERT OR IGNORE INTO search_filtered_items
+            SELECT ?,? WHERE EXISTS(SELECT 1 FROM queries WHERE id=?)""",
+            [(owner, identity, owner) for owner, identity in missing],
+        )
 
 
 def record_health(
@@ -450,26 +467,29 @@ def listing_cutoff(query_id, item_ids, now):
     return floor
 
 
-def remember_listing_frontier(query_id, item_ids, now):
+def remember_listing_frontier(query_id, item_ids, now, *, conn=None):
     """Only advance after the whole batch's alert transactions succeeded."""
+    if conn is None:
+        with closing(connection()) as opened, opened:
+            return remember_listing_frontier(query_id, item_ids, now, conn=opened)
     maximum = max([0] + [int(i) for i in item_ids if str(i).isdigit()])
-    with closing(connection()) as conn, conn:
-        conn.execute(
-            """INSERT INTO listing_frontiers VALUES (?,?,?) ON CONFLICT(query_id)
-            DO UPDATE SET max_item_id=MAX(max_item_id,excluded.max_item_id),last_check=excluded.last_check""",
-            (query_id, maximum, now),
-        )
-        global_max = conn.execute(
-            "SELECT COALESCE(MAX(max_item_id),0) FROM listing_checkpoints"
-        ).fetchone()[0]
-        conn.execute(
-            """INSERT INTO listing_checkpoints VALUES (?,?) ON CONFLICT(minute)
-            DO UPDATE SET max_item_id=MAX(max_item_id,excluded.max_item_id)""",
-            (int(now / 60), max(maximum, global_max)),
-        )
-        # Retain the last old checkpoint as the boundary, plus the recent window.
-        conn.execute(
-            """DELETE FROM listing_checkpoints WHERE minute <
-            (SELECT MAX(minute) FROM listing_checkpoints WHERE minute<=?)""",
-            (int((now - 1200) / 60),),
-        )
+    conn.execute(
+        """INSERT INTO listing_frontiers VALUES (?,?,?) ON CONFLICT(query_id)
+        DO UPDATE SET max_item_id=MAX(max_item_id,excluded.max_item_id),last_check=excluded.last_check""",
+        (query_id, maximum, now),
+    )
+    global_max = conn.execute(
+        "SELECT COALESCE(MAX(max_item_id),0) FROM listing_checkpoints"
+    ).fetchone()[0]
+    conn.execute(
+        """INSERT INTO listing_checkpoints VALUES (?,?) ON CONFLICT(minute)
+        DO UPDATE SET max_item_id=excluded.max_item_id
+        WHERE listing_checkpoints.max_item_id<excluded.max_item_id""",
+        (int(now / 60), max(maximum, global_max)),
+    )
+    # Retain the last old checkpoint as the boundary, plus the recent window.
+    conn.execute(
+        """DELETE FROM listing_checkpoints WHERE minute <
+        (SELECT MAX(minute) FROM listing_checkpoints WHERE minute<=?)""",
+        (int((now - 1200) / 60),),
+    )

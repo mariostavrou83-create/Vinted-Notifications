@@ -182,6 +182,35 @@ write and commit timings, making future local delays distinguishable from
 provider response time. These changes target purchase latency without imposing
 a deadline that could discard an uncertain payment result.
 
+The next measured purchase still took 18.75 seconds in the purchase operation:
+11.55 seconds of upstream requests and 4.96 seconds in accepted-session saves.
+Those saves spent almost all their time before/during UPDATE, while the three
+slowest commits took only 16–36 ms. Changing FULL durability or dropping token
+rotations would therefore target the wrong part of the measured delay.
+
+Idle Telegram dispatchers now probe eligibility without reserving SQLite's
+writer. A real alert or photo still acquires the writer and repeats the full
+cooldown, priority and lease checks before claiming it. The existing 50 ms idle
+discovery cadence and immediate new-alert delivery are preserved. The read-only
+probe also works while another connection holds the writer; a racing new listing
+still takes priority over a photo at the atomic recheck.
+
+Known filtered IDs also return without another write. The batch's filter,
+frontier and keyword-variant metadata share one short transaction after the
+per-item alert/outbox commits; frontier and variant freshness still advance.
+An unchanged legacy watermark no longer takes a writer. Optional Telegram poll
+and click timestamps wait at most 25 ms for a writer, then skip only that busy
+timestamp. Success/error records and critical payment/session writes retain
+their usual durability and timeout.
+
+Terminal feedback keeps its durable card update before the Telegram edit, but
+awaits local writes in a worker thread while retaining the card lock. Cancellation
+must drain that same write before releasing the lock. Unchanged views no longer
+cause another view UPDATE; actual notes-view repairs still persist. Fixed stage
+codes and separate preparation, Telegram and bookkeeping timings distinguish
+stale display from actual purchase latency. No full-purchase speed is inferred
+from a display timestamp, an offline benchmark or one faster database operation.
+
 Checkout, delivery and payment-request refusals now have a separate durable
 episode and owner notice. These failures previously bypassed the connection
 warning recorder. The failure is accepted only from the exact currently saved,

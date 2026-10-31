@@ -128,6 +128,11 @@ def update_last_timestamp(query_id, timestamp):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        existing = cursor.execute(
+            "SELECT last_item FROM queries WHERE id=?", (query_id,)
+        ).fetchone()
+        if existing is None or existing[0] == timestamp:
+            return
         cursor.execute(
             "UPDATE queries SET last_item=? WHERE id=?", (timestamp, query_id)
         )

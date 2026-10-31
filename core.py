@@ -1,3 +1,4 @@
+from contextlib import closing
 from time import monotonic, time
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
@@ -512,15 +513,19 @@ def _clear_item_queue(items_queue, new_items_queue):
             if recorded is not False:
                 to_notify.append(item)
 
-        search_settings.remember_filtered(query_id, filtered_ids)
-        search_settings.remember_listing_frontier(
-            query_id, [item.id for item in data], time()
-        )
-        if variant:
-            vinted_keywords.finish(
-                variant, [item.id for item in data], watermark, time()
+        # New items/outbox entries above retain their own durable commits.
+        # Finish the small metadata batch together only after every item
+        # succeeded; no marketplace or Telegram I/O occurs in this transaction.
+        with closing(search_settings.connection()) as conn, conn:
+            search_settings.remember_filtered(query_id, filtered_ids, conn=conn)
+            search_settings.remember_listing_frontier(
+                query_id, [item.id for item in data], time(), conn=conn
             )
-        elif watermark is not None and watermark != last_query_timestamp:
+            if variant:
+                vinted_keywords.finish(
+                    variant, [item.id for item in data], watermark, time(), conn=conn
+                )
+        if not variant and watermark is not None and watermark != last_query_timestamp:
             db.update_last_timestamp(query_id, watermark)
         if is_first_run:
             # An empty successful first page is still a completed baseline.

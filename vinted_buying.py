@@ -7,6 +7,7 @@ import os
 import re
 import time
 from contextlib import closing
+from contextvars import copy_context
 from decimal import Decimal, InvalidOperation
 from urllib.parse import parse_qs, urlsplit
 
@@ -2416,10 +2417,70 @@ def merge_live_feedback(row, details, message_id):
     return dict(details, buy_feedback=None)
 
 
+def _save_alert_feedback(message_id, item_id, details):
+    with closing(connection()) as conn, conn:
+        conn.execute(
+            "UPDATE telegram_photo_cards SET details=? WHERE platform='vinted' AND message_id=? AND item_id=?",
+            (json.dumps(details), message_id, item_id),
+        )
+
+
+def _feedback_bookkeeping(message_id, view, changed):
+    import photo_cards
+
+    if changed:
+        photo_cards.after_edit("vinted", message_id, view=view)
+    photo_cards.control_health("vinted", "success")
+
+
+async def _feedback_storage(function, *args):
+    """Drain this same write before cancellation can release the card lock."""
+    operation = asyncio.get_running_loop().run_in_executor(
+        None, copy_context().run, function, *args
+    )
+    cancelled = False
+    while True:
+        try:
+            value = await asyncio.shield(operation)
+            break
+        except asyncio.CancelledError:
+            if operation.cancelled():
+                raise
+            cancelled = True
+    if cancelled:
+        raise asyncio.CancelledError
+    return value
+
+
+def _log_feedback_timing(started, edit_started, edit_finished, *, transient, stage):
+    """UI latency is separate from the timed, durable purchase operation."""
+    try:
+        finished = time.perf_counter()
+        spans = (
+            (edit_started if edit_started is not None else finished) - started,
+            (edit_finished - edit_started)
+            if edit_finished is not None and edit_started is not None else 0,
+            finished - edit_finished if edit_finished is not None else 0,
+            finished - started,
+        )
+        if not all(math.isfinite(value) for value in spans):
+            return
+        logger.info(
+            "Autobuy feedback timing: transient=%s stage=%s prepare_ms=%.3f telegram_ms=%.3f bookkeeping_ms=%.3f elapsed_ms=%.3f",
+            transient, stage,
+            *(min(86400000, max(0, value * 1000)) for value in spans),
+        )
+    except Exception:  # noqa: BLE001,S110 -- optional timing cannot alter feedback
+        pass
+
+
 async def show_alert_feedback(bot, message, outcome):
     """Share durable alert feedback between buttons and notification replies."""
     import photo_cards
+    from vinted_progress import STAGE_LABELS
 
+    started = time.perf_counter()
+    edit_started = edit_finished = None
     saved = photo_cards.load("vinted", message.message_id)
     if not saved:
         return
@@ -2431,14 +2492,18 @@ async def show_alert_feedback(bot, message, outcome):
     transient = (
         feedback["state"] == "in_progress" and feedback.get("_live_progress") is True
     )
+    stage = outcome.get("_progress_stage")
+    stage = stage if isinstance(stage, str) and stage in STAGE_LABELS else (
+        "progress" if transient else "result"
+    )
     details = dict(details, buy_feedback=feedback)
     try:
         if not transient:
-            with closing(connection()) as conn, conn:
-                conn.execute(
-                    "UPDATE telegram_photo_cards SET details=? WHERE platform='vinted' AND message_id=? AND item_id=?",
-                    (json.dumps(details), message.message_id, row["item_id"]),
-                )
+            # The caller keeps this card's UI lock until this awaited commit
+            # completes. Slow local storage must not stall other Telegram work.
+            await _feedback_storage(
+                _save_alert_feedback, message.message_id, row["item_id"], details
+            )
         # Picture and notes controls re-use these details, preserving buy status.
         view = card.get("view", "listing")
         note_page = int(view.split(":")[1]) if view.startswith("notes:") else None
@@ -2458,6 +2523,7 @@ async def show_alert_feedback(bot, message, outcome):
             ),
             **photo_cards.TIMEOUTS,
         )
+        edit_started = time.perf_counter()
         try:
             if photo_cards.has_photo(card, details):
                 await bot.edit_message_caption(
@@ -2472,9 +2538,13 @@ async def show_alert_feedback(bot, message, outcome):
         except BadRequest as exc:
             if "message is not modified" not in str(exc).lower():
                 raise
+        finally:
+            edit_finished = time.perf_counter()
         if not transient:
-            photo_cards.after_edit("vinted", message.message_id, view=view)
-            photo_cards.control_health("vinted", "success")
+            await _feedback_storage(
+                _feedback_bookkeeping, message.message_id, view,
+                view != card.get("view", "listing"),
+            )
         offer = feedback.get("owner_resolution")
         if offer:
             logger.info(
@@ -2485,7 +2555,8 @@ async def show_alert_feedback(bot, message, outcome):
             )
     except TelegramError as exc:
         if not transient:
-            photo_cards.control_health(
+            await _feedback_storage(
+                photo_cards.control_health,
                 "vinted", "error", "Could not display Autobuy status"
             )
         logger.warning(
@@ -2494,11 +2565,16 @@ async def show_alert_feedback(bot, message, outcome):
             type(exc).__name__,
         )
         # Never repeat a payment because its Telegram display failed.
+    finally:
+        _log_feedback_timing(
+            started, edit_started, edit_finished, transient=transient, stage=stage
+        )
     logger.info(
-        "Autobuy status item=%s search=%s state=%s",
+        "Autobuy status item=%s search=%s state=%s stage=%s",
         row["item_id"],
         row.get("query_id"),
         feedback["state"],
+        stage,
     )
 
 

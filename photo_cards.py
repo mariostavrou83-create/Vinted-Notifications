@@ -37,21 +37,48 @@ _locks = WeakValueDictionary()
 def control_health(platform, event, error=""):
     if event not in ("poll", "click", "success", "error"):
         raise ValueError("Unknown control event")
-    with closing(connection()) as conn, conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO telegram_control_health(platform) VALUES (?)",
-            (platform,),
+    advisory = event in ("poll", "click")
+    try:
+        with closing(connection()) as conn:
+            previous_timeout = (
+                conn.execute("PRAGMA busy_timeout").fetchone()[0] if advisory else None
+            )
+            try:
+                if advisory:
+                    # These timestamps never authorize a purchase. Do not hold an
+                    # owner callback or Telegram polling behind another writer.
+                    conn.execute("PRAGMA busy_timeout=25")
+                with conn:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO telegram_control_health(platform) VALUES (?)",
+                        (platform,),
+                    )
+                    if event != "error":
+                        conn.execute(
+                            f"UPDATE telegram_control_health SET last_{event}=? WHERE platform=?",
+                            (time.time(), platform),
+                        )
+                    if event in ("success", "error"):
+                        conn.execute(
+                            "UPDATE telegram_control_health SET error=? WHERE platform=?",
+                            (error, platform),
+                        )
+            finally:
+                # connection_scope can lend a connection to another operation.
+                # Its critical-write timeout must survive this advisory metric.
+                if previous_timeout is not None:
+                    conn.execute(f"PRAGMA busy_timeout={int(previous_timeout)}")
+    except sqlite3.OperationalError as exc:
+        code = getattr(exc, "sqlite_errorcode", None)
+        busy = (
+            code & 255 in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+            if type(code) is int
+            else str(exc) in ("database is locked", "database table is locked")
         )
-        if event != "error":
-            conn.execute(
-                f"UPDATE telegram_control_health SET last_{event}=? WHERE platform=?",
-                (time.time(), platform),
-            )
-        if event in ("success", "error"):
-            conn.execute(
-                "UPDATE telegram_control_health SET error=? WHERE platform=?",
-                (error, platform),
-            )
+        if not advisory or not busy:
+            raise
+        # The transaction context has rolled back; skip only this optional
+        # timestamp. Success/error reports retain their normal durable writes.
 
 
 async def enrichment_failures(platform, message_id, *, failed):

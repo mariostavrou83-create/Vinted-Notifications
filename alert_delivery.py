@@ -62,54 +62,71 @@ def acknowledge_listing(conn, row, message_id, *, now=None):
     return changed.rowcount == 1
 
 
-def claim(now=None, preferred_photo=None, platform="vinted", allow_photos=True):
-    now = time.time() if now is None else now
-    with closing(connection()) as conn, conn:
-        conn.execute("BEGIN IMMEDIATE")
-        cooldown = conn.execute(
-            "SELECT value FROM delivery_runtime WHERE key=?",
+def _claim_candidate(conn, now, preferred_photo, platform, allow_photos):
+    cooldown = conn.execute(
+        "SELECT value FROM delivery_runtime WHERE key=?",
+        (
             (
-                (
-                    "cooldown_until"
-                    if platform == "vinted"
-                    else platform + "_cooldown_until"
-                ),
+                "cooldown_until"
+                if platform == "vinted"
+                else platform + "_cooldown_until"
             ),
-        ).fetchone()
-        if cooldown and cooldown[0] > now:
-            return None
-        # A buying example must never take the next send slot from a new deal.
-        row = conn.execute(
-            """SELECT * FROM alert_outbox WHERE platform=? AND status='pending'
+        ),
+    ).fetchone()
+    if cooldown and cooldown[0] > now:
+        return None, None
+    # A buying example must never take the next send slot from a new deal.
+    row = conn.execute(
+        """SELECT * FROM alert_outbox WHERE platform=? AND status='pending'
             AND next_attempt<=? AND leased_until<=? ORDER BY found_at,item_id LIMIT 1""",
-            (platform, now, now),
-        ).fetchone()
-        kind = "listing"
-        if row is None and allow_photos and preferred_photo:
-            row = conn.execute(
-                """SELECT * FROM alert_outbox WHERE platform=? AND item_id=? AND status='sent'
+        (platform, now, now),
+    ).fetchone()
+    kind = "listing"
+    if row is None and allow_photos and preferred_photo:
+        row = conn.execute(
+            """SELECT * FROM alert_outbox WHERE platform=? AND item_id=? AND status='sent'
                 AND photo_status='pending' AND photo_attempts=0 AND photo_next_attempt<=?
                 AND leased_until<=?""",
-                (platform, preferred_photo, now, now),
-            ).fetchone()
-            if row:
-                kind = "photo"
-        if row is None and allow_photos:
+            (platform, preferred_photo, now, now),
+        ).fetchone()
+        if row:
             kind = "photo"
-            row = conn.execute(
-                """SELECT * FROM alert_outbox WHERE platform=? AND status='sent'
+    if row is None and allow_photos:
+        kind = "photo"
+        row = conn.execute(
+            """SELECT * FROM alert_outbox WHERE platform=? AND status='sent'
                 AND photo_status='pending' AND photo_next_attempt<=? AND leased_until<=?
                 ORDER BY found_at,item_id LIMIT 1""",
-                (platform, now, now),
-            ).fetchone()
-        if row is None:
-            return None
-        token = secrets.token_hex(16)
-        conn.execute(
-            "UPDATE alert_outbox SET lease_token=?,leased_until=? WHERE item_id=?",
-            (token, now + 120, row["item_id"]),
+            (platform, now, now),
+        ).fetchone()
+    return row, kind
+
+
+def claim(now=None, preferred_photo=None, platform="vinted", allow_photos=True):
+    now = time.time() if now is None else now
+    with closing(connection()) as conn:
+        # Idle dispatchers poll every 50ms. Their eligibility reads must not
+        # reserve SQLite's sole writer while an owner purchase saves a session.
+        # A real candidate is always rechecked after acquiring the write lock:
+        # another worker may lease it, add a listing, or start a cooldown first.
+        candidate, _ = _claim_candidate(
+            conn, now, preferred_photo, platform, allow_photos
         )
-        return dict(row, kind=kind, lease_token=token)
+        if candidate is None:
+            return None
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row, kind = _claim_candidate(
+                conn, now, preferred_photo, platform, allow_photos
+            )
+            if row is None:
+                return None
+            token = secrets.token_hex(16)
+            conn.execute(
+                "UPDATE alert_outbox SET lease_token=?,leased_until=? WHERE item_id=?",
+                (token, now + 120, row["item_id"]),
+            )
+            return dict(row, kind=kind, lease_token=token)
 
 
 def finish(
