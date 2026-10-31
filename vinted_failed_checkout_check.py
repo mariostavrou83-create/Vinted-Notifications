@@ -12,6 +12,7 @@ import vinted_buying as buying
 from search_settings import connection
 
 logger = logging.getLogger(__name__)
+CHECK_VERSION = "interstitial-v1"
 
 
 def check(item_id, expected_updated):
@@ -47,12 +48,32 @@ def check(item_id, expected_updated):
         ).hexdigest()
         saved = {"item_id": item_id, "buyer_id": config["user_id"],
                  "attempt_updated": attempt["updated"], "stage": "connection",
-                 "payment_submitted": False, "started": time.time()}
+                 "payment_submitted": False, "started": time.time(), "version": CHECK_VERSION}
         with closing(connection()) as conn, conn:
-            inserted = conn.execute(
-                "INSERT OR IGNORE INTO parameters(key,value) VALUES (?,?)",
-                (key, buyer.encrypt(saved).decode("ascii")),
-            ).rowcount
+            conn.execute("BEGIN IMMEDIATE")
+            previous = conn.execute("SELECT value FROM parameters WHERE key=?", (key,)).fetchone()
+            if previous:
+                prior = buyer.decrypt(previous[0].encode("ascii"))
+                # Permit one verification of this protocol correction only for
+                # a conclusively rejected pre-fix build. Reuse its transaction;
+                # an accepted/uncertain build is never eligible for this path.
+                if not (
+                    prior.get("version") is None and prior.get("http_status") == 403
+                    and prior.get("stage") == "checkout_build" and not prior.get("checkout_id")
+                    and prior.get("payment_submitted") is False
+                    and prior.get("buyer_id") == config["user_id"]
+                    and prior.get("item_id") == item_id
+                    and re.fullmatch(r"[0-9]{1,24}", str(prior.get("transaction_id", "")))
+                ):
+                    raise buyer.BuyerError("This stopped attempt has already been checked. No repeat request was sent.")
+                saved["transaction_id"] = prior["transaction_id"]
+                conn.execute("UPDATE parameters SET value=? WHERE key=?", (buyer.encrypt(saved).decode("ascii"), key))
+                inserted = 1
+            else:
+                inserted = conn.execute(
+                    "INSERT OR IGNORE INTO parameters(key,value) VALUES (?,?)",
+                    (key, buyer.encrypt(saved).decode("ascii")),
+                ).rowcount
         if inserted != 1:
             raise buyer.BuyerError("This stopped attempt has already been checked. No repeat request was sent.")
 
@@ -66,12 +87,14 @@ def check(item_id, expected_updated):
             client = buyer.connected_client()
             saved["stage"] = "listing"
             _, seller = buying.verified_listing(client, row, config, limits)
-            saved["stage"] = "conversation"
-            conversation = client.request("POST", "/api/v2/conversations", {
-                "initiator": "buy", "item_id": item_id, "opposite_user_id": seller,
-            })
-            transaction = (conversation.get("conversation") or {}).get("transaction") or {}
-            transaction_id = transaction.get("id")
+            transaction_id = saved.get("transaction_id")
+            if transaction_id is None:
+                saved["stage"] = "conversation"
+                conversation = client.request("POST", "/api/v2/conversations", {
+                    "initiator": "buy", "item_id": item_id, "opposite_user_id": seller,
+                })
+                transaction = (conversation.get("conversation") or {}).get("transaction") or {}
+                transaction_id = transaction.get("id")
             if not re.fullmatch(r"[0-9]{1,24}", str(transaction_id)):
                 raise buyer.BuyerError("Vinted did not return a purchase transaction.")
             saved.update(transaction_id=str(transaction_id), stage="checkout_build")

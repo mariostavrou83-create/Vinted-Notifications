@@ -14,6 +14,7 @@ slider and interstitial challenges. TLS verification remains enabled.
 
 import ipaddress
 import json
+import math
 import re
 import time
 from collections.abc import Mapping
@@ -230,7 +231,9 @@ def _challenge_state(value):
         query = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=64)
         if query.get("t") == ["bv"]:
             return "ip_blocked"
-        if query.get("t") != ["fe"]:
+        if query.get("t") != ["fe"] and not (
+            parsed.path.rstrip("/") == "/interstitial" and query.get("t") == ["it"]
+        ):
             return "invalid_challenge"
         if "referer" in query:
             if len(query["referer"]) != 1 or not _clean_string(
@@ -435,7 +438,8 @@ def _post(session, path, payload, deadline):
 
 
 def solve_datadome(
-    challenge_url, *, proxy, api_key, user_agent, enabled=False, website_url=WEBSITE
+    challenge_url, *, proxy, api_key, user_agent, enabled=False, website_url=WEBSITE,
+    max_seconds=None,
 ):
     """Create at most one task and return fixed diagnostics plus a private cookie.
 
@@ -445,6 +449,10 @@ def solve_datadome(
     """
     if enabled is not True:
         return SolverResult("disabled")
+    if max_seconds is None:
+        max_seconds = MAX_SECONDS
+    if type(max_seconds) not in (int, float) or not math.isfinite(max_seconds) or not 0 < max_seconds <= MAX_SECONDS:
+        return SolverResult("timeout")
     state = _challenge_state(challenge_url)
     if state != "ready":
         return SolverResult(state)
@@ -459,7 +467,7 @@ def solve_datadome(
         return SolverResult("invalid_proxy")
     if user_agent != CHROME_USER_AGENT:
         return SolverResult("unsupported_browser")
-    deadline = time.monotonic() + MAX_SECONDS
+    deadline = time.monotonic() + max_seconds
     with requests.Session() as session:
         data, error = _post(
             session,

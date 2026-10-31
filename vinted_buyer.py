@@ -1120,6 +1120,9 @@ class Client:
         self.solver_attempted = False
         self.solver_diagnostics = {}
         self.solver_solved = False
+        self._solver_first_kind = None
+        self._solver_followup_attempted = False
+        self._solver_followup_deadline = 0
         if self.network["proxy"]:
             self.session.proxies.update(
                 {"http": self.network["proxy"], "https": self.network["proxy"]}
@@ -1230,9 +1233,9 @@ class Client:
             self.session.headers.pop("X-Anon-Id", None)
 
     @timed_operation("security_check")
-    def solve_challenge(self, response, data=None):
-        """One supported task on this client's fixed account proxy and browser."""
-        if self.solver_attempted or not self.network["enabled"]:
+    def solve_challenge(self, response, data=None, *, allow_interstitial_followup=False):
+        """Solve once, plus one explicit slider-to-device step at checkout build."""
+        if not self.network["enabled"]:
             return False
         from vinted_captcha import extract_challenge, solve_datadome
         from vinted_http import BROWSER_USER_AGENT
@@ -1240,7 +1243,30 @@ class Client:
         challenge = extract_challenge(response, data)
         if not challenge:
             return False
+        from urllib.parse import parse_qs
+
+        parts = urlsplit(challenge)
+        marker = parse_qs(parts.query, max_num_fields=64).get("t")
+        kind = "captcha" if parts.path.rstrip("/") == "/captcha" else "interstitial"
+        options = {}
+        if self.solver_attempted:
+            remaining = min(10, self._solver_followup_deadline - time.monotonic())
+            if not (
+                allow_interstitial_followup and self.solver_solved
+                and self._solver_first_kind == "captcha"
+                and not self._solver_followup_attempted
+                and kind == "interstitial" and marker == ["it"] and remaining > 1
+            ):
+                return False
+            self._solver_followup_attempted = True
+            options["max_seconds"] = remaining
+        else:
+            self._solver_first_kind = kind if marker == ["fe"] else "interstitial"
+            # A second stage may use at most ten seconds, and cannot extend
+            # this challenge chain beyond fifteen seconds from its first task.
+            self._solver_followup_deadline = time.monotonic() + 15
         self.solver_attempted = True
+        self.solver_solved = False
         from vinted_progress import temporary_stage
 
         with temporary_stage("security_check"):
@@ -1250,6 +1276,7 @@ class Client:
                 api_key=self.network["api_key"],
                 user_agent=BROWSER_USER_AGENT,
                 enabled=True,
+                **options,
             )
         public_result = getattr(result, "public", None)
         diagnostics = public_result() if callable(public_result) else None
@@ -1279,14 +1306,14 @@ class Client:
         self.solver_solved = True
         return True
 
-    def retry_security_check(self, response, data, error, *, payment=False):
+    def retry_security_check(self, response, data, error, *, payment=False, allow_interstitial_followup=False):
         """Run after rejected-response cookies have been rolled back."""
         if (
             payment
             or response is None
             or error.reason != "security_challenge"
             or response.status_code not in (200, 401, 403, 301, 302, 303, 307, 308)
-            or self.solver_attempted
+            or (self.solver_attempted and not allow_interstitial_followup)
         ):
             return False
         from vinted_purchase_control import checkpoint
@@ -1298,7 +1325,7 @@ class Client:
             # already dispatched HTTP read returns a challenge.
             with guard():
                 pass
-        if not self.solve_challenge(response, data):
+        if not self.solve_challenge(response, data, allow_interstitial_followup=allow_interstitial_followup):
             return False
         if guard is not None:
             with guard():
@@ -1933,7 +1960,8 @@ class Client:
                 except Exception:  # noqa: BLE001,S110 -- optional payment evidence
                     pass
             if self.retry_security_check(
-                response, data, error, payment=path.endswith("/payment")
+                response, data, error, payment=path.endswith("/payment"),
+                allow_interstitial_followup=(method == "POST" and path == "/api/v2/purchases/checkout/build"),
             ):
                 return self.request(
                     method, path, body, allow_challenge=allow_challenge, params=params

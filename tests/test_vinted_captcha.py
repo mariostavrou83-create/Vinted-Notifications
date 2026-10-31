@@ -107,6 +107,7 @@ class ChallengeTests(unittest.TestCase):
             CHALLENGE + "\nsecret",
             CHALLENGE + "&t=fe",
             CHALLENGE.replace("t=fe", "t=unknown"),
+            CHALLENGE.replace("t=fe", "t=it"),
             CHALLENGE.replace("www.vinted.co.uk", "evil.test"),
             CHALLENGE.replace("t=fe", "missing=true"),
         )
@@ -417,7 +418,7 @@ class SolverTests(unittest.TestCase):
         self.assertEqual(self.session.post.call_count, 2)
 
     def test_interstitial_uses_same_documented_proxy_required_task_type(self):
-        url = CHALLENGE.replace("/captcha/", "/interstitial/")
+        url = CHALLENGE.replace("/captcha/", "/interstitial/").replace("t=fe", "t=it")
         self.session.post.return_value = response(solved())
         self.assertEqual(self.solve(challenge_url=url).state, "solved")
         task = self.session.post.call_args.kwargs["json"]["task"]
@@ -425,6 +426,19 @@ class SolverTests(unittest.TestCase):
         self.assertEqual(
             task["proxy"], "proxy.example.com:8080:proxy-user:private-password"
         )
+        self.assertEqual(task["captchaUrl"], url)
+
+    def test_followup_budget_bounds_polling_without_extra_task(self):
+        self.session.post.side_effect = [response(created())] + [response({"errorId": 0, "status": "processing"})] * 5
+        result = self.solve(max_seconds=4)
+        self.assertEqual(result.state, "timeout")
+        self.assertEqual(self.clock.sleeps, [1, 2])
+        self.assertEqual(self.session.post.call_count, 3)
+
+    def test_invalid_time_budgets_cannot_create_a_task(self):
+        for budget in (True, 0, -1, 61, float("nan"), float("inf"), "10"):
+            self.assertEqual(self.solve(max_seconds=budget).state, "timeout")
+        self.factory.assert_not_called()
 
     def test_solver_cookie_and_metadata_are_never_in_public_diagnostics(self):
         self.session.post.return_value = response(

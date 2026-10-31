@@ -21,6 +21,7 @@ from web_ui_plugin.web_ui import create_app
 PROXY = "http://network-owner:network-password@fixed-proxy.example.test:8080"
 KEY = "private-capsolver-key-0123456789"
 CHALLENGE = {"url": "https://geo.captcha-delivery.com/captcha/?cid=test&t=fe"}
+INTERSTITIAL = {"url": "https://geo.captcha-delivery.com/interstitial/?cid=test&t=it"}
 SAVED = {
     "csrf": "saved-csrf-token-0123456789",
     "cookies": {
@@ -259,6 +260,66 @@ class NetworkTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(request.call_count, 2)
         solver.assert_called_once()
 
+    def test_checkout_build_handles_slider_then_device_check_with_same_body(self):
+        self.configure()
+        client = self.client(SAVED)
+        body = {"purchase_items": [{"id": 456, "type": "transaction"}]}
+        with self.solver() as solver, patch.object(client.session, "request", side_effect=[
+            response(403, CHALLENGE), response(403, INTERSTITIAL), response(data={"checkout": {"id": "test"}}),
+        ]) as request:
+            result = client.request("POST", "/api/v2/purchases/checkout/build", body)
+        self.assertEqual(result, {"checkout": {"id": "test"}})
+        self.assertEqual(solver.call_count, 2)
+        self.assertEqual(request.call_count, 3)
+        self.assertTrue(all(call == request.call_args_list[0] for call in request.call_args_list))
+        self.assertNotIn("max_seconds", solver.call_args_list[0].kwargs)
+        self.assertLessEqual(solver.call_args_list[1].kwargs["max_seconds"], 10)
+        self.assertEqual(solver.call_args_list[1].kwargs["proxy"], PROXY)
+
+    def test_interstitial_first_uses_one_task_and_cannot_repeat_it(self):
+        self.configure()
+        for outcome in (response(data={"checkout": {"id": "test"}}), response(403, INTERSTITIAL)):
+            client = self.client(SAVED)
+            with self.solver() as solver, patch.object(client.session, "request", side_effect=[response(403, INTERSTITIAL), outcome]) as request:
+                if outcome.status_code == 403:
+                    with self.assertRaises(buyer.BuyerError):
+                        client.request("POST", "/api/v2/purchases/checkout/build", {})
+                else:
+                    client.request("POST", "/api/v2/purchases/checkout/build", {})
+            solver.assert_called_once()
+            self.assertEqual(request.call_count, 2)
+
+    def test_device_followup_cannot_loop_or_repeat_slider(self):
+        self.configure()
+        for sequence, count in (([CHALLENGE, INTERSTITIAL, INTERSTITIAL], 2), ([CHALLENGE, CHALLENGE], 1)):
+            client = self.client(SAVED)
+            with self.solver() as solver, patch.object(client.session, "request", side_effect=[response(403, x) for x in sequence]) as request, self.assertRaises(buyer.BuyerError):
+                client.request("POST", "/api/v2/purchases/checkout/build", {})
+            self.assertEqual(solver.call_count, count)
+            self.assertEqual(request.call_count, count + 1)
+
+    def test_followup_is_limited_to_checkout_build_and_never_payment(self):
+        self.configure()
+        for path in ("/api/v2/conversations", "/api/v2/purchases/test/checkout/payment"):
+            client = self.client(SAVED)
+            with self.solver() as solver:
+                client.solve_challenge(response(403, CHALLENGE), CHALLENGE)
+                with patch.object(client.session, "request", return_value=response(403, INTERSTITIAL)) as request, self.assertRaises(buyer.BuyerError):
+                    client.request("POST", path, {})
+            solver.assert_called_once()
+            request.assert_called_once()
+
+    def test_slow_slider_does_not_start_another_paid_task(self):
+        self.configure()
+        client = self.client(SAVED)
+        with self.solver() as solver:
+            client.solve_challenge(response(403, CHALLENGE), CHALLENGE)
+            client._solver_followup_deadline = 0
+            with patch.object(client.session, "request", return_value=response(403, INTERSTITIAL)) as request, self.assertRaises(buyer.BuyerError):
+                client.request("POST", "/api/v2/purchases/checkout/build", {})
+        solver.assert_called_once()
+        request.assert_called_once()
+
     def test_unsolved_challenge_does_not_replay_request(self):
         self.configure()
         client = self.client(SAVED)
@@ -268,6 +329,17 @@ class NetworkTests(DatabaseFixture, unittest.TestCase):
             client.request("GET", "/api/v2/users/current")
         request.assert_called_once()
         solver.assert_called_once()
+
+    def test_failed_device_solver_does_not_replay_build_again(self):
+        self.configure()
+        client = self.client(SAVED)
+        with self.solver() as solver, patch.object(client.session, "request", side_effect=[
+            response(403, CHALLENGE), response(403, INTERSTITIAL),
+        ]) as request, self.assertRaises(buyer.BuyerError):
+            solver.side_effect = [SimpleNamespace(state="solved", cookie="new-security-cookie"), SimpleNamespace(state="timeout")]
+            client.request("POST", "/api/v2/purchases/checkout/build", {})
+        self.assertEqual(solver.call_count, 2)
+        self.assertEqual(request.call_count, 2)
 
     def test_generic_forbidden_and_rate_limits_never_spend_solver_credit(self):
         self.configure()

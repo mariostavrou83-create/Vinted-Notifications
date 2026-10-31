@@ -91,7 +91,8 @@ class ChallengeEvidenceTests(unittest.TestCase):
         evidence = diagnostics.refusal_evidence(response, {}, operation="checkout_build", challenged=True)
         self.assertEqual(evidence["challenge_candidate_source"], "html")
         self.assertEqual(evidence["challenge_candidate_marker"], "it")
-        self.assertFalse(evidence["challenge_url_extractable"])
+        self.assertTrue(evidence["challenge_url_extractable"])
+        self.assertEqual(evidence["challenge_url_marker"], "it")
         self.assertNotIn("private", repr(evidence))
 
     def test_exact_machine_code_labels_are_evidence_without_inventing_a_cause(self):

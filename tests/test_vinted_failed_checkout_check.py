@@ -122,6 +122,42 @@ class FailedCheckoutCheckTests(unittest.TestCase):
                 self.run_check()
         self.connection.assert_not_called()
 
+    def test_pre_fix_explicit_refusal_can_be_checked_once_reusing_transaction(self):
+        self.client.request.side_effect = [
+            {"conversation": {"transaction": {"id": 456}}},
+            buyer.BuyerError("Blocked", status=403, reason="security_challenge"),
+        ]
+        with self.assertRaises(buyer.BuyerError):
+            self.run_check()
+        with closing(search_settings.connection()) as conn, conn:
+            key, value = conn.execute("SELECT key,value FROM parameters WHERE key LIKE 'buyer_failed_checkout_check:%'").fetchone()
+            prior = buyer.decrypt(value.encode())
+            prior.pop("version")
+            conn.execute("UPDATE parameters SET value=? WHERE key=?", (buyer.encrypt(prior).decode(), key))
+        self.client.request.reset_mock()
+        self.client.request.side_effect = None
+        self.client.request.return_value = {"checkout": {"id": "test"}}
+        self.run_check()
+        self.client.request.assert_called_once_with("POST", "/api/v2/purchases/checkout/build", {
+            "purchase_items": [{"id": "456", "type": "transaction"}],
+        })
+        with self.assertRaisesRegex(buyer.BuyerError, "already been checked"):
+            self.run_check()
+
+    def test_pre_fix_accepted_checkout_or_uncertain_request_cannot_be_rechecked(self):
+        self.run_check()
+        with closing(search_settings.connection()) as conn, conn:
+            key, value = conn.execute("SELECT key,value FROM parameters WHERE key LIKE 'buyer_failed_checkout_check:%'").fetchone()
+            prior = buyer.decrypt(value.encode())
+            prior.pop("version")
+            for updates in ({"http_status": 403}, {"stage": "checkout_build", "checkout_id": None, "http_status": None}):
+                prior.update(updates)
+                conn.execute("UPDATE parameters SET value=? WHERE key=?", (buyer.encrypt(prior).decode(), key))
+                conn.commit()
+                with self.assertRaisesRegex(buyer.BuyerError, "already been checked"):
+                    self.run_check()
+        self.assertEqual(self.client.request.call_count, 2)
+
 
 class FailedCheckoutOwnerTests(fixtures.DatabaseFixture, unittest.TestCase):
     owner = fixtures.BuyerDashboardTests.owner

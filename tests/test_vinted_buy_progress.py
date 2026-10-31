@@ -390,7 +390,7 @@ class SecurityProgressTests(unittest.TestCase):
             return SimpleNamespace(state="unavailable")
 
         with progress.bind_progress(events.append), patch(
-            "vinted_captcha.extract_challenge", return_value={"fictional": True}
+            "vinted_captcha.extract_challenge", return_value="https://geo.captcha-delivery.com/captcha/?cid=fictional&t=fe"
         ), patch("vinted_captcha.solve_datadome", side_effect=solver) as solved:
             progress.report("opening_checkout")
             self.assertFalse(client.solve_challenge(Mock()))

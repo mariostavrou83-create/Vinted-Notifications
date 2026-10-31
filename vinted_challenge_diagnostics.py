@@ -131,7 +131,7 @@ def refusal_evidence(response, data, *, operation, challenged):
         parts = urlsplit(url)
         kind = "captcha" if parts.path.rstrip("/") == "/captcha" else "interstitial"
         query = parse_qs(parts.query, keep_blank_values=True, max_num_fields=64)
-        marker = "bv" if query.get("t") == ["bv"] else "fe"
+        marker = query["t"][0]
         source = (
             "redirect" if status in (301, 302, 303, 307, 308)
             else "json" if isinstance(data, dict) and any(

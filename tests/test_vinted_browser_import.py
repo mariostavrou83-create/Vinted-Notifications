@@ -344,7 +344,7 @@ class BrowserImportTests(buying_tests.SessionRotationFixture, unittest.TestCase)
                 raise ValueError("Private reconnect cancelled.")
             yield
 
-        def solver_result(*args):
+        def solver_result(*args, **kwargs):
             cancelled.append(True)
             return True
 

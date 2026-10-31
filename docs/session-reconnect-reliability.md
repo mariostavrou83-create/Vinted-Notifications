@@ -363,12 +363,31 @@ uses the original listing/conversation/build path and stops immediately after
 build. It cannot submit payment, reset a purchase, change buying permissions or
 run on a schedule. A durable marker prevents repeat checks after double clicks,
 errors or restarts; transaction and checkout references remain encrypted.
-An earlier uncertain payment still blocks this diagnostic. It may use the
-existing configured solver once, under the unchanged challenge retry policy.
+An earlier uncertain payment still blocks this diagnostic. It uses the existing
+configured solver under the bounded challenge policy below.
 
 Refusal logs additionally classify candidate URL host, path, marker and referer
-using fixed labels. Unsupported formats remain unsupported; no private URLs or
-challenge query values are logged, and solver/payment behavior is unchanged.
+using fixed labels; no private URLs or challenge query values are logged.
+
+The no-payment check at 12:53 UTC identified the missing format: an explicit
+`geo.captcha-delivery.com/interstitial/` URL with `t=it` and a WWW referer. The
+old validator rejected this marker locally. It now accepts `it` only on the
+existing allowlisted interstitial path and passes the original URL unchanged
+to the configured solver. Host, protocol, referer and hard-block checks remain.
+CapSolver documents interstitial support under the same task type:
+https://docs.capsolver.com/en/guide/captcha/datadome/ .
+
+A checkout build may handle one explicit `it` device check after a successfully
+solved slider. This is capped at two tasks per client, never repeats a stage,
+and is allowed only at the pre-payment build endpoint. The second task has at
+most ten seconds and shares a fifteen-second window from the first task's
+start. Ordinary refusals, failed solutions and payment requests cannot trigger
+this continuation. This limit is not a promise of total purchase latency.
+
+One diagnostic run made before this protocol correction can be rechecked only
+when its saved build definitively returned HTTP 403 without a checkout or
+payment. It reuses the encrypted transaction reference and consumes the new
+version marker before network work; accepted or ambiguous builds stay blocked.
 
 ## eBay validation
 
