@@ -246,6 +246,23 @@ cookie value or response body, and cannot change classification, buy, solve a
 challenge or replay payment. A healthy identity check remains separate evidence
 from whether Vinted will accept a particular payment request.
 
+A later checkout refusal exposed two applicable DataDome cookie records in the
+prepared request. The transport passes both scoped records to its HTTP client;
+this evidence does not capture the wire header or prove why the request failed.
+The duplicate state is reproducible: a legacy or solved `www` cookie can coexist
+with a later accepted parent-domain Set-Cookie. Auth-token normalization already
+handled overlapping credentials, but security cookies previously accumulated.
+
+An accepted HTTPS first-party response may now normalize that state only when
+it supplies exactly one valid, secure, unexpired root-path DataDome cookie. The
+received cookie retains its actual metadata; only older root-path records whose
+domain coverage it contains are removed. A fresh parent-domain cookie can replace
+a legacy `www` record, while a host-only `www` cookie cannot delete parent/API
+coverage. Missing, malformed or ambiguous authority makes no guessed selection.
+Rejected-response rollback, authentication handling, the saved cookie format,
+payment decisions and no-replay protection remain unchanged. This repairs a
+cookie-state defect without claiming that it eliminates provider challenges.
+
 Checkout, delivery and payment-request refusals now have a separate durable
 episode and owner notice. These failures previously bypassed the connection
 warning recorder. The failure is accepted only from the exact currently saved,
