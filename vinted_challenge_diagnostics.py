@@ -2,6 +2,7 @@
 
 import logging
 from collections.abc import Mapping
+from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlsplit
 
 import requests
@@ -51,6 +52,56 @@ def _retry_after_evidence(headers):
     if seconds > 86400:
         return True, "outside_bound", None
     return True, "seconds", seconds
+
+
+def _candidate_evidence(response, data):
+    """Describe rejected URL formats without widening solver validation."""
+    from vinted_captcha import CHALLENGE_HOSTS, MAX_RESPONSE
+
+    result = dict.fromkeys(("source", "host", "path", "marker", "referer"), "none")
+    candidates = []
+    headers = getattr(response, "headers", {})
+    if getattr(response, "status_code", None) in (301, 302, 303, 307, 308):
+        candidates.append((headers.get("Location"), "redirect"))
+    if isinstance(data, dict):
+        candidates.extend((data.get(key), "json") for key in ("url", "captcha_url", "challenge_url"))
+    body = getattr(response, "text", "")
+    if isinstance(body, str) and len(body) <= MAX_RESPONSE and "<" in body:
+        class Links(HTMLParser):
+            def handle_starttag(self, tag, attrs):
+                if tag in ("iframe", "a", "form", "script") and len(candidates) < 20:
+                    attrs = dict(attrs)
+                    candidate = attrs.get("src") or attrs.get("href") or attrs.get("action")
+                    try:
+                        if isinstance(candidate, str) and urlsplit(candidate).hostname in CHALLENGE_HOSTS:
+                            candidates.append((candidate, "html"))
+                    except ValueError:
+                        pass
+        Links().feed(body)
+    for value, source in candidates:
+        if not isinstance(value, str) or not 0 < len(value) <= 8192:
+            continue
+        result["source"] = source
+        try:
+            parts = urlsplit(value)
+            result["host"] = {"geo.captcha-delivery.com": "geo", "ct.captcha-delivery.com": "ct"}.get(parts.hostname, "other")
+            result["path"] = {"/captcha": "captcha", "/interstitial": "interstitial"}.get(parts.path.rstrip("/"), "other")
+            query = parse_qs(parts.query, keep_blank_values=True, max_num_fields=64)
+            marker = query.get("t")
+            result["marker"] = (
+                "missing" if marker is None else "multiple" if len(marker) != 1
+                else marker[0] if marker[0] in ("fe", "bv", "it") else "other"
+            )
+            referer = query.get("referer")
+            result["referer"] = "missing" if referer is None else "other"
+            if referer and len(referer) == 1:
+                result["referer"] = {
+                    "www.vinted.co.uk": "www", "vinted.co.uk": "apex", "api.vinted.co.uk": "api",
+                }.get(urlsplit(referer[0]).hostname, "other")
+        except (ValueError, UnicodeError):
+            pass
+        break
+    return {"challenge_candidate_" + key: value for key, value in result.items()}
 
 
 def refusal_evidence(response, data, *, operation, challenged):
@@ -125,6 +176,7 @@ def refusal_evidence(response, data, *, operation, challenged):
         "retry_after_present": retry_after_present,
         "retry_after_kind": retry_after_kind,
         "retry_after_seconds": retry_after_seconds,
+        **_candidate_evidence(response, data),
     }
 
 
@@ -142,7 +194,10 @@ def log_refusal_evidence(response, data, *, operation, challenged):
             "prepared_cookie_evidence=%s prepared_access_cookies=%s "
             "prepared_datadome_cookies=%s prepared_csrf_present=%s "
             "message_code_type=%s message_code=%s retry_after_present=%s "
-            "retry_after_kind=%s retry_after_seconds=%s",
+            "retry_after_kind=%s retry_after_seconds=%s "
+            "challenge_candidate_source=%s challenge_candidate_host=%s "
+            "challenge_candidate_path=%s challenge_candidate_marker=%s "
+            "challenge_candidate_referer=%s",
             *(evidence[key] for key in (
                 "operation", "http", "challenged", "x_datadome", "x_dd_b",
                 "x_set_cookie", "datadome_set_cookie", "challenge_url_extractable",
@@ -151,6 +206,8 @@ def log_refusal_evidence(response, data, *, operation, challenged):
                 "prepared_datadome_cookies", "prepared_csrf_present",
                 "message_code_type", "message_code", "retry_after_present",
                 "retry_after_kind", "retry_after_seconds",
+                "challenge_candidate_source", "challenge_candidate_host",
+                "challenge_candidate_path", "challenge_candidate_marker", "challenge_candidate_referer",
             )),
         )
     except Exception:  # noqa: BLE001,S110 -- evidence cannot affect payments

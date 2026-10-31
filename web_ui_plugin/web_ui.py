@@ -764,6 +764,14 @@ def create_app(test_config=None):
                     flash(vinted_buyer.check_signin(), "success")
                 elif action == "buyer_recheck":
                     flash(vinted_buyer.check_saved_connection(), "success")
+                elif action == "buyer_failed_checkout_check":
+                    import vinted_failed_checkout_check
+
+                    flash(vinted_failed_checkout_check.check(
+                        request.form.get("buyer_item_id", ""),
+                        request.form.get("buyer_attempt_updated", ""),
+                    ), "success")
+                    return redirect(url_for("connections"), code=303)
                 elif action == "buyer_telegram_review_latest":
                     import vinted_telegram_review
 

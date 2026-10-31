@@ -349,6 +349,27 @@ An authenticated, CSRF-protected dashboard button sends one clearly labelled
 connection-warning delivery test with a five-minute cooldown. The test makes no
 Vinted request and does not consume, fabricate or clear a real failure episode.
 
+## October 31 failed-checkout diagnostic
+
+The 12:35 UTC attempt still failed after an original-cookie reconnect: one
+applicable access cookie, then a solved security cookie, then another HTTP 403
+challenge. The solver's returned solution was not accepted on that retry. This
+does not establish an expired login or a cause for the separate numeric 106
+responses earlier that day.
+
+Purchase history now offers one explicit checkout-build check for a stopped
+attempt from the last day that has no existing checkout or payment. The check
+uses the original listing/conversation/build path and stops immediately after
+build. It cannot submit payment, reset a purchase, change buying permissions or
+run on a schedule. A durable marker prevents repeat checks after double clicks,
+errors or restarts; transaction and checkout references remain encrypted.
+An earlier uncertain payment still blocks this diagnostic. It may use the
+existing configured solver once, under the unchanged challenge retry policy.
+
+Refusal logs additionally classify candidate URL host, path, marker and referer
+using fixed labels. Unsupported formats remain unsupported; no private URLs or
+challenge query values are logged, and solver/payment behavior is unchanged.
+
 ## eBay validation
 
 The combined regression uses discovery, retained keyword candidates, exact-item

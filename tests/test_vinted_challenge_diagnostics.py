@@ -72,6 +72,28 @@ class ChallengeEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence["message_code_type"], "missing")
         self.assertEqual(evidence["message_code"], "none")
 
+    def test_rejected_candidate_format_is_observed_without_solver_acceptance(self):
+        for marker, label in (("it", "it"), ("private", "other"), (None, "missing")):
+            url = "https://ct.captcha-delivery.com/interstitial/?cid=private&referer=https%3A%2F%2Fapi.vinted.co.uk%2Fprivate"
+            if marker is not None:
+                url += "&t=" + marker
+            evidence = self.evidence({"url": url})
+            self.assertFalse(evidence["challenge_url_extractable"])
+            self.assertEqual(evidence["challenge_candidate_host"], "ct")
+            self.assertEqual(evidence["challenge_candidate_path"], "interstitial")
+            self.assertEqual(evidence["challenge_candidate_marker"], label)
+            self.assertEqual(evidence["challenge_candidate_referer"], "api")
+            self.assertNotIn("private", repr(evidence))
+
+    def test_html_candidate_observation_does_not_expose_challenge_values(self):
+        response = fixture.response(403, {})
+        response._content = b'<iframe src="https://ct.captcha-delivery.com/interstitial/?t=it&amp;cid=private"></iframe>'
+        evidence = diagnostics.refusal_evidence(response, {}, operation="checkout_build", challenged=True)
+        self.assertEqual(evidence["challenge_candidate_source"], "html")
+        self.assertEqual(evidence["challenge_candidate_marker"], "it")
+        self.assertFalse(evidence["challenge_url_extractable"])
+        self.assertNotIn("private", repr(evidence))
+
     def test_exact_machine_code_labels_are_evidence_without_inventing_a_cause(self):
         for code in ("access_denied", "permission_denied", "request_forbidden",
                      "request_rate_limit_exceeded", "action_not_allowed", "account_restricted"):
