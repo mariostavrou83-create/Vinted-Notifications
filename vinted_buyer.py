@@ -1534,6 +1534,7 @@ class Client:
                     "domain_root" if fresh.domain_specified else "host_only", before,
                     sum(cookie.name == "datadome" for cookie in normalized), shadows,
                 )
+            return copy(fresh)
         except Exception:  # noqa: BLE001,S110 -- never discard an accepted payment
             return
 

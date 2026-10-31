@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import logging
 import math
+import os
 import sqlite3
 import time
 from contextlib import closing
@@ -136,6 +137,15 @@ async def run(notifier=None):
             "Vinted offers warnings enabled; stored-state checks every 60s"
         )
     while True:
+        if os.environ.get("MSJ_VINTED_SECURITY_COOKIE_REFRESH"):
+            try:
+                from vinted_security_cookie_repair import run_once
+
+                await asyncio.to_thread(run_once)
+            except Exception as exc:  # noqa: BLE001 -- preserve normal maintenance
+                logger.warning(
+                    "Vinted security cookie repair unavailable: %s", type(exc).__name__
+                )
         try:
             await asyncio.to_thread(maintain_connection)
             await asyncio.to_thread(check_account_health)

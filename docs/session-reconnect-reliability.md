@@ -263,6 +263,20 @@ Rejected-response rollback, authentication handling, the saved cookie format,
 payment decisions and no-replay protection remain unchanged. This repairs a
 cookie-state defect without claiming that it eliminates provider challenges.
 
+For an existing duplicate root state, a private versioned refresh request may
+run once from the existing maintenance worker. Its admission marker survives
+restarts and its expiry is bounded. It permits only three fixed-origin GETs
+(account, homepage, account), with short timeouts and purchase-priority checks;
+it cannot renew, solve challenges, create a checkout or submit payment. While
+testing a clean security context, accepted auth/CSRF rotations remain durable
+but every intermediate save overlays the original security cookies. A final
+same-buyer check and fresh server scope covering all removed root scopes are
+required before the new security context is saved. Missing authority or any
+failure restores only security state, preserving accepted auth rotations and
+the current CAS reference. A newer reconnect wins, and completed markers cannot
+be overwritten by a later worker that never obtained admission. Default-off
+refresh failures cannot skip ordinary maintenance or clear checkout warnings.
+
 Checkout, delivery and payment-request refusals now have a separate durable
 episode and owner notice. These failures previously bypassed the connection
 warning recorder. The failure is accepted only from the exact currently saved,
