@@ -3,6 +3,7 @@
 import unittest
 from unittest.mock import patch
 
+import requests
 from requests.structures import CaseInsensitiveDict
 
 import test_vinted_network as fixture
@@ -68,6 +69,37 @@ class ChallengeEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence["operation"], "buyer_request")
         self.assertEqual(evidence["challenge_url_kind"], "none")
         self.assertFalse(evidence["challenge_url_extractable"])
+
+    def test_prepared_cookie_counts_and_csrf_presence_never_return_values(self):
+        response = fixture.response(403, {"url": URL})
+        response.request = requests.Request("POST", buyer.BASE + PAYMENT, headers={
+            "Cookie": "access_token_web=private-auth; datadome=private-old; datadome=private-new; refresh_token_web=private-refresh",
+            "X-CSRF-Token": "private-security-token",
+        }).prepare()
+        evidence = diagnostics.refusal_evidence(
+            response, {"url": URL}, operation="payment_submit", challenged=True
+        )
+        self.assertTrue(evidence["prepared_cookie_evidence"])
+        self.assertEqual(evidence["prepared_access_cookies"], 1)
+        self.assertEqual(evidence["prepared_datadome_cookies"], 2)
+        self.assertTrue(evidence["prepared_csrf_present"])
+        self.assertNotIn("private", repr(evidence))
+
+    def test_absent_prepared_metadata_differs_from_proven_cookie_absence(self):
+        response = fixture.response(403, {})
+        evidence = diagnostics.refusal_evidence(
+            response, {}, operation="payment_submit", challenged=False
+        )
+        self.assertFalse(evidence["prepared_cookie_evidence"])
+        self.assertIsNone(evidence["prepared_access_cookies"])
+        response.request = requests.Request("POST", buyer.BASE + PAYMENT).prepare()
+        evidence = diagnostics.refusal_evidence(
+            response, {}, operation="payment_submit", challenged=False
+        )
+        self.assertTrue(evidence["prepared_cookie_evidence"])
+        self.assertEqual(evidence["prepared_access_cookies"], 0)
+        self.assertEqual(evidence["prepared_datadome_cookies"], 0)
+        self.assertFalse(evidence["prepared_csrf_present"])
 
 
 class PaymentRefusalEvidenceTests(unittest.TestCase):

@@ -1,6 +1,7 @@
 """Fixed refusal evidence; never solve, retry or expose a challenge URL."""
 
 import logging
+from collections.abc import Mapping
 from urllib.parse import parse_qs, urlsplit
 
 import requests
@@ -11,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 def refusal_evidence(response, data, *, operation, challenged):
-    """Describe only documented header presence and validated URL structure.
+    """Describe header presence, validated URL structure and credential counts.
 
     Header presence is evidence, not an authentication or payment-readiness
     decision. Query markers describe the received format; they do not establish
@@ -46,6 +47,20 @@ def refusal_evidence(response, data, *, operation, challenged):
     security_cookie = isinstance(cookies, requests.cookies.RequestsCookieJar) and any(
         cookie.name == "datadome" for cookie in cookies
     )
+    prepared_headers = getattr(getattr(response, "request", None), "headers", None)
+    cookie_evidence, access_count, security_count, csrf_present = False, None, None, None
+    if isinstance(prepared_headers, Mapping):
+        csrf_present = bool(prepared_headers.get(
+            "X-CSRF-Token", prepared_headers.get("x-csrf-token")
+        ))
+        cookie = prepared_headers.get("Cookie", prepared_headers.get("cookie", ""))
+        if isinstance(cookie, str) and len(cookie) <= 65536:
+            parts = cookie.split(";", 1000)
+            if len(parts) <= 1000:
+                names = [part.split("=", 1)[0].strip() for part in parts]
+                cookie_evidence = True
+                access_count = names.count("access_token_web")
+                security_count = names.count("datadome")
     return {
         "operation": operation, "http": status,
         "challenged": challenged is True,
@@ -57,6 +72,10 @@ def refusal_evidence(response, data, *, operation, challenged):
         "challenge_url_kind": kind,
         "challenge_url_marker": marker,
         "challenge_url_source": source,
+        "prepared_cookie_evidence": cookie_evidence,
+        "prepared_access_cookies": access_count,
+        "prepared_datadome_cookies": security_count,
+        "prepared_csrf_present": csrf_present,
     }
 
 
@@ -70,11 +89,15 @@ def log_refusal_evidence(response, data, *, operation, challenged):
             "Vinted refusal evidence: operation=%s http=%s challenged=%s "
             "x_datadome=%s x_dd_b=%s x_set_cookie=%s datadome_set_cookie=%s "
             "challenge_url_extractable=%s challenge_url_kind=%s "
-            "challenge_url_marker=%s challenge_url_source=%s",
+            "challenge_url_marker=%s challenge_url_source=%s "
+            "prepared_cookie_evidence=%s prepared_access_cookies=%s "
+            "prepared_datadome_cookies=%s prepared_csrf_present=%s",
             *(evidence[key] for key in (
                 "operation", "http", "challenged", "x_datadome", "x_dd_b",
                 "x_set_cookie", "datadome_set_cookie", "challenge_url_extractable",
                 "challenge_url_kind", "challenge_url_marker", "challenge_url_source",
+                "prepared_cookie_evidence", "prepared_access_cookies",
+                "prepared_datadome_cookies", "prepared_csrf_present",
             )),
         )
     except Exception:  # noqa: BLE001,S110 -- evidence cannot affect payments

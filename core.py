@@ -303,6 +303,10 @@ def process_items(queue):
 
 
 def clear_item_queue(items_queue, new_items_queue):
+    import frontier_heartbeats
+
+    # An idle extractor still commits its bounded freshness batch on time.
+    frontier_heartbeats.flush(due=True)
     # Idle checks need no database connection. A successful response shares one
     # short-lived connection across its reads and independently committed writes.
     if items_queue.empty():
@@ -319,10 +323,20 @@ def _clear_item_queue(items_queue, new_items_queue):
     if not items_queue.empty():
         batch = items_queue.get()
         data, query_id = batch[:2]
+        import frontier_heartbeats
+
+        variant_id = batch[3] if len(batch) > 3 else None
+        if data:
+            # Preserve the global twenty-minute checkpoint before any new
+            # listing is compared with it. New alerts never wait for a timer.
+            frontier_heartbeats.flush()
+        else:
+            # This exact search's previous observation must be durable before
+            # its next outage/freshness eligibility check.
+            frontier_heartbeats.flush(query_id=query_id, variant_id=variant_id)
         search = search_settings.get_search(query_id)
         import vinted_keywords
 
-        variant_id = batch[3] if len(batch) > 3 else None
         variant = (
             vinted_keywords.current(variant_id, query_id, batch[2])
             if variant_id
@@ -363,6 +377,10 @@ def _clear_item_queue(items_queue, new_items_queue):
                 f"First run for query {query_id}: baselining {len(data)} item(s) "
                 f"without notifying, so the existing catalogue is not replayed."
             )
+
+        if not data and not is_first_run and last_query_timestamp is not None:
+            if frontier_heartbeats.defer(search, variant, time()):
+                return True
 
         to_notify = []
         filtered_ids = []

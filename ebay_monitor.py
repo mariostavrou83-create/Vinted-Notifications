@@ -506,6 +506,24 @@ def record_snapshot(
                 warning = ""  # The newest page overlaps the preceding successful check.
         created_count = 0
         flow = Counter(returned=len(items))
+        from ebay_privacy import owner_cache, track_item
+
+        # The writer reservation makes these bounded reads stable for this
+        # batch, including seller-deletion and duplicate-item races. Repeated
+        # catalogue rows must not delete/reinsert unchanged ownership indexes.
+        owners = owner_cache(conn, items)
+        identities = tuple(dict.fromkeys(
+            str(raw.get("itemId") or raw.get("legacyItemId") or "")
+            for raw in items if isinstance(raw, dict)
+        ))
+        seen = set()
+        for start in range(0, len(identities), 500):
+            chunk = identities[start:start + 500]
+            marks = ",".join("?" for _ in chunk)
+            seen.update(row[0] for row in conn.execute(
+                f"SELECT item_id FROM ebay_seen WHERE query_id=? AND item_id IN ({marks})",
+                (search["id"], *chunk),
+            ))
         for raw in items:
             if not isinstance(raw, dict):
                 flow["invalid_result"] += 1
@@ -517,10 +535,11 @@ def record_snapshot(
             if not raw_id:
                 flow["invalid_identity"] += 1
                 continue
-            from ebay_privacy import track_item
-
-            if not track_item(conn, raw, raw_id):
+            if not track_item(conn, raw, raw_id, cache=owners):
                 flow["privacy_excluded"] += 1
+                continue
+            if raw_id in seen:
+                flow["already_seen"] += 1
                 continue
             inserted = conn.execute(
                 "INSERT OR IGNORE INTO ebay_seen VALUES (?,?,?)",
@@ -529,6 +548,7 @@ def record_snapshot(
             if not inserted:
                 flow["already_seen"] += 1
                 continue
+            seen.add(raw_id)
             if baseline is None:
                 flow["initial_baseline"] += 1
                 continue

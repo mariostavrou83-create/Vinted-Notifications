@@ -66,28 +66,80 @@ def identifier_hash(value, salt):
     ).hexdigest()
 
 
-def track_item(conn, raw, raw_id):
-    """Called in the snapshot transaction; refuse a previously deleted seller."""
-    salt = conn.execute(
-        "SELECT value FROM parameters WHERE key='ebay_deletion_verification'"
-    ).fetchone()[0]
+def _owner_values(raw, raw_id, salt):
     seller = raw.get("seller") or {}
     value = seller.get("username") if isinstance(seller, dict) else None
     digest = identifier_hash(value, salt) if isinstance(value, str) and value else ""
-    if (
-        digest
-        and conn.execute(
-            "SELECT 1 FROM ebay_deleted_sellers WHERE digest=?", (digest,)
-        ).fetchone()
-    ):
-        return False
     legacy = str(raw.get("legacyItemId") or "")
     if not legacy and raw_id.startswith("v1|"):
         legacy = raw_id.split("|")[1]
+    return raw_id, "ebay:" + legacy, digest
+
+
+def owner_cache(conn, items):
+    """Read once inside the snapshot's writer reservation, never across batches."""
+    salt = conn.execute(
+        "SELECT value FROM parameters WHERE key='ebay_deletion_verification'"
+    ).fetchone()[0]
+    values = {}
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        raw_id = str(raw.get("itemId") or raw.get("legacyItemId") or "")
+        if raw_id:
+            values[id(raw)] = _owner_values(raw, raw_id, salt)
+    identities = tuple(dict.fromkeys(value[0] for value in values.values()))
+    digests = tuple({value[2] for value in values.values() if value[2]})
+    owners, deleted = {}, set()
+    for start in range(0, len(identities), 500):
+        chunk = identities[start:start + 500]
+        marks = ",".join("?" for _ in chunk)
+        owners.update(
+            (row[0], (row[1], row[2])) for row in conn.execute(
+                f"SELECT raw_id,item_id,seller_hash FROM ebay_item_owners WHERE raw_id IN ({marks})",
+                chunk,
+            )
+        )
+    for start in range(0, len(digests), 500):
+        chunk = digests[start:start + 500]
+        marks = ",".join("?" for _ in chunk)
+        deleted.update(row[0] for row in conn.execute(
+            f"SELECT digest FROM ebay_deleted_sellers WHERE digest IN ({marks})", chunk
+        ))
+    return {"salt": salt, "values": values, "owners": owners, "deleted": deleted}
+
+
+def track_item(conn, raw, raw_id, *, cache=None):
+    """Called in the snapshot transaction; refuse a previously deleted seller."""
+    cached = cache["values"].get(id(raw)) if cache is not None else None
+    if cached is not None and cached[0] == raw_id:
+        _, item_id, digest = cached
+        deleted = digest in cache["deleted"]
+        old = cache["owners"].get(raw_id)
+    else:
+        salt = conn.execute(
+            "SELECT value FROM parameters WHERE key='ebay_deletion_verification'"
+        ).fetchone()[0]
+        _, item_id, digest = _owner_values(raw, raw_id, salt)
+        deleted = digest and conn.execute(
+            "SELECT 1 FROM ebay_deleted_sellers WHERE digest=?", (digest,)
+        ).fetchone()
+        old_row = conn.execute(
+            "SELECT item_id,seller_hash FROM ebay_item_owners WHERE raw_id=?", (raw_id,)
+        ).fetchone()
+        old = tuple(old_row) if old_row is not None else None
+    if deleted:
+        return False
+    if old == (item_id, digest):
+        return True
     conn.execute(
-        "INSERT OR REPLACE INTO ebay_item_owners VALUES (?,?,?)",
-        (raw_id, "ebay:" + legacy, digest),
+        """INSERT INTO ebay_item_owners VALUES (?,?,?) ON CONFLICT(raw_id)
+        DO UPDATE SET item_id=excluded.item_id,seller_hash=excluded.seller_hash
+        WHERE item_id<>excluded.item_id OR seller_hash<>excluded.seller_hash""",
+        (raw_id, item_id, digest),
     )
+    if cache is not None:
+        cache["owners"][raw_id] = (item_id, digest)
     return True
 
 

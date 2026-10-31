@@ -224,6 +224,22 @@ paths and raw errors are never logged. Disabled and expired connections retain
 native execution paths; FULL, write timeouts and session CAS are unchanged.
 Direct Supabase-auth connections and script transactions are outside this audit.
 
+The audit found 1,016–1,067 unchanged frontier transactions per minute spending
+38–42 seconds in commits. Empty, already-primed heartbeat pages now share a
+bounded freshness batch of at most twenty entries and at most 0.5 seconds.
+Nonempty pages flush pending freshness before eligibility checks, and advancing
+frontiers, baselines, new items and outbox records retain immediate commits.
+Captured search/frontier/variant revisions are revalidated under the writer
+before timestamps advance, preventing stale observations from updating edited
+or replaced searches. Multiple keywords for one parent are validated together.
+
+Repeated eBay snapshots also prefetched their stable owner/deletion/seen state
+inside the existing atomic writer reservation. Identical rows skip owner and
+seen mutations; changed sellers and seller-deletion exclusions remain checked
+before deduplication. This removes 200 redundant item writes on an unchanged
+100-item page. The early long eBay transaction evidence and the dominant ongoing
+frontier commit load are separate findings; neither establishes payment success.
+
 Payment refusals additionally record documented security-header presence and
 strictly validated challenge URL categories/markers. They expose no URL,
 cookie value or response body, and cannot change classification, buy, solve a

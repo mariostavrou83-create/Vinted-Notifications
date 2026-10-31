@@ -40,6 +40,12 @@ class AlertTests(unittest.TestCase):
         audit_patch = patch("search_match_audit.eligible_seen", return_value=set())
         audit_patch.start()
         self.addCleanup(audit_patch.stop)
+        # Freshness batching has separate real-SQLite coverage. This extracted
+        # alert-loss fixture must keep using its in-memory database double.
+        for target in ("frontier_heartbeats.flush", "frontier_heartbeats.defer"):
+            heartbeat_patch = patch(target, return_value=False)
+            heartbeat_patch.start()
+            self.addCleanup(heartbeat_patch.stop)
         self.seen = set()
         self.watermark = None
         self.frontier = 0
@@ -71,6 +77,7 @@ class AlertTests(unittest.TestCase):
             ],
         )
         settings = SimpleNamespace(
+            connection=nullcontext,
             get_search=lambda q: {
                 "id": q,
                 "query": "https://www.vinted.co.uk/catalog",
@@ -80,9 +87,9 @@ class AlertTests(unittest.TestCase):
             },
             filtered_ids=lambda q, ids: set(),
             excluded_by=lambda title, phrases: None,
-            remember_filtered=lambda q, ids: None,
+            remember_filtered=lambda q, ids, **kwargs: None,
             listing_cutoff=lambda q, ids, now: self.frontier,
-            remember_listing_frontier=lambda q, ids, now: setattr(
+            remember_listing_frontier=lambda q, ids, now, **kwargs: setattr(
                 self,
                 "frontier",
                 max([self.frontier] + [int(identity) for identity in ids]),
@@ -100,6 +107,7 @@ class AlertTests(unittest.TestCase):
             },
             {
                 "db": self.db,
+                "closing": nullcontext,
                 "logger": logging.getLogger("test"),
                 "escape": html.escape,
                 "time": time,
