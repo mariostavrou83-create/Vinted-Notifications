@@ -145,6 +145,27 @@ warning bound to that checkout, so checking an old paid order cannot clear a
 newer refusal. These changes do not establish that Vinted will accept a future
 checkout or payment.
 
+## Transient database contention
+
+Search-health status is advisory. Its batched transaction waits at most 50 ms
+for the SQLite writer, retains the latest status per current query if busy, and
+retries on a one-second maintenance clock. It cannot restart the poller merely
+because that status write was busy; critical item and payment write timeouts
+remain unchanged.
+
+Offers also treat SQLite busy/locked errors as transient rather than an unfamiliar
+marketplace response. Interrupted send receipts keep their durable sending lease
+and expire into uncertainty without replay. A narrowly configured, one-time
+storage-incident repair may restore a verified account's prior operating mode;
+other pauses and current uncertain sends are preserved. This mitigates observed
+contention consequences without claiming the original lock owner was identified.
+
+For intermittent catalogue 5xx errors, twenty validated fetches started after
+the latest error reset only the delay used for a future 5xx. They never shorten
+an active pause, rate limit, authentication restriction or explicit Retry-After.
+Broad outages still escalate the shared delay. Worker count and configured
+request rate are unchanged.
+
 Checkout, delivery and payment-request refusals now have a separate durable
 episode and owner notice. These failures previously bypassed the connection
 warning recorder. The failure is accepted only from the exact currently saved,

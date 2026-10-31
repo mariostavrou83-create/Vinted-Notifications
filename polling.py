@@ -1,6 +1,7 @@
 """Bounded polling with independent HTTP sessions and no overlapping query runs."""
 
 import os
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -22,6 +23,8 @@ RECOVERY_WORKERS = 12
 FRONTIER_HEARTBEAT_SECONDS = 30
 HEALTH_WRITE_SECONDS = 20
 HEALTH_FLUSH_SECONDS = 1
+HEALTH_BUSY_TIMEOUT_MS = 50
+SERVER_RECOVERY_SUCCESSES = 20
 
 
 class CoolingDown(Exception):
@@ -37,6 +40,7 @@ class RequestBudget:
         self.restricted_until = 0.0
         self.server_delay = 0.0
         self.last_server_error = float("-inf")
+        self.server_successes = 0
 
     def remaining(self):
         with self.lock:
@@ -60,22 +64,70 @@ class RequestBudget:
         """Back off briefly for an isolated 5xx with no Retry-After directive.
 
         Concurrent failures share one pause. Failures after that pause grow it
-        exponentially to a minute; five healthy minutes restore the short wait.
+        exponentially to a minute. Twenty validated post-error fetches, or
+        five quiet minutes, restore the short wait for a future error only.
         Never shorten a rate-limit, authentication or explicit Retry-After wait.
         """
         now = time.monotonic()
         with self.lock:
+            previous_error = self.last_server_error
+            self.last_server_error = now
+            self.server_successes = 0
             if self.until > now:
                 return self.until - now
-            if now - self.last_server_error > 300:
+            if now - previous_error > 300:
                 self.server_delay = 0.0
             self.server_delay = min(60.0, max(2.0, self.server_delay * 2))
-            self.last_server_error = now
             self.until = now + self.server_delay
             return self.server_delay
 
+    def server_success(self, started):
+        """Recover future 5xx delay without shortening any current deadline."""
+        with self.lock:
+            # Earlier in-flight requests are not evidence that the failing
+            # service recovered. Each newer 5xx invalidates partial evidence.
+            if not started > self.last_server_error:
+                return
+            self.server_successes = min(
+                SERVER_RECOVERY_SUCCESSES, self.server_successes + 1
+            )
+            if self.server_successes == SERVER_RECOVERY_SUCCESSES:
+                self.server_delay = 0.0
+
 
 budget = RequestBudget()
+
+
+def _write_health(health_updates):
+    """Commit an advisory batch with a short wait, preserving other callers."""
+    with closing(search_settings.connection()) as conn:
+        previous_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        try:
+            # Reserve the write before reading statuses. A partial batch must
+            # roll back before normal connection settings are restored.
+            conn.execute(f"PRAGMA busy_timeout={HEALTH_BUSY_TIMEOUT_MS}")
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                for (
+                    scheduler_id,
+                    parent_id,
+                    variant_id,
+                    wall_start,
+                    duration,
+                    interval,
+                    error,
+                ) in health_updates:
+                    search_settings.record_health(
+                        parent_id, wall_start, duration, interval, error, conn=conn
+                    )
+                    if variant_id:
+                        vinted_keywords.health(
+                            variant_id, wall_start, interval, error, conn=conn
+                        )
+        finally:
+            # connection() can be borrowed by an enclosing local batch. The
+            # short advisory timeout must not leak into critical item writes.
+            conn.execute(f"PRAGMA busy_timeout={previous_timeout}")
 
 
 def retry_after_seconds(value, default=60):
@@ -144,6 +196,9 @@ def fetch_query(query, count, *, deadline=None, frontier=None):
         else None
     )
     items = _local.clients[host].search(query[1], nbr_items=count, after_id=after_id)
+    # Count only catalogue responses that passed status, JSON and list-shape
+    # validation, never a raw HTTP 200 or an expired in-flight success.
+    budget.server_success(started)
     observed = time.time()
     for item in items:
         item.observed_at = observed
@@ -186,6 +241,8 @@ class Poller:
         self.health_written = {}
         self.pending_health = {}
         self.last_health_write = time.monotonic()
+        self.health_retry_at = 0.0
+        self.health_busy_notice_after = 0.0
         if os.environ.get("MSJ_DISCOVERY_SHADOW") == "1":
             from discovery_shadow import DiscoveryShadow
 
@@ -365,36 +422,41 @@ class Poller:
         # Routine writes share one short transaction per second. Errors, first
         # results and recovery bypass that wait. No connection or write lock is
         # held during network requests or listing processing.
-        if self.pending_health and (
+        if self.pending_health and now >= self.health_retry_at and (
             urgent_health or now - self.last_health_write >= HEALTH_FLUSH_SECONDS
         ):
-            health_updates = [
-                update
-                for scheduler_id, (url, update) in self.pending_health.items()
-                if scheduler_id in queries and queries[scheduler_id][1] == url
-            ]
-            if health_updates:
-                with closing(search_settings.connection()) as conn, conn:
-                    for (
-                        scheduler_id,
-                        parent_id,
-                        variant_id,
-                        wall_start,
-                        duration,
-                        interval,
-                        error,
-                    ) in health_updates:
-                        search_settings.record_health(
-                            parent_id, wall_start, duration, interval, error, conn=conn
-                        )
-                        if variant_id:
-                            vinted_keywords.health(
-                                variant_id, wall_start, interval, error, conn=conn
-                            )
+            # Retain only each current query's latest observation while storage
+            # is busy. Removed/edited searches cannot grow the retry buffer.
+            for scheduler_id, (url, _) in list(self.pending_health.items()):
+                if scheduler_id not in queries or queries[scheduler_id][1] != url:
+                    self.pending_health.pop(scheduler_id, None)
+            health_updates = [update for _, update in self.pending_health.values()]
+            try:
+                if health_updates:
+                    # A competing writer cannot stall the fast scheduler for
+                    # the normal 15-second critical-transaction timeout.
+                    _write_health(health_updates)
+            except sqlite3.OperationalError as exc:
+                code = getattr(exc, "sqlite_errorcode", None)
+                busy = (
+                    type(code) is int
+                    and code & 255 in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                ) or str(exc) in ("database is locked", "database table is locked")
+                if not busy:
+                    raise
+                # Retry locally without losing pending statuses, changing
+                # marketplace deadlines, or restarting the poller. An urgent
+                # network failure still cannot create a tight storage retry.
+                self.health_retry_at = now + HEALTH_FLUSH_SECONDS
+                if now >= self.health_busy_notice_after:
+                    logger.warning("Search health storage busy; polling continues")
+                    self.health_busy_notice_after = now + 60
+            else:
                 for scheduler_id, *_ in health_updates:
                     self.health_written[scheduler_id] = now
-            self.pending_health.clear()
-            self.last_health_write = now
+                self.pending_health.clear()
+                self.last_health_write = now
+                self.health_retry_at = 0.0
 
         for query_id in list(self.next_due):
             if query_id not in queries:

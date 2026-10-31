@@ -277,6 +277,15 @@ if __name__ == "__main__":
     if review_release:
         logger.info("Reviewed search edits applied: %s", review_release)
 
+    from vinted_offer_storage_recovery import run_once as recover_offer_storage
+
+    try:
+        storage_recovery = recover_offer_storage()
+        if storage_recovery != "not_requested":
+            logger.info("Vinted offers storage incident recovery: result=%s", storage_recovery)
+    except Exception as exc:  # noqa: BLE001 -- keep a saved pause on failed repair
+        logger.warning("Vinted offers storage incident recovery unavailable: %s", type(exc).__name__)
+
     from vinted_buyer import import_auth_results_once
 
     import_auth_results_once()

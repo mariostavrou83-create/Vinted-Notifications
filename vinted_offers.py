@@ -67,6 +67,15 @@ class InventoryPending(ValueError):
     """One wardrobe page per tick keeps account work bounded."""
 
 
+def _storage_busy(exc):
+    """Recognize only SQLite's transient lock errors, including extended codes."""
+    code = getattr(exc, "sqlite_errorcode", None)
+    if type(code) is int:
+        return code & 255 in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    # Synthetic exceptions and older Python versions may omit the numeric code.
+    return str(exc) in ("database is locked", "database table is locked")
+
+
 class SellerItems:
     """Use the current wardrobe API plus the existing verified listing parser.
 
@@ -1281,26 +1290,26 @@ class OfferWorker:
                     pause(reason)
 
     def tick(self):
-        now = self.clock()
         try:
-            _recover(now)
-            config = state()
+            self._tick()
         except sqlite3.OperationalError as exc:
-            code = getattr(exc, "sqlite_errorcode", None)
-            busy = (
-                type(code) is int
-                and code & 255 in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
-            ) or str(exc) in ("database is locked", "database table is locked")
-            if not busy:
+            if not _storage_busy(exc):
                 raise
-            # No marketplace call has started. Retry the atomic recovery on
-            # the next tick, before considering any queued or expired send.
+            # Stop this tick at the failing operation. The run loop provides
+            # a five-second local backoff, with no inline marketplace retry.
+            # A checking lease can recover, but a committed sending lease is
+            # retained and must expire into the existing uncertain quarantine.
+            now = self.clock()
             if now >= self.storage_notice_after:
                 logger.warning(
-                    "Vinted offers storage busy before account access; waiting"
+                    "Vinted offers storage busy; waiting before further account access"
                 )
                 self.storage_notice_after = now + 60
-            return
+
+    def _tick(self):
+        now = self.clock()
+        _recover(now)
+        config = state()
         if config["mode"] == "paused" or config["cooldown_until"] > now:
             return
         recent_key = (config["account_id"], config["revision"])
@@ -1310,6 +1319,15 @@ class OfferWorker:
         needs_scan = config["next_scan"] <= now
         needs_recent = config["scan_page"] > 1 and self.recent_scan["next_scan"] <= now
         with closing(connection()) as conn:
+            # A previous tick may have lost local storage after the offer POST.
+            # Never perform more account work while that send's outcome is
+            # unresolved. Recovery above quarantines it when its lease expires.
+            sending = conn.execute(
+                "SELECT 1 FROM vinted_offer_jobs WHERE account_id=? AND status='sending' LIMIT 1",
+                (config["account_id"],),
+            ).fetchone()
+            if sending:
+                return
             pending = conn.execute(
                 """SELECT 1 FROM vinted_offer_jobs WHERE account_id=?
                 AND (status='queued' OR (? AND status='ready'))
