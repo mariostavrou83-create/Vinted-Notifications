@@ -1395,6 +1395,7 @@ class Client:
         sealed = encrypt(current)
         sealed_at = _session_storage_clock()
         with closing(connection()) as conn:
+            opened_at = _session_storage_clock()
             with conn:
                 updated = conn.execute(
                     "UPDATE vinted_buyer SET session=? WHERE id=1 AND user_id=? AND session=?",
@@ -1414,10 +1415,12 @@ class Client:
         try:
             if _session_storage_clock() - seal_started >= 0.1:
                 logger.info(
-                    "Vinted session storage timing: seal_ms=%.3f write_ms=%.3f commit_ms=%.3f",
+                    "Vinted session storage timing: seal_ms=%.3f write_ms=%.3f commit_ms=%.3f connection_open_ms=%.3f update_ms=%.3f",
                     (sealed_at - seal_started) * 1000,
                     (written_at - sealed_at) * 1000,
                     (committed_at - written_at) * 1000,
+                    (opened_at - sealed_at) * 1000,
+                    (written_at - opened_at) * 1000,
                 )
         except Exception:  # noqa: BLE001 -- diagnostics cannot invalidate rotation
             pass
@@ -1878,6 +1881,17 @@ class Client:
         except BuyerError as error:
             # Roll back the entire rejected response before adding a solved
             # security cookie. A payment response never authorizes a replay.
+            if error.status == 403 or error.reason == "security_challenge":
+                try:
+                    from vinted_challenge_diagnostics import log_refusal_evidence
+
+                    log_refusal_evidence(
+                        response, data,
+                        operation=request_operation(method, path, body),
+                        challenged=error.reason == "security_challenge",
+                    )
+                except Exception:  # noqa: BLE001,S110 -- optional payment evidence
+                    pass
             if self.retry_security_check(
                 response, data, error, payment=path.endswith("/payment")
             ):

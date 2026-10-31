@@ -211,6 +211,25 @@ codes and separate preparation, Telegram and bookkeeping timings distinguish
 stale display from actual purchase latency. No full-purchase speed is inferred
 from a display timestamp, an offline benchmark or one faster database operation.
 
+The following live attempt still spent 3.31 seconds in one session save and
+received a payment-endpoint security challenge. This is not a verified speed or
+payment-reliability fix. Session timing now separates opening the connection
+from executing its CAS update, so neither is automatically labelled lock wait.
+Temporary `SQLITE_WRITE_AUDIT=1` diagnostics observe fixed operation/table/source
+labels across the normal database connections, including legacy cursor writes.
+They distinguish first-statement execution from transaction hold and commit,
+log after the transaction releases its writer, rate-limit slow events and
+summaries, and expire after ten minutes per process. SQL, parameter values,
+paths and raw errors are never logged. Disabled and expired connections retain
+native execution paths; FULL, write timeouts and session CAS are unchanged.
+Direct Supabase-auth connections and script transactions are outside this audit.
+
+Payment refusals additionally record documented security-header presence and
+strictly validated challenge URL categories/markers. They expose no URL,
+cookie value or response body, and cannot change classification, buy, solve a
+challenge or replay payment. A healthy identity check remains separate evidence
+from whether Vinted will accept a particular payment request.
+
 Checkout, delivery and payment-request refusals now have a separate durable
 episode and owner notice. These failures previously bypassed the connection
 warning recorder. The failure is accepted only from the exact currently saved,

@@ -173,9 +173,10 @@ class SessionStorageTimingTests(SessionRotationFixture, unittest.TestCase):
 
     def test_slow_accepted_save_logs_only_numeric_phases_and_retains_full_durability(self):
         with purchase_waiter(), self.assertLogs(buyer.logger, level="INFO") as captured:
-            self.save_with_clock([0, 0.02, 0.12, 0.22, 0.3])
+            self.save_with_clock([0, 0.02, 0.04, 0.12, 0.22, 0.3])
         line = next(text for text in captured.output if "session storage timing" in text)
         self.assertIn("seal_ms=20.000 write_ms=100.000 commit_ms=100.000", line)
+        self.assertIn("connection_open_ms=20.000 update_ms=80.000", line)
         for secret in (self.old_access, self.old_refresh, self.client.csrf):
             self.assertNotIn(secret, line)
         self.assertEqual(self.saved()[1], self.client.exported())
@@ -184,14 +185,14 @@ class SessionStorageTimingTests(SessionRotationFixture, unittest.TestCase):
 
     def test_fast_save_has_no_extra_phase_log_and_diagnostic_failure_cannot_undo_save(self):
         with self.assertLogs(buyer.logger, level="INFO") as captured:
-            self.save_with_clock([0, 0.001, 0.002, 0.003, 0.004])
+            self.save_with_clock([0, 0.001, 0.0015, 0.002, 0.003, 0.004])
         self.assertFalse(any("session storage timing" in line for line in captured.output))
         self.client.csrf = "accepted-next-csrf-token-0123456789"
         def unavailable(message, *args):
             if "session storage timing" in message:
                 raise RuntimeError("private diagnostic failure")
         with patch.object(buyer.logger, "info", side_effect=unavailable):
-            self.save_with_clock([0, 0.02, 0.12, 0.22, 0.3])
+            self.save_with_clock([0, 0.02, 0.04, 0.12, 0.22, 0.3])
         self.assertEqual(self.saved()[1], self.client.exported())
 
     def test_cas_still_rejects_changed_connection_without_a_success_timing(self):
@@ -199,11 +200,11 @@ class SessionStorageTimingTests(SessionRotationFixture, unittest.TestCase):
         with closing(search_settings.connection()) as conn, conn:
             conn.execute("UPDATE vinted_buyer SET session=?", (replacement,))
         with self.assertRaises(buyer.BuyerError) as failure, patch.object(buyer.logger, "info") as info:
-            self.save_with_clock([0, 0.02, 0.12, 0.22])
+            self.save_with_clock([0, 0.02, 0.04, 0.12, 0.22])
         self.assertEqual(failure.exception.reason, "saved_session")
         self.assertEqual(self.saved()[0]["session"], replacement)
         self.assertFalse(any("session storage timing" in call.args[0] for call in info.call_args_list))
 
     def test_phase_clock_failure_after_update_cannot_roll_back_rotation(self):
-        self.save_with_clock([0, 0.02, RuntimeError("private clock detail"), 0.22, 0.3])
+        self.save_with_clock([0, 0.02, 0.04, RuntimeError("private clock detail"), 0.22, 0.3])
         self.assertEqual(self.saved()[1], self.client.exported())
