@@ -167,9 +167,8 @@ class PickupCookieEvidenceTests(DatabaseFixture, unittest.TestCase):
                 for secret in (*self.secrets.values(), self.csrf):
                     self.assertNotIn(secret, " ".join(logs.output))
 
-    def test_verified_api_requests_without_applicable_access_cookie_stop_before_http(self):
+    def test_verified_notifications_without_applicable_access_cookie_stop_before_http(self):
         for path, params, stage in (
-            (self.path, self.params, "pickup_points"),
             (buyer.NOTIFICATIONS_PATH, {"page": 1, "per_page": 20}, "request"),
         ):
             with self.subTest(path=path):
@@ -189,6 +188,38 @@ class PickupCookieEvidenceTests(DatabaseFixture, unittest.TestCase):
                 network.assert_not_called()
                 solver.assert_not_called()
                 self.assertEqual(client.exported(), before)
+
+    def test_verified_www_pickup_uses_original_cookie_scope_and_vinted_response(self):
+        client = self.client("www.vinted.co.uk", domain_specified=False)
+        client._verified_session = ("99", b"offline-verified-session", {})
+        original = client.exported()
+        sent = []
+
+        def transport(adapter, prepared, **kwargs):
+            sent.append(prepared)
+            return self.response(prepared, status=200)
+
+        with (
+            patch.object(requests.adapters.HTTPAdapter, "send", autospec=True, side_effect=transport),
+            patch.object(client, "persist_session") as persist,
+            patch.object(client, "solve_challenge") as solver,
+        ):
+            result = client.request("GET", self.path, params=self.params)
+        self.assertEqual(result, {"shipping_points": []})
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0].method, "GET")
+        self.assertTrue(sent[0].url.startswith(buyer.PICKUP_BASE + self.path + "?"))
+        self.assertIsNone(sent[0].body)
+        for name in self.secrets:
+            self.assertNotIn(name + "=", sent[0].headers.get("Cookie", ""))
+        self.assertEqual(client.exported(), original)
+        persist.assert_called_once()
+        solver.assert_not_called()
+
+    def test_verified_www_pickup_preserves_actual_refusal_without_retry(self):
+        client = self.client("www.vinted.co.uk", domain_specified=False)
+        client._verified_session = ("99", b"offline-verified-session", {})
+        self.refusal(client, 0)
 
     def test_verified_api_requests_with_original_parent_scope_can_reach_vinted(self):
         for path, params in (

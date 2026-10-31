@@ -12,6 +12,12 @@ CSRF handling, owner notifications and alert efficiency changes are retained.
 The later sections describing the withdrawn checkout experiments are historical;
 this rollback does not establish that Vinted will accept a future payment.
 
+The rollback completion also removes the newer missing-access-cookie preflight
+from the allowlisted pickup lookup. That read uses its original cookie scope
+and lets Vinted's actual response determine acceptance. The notifications
+preflight remains part of the offers reconnect protection. No cookie scope is
+widened, and a refused lookup is not retried or treated as a valid delivery choice.
+
 The dashboard Supabase owner login and the Vinted buyer session are separate.
 The dashboard keeps only an opaque browser reference and encrypted server-side
 credentials; no dashboard or Vinted password is persisted by these changes.

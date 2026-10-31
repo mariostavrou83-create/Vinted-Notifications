@@ -1687,11 +1687,11 @@ class Client:
                     "Vinted %s cookie evidence: available=False",
                     "pickup" if pickup_gateway else "notifications",
                 )
-            if api_access_missing:
-                # A www identity check cannot authenticate an API-host request
-                # when the preserved cookie scope excludes that host. Stop the
-                # known unauthenticated call locally; never widen credentials,
-                # switch routes, solve a challenge or retry this request.
+            if api_access_missing and notifications_gateway:
+                # Keep the offers authentication check. The pickup lookup
+                # retains its original request behavior: absent credentials
+                # are evidence, not proof that this endpoint will reject it.
+                # Never widen cookies; Vinted's response remains authoritative.
                 raise BuyerError(
                     AUTH_REASONS["api_cookie_scope"],
                     reason="api_cookie_scope",
