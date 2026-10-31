@@ -69,6 +69,63 @@ class ChallengeEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence["operation"], "buyer_request")
         self.assertEqual(evidence["challenge_url_kind"], "none")
         self.assertFalse(evidence["challenge_url_extractable"])
+        self.assertEqual(evidence["message_code_type"], "missing")
+        self.assertEqual(evidence["message_code"], "none")
+
+    def test_exact_machine_code_labels_are_evidence_without_inventing_a_cause(self):
+        for code in ("access_denied", "permission_denied", "request_forbidden",
+                     "request_rate_limit_exceeded", "action_not_allowed", "account_restricted"):
+            with self.subTest(code=code):
+                evidence = self.evidence({"code": 106, "message_code": code}, challenged=False)
+                self.assertEqual(evidence["message_code_type"], "string")
+                self.assertEqual(evidence["message_code"], code)
+                self.assertFalse(evidence["challenged"])
+                self.assertFalse(evidence["challenge_url_extractable"])
+
+    def test_unknown_and_non_string_message_codes_never_expose_upstream_data(self):
+        for code in ("private_token_identifier", "private@example.com", "access_denied private",
+                     "ACCESS_DENIED", "access_denied\n", "private" * 20000, ""):
+            with self.subTest(length=len(code)):
+                evidence = self.evidence({"code": 106, "message_code": code}, challenged=False)
+                self.assertEqual(evidence["message_code_type"], "string")
+                self.assertEqual(evidence["message_code"], "other")
+                self.assertNotIn("private", repr(evidence))
+        for code in (None, 106, True, {"private": "value"}, ["access_denied"]):
+            with self.subTest(type=type(code).__name__):
+                evidence = self.evidence({"message_code": code}, challenged=False)
+                self.assertEqual(evidence["message_code_type"], "non_string")
+                self.assertEqual(evidence["message_code"], "none")
+                self.assertNotIn("private", repr(evidence))
+
+    def test_retry_after_only_reports_presence_and_bounded_numeric_seconds(self):
+        absent = self.evidence({}, challenged=False)
+        self.assertFalse(absent["retry_after_present"])
+        self.assertEqual(absent["retry_after_kind"], "missing")
+        self.assertIsNone(absent["retry_after_seconds"])
+        for value, kind, seconds in (
+            ("0", "seconds", 0), ("60", "seconds", 60), ("86400", "seconds", 86400),
+            ("86401", "outside_bound", None), ("999999999999", "non_numeric", None),
+            ("private-date-or-header", "non_numeric", None), ("-1", "non_numeric", None),
+            ("1.5", "non_numeric", None), ("６０", "non_numeric", None),
+            ({"private": "value"}, "non_string", None),
+        ):
+            with self.subTest(kind=kind, seconds=seconds):
+                evidence = self.evidence({}, headers={"retry-after": value}, challenged=False)
+                self.assertTrue(evidence["retry_after_present"])
+                self.assertEqual(evidence["retry_after_kind"], kind)
+                self.assertEqual(evidence["retry_after_seconds"], seconds)
+                self.assertNotIn("private", repr(evidence))
+
+    def test_logs_drop_unknown_machine_codes_messages_and_retry_after_text(self):
+        data = {"code": 106, "message_code": "private_machine_code", "message": "private message"}
+        response = fixture.response(403, data)
+        response.headers["Retry-After"] = "private retry value"
+        with self.assertLogs(diagnostics.logger, level="INFO") as logs:
+            diagnostics.log_refusal_evidence(response, data, operation="checkout_build", challenged=False)
+        text = " ".join(logs.output)
+        self.assertIn("message_code_type=string message_code=other", text)
+        self.assertIn("retry_after_present=True retry_after_kind=non_numeric retry_after_seconds=None", text)
+        self.assertNotIn("private", text)
 
     def test_prepared_cookie_counts_and_csrf_presence_never_return_values(self):
         response = fixture.response(403, {"url": URL})
@@ -139,7 +196,8 @@ class PaymentRefusalEvidenceTests(unittest.TestCase):
             self.assertNotIn(secret, text)
 
     def test_numeric_backend_refusal_keeps_existing_reason_and_code(self):
-        response = fixture.response(403, {"code": 106, "message": "private provider text"})
+        response = fixture.response(403, {"code": 106, "message": "private provider text", "message_code": "access_denied"})
+        response.headers["Retry-After"] = "60"
         with (
             self.fixture.solver() as solver,
             patch.object(self.client.session, "request", return_value=response) as request,
@@ -150,6 +208,9 @@ class PaymentRefusalEvidenceTests(unittest.TestCase):
         self.assertEqual(error.exception.reason, "forbidden")
         self.assertEqual(error.exception.api_code, 106)
         self.assertIn("challenged=False", " ".join(logs.output))
+        self.assertIn("message_code=access_denied", " ".join(logs.output))
+        self.assertIn("retry_after_seconds=60", " ".join(logs.output))
+        self.assertNotIn("private", " ".join(logs.output))
         request.assert_called_once()
         solver.assert_not_called()
 

@@ -18,6 +18,27 @@ and lets Vinted's actual response determine acceptance. The notifications
 preflight remains part of the offers reconnect protection. No cookie scope is
 widened, and a refused lookup is not retried or treated as a valid delivery choice.
 
+### Follow-up after the original-cookie reconnect
+
+The owner reconnected with the original browser records at 11:57 UTC on
+31 October. API access-cookie applicability returned, offers sent successfully,
+and the 11:59 purchase completed in 14.02 seconds. The next two checkout builds
+received HTTP 403 with numeric API code 106 despite a valid account check and
+an applicable access cookie. No public authoritative meaning for code 106 was
+established, and these responses contained no extractable security challenge.
+
+The accepted-response security-cookie normalization is reinstated narrowly:
+an offline transport/persistence reproduction showed that a fresh parent-domain
+cookie could coexist with the older solver-installed WWW cookie and survive
+into the next purchase. Only a new accepted first-party response with one
+valid cookie can replace records whose scope it covers. Existing ambiguous
+records are never selected by jar order. There are no added network requests,
+background repair jobs or payment retries. The original purchase steps and
+offers reconnect fixes remain. Two prepared security cookies were observed
+on the failed builds, but this does not establish that they caused code 106.
+Fixed error-code categories and bounded retry-header diagnostics improve the
+evidence for any further refusal without logging arbitrary upstream messages.
+
 The dashboard Supabase owner login and the Vinted buyer session are separate.
 The dashboard keeps only an opaque browser reference and encrypted server-side
 credentials; no dashboard or Vinted password is persisted by these changes.

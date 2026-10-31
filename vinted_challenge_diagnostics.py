@@ -10,6 +10,48 @@ from vinted_timing import OPERATIONS
 
 logger = logging.getLogger(__name__)
 
+# These are exact diagnostic labels, not a mapping from numeric API codes to
+# causes. In particular, code 106 alone does not establish any of these reasons.
+_MESSAGE_CODES = frozenset({
+    "access_denied", "request_forbidden", "permission_denied", "forbidden",
+    "unauthorized", "unauthenticated", "authentication_required",
+    "invalid_authentication_token", "invalid_authentification_token",
+    "invalid_token", "invalid_grant", "invalid_refresh_token",
+    "refresh_token_expired", "session_expired", "invalid_csrf_token",
+    "csrf_token_invalid", "csrf_error", "captcha_required", "verification_required",
+    "rate_limited", "rate_limit_exceeded", "request_rate_limit_exceeded",
+    "too_many_requests", "action_denied", "action_not_allowed", "not_allowed",
+    "operation_not_allowed", "user_blocked", "account_blocked", "account_restricted",
+    "bad_request", "not_found", "item_not_found", "item_sold", "item_reserved",
+})
+
+
+def _message_code_evidence(data):
+    if not isinstance(data, dict) or "message_code" not in data:
+        return "missing", "none"
+    code = data["message_code"]
+    if not isinstance(code, str):
+        return "non_string", "none"
+    # Never output an unknown upstream identifier, even if it looks like a
+    # machine code: credentials and private text can also have that shape.
+    return "string", code if len(code) <= 64 and code in _MESSAGE_CODES else "other"
+
+
+def _retry_after_evidence(headers):
+    value = headers.get("Retry-After", headers.get("retry-after"))
+    if value is None:
+        return False, "missing", None
+    if not isinstance(value, str):
+        return True, "non_string", None
+    if len(value) > 6 or not value.isascii() or not value.isdigit():
+        # HTTP dates can also be valid Retry-After values. Do not echo them,
+        # parse private strings or label every non-numeric value invalid.
+        return True, "non_numeric", None
+    seconds = int(value)
+    if seconds > 86400:
+        return True, "outside_bound", None
+    return True, "seconds", seconds
+
 
 def refusal_evidence(response, data, *, operation, challenged):
     """Describe header presence, validated URL structure and credential counts.
@@ -26,6 +68,8 @@ def refusal_evidence(response, data, *, operation, challenged):
     status = getattr(response, "status_code", None)
     status = status if type(status) is int and 100 <= status <= 599 else None
     headers = getattr(response, "headers", {})
+    message_code_type, message_code = _message_code_evidence(data)
+    retry_after_present, retry_after_kind, retry_after_seconds = _retry_after_evidence(headers)
 
     def present(name):
         return headers.get(name) is not None or headers.get(name.lower()) is not None
@@ -76,6 +120,11 @@ def refusal_evidence(response, data, *, operation, challenged):
         "prepared_access_cookies": access_count,
         "prepared_datadome_cookies": security_count,
         "prepared_csrf_present": csrf_present,
+        "message_code_type": message_code_type,
+        "message_code": message_code,
+        "retry_after_present": retry_after_present,
+        "retry_after_kind": retry_after_kind,
+        "retry_after_seconds": retry_after_seconds,
     }
 
 
@@ -91,13 +140,17 @@ def log_refusal_evidence(response, data, *, operation, challenged):
             "challenge_url_extractable=%s challenge_url_kind=%s "
             "challenge_url_marker=%s challenge_url_source=%s "
             "prepared_cookie_evidence=%s prepared_access_cookies=%s "
-            "prepared_datadome_cookies=%s prepared_csrf_present=%s",
+            "prepared_datadome_cookies=%s prepared_csrf_present=%s "
+            "message_code_type=%s message_code=%s retry_after_present=%s "
+            "retry_after_kind=%s retry_after_seconds=%s",
             *(evidence[key] for key in (
                 "operation", "http", "challenged", "x_datadome", "x_dd_b",
                 "x_set_cookie", "datadome_set_cookie", "challenge_url_extractable",
                 "challenge_url_kind", "challenge_url_marker", "challenge_url_source",
                 "prepared_cookie_evidence", "prepared_access_cookies",
                 "prepared_datadome_cookies", "prepared_csrf_present",
+                "message_code_type", "message_code", "retry_after_present",
+                "retry_after_kind", "retry_after_seconds",
             )),
         )
     except Exception:  # noqa: BLE001,S110 -- evidence cannot affect payments

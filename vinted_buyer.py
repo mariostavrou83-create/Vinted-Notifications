@@ -1446,6 +1446,76 @@ class Client:
             )
             raise
 
+    def _normalize_security_cookie(self, response, now):
+        """Retain one fresh accepted root cookie without guessing its scope."""
+        try:
+            returned = getattr(response, "cookies", None)
+            if not isinstance(returned, requests.cookies.RequestsCookieJar):
+                return
+            candidates = [cookie for cookie in returned if cookie.name == "datadome"]
+            if len(candidates) != 1 or response.status_code not in (200, 201):
+                return
+            fresh = candidates[0]
+            origin = urlsplit(response.url)
+            host = (fresh.domain or "").lstrip(".")
+            if (
+                origin.scheme != "https"
+                or origin.hostname not in ("www.vinted.co.uk", "api.vinted.co.uk")
+                or origin.port not in (None, 443)
+                or origin.username is not None or origin.password is not None
+                or fresh.domain not in COOKIE_DOMAINS or fresh.path != "/"
+                or fresh.secure is not True
+                or any(type(getattr(fresh, flag)) is not bool for flag in (
+                    "domain_specified", "domain_initial_dot", "path_specified", "discard"
+                ))
+                or fresh.port is not None or fresh.port_specified
+                or not isinstance(fresh.value, str)
+                or not re.fullmatch(r"[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]{16,4096}", fresh.value)
+                or (fresh.expires is not None and (
+                    type(fresh.expires) is not int or not now < fresh.expires <= 253402300799
+                ))
+                or (not fresh.domain_specified and fresh.domain.startswith("."))
+                or not (origin.hostname == host or (
+                    fresh.domain_specified and origin.hostname.endswith("." + host)
+                ))
+            ):
+                return
+
+            def contained(old):
+                if (
+                    old.name != "datadome" or old.path != fresh.path
+                    or old.domain not in COOKIE_DOMAINS or old.secure is not True
+                    or type(old.domain_specified) is not bool
+                    or (not old.domain_specified and old.domain.startswith("."))
+                    or old.port is not None or old.port_specified
+                ):
+                    return False
+                old_host = old.domain.lstrip(".")
+                if not fresh.domain_specified:
+                    return not old.domain_specified and old_host == host
+                return old_host == host or old_host.endswith("." + host)
+
+            # Work on a copy: malformed or ambiguous metadata must not alter an
+            # accepted payment result, authentication rotation or original jar.
+            normalized = self.session.cookies.copy()
+            before = sum(cookie.name == "datadome" for cookie in normalized)
+            shadows = 0
+            for old in list(normalized):
+                same_key = old.name == fresh.name and (old.domain, old.path) == (fresh.domain, fresh.path)
+                if same_key or contained(old):
+                    shadows += not same_key
+                    normalized.clear(old.domain, old.path, old.name)
+            normalized.set_cookie(copy(fresh))
+            self.session.cookies = normalized
+            if shadows:
+                logger.info(
+                    "Vinted security cookie normalization: received_scope=%s before=%s after=%s shadows_removed=%s",
+                    "domain_root" if fresh.domain_specified else "host_only", before,
+                    sum(cookie.name == "datadome" for cookie in normalized), shadows,
+                )
+        except Exception:  # noqa: BLE001,S110 -- never discard an accepted payment
+            return
+
     def update_tokens(self, response, data):
         """Keep accepted token rotations without inventing broader cookie scope."""
         returned = getattr(response, "cookies", None)
@@ -1535,6 +1605,7 @@ class Client:
                 self.session.cookies.set(
                     cookie, value, domain="www.vinted.co.uk", secure=True
                 )
+        self._normalize_security_cookie(response, now)
         self.headers()
         return any(cookie == "access_token_web" for cookie, _, _ in updates)
 
