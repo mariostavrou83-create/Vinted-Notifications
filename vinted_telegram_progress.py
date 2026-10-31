@@ -105,6 +105,49 @@ def active_status(message_id, item_id, durable):
     return "Your authorised Autobuy is running. Waiting for Vinted…"
 
 
+def live_feedback(message_id, item_id, durable):
+    """Read one current alert's stage without persisting optional UI updates."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+    bridge = _active.get((loop, message_id))
+    if (
+        not bridge or bridge.closed or bridge.control.finished
+        or bridge.item_id != str(item_id) or not bridge.latest
+        or (durable and durable.get("state") not in ("preparing", "paying"))
+    ):
+        return None
+    _, stage, published = bridge.latest
+    if durable:
+        updated = durable.get("updated")
+        if (
+            type(updated) not in (int, float) or not math.isfinite(updated)
+            or updated > published
+            or (durable["state"] == "paying" and stage not in (
+                "submitting_payment", "security_check"
+            ))
+        ):
+            return None
+    elif stage != "waiting":
+        return None
+    if bridge.control.requested.is_set():
+        return {
+            "state": "stopping",
+            "message": "Stopping autobuy. No payment will be sent; waiting for the current request to finish.",
+            "stop_token": None,
+        }
+    return {
+        "state": "in_progress",
+        "message": STAGE_LABELS[stage],
+        "_live_progress": True,
+        "stop_token": (
+            None if bridge.control.paying or (durable and durable["state"] == "paying")
+            else bridge.control.token
+        ),
+    }
+
+
 class TelegramProgress:
     """One coalesced UI worker; publishing never waits for I/O or Telegram."""
 
@@ -282,6 +325,7 @@ class TelegramProgress:
                 {
                     "state": "in_progress",
                     "message": STAGE_LABELS[stage],
+                    "_live_progress": True,
                     "stop_token": (
                         None
                         if self.control.paying

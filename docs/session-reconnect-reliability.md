@@ -166,6 +166,22 @@ an active pause, rate limit, authentication restriction or explicit Retry-After.
 Broad outages still escalate the shared delay. Worker count and configured
 request rate are unchanged.
 
+## Purchase write priority
+
+The existing owner-purchase marker now also defers optional health batches
+before they acquire SQLite's writer and between rows. A purchase arriving
+during such a batch causes the entire advisory batch to roll back for later
+retry; item/outbox writes and accepted token rotations stay durable.
+
+Live Telegram purchase stages render from the exact active card's in-memory
+control without writing photo metadata or control-health records on each stage.
+Notes and photo changes overlay the same live stage and Stop token. Durable
+payment outcomes override stale progress, while final feedback and owner
+decisions still persist. Slow accepted session saves expose only numeric seal,
+write and commit timings, making future local delays distinguishable from
+provider response time. These changes target purchase latency without imposing
+a deadline that could discard an uncertain payment result.
+
 Checkout, delivery and payment-request refusals now have a separate durable
 episode and owner notice. These failures previously bypassed the connection
 warning recorder. The failure is accepted only from the exact currently saved,

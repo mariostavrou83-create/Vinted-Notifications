@@ -27,15 +27,22 @@ def purchase_waiter():
         os.close(fd)
 
 
-def yield_to_purchase():
-    """Background work finishes its in-flight request, then releases the buyer."""
+def purchase_waiting():
+    """Observe the owner marker without waiting or retaining another lock."""
     fd = _open()
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            from vinted_buyer import BuyerError
-
-            raise BuyerError("An owner purchase is waiting.", reason="busy") from None
+            return True
+        return False
     finally:
         os.close(fd)
+
+
+def yield_to_purchase():
+    """Background work finishes its in-flight request, then releases the buyer."""
+    if purchase_waiting():
+        from vinted_buyer import BuyerError
+
+        raise BuyerError("An owner purchase is waiting.", reason="busy")

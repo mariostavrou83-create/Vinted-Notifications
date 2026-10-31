@@ -359,9 +359,15 @@ def load(platform, message_id):
         ).fetchone()
     if row is None:
         return None
+    row = dict(row, reference_id=card["reference_id"], telegram_message_id=message_id)
+    details = json.loads(card["details"])
+    if platform == "vinted":
+        from vinted_buying import merge_live_feedback
+
+        details = merge_live_feedback(row, details, message_id)
     return (
-        dict(row, reference_id=card["reference_id"], telegram_message_id=message_id),
-        json.loads(card["details"]),
+        row,
+        details,
         dict(card),
     )
 

@@ -16,6 +16,7 @@ import resource_controls
 import search_settings
 import vinted_keywords
 from logger import get_logger
+from vinted_buyer_priority import purchase_waiting
 
 logger = get_logger(__name__)
 DEFAULT_WORKERS = 80
@@ -98,8 +99,18 @@ class RequestBudget:
 budget = RequestBudget()
 
 
+class HealthWriteDeferred(Exception):
+    """An owner purchase takes priority over optional status persistence."""
+
+
+def _health_purchase_priority():
+    if purchase_waiting():
+        raise HealthWriteDeferred
+
+
 def _write_health(health_updates):
     """Commit an advisory batch with a short wait, preserving other callers."""
+    _health_purchase_priority()
     with closing(search_settings.connection()) as conn:
         previous_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
         try:
@@ -107,6 +118,7 @@ def _write_health(health_updates):
             # roll back before normal connection settings are restored.
             conn.execute(f"PRAGMA busy_timeout={HEALTH_BUSY_TIMEOUT_MS}")
             with conn:
+                _health_purchase_priority()
                 conn.execute("BEGIN IMMEDIATE")
                 for (
                     scheduler_id,
@@ -117,6 +129,7 @@ def _write_health(health_updates):
                     interval,
                     error,
                 ) in health_updates:
+                    _health_purchase_priority()
                     search_settings.record_health(
                         parent_id, wall_start, duration, interval, error, conn=conn
                     )
@@ -124,6 +137,7 @@ def _write_health(health_updates):
                         vinted_keywords.health(
                             variant_id, wall_start, interval, error, conn=conn
                         )
+                _health_purchase_priority()
         finally:
             # connection() can be borrowed by an enclosing local batch. The
             # short advisory timeout must not leak into critical item writes.
@@ -436,6 +450,10 @@ class Poller:
                     # A competing writer cannot stall the fast scheduler for
                     # the normal 15-second critical-transaction timeout.
                     _write_health(health_updates)
+            except HealthWriteDeferred:
+                # The owner marker covers waiting and active Autobuy work.
+                # Keep the latest statuses without competing for its writes.
+                self.health_retry_at = now + HEALTH_FLUSH_SECONDS
             except sqlite3.OperationalError as exc:
                 code = getattr(exc, "sqlite_errorcode", None)
                 busy = (

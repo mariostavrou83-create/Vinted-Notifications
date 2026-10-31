@@ -1105,6 +1105,14 @@ def save_network(form):
             )
 
 
+def _session_storage_clock():
+    """Optional phase evidence cannot interrupt a durable credential save."""
+    try:
+        return time.perf_counter()
+    except Exception:  # noqa: BLE001 -- retain accepted rotations if timing fails
+        return None
+
+
 class Client:
     def __init__(self, saved=None):
         self.network = network_configuration()
@@ -1383,12 +1391,17 @@ class Client:
         current = self.exported()
         if current == previous:
             return
+        seal_started = _session_storage_clock()
         sealed = encrypt(current)
-        with closing(connection()) as conn, conn:
-            updated = conn.execute(
-                "UPDATE vinted_buyer SET session=? WHERE id=1 AND user_id=? AND session=?",
-                (sealed, user_id, previous_sealed),
-            ).rowcount
+        sealed_at = _session_storage_clock()
+        with closing(connection()) as conn:
+            with conn:
+                updated = conn.execute(
+                    "UPDATE vinted_buyer SET session=? WHERE id=1 AND user_id=? AND session=?",
+                    (sealed, user_id, previous_sealed),
+                ).rowcount
+                written_at = _session_storage_clock()
+            committed_at = _session_storage_clock()
         if updated != 1:
             raise BuyerError(
                 "The saved Vinted connection changed. Recheck it before buying.",
@@ -1396,6 +1409,18 @@ class Client:
                 stage="saved_session",
             )
         self._verified_session = (user_id, sealed, current)
+        # Numeric storage phases only. Optional evidence must not change an
+        # accepted credential save or expose its tokens, SQL, paths or errors.
+        try:
+            if _session_storage_clock() - seal_started >= 0.1:
+                logger.info(
+                    "Vinted session storage timing: seal_ms=%.3f write_ms=%.3f commit_ms=%.3f",
+                    (sealed_at - seal_started) * 1000,
+                    (written_at - sealed_at) * 1000,
+                    (committed_at - written_at) * 1000,
+                )
+        except Exception:  # noqa: BLE001 -- diagnostics cannot invalidate rotation
+            pass
         logger.info("Vinted verified session rotation: persisted=True")
 
     @contextmanager

@@ -2376,6 +2376,46 @@ async def show_purchase_feedback(bot, message, outcome):
     return outcome
 
 
+def _card_feedback(outcome):
+    feedback = {
+        key: outcome.get(key)
+        for key in (
+            "state", "message", "checkout_id", "total", "reason", "action_url",
+            "owner_resolution", "stop_token",
+        )
+    }
+    if outcome.get("_live_progress") is True:
+        feedback["_live_progress"] = True
+    return feedback
+
+
+def merge_live_feedback(row, details, message_id):
+    """Overlay exact live progress when another view reloads this alert."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return details
+    from vinted_telegram_progress import live_feedback
+
+    durable = result(str(row["item_id"]))
+    current = live_feedback(message_id, row["item_id"], durable)
+    if current is not None:
+        return dict(details, buy_feedback=_card_feedback(current))
+    saved = details.get("buy_feedback") or {}
+    authoritative = durable and durable.get("state") not in ("preparing", "paying")
+    if saved.get("state") != "in_progress" or not (
+        saved.get("_live_progress") is True or authoritative
+    ):
+        return details
+    # An actual photo/notes edit may have saved an overlaid stage. Once its
+    # bridge ends, use the durable attempt rather than retain stale Stop tokens.
+    if durable:
+        from vinted_owner_controls import with_offer
+
+        return dict(details, buy_feedback=_card_feedback(with_offer(row, durable)))
+    return dict(details, buy_feedback=None)
+
+
 async def show_alert_feedback(bot, message, outcome):
     """Share durable alert feedback between buttons and notification replies."""
     import photo_cards
@@ -2387,26 +2427,18 @@ async def show_alert_feedback(bot, message, outcome):
     from vinted_owner_controls import with_offer
 
     outcome = with_offer(row, outcome)
-    feedback = {
-        key: outcome.get(key)
-        for key in (
-            "state",
-            "message",
-            "checkout_id",
-            "total",
-            "reason",
-            "action_url",
-            "owner_resolution",
-            "stop_token",
-        )
-    }
+    feedback = _card_feedback(outcome)
+    transient = (
+        feedback["state"] == "in_progress" and feedback.get("_live_progress") is True
+    )
     details = dict(details, buy_feedback=feedback)
     try:
-        with closing(connection()) as conn, conn:
-            conn.execute(
-                "UPDATE telegram_photo_cards SET details=? WHERE platform='vinted' AND message_id=? AND item_id=?",
-                (json.dumps(details), message.message_id, row["item_id"]),
-            )
+        if not transient:
+            with closing(connection()) as conn, conn:
+                conn.execute(
+                    "UPDATE telegram_photo_cards SET details=? WHERE platform='vinted' AND message_id=? AND item_id=?",
+                    (json.dumps(details), message.message_id, row["item_id"]),
+                )
         # Picture and notes controls re-use these details, preserving buy status.
         view = card.get("view", "listing")
         note_page = int(view.split(":")[1]) if view.startswith("notes:") else None
@@ -2440,8 +2472,9 @@ async def show_alert_feedback(bot, message, outcome):
         except BadRequest as exc:
             if "message is not modified" not in str(exc).lower():
                 raise
-        photo_cards.after_edit("vinted", message.message_id, view=view)
-        photo_cards.control_health("vinted", "success")
+        if not transient:
+            photo_cards.after_edit("vinted", message.message_id, view=view)
+            photo_cards.control_health("vinted", "success")
         offer = feedback.get("owner_resolution")
         if offer:
             logger.info(
@@ -2451,9 +2484,10 @@ async def show_alert_feedback(bot, message, outcome):
                 message.message_id,
             )
     except TelegramError as exc:
-        photo_cards.control_health(
-            "vinted", "error", "Could not display Autobuy status"
-        )
+        if not transient:
+            photo_cards.control_health(
+                "vinted", "error", "Could not display Autobuy status"
+            )
         logger.warning(
             "Autobuy result display failed item=%s error=%s",
             row["item_id"],
