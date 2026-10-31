@@ -377,8 +377,10 @@ to the configured solver. Host, protocol, referer and hard-block checks remain.
 CapSolver documents interstitial support under the same task type:
 https://docs.capsolver.com/en/guide/captcha/datadome/ .
 
-A checkout build may handle one explicit `it` device check after a successfully
-solved slider. This is capped at two tasks per client, never repeats a stage,
+A checkout build may handle a slider and an explicit `it` device check in either
+order. The 13:03 UTC no-payment check showed the device-to-slider order after
+CapSolver returned a device solution; the earlier attempt showed slider-to-device.
+This is capped at two tasks per client, never repeats a stage,
 and is allowed only at the pre-payment build endpoint. The second task has at
 most ten seconds and shares a fifteen-second window from the first task's
 start. Ordinary refusals, failed solutions and payment requests cannot trigger

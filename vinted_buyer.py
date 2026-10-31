@@ -1233,8 +1233,8 @@ class Client:
             self.session.headers.pop("X-Anon-Id", None)
 
     @timed_operation("security_check")
-    def solve_challenge(self, response, data=None, *, allow_interstitial_followup=False):
-        """Solve once, plus one explicit slider-to-device step at checkout build."""
+    def solve_challenge(self, response, data=None, *, allow_checkout_followup=False):
+        """Solve once, plus one distinct verification stage at checkout build."""
         if not self.network["enabled"]:
             return False
         from vinted_captcha import extract_challenge, solve_datadome
@@ -1252,10 +1252,12 @@ class Client:
         if self.solver_attempted:
             remaining = min(10, self._solver_followup_deadline - time.monotonic())
             if not (
-                allow_interstitial_followup and self.solver_solved
-                and self._solver_first_kind == "captcha"
+                allow_checkout_followup and self.solver_solved
+                and self._solver_first_kind in ("captcha", "interstitial")
                 and not self._solver_followup_attempted
-                and kind == "interstitial" and marker == ["it"] and remaining > 1
+                and kind != self._solver_first_kind and remaining > 1
+                and ((kind == "interstitial" and marker == ["it"])
+                     or (kind == "captcha" and marker == ["fe"]))
             ):
                 return False
             self._solver_followup_attempted = True
@@ -1306,14 +1308,14 @@ class Client:
         self.solver_solved = True
         return True
 
-    def retry_security_check(self, response, data, error, *, payment=False, allow_interstitial_followup=False):
+    def retry_security_check(self, response, data, error, *, payment=False, allow_checkout_followup=False):
         """Run after rejected-response cookies have been rolled back."""
         if (
             payment
             or response is None
             or error.reason != "security_challenge"
             or response.status_code not in (200, 401, 403, 301, 302, 303, 307, 308)
-            or (self.solver_attempted and not allow_interstitial_followup)
+            or (self.solver_attempted and not allow_checkout_followup)
         ):
             return False
         from vinted_purchase_control import checkpoint
@@ -1325,7 +1327,7 @@ class Client:
             # already dispatched HTTP read returns a challenge.
             with guard():
                 pass
-        if not self.solve_challenge(response, data, allow_interstitial_followup=allow_interstitial_followup):
+        if not self.solve_challenge(response, data, allow_checkout_followup=allow_checkout_followup):
             return False
         if guard is not None:
             with guard():
@@ -1961,7 +1963,7 @@ class Client:
                     pass
             if self.retry_security_check(
                 response, data, error, payment=path.endswith("/payment"),
-                allow_interstitial_followup=(method == "POST" and path == "/api/v2/purchases/checkout/build"),
+                allow_checkout_followup=(method == "POST" and path == "/api/v2/purchases/checkout/build"),
             ):
                 return self.request(
                     method, path, body, allow_challenge=allow_challenge, params=params

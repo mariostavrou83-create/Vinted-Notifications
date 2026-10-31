@@ -12,7 +12,7 @@ import vinted_buying as buying
 from search_settings import connection
 
 logger = logging.getLogger(__name__)
-CHECK_VERSION = "interstitial-v1"
+CHECK_VERSION = "two-stage-verification-v1"
 
 
 def check(item_id, expected_updated):
@@ -58,7 +58,7 @@ def check(item_id, expected_updated):
                 # a conclusively rejected pre-fix build. Reuse its transaction;
                 # an accepted/uncertain build is never eligible for this path.
                 if not (
-                    prior.get("version") is None and prior.get("http_status") == 403
+                    prior.get("version") in (None, "interstitial-v1") and prior.get("http_status") == 403
                     and prior.get("stage") == "checkout_build" and not prior.get("checkout_id")
                     and prior.get("payment_submitted") is False
                     and prior.get("buyer_id") == config["user_id"]

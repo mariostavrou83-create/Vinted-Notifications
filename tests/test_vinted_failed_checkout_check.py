@@ -132,7 +132,7 @@ class FailedCheckoutCheckTests(unittest.TestCase):
         with closing(search_settings.connection()) as conn, conn:
             key, value = conn.execute("SELECT key,value FROM parameters WHERE key LIKE 'buyer_failed_checkout_check:%'").fetchone()
             prior = buyer.decrypt(value.encode())
-            prior.pop("version")
+            prior["version"] = "interstitial-v1"
             conn.execute("UPDATE parameters SET value=? WHERE key=?", (buyer.encrypt(prior).decode(), key))
         self.client.request.reset_mock()
         self.client.request.side_effect = None

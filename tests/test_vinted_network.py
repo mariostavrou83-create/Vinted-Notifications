@@ -289,6 +289,23 @@ class NetworkTests(DatabaseFixture, unittest.TestCase):
             solver.assert_called_once()
             self.assertEqual(request.call_count, 2)
 
+    def test_checkout_build_handles_device_then_slider_with_no_third_task(self):
+        self.configure()
+        for final in (response(data={"checkout": {"id": "test"}}), response(403, INTERSTITIAL)):
+            client = self.client(SAVED)
+            with self.solver() as solver, patch.object(client.session, "request", side_effect=[
+                response(403, INTERSTITIAL), response(403, CHALLENGE), final,
+            ]) as request:
+                if final.status_code == 403:
+                    with self.assertRaises(buyer.BuyerError):
+                        client.request("POST", "/api/v2/purchases/checkout/build", {})
+                else:
+                    self.assertEqual(client.request("POST", "/api/v2/purchases/checkout/build", {}), {"checkout": {"id": "test"}})
+            self.assertEqual(solver.call_count, 2)
+            self.assertEqual(request.call_count, 3)
+            self.assertTrue(all(call == request.call_args_list[0] for call in request.call_args_list))
+            self.assertLessEqual(solver.call_args_list[1].kwargs["max_seconds"], 10)
+
     def test_device_followup_cannot_loop_or_repeat_slider(self):
         self.configure()
         for sequence, count in (([CHALLENGE, INTERSTITIAL, INTERSTITIAL], 2), ([CHALLENGE, CHALLENGE], 1)):
