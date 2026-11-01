@@ -384,7 +384,11 @@ def create_app(test_config=None):
             from search_review_release import apply_once
             try:
                 manifest = json.loads(request.form.get("manifest", ""))
-                result = apply_once(manifest_data=manifest)
+                if isinstance(manifest, dict) and manifest.get("id") == "msj-search-quality-20261101-v1":
+                    from search_quality_review import apply_once as apply_quality
+                    result = apply_quality(manifest)
+                else:
+                    result = apply_once(manifest_data=manifest)
             except (ValueError, TypeError, KeyError, RuntimeError) as exc:
                 return {"error": str(exc)}, 409
             return {"result": result}, 200, {"Cache-Control": "no-store"}

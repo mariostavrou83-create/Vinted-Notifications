@@ -9,6 +9,7 @@ import db
 import search_settings
 
 DEFAULT_REQUESTS_PER_SECOND = 10
+MAX_REQUESTS_PER_SECOND = 60
 
 
 def request_rate():
@@ -17,15 +18,15 @@ def request_rate():
             db.get_parameter("vinted_requests_per_second")
             or DEFAULT_REQUESTS_PER_SECOND
         )
-        return max(0, min(20, value))
+        return max(0, min(MAX_REQUESTS_PER_SECOND, value))
     except (ValueError, TypeError):
         return DEFAULT_REQUESTS_PER_SECOND
 
 
 def save_rate(value):
-    if not str(value).isdigit() or not 0 <= int(value) <= 20:
+    if not str(value).isdigit() or not 0 <= int(value) <= MAX_REQUESTS_PER_SECOND:
         raise ValueError(
-            "Choose fast mode (0), or 1–20 total Vinted checks per second."
+            "Choose fast mode (0), or 1–60 total Vinted checks per second."
         )
     with closing(search_settings.connection()) as conn, conn:
         conn.execute(
