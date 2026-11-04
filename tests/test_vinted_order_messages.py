@@ -45,3 +45,23 @@ class OrderMessageTests(DatabaseFixture, unittest.TestCase):
         self.assertTrue(result["is_paid"])
         self.assertEqual(result["delivered_at"], 1000)
         self.assertNotIn("private", str(result))
+
+    def test_message_gateway_limits_paths_and_keeps_personal_data_check(self):
+        from test_vinted_network import response
+        client = messages.buyer.Client()
+        path = "/messaging/main/conversations/01a1a36a-3a23-7d6b-902b-bc85860d0ebf"
+        body = {"content": "Approved test text", "is_personal_data_sharing_check_skipped": False, "photo_temp_uuids": None}
+        try:
+            with patch.object(client.session, "request", return_value=response(data={"id": "offline"})) as request:
+                client.request("GET", path)
+                self.assertEqual(request.call_args.args, ("GET", "https://api.vinted.co.uk" + path))
+                client.request("POST", path + "/replies", body)
+                self.assertEqual(request.call_args.kwargs["json"], body)
+                self.assertFalse(request.call_args.kwargs["allow_redirects"])
+                count = request.call_count
+                for method, suffix, payload in [("DELETE", "", None), ("POST", "", body), ("POST", "/replies", dict(body, is_personal_data_sharing_check_skipped=True)), ("GET", "/replies", None)]:
+                    with self.assertRaises(messages.buyer.BuyerError):
+                        client.request(method, path + suffix, payload)
+                self.assertEqual(request.call_count, count)
+        finally:
+            client.session.close()

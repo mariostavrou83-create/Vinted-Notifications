@@ -1,6 +1,7 @@
 """Order-message controls and independent, account-bound order observation."""
 
 import json
+import re
 import time
 from contextlib import closing
 
@@ -59,7 +60,7 @@ def evidence(value, key="", depth=0):
         return {k: evidence(v, k, depth + 1) for k, v in value.items()}
     if isinstance(value, list):
         return [evidence(v, key, depth + 1) for v in value[:3]]
-    if key in {"id", "transaction_id", "conversation_id", "seller_id", "buyer_id", "user_id", "user_side", "current_user_side", "type", "entity_type", "status", "status_code", "code", "event_type", "total_pages", "current_page", "total_entries"} or key.startswith("is_") or key.endswith(("_at", "_at_ts")):
+    if key in {"id", "transaction_id", "conversation_id", "seller_id", "buyer_id", "user_id", "user_side", "current_user_side", "type", "entity_type", "status", "transaction_user_status", "date", "status_code", "code", "event_type", "total_pages", "current_page", "total_entries"} or key.startswith("is_") or key.endswith(("_at", "_at_ts")):
         return value if not isinstance(value, str) or len(value) < 120 else "string"
     return None if value is None else type(value).__name__
 
@@ -85,10 +86,29 @@ class OrderMessageWorker:
                     yield_to_purchase()
                     data = client.request("GET", f"/api/v2/my_orders?type={kind}&status=all&page=1&per_page=20")
                     observed[kind] = evidence(data)
+                    rows = data.get("my_orders", [])
+                    observed[kind]["statuses"] = list({str(row.get("status")) + " / " + str(row.get("transaction_user_status")) for row in rows})
+                    selected = rows[:1] + [row for row in rows[1:] if "complet" in str(row.get("status", "")).lower()][:1]
+                    observed[kind]["details"] = []
+                    for order in selected:
+                        detail = {}
+                        tid, cid = str(order.get("transaction_id", "")), str(order.get("conversation_id", ""))
+                        paths = []
+                        if re.fullmatch(r"[1-9][0-9]{0,23}", tid):
+                            paths.append(("transaction", "/api/v2/transactions/" + tid))
+                        if re.fullmatch(r"[0-9a-f-]{36}", cid):
+                            paths.append(("conversation", "/messaging/main/conversations/" + cid))
+                        for label, path in paths:
+                            yield_to_purchase()
+                            try:
+                                detail[label] = evidence(client.request("GET", path))
+                            except buyer.BuyerError as exc:
+                                detail[label] = {"error": exc.reason, "http": exc.status}
+                        observed[kind]["details"].append(detail)
                 with closing(connection()) as conn, conn:
                     conn.execute("""UPDATE vinted_order_message_settings SET evidence=?,
                         last_scan=?,next_scan=?,error='' WHERE id=1 AND account_id=?""",
-                        (json.dumps(observed), self.clock(), self.clock() + 60, config["account_id"]))
+                        (json.dumps(observed), self.clock(), self.clock() + 3600, config["account_id"]))
                 logger.info("Vinted order messages: account order check succeeded")
         except buyer.BuyerError as exc:
             if exc.reason == "busy":

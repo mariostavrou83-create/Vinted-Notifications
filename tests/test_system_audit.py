@@ -458,6 +458,7 @@ class WatchdogTests(unittest.TestCase):
             "rss_process": None,
             "ebay_worker_process": Mock(),
             "offers_worker_process": Mock(),
+            "order_messages_process": Mock(),
             "scrape_process": Mock(),
             "item_extractor_process": Mock(),
             "dispatcher_process": Mock(),
@@ -484,6 +485,7 @@ class WatchdogTests(unittest.TestCase):
                 "dispatcher",
                 "dashboard",
                 "vinted-offers",
+                "vinted-order-messages",
             },
         )
         namespace["shutdown_requested"].set()

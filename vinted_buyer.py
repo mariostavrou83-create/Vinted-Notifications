@@ -1665,6 +1665,10 @@ class Client:
 
         checkpoint()
         notifications_gateway = path == NOTIFICATIONS_PATH
+        messaging_gateway = bool(re.fullmatch(
+            r"/messaging/main/conversations/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:/replies)?",
+            path,
+        ))
         pickup_gateway = bool(
             re.fullmatch(
                 r"/shipping-estimation/external/shipping_orders/[0-9]{1,24}/nearby_pickup_points",
@@ -1693,6 +1697,19 @@ class Client:
                     "Sec-Fetch-Site": "same-site",
                 },
             }
+        elif messaging_gateway:
+            valid_read = method == "GET" and not path.endswith("/replies") and body is None
+            valid_reply = (
+                method == "POST" and path.endswith("/replies")
+                and isinstance(body, dict)
+                and set(body) == {"content", "is_personal_data_sharing_check_skipped", "photo_temp_uuids"}
+                and isinstance(body["content"], str) and 0 < len(body["content"]) <= 2000
+                and body["is_personal_data_sharing_check_skipped"] is False
+                and body["photo_temp_uuids"] is None
+            )
+            if params is not None or allow_challenge or not (valid_read or valid_reply):
+                raise BuyerError("Vinted conversation request could not be verified.")
+            extra = {"headers": {"Platform": "web", "X-Next-App": "marketplace-web", "Sec-Fetch-Site": "same-site"}}
         elif pickup_gateway:
             if (
                 method != "GET"
@@ -1746,14 +1763,14 @@ class Client:
             referer = BASE + "/checkout?purchase_id=" + path.split("/")[4]
         elif path.startswith("/api/v2/items/"):
             referer = BASE + "/items/" + path.split("/")[4]
-        elif renewal or notifications_gateway:
+        elif renewal or notifications_gateway or messaging_gateway:
             referer = BASE + "/"
         elif path.startswith("/web/api/auth/"):
             referer = BASE + "/member/login"
         else:
             referer = self.session.headers.get("Referer", BASE + "/")
         self.session.headers["Referer"] = referer
-        if pickup_gateway or notifications_gateway:
+        if pickup_gateway or notifications_gateway or messaging_gateway:
             # Observe cookie scope for this validated API-host request without
             # copying credentials between hosts or changing the actual request.
             # Identity on www does not establish that cookies apply to api.
@@ -1777,7 +1794,7 @@ class Client:
                 )
                 logger.info(
                     "Vinted %s cookie evidence: access_sent=%s refresh_sent=%s csrf_sent=%s",
-                    "pickup" if pickup_gateway else "notifications",
+                    "pickup" if pickup_gateway else "messages" if messaging_gateway else "notifications",
                     pickup_cookie_names.count("access_token_web"),
                     pickup_cookie_names.count("refresh_token_web"),
                     bool(prepared_pickup.headers.get("X-CSRF-Token")),
@@ -1785,9 +1802,9 @@ class Client:
             except Exception:  # noqa: BLE001 -- optional evidence cannot stop buying
                 logger.info(
                     "Vinted %s cookie evidence: available=False",
-                    "pickup" if pickup_gateway else "notifications",
+                    "pickup" if pickup_gateway else "messages" if messaging_gateway else "notifications",
                 )
-            if api_access_missing and notifications_gateway:
+            if api_access_missing and (notifications_gateway or messaging_gateway):
                 # Keep the offers authentication check. The pickup lookup
                 # retains its original request behavior: absent credentials
                 # are evidence, not proof that this endpoint will reject it.
@@ -1828,7 +1845,7 @@ class Client:
                         method,
                         (
                             PICKUP_BASE
-                            if pickup_gateway or notifications_gateway
+                            if pickup_gateway or notifications_gateway or messaging_gateway
                             else BASE
                         )
                         + path,
