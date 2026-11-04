@@ -1,0 +1,19 @@
+{% extends 'msj_base.html' %}
+{% block title %}Order messages · MSJ Finder{% endblock %}
+{% block content %}
+<section class="form-card"><h1>Order messages</h1>
+<p>Vinted account: {{config.account_id or 'Not selected'}} · Status: <b>{{config.mode}}</b></p>
+{% if config.error %}<p class="notice error">{{config.error}}</p>{% endif %}
+<form method="post" action="/messages/settings"><input type="hidden" name="csrf" value="{{csrf}}">
+<label for="purchase">To the seller · 3 minutes after your purchase</label>
+<textarea id="purchase" name="purchase" rows="3" maxlength="2000" required>{{config.templates.purchase}}</textarea>
+<label for="sale">To the buyer · 3 minutes after their purchase</label>
+<textarea id="sale" name="sale" rows="3" maxlength="2000" required>{{config.templates.sale}}</textarea>
+<label for="review">To the buyer · 2 days after delivery</label>
+<textarea id="review" name="review" rows="3" maxlength="2000" required>{{config.templates.review}}</textarea>
+<p>Each message belongs to one confirmed order. Cancelled orders are excluded.</p>
+<button class="primary" name="mode" value="preview">Save and check connection</button>
+<button class="secondary" name="mode" value="paused">Pause messages</button>
+</form><p>Connection checks read order details without sending messages.</p>
+</section>
+{% endblock %}

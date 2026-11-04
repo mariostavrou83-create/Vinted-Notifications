@@ -23,19 +23,27 @@ def request_rate():
         return DEFAULT_REQUESTS_PER_SECOND
 
 
-def save_rate(value):
+def save_rate(value, interval=None):
     if not str(value).isdigit() or not 0 <= int(value) <= MAX_REQUESTS_PER_SECOND:
         raise ValueError(
             "Choose fast mode (0), or 1–60 total Vinted checks per second."
         )
+    if interval is not None:
+        try:
+            interval = float(interval)
+        except (ValueError, TypeError):
+            raise ValueError("Choose a repeat interval between 1 and 300 seconds.") from None
+        if not math.isfinite(interval) or not 1 <= interval <= 300:
+            raise ValueError("Choose a repeat interval between 1 and 300 seconds.")
     with closing(search_settings.connection()) as conn, conn:
         conn.execute(
             "INSERT OR REPLACE INTO parameters VALUES ('vinted_requests_per_second',?)",
             (str(value),),
         )
-        if int(value) == 0:
+        if interval is not None or int(value) == 0:
             conn.execute(
-                "INSERT OR REPLACE INTO parameters VALUES ('query_refresh_delay','1')"
+                "INSERT OR REPLACE INTO parameters VALUES ('query_refresh_delay',?)",
+                (format(interval if interval is not None else 1, 'g'),),
             )
 
 
@@ -53,7 +61,7 @@ def summary():
             "rate": value,
             "name": name,
             "cycle": round(
-                max(1 if value == 0 else target, checks / value if value else 0), 1
+                max(target, checks / value if value else 0), 1
             ),
         }
         for value, name in ((0, "Fast"), (10, "Balanced"), (5, "Budget"))

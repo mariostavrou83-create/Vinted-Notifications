@@ -184,6 +184,10 @@ def create_app(test_config=None):
 
     install_offers(app)
 
+    from vinted_order_message_routes import install as install_order_messages
+
+    install_order_messages(app)
+
     @app.after_request
     def headers(response):
         response.headers.update(
@@ -737,7 +741,10 @@ def create_app(test_config=None):
                         "success",
                     )
                 elif action == "vinted_rate":
-                    resource_controls.save_rate(request.form.get("request_rate", ""))
+                    resource_controls.save_rate(
+                        request.form.get("request_rate", ""),
+                        request.form.get("repeat_interval"),
+                    )
                     flash(
                         "Vinted checking mode saved. It applies automatically to all searches.",
                         "success",

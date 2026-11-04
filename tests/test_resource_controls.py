@@ -102,6 +102,21 @@ class ControlsDashboardTests(EbayFixture, unittest.TestCase):
 class ScalingTests(test_search_controls.DatabaseFixture, unittest.TestCase):
     simulate = test_search_controls.SchedulerTests.simulate
 
+    def test_fractional_interval_persists_without_rate_limit_and_invalid_is_atomic(self):
+        resource_controls.save_rate("0", "3.5")
+        self.assertEqual(float(db.get_parameter("query_refresh_delay")), 3.5)
+        self.assertEqual(resource_controls.summary()["cycle"], 3.5)
+        starts, _ = self.simulate(workers=96, target=3.5, seconds=15)
+        for query_id in range(1, 45):
+            times = [t for q, t in starts if q == query_id]
+            self.assertGreaterEqual(len(times), 4)
+            self.assertTrue(all(3.499 <= b - a <= 3.6 for a, b in itertools.pairwise(times)))
+        for invalid in ("nan", "inf", "", "0", "301"):
+            with self.assertRaises(ValueError):
+                resource_controls.save_rate("5", invalid)
+            self.assertEqual(resource_controls.request_rate(), 0)
+            self.assertEqual(float(db.get_parameter("query_refresh_delay")), 3.5)
+
     def test_fast_mode_restores_one_second_checks_without_overlap(self):
         resource_controls.save_rate("0")
         starts, pending = self.simulate(workers=12, target=1)

@@ -31,6 +31,7 @@ telegram_process = None
 rss_process = None
 ebay_worker_process = None
 offers_worker_process = None
+order_messages_process = None
 scrape_process = None
 item_extractor_process = None
 dispatcher_process = None
@@ -113,7 +114,7 @@ def check_refresh_delay(items_queue):
 
     # Get the current value from the database
     try:
-        new_delay = int(db.get_parameter("query_refresh_delay"))
+        new_delay = float(db.get_parameter("query_refresh_delay"))
 
         # If the delay has changed, update the scheduler
         if new_delay != current_query_refresh_delay:
@@ -148,6 +149,7 @@ def monitor_processes(items_queue, telegram_queue, rss_queue, new_items_queue=No
 
 def _monitor_processes(items_queue, telegram_queue, rss_queue, new_items_queue=None):
     global telegram_process, rss_process, ebay_worker_process, offers_worker_process
+    global order_messages_process
     global scrape_process, item_extractor_process, dispatcher_process, web_ui_process_instance
 
     if new_items_queue is not None:
@@ -176,6 +178,11 @@ def _monitor_processes(items_queue, telegram_queue, rss_queue, new_items_queue=N
 
         offers_worker_process = ensure_running(
             offers_worker_process, offers_run, name="vinted-offers"
+        )
+        from vinted_order_messages import run as order_messages_run
+
+        order_messages_process = ensure_running(
+            order_messages_process, order_messages_run, name="vinted-order-messages"
         )
 
     if ebay_worker_process is None or not ebay_worker_process.is_alive():
@@ -327,7 +334,7 @@ if __name__ == "__main__":
 
     # 1. Create and start the scrape process
     # This process will scrape items and put them in the items_queue
-    current_query_refresh_delay = int(db.get_parameter("query_refresh_delay"))
+    current_query_refresh_delay = float(db.get_parameter("query_refresh_delay"))
     scrape_process = multiprocessing.Process(
         target=scraper_process, args=(items_queue,)
     )
@@ -466,6 +473,7 @@ if __name__ == "__main__":
                 web_ui_process_instance,
                 ebay_worker_process,
                 offers_worker_process,
+                order_messages_process,
                 telegram_process,
                 rss_process,
                 buyer_check_process,
