@@ -52,14 +52,16 @@ class RenewalOfferBackoffTests(DatabaseFixture, unittest.TestCase):
         client = SimpleNamespace(
             _verified_session=("99", self.sealed, {}),
             session=SimpleNamespace(close=Mock()),
-            request=Mock(return_value={"notifications": []}),
+            request=Mock(return_value={"notifications": [], "items": []}),
         )
         factory = Mock(return_value=client)
         offers.OfferWorker(clock=lambda: NOW + 72, client_factory=factory).tick()
         factory.assert_not_called()
         offers.OfferWorker(clock=lambda: NOW + 73, client_factory=factory).tick()
         factory.assert_called_once()
-        self.assertEqual(client.request.call_args.args[0:2], ("GET", buyer.NOTIFICATIONS_PATH))
+        client.request.assert_any_call("GET", buyer.NOTIFICATIONS_PATH,
+                                       params={"page": 1, "per_page": offers.PAGE_SIZE})
+        self.assertEqual(offers.state()["mode"], "live")
 
     def test_upstream_rate_limit_still_has_its_existing_minimum(self):
         error = buyer.BuyerError("Offline rate limit", 429, reason="rate_limited", retry_after=73)

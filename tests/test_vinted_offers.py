@@ -1246,7 +1246,7 @@ class OfferTests(DatabaseFixture, unittest.TestCase):
         job = {"account_id": "111", "item_id": "1001"}
         with self.assertRaises(offers.OfferCheck) as absent:
             offers.SellerItems(lambda: self.now).read(self.client, job)
-        self.assertEqual(absent.exception.reason, "unavailable")
+        self.assertEqual(absent.exception.reason, "inventory_missing")
         self.client.wardrobe = [
             dict(
                 self.client.request("GET", "/api/v2/items/1001")["item"], is_closed=True

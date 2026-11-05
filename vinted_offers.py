@@ -51,6 +51,8 @@ MESSAGES = {
     "cancelled": "Removed from the queue by you.",
     "stale": "Settings changed while this item was being checked. It will be checked again.",
     "inventory": "Checking your wardrobe for this item.",
+    "inventory_missing": "This item was not in the current wardrobe response. Active listings are checked again automatically.",
+    "closed_conversation": "This buyer's transaction is already paid, completed, cancelled or unavailable.",
     "crash": "The worker restarted during this send. Check Vinted; it will not be retried automatically.",
     "outside_history": "This favourite is outside your selected history period.",
 }
@@ -95,7 +97,9 @@ class SellerItems:
 
     def read(self, client, job):
         now = self.clock()
-        if self.account != job["account_id"] or self.complete and self.expires < now:
+        # An unfinished wardrobe is stale too. Otherwise a newly listed item
+        # can be absent from an old first page plus a fresh final page forever.
+        if self.account != job["account_id"] or self.expires < now:
             self.account, self.rows, self.page = job["account_id"], {}, 1
             self.complete = False
         if job["item_id"] not in self.rows and not self.complete:
@@ -112,12 +116,12 @@ class SellerItems:
             if len(self.rows) > 10000 or self.page > 200:
                 raise OfferCheck("shape", pause=True)
             self.page += 1
-            self.complete = len(rows) < 96
+            self.complete = wardrobe_page_complete(data, rows, self.page - 1)
             self.expires = now + 60
         found = self.rows.get(job["item_id"])
         if not found:
             if self.complete:
-                raise OfferCheck("unavailable")
+                raise OfferCheck("inventory_missing")
             raise InventoryPending()
         record, checked = found
         if checked < now - 60:
@@ -149,6 +153,141 @@ class SellerItems:
                 "title": record.get("title", "Vinted item"),
             }
         }
+
+
+def wardrobe_page_complete(data, rows, page):
+    """Respect server pagination even when it caps the requested page size."""
+    pagination = data.get("pagination")
+    if isinstance(pagination, dict):
+        total = pagination.get("total_pages")
+        if type(total) is int and total >= 0:
+            return not rows or page >= total
+        per_page = pagination.get("per_page")
+        if type(per_page) is int and 0 < per_page <= 96:
+            return len(rows) < per_page
+    return len(rows) < 96
+
+
+def recover_available_items(rows, config, now):
+    """Recheck availability skips only after a fresh, owned, sellable listing.
+
+    This never sends. The normal worker must still validate the canonical
+    listing, buyer and conversation. Each old skip is recovered at most once,
+    and any previous send attempt permanently excludes it from recovery.
+    """
+    active = []
+    for item in rows:
+        item_id = identifier(item.get("id")) if isinstance(item, dict) else None
+        if not item_id:
+            continue
+        try:
+            checked_item({"item": item},
+                         {"item_id": item_id, "account_id": config["account_id"]},
+                         config["rounding"])
+        except OfferCheck:
+            continue
+        active.append(item_id)
+    if not active:
+        return active, []
+    recovered = []
+    with closing(connection()) as conn, conn:
+        fresh = conn.execute(
+            "SELECT account_id,mode,revision FROM vinted_offer_settings WHERE id=1"
+        ).fetchone()
+        if (fresh["account_id"] != config["account_id"] or fresh["mode"] == "paused"
+                or fresh["revision"] != config["revision"]):
+            return active, []
+        candidates = conn.execute(
+            "SELECT id,item_id FROM vinted_offer_jobs WHERE account_id=? "
+            "AND item_id IN (" + ",".join("?" for _ in active) + ") "
+            "AND status='skipped' AND reason IN ('unavailable','inventory_missing') "
+            "AND offer_id IS NULL AND sent_at IS NULL AND liked_at>=? "
+            "AND NOT EXISTS (SELECT 1 FROM vinted_offer_events e "
+            "WHERE e.job_id=vinted_offer_jobs.id "
+            "AND e.action IN ('sending','availability_recheck'))",
+            (config["account_id"], *active, history_cutoff(config, now)),
+        ).fetchall()
+        # No write transaction at all when there is nothing to recover.
+        if candidates:
+            conn.execute("BEGIN IMMEDIATE")
+            fresh = conn.execute(
+                "SELECT account_id,mode,revision FROM vinted_offer_settings WHERE id=1"
+            ).fetchone()
+            if (fresh["account_id"] != config["account_id"] or fresh["mode"] == "paused"
+                    or fresh["revision"] != config["revision"]):
+                return active, []
+            for row in candidates:
+                changed = conn.execute(
+                    "UPDATE vinted_offer_jobs SET status='queued',reason='',lease_until=0 "
+                    "WHERE id=? AND status='skipped' "
+                    "AND reason IN ('unavailable','inventory_missing') "
+                    "AND offer_id IS NULL AND sent_at IS NULL "
+                    "AND NOT EXISTS (SELECT 1 FROM vinted_offer_events e "
+                    "WHERE e.job_id=vinted_offer_jobs.id "
+                    "AND e.action IN ('sending','availability_recheck'))", (row["id"],)
+                ).rowcount
+                if changed:
+                    event(conn, "availability_recheck", job_id=row["id"], now=now)
+                    recovered.append(dict(row))
+    for row in recovered:
+        logger.info("Vinted offers availability recovered: queue_id=%s item_id=%s",
+                    row["id"], row["item_id"])
+    return active, recovered
+
+
+class WardrobeCoverage:
+    """Check all wardrobe pages, with one read per tick and ten-minute cycles."""
+
+    def __init__(self):
+        self.account = None
+        self.page = 1
+        self.next_scan = 0
+        self.seen = set()
+        self.active = set()
+        self.recovered = 0
+        self.audit = True
+
+    def scan(self, client, config, now):
+        import os
+        import json
+
+        if self.account != config["account_id"]:
+            self.__init__()
+            self.account = config["account_id"]
+        if now < self.next_scan:
+            return
+        if self.page == 1:
+            self.seen, self.active, self.recovered = set(), set(), 0
+        yield_to_purchase()
+        data = client.request("GET", f"/api/v2/wardrobe/{self.account}/items"
+                              f"?page={self.page}&per_page=96&order=relevance")
+        rows = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(rows, list) or len(rows) > 96:
+            raise OfferCheck("shape", pause=True)
+        active, recovered = recover_available_items(rows, config, now)
+        self.active.update(active)
+        self.recovered += len(recovered)
+        self.seen.update(identifier(r.get("id")) for r in rows if isinstance(r, dict)
+                         and identifier(r.get("id")))
+        if len(self.seen) > 10000 or self.page > 200:
+            raise OfferCheck("shape", pause=True)
+        if self.audit and os.environ.get("MSJ_OFFER_AUDIT_TITLE"):
+            for item in rows:
+                if not isinstance(item, dict) or identifier(item.get("id")) not in active:
+                    continue
+                evidence = {"item_id": identifier(item["id"]),
+                            "title": str(item.get("title", ""))[:160]}
+                for key in ("favourite_count", "favourites_count", "view_count"):
+                    if type(item.get(key)) is int:
+                        evidence[key] = item[key]
+                logger.info("Vinted offer active listing: %s", json.dumps(evidence))
+        complete = wardrobe_page_complete(data, rows, self.page)
+        logger.info("Vinted offers wardrobe coverage: page=%s rows=%s complete=%s active=%s recovered=%s",
+                    self.page, len(rows), complete, len(self.active), self.recovered)
+        self.page = 1 if complete else self.page + 1
+        self.next_scan = now + (600 if complete else PAGE_GAP)
+        if complete:
+            self.audit = False
 
 
 def migrate(conn):
@@ -629,7 +768,7 @@ def checked_conversation(data, job):
     ):
         raise OfferCheck("recipient", pause=True)
     if any(transaction.get(key) for key in ("is_completed", "is_cancelled", "is_paid")):
-        raise OfferCheck("unavailable")
+        raise OfferCheck("closed_conversation")
     messages = conv.get("messages")
     if not isinstance(messages, list):
         raise OfferCheck("shape", pause=True)
@@ -962,6 +1101,7 @@ class OfferWorker:
         )
         self.clock = clock or time.time
         self.inventory = SellerItems(self.clock)
+        self.coverage = WardrobeCoverage()
         self.item_reader = item_reader or self.inventory.read
         self.storage_notice_after = 0
         self.recent_key = None
@@ -1088,10 +1228,13 @@ class OfferWorker:
                 (fresh["account_id"], cutoff),
             )
             row = conn.execute(
-                "SELECT * FROM vinted_offer_jobs WHERE account_id=? AND status IN ("
+                "SELECT *,EXISTS(SELECT 1 FROM vinted_offer_events e "
+                "WHERE e.job_id=vinted_offer_jobs.id AND e.action='availability_recheck') "
+                "AS availability_recovered FROM vinted_offer_jobs WHERE account_id=? AND status IN ("
                 + ",".join("?" for _ in statuses)
                 + ") AND liked_at>=? AND liked_at<=? "
-                "ORDER BY CASE WHEN liked_at>=? THEN 0 ELSE 1 END,liked_at,id LIMIT 1",
+                "ORDER BY CASE WHEN liked_at>=? AND NOT availability_recovered "
+                "THEN 0 ELSE 1 END,liked_at,id LIMIT 1",
                 (
                     fresh["account_id"],
                     *statuses,
@@ -1106,9 +1249,9 @@ class OfferWorker:
             ).fetchone()
             if not row:
                 return None
-            if fresh["mode"] == "live" and row["liked_at"] < (
+            if fresh["mode"] == "live" and (row["availability_recovered"] or row["liked_at"] < (
                 fresh["priority_since"] or now
-            ):
+            )):
                 # Keep the next send slot free for a new like due within the
                 # global spacing, instead of letting the history delay it.
                 upcoming = conn.execute(
@@ -1132,6 +1275,8 @@ class OfferWorker:
 
     def process(self, client, config, job):
         sending = False
+        stage = "inventory"
+        info = {}
         try:
             yield_to_purchase()
             info = checked_item(self.item_reader(client, job), job, config["rounding"])
@@ -1139,6 +1284,7 @@ class OfferWorker:
             if config["mode"] == "preview":
                 _finish(job["id"], "ready", checked_at=self.clock(), **info)
                 return
+            stage = "conversation"
             conv_id = identifier(job.get("conversation_id"))
             if not conv_id:
                 data = client.request(
@@ -1253,7 +1399,7 @@ class OfferWorker:
                     "UPDATE vinted_offer_settings SET last_sent=?,next_send=MAX(next_send,?) WHERE id=1",
                     (now, now + SEND_GAP),
                 )
-            logger.info("Vinted offers: sent queue_id=%s", job["id"])
+            logger.info("Vinted offers: sent queue_id=%s item_id=%s", job["id"], job["item_id"])
         except InventoryPending:
             _finish(job["id"], "queued", "inventory")
         except OfferCheck as exc:
@@ -1261,7 +1407,11 @@ class OfferWorker:
                 job["id"],
                 "uncertain" if sending else "skipped",
                 "uncertain" if sending else exc.reason,
+                checked_at=self.clock(),
+                **info,
             )
+            logger.info("Vinted offers check outcome: queue_id=%s item_id=%s reason=%s stage=%s",
+                        job["id"], job["item_id"], exc.reason, stage)
             if exc.pause or sending:
                 pause("uncertain" if sending else exc.reason)
         except buyer.BuyerError as exc:
@@ -1281,7 +1431,10 @@ class OfferWorker:
                         (self.clock() + SCAN_GAP,),
                     )
             elif exc.status in (404, 410):
-                _finish(job["id"], "skipped", "unavailable")
+                reason = "unavailable" if stage == "inventory" else "closed_conversation"
+                _finish(job["id"], "skipped", reason, checked_at=self.clock(), **info)
+                logger.info("Vinted offers check outcome: queue_id=%s item_id=%s reason=%s stage=%s",
+                            job["id"], job["item_id"], reason, stage)
             else:
                 _finish(job["id"], "queued", reason)
                 if reason == "cooldown":
@@ -1318,6 +1471,7 @@ class OfferWorker:
             self.recent_scan = {"page": 1, "latest": 0, "watermark": 0, "next_scan": 0}
         needs_scan = config["next_scan"] <= now
         needs_recent = config["scan_page"] > 1 and self.recent_scan["next_scan"] <= now
+        needs_coverage = self.coverage.next_scan <= now or self.coverage.account != config["account_id"]
         with closing(connection()) as conn:
             # A previous tick may have lost local storage after the offer POST.
             # Never perform more account work while that send's outcome is
@@ -1342,6 +1496,7 @@ class OfferWorker:
         if (
             not needs_scan
             and not needs_recent
+            and not needs_coverage
             and (not pending or config["next_send"] > now)
         ):
             return
@@ -1370,6 +1525,8 @@ class OfferWorker:
                 if job:
                     self.process(client, config, job)
                 config = state()
+                if config["mode"] != "paused" and config["cooldown_until"] <= self.clock() and needs_coverage:
+                    self.coverage.scan(client, config, self.clock())
                 if config["mode"] != "paused" and config["next_scan"] <= self.clock():
                     yield_to_purchase()
                     self.scan(client, config)
