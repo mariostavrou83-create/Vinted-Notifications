@@ -1397,6 +1397,9 @@ class OfferWorker:
 
 def run():
     """A small dedicated worker; no sleeping or offer work in the fast poller."""
+    from vinted_offer_audit import log_on_start
+
+    log_on_start()
     worker = OfferWorker()
     logger.info("Vinted offers worker ready: minimum send spacing=%ss", SEND_GAP)
     while True:
