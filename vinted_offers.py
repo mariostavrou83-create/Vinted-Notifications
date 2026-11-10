@@ -84,7 +84,9 @@ class SellerItems:
 
     The former UK item-detail API returns 404. A wardrobe record confirms the
     item's active/closed state even when can_buy=False because we are its owner.
-    The canonical listing page confirms current price, seller and restrictions.
+    The canonical listing page confirms seller and restrictions. Its current
+    price takes precedence when present; seller views that omit it use the
+    separately verified, at-most-60-second-old owned wardrobe price.
     No refusal causes a route switch, anonymous read, or challenge retry.
     """
 
@@ -133,7 +135,7 @@ class SellerItems:
         checked_item({"item": record}, job, "penny")
         yield_to_purchase()
         data = client.listing_page(
-            buyer.BASE + "/items/" + job["item_id"], job["item_id"]
+            buyer.BASE + "/items/" + job["item_id"], job["item_id"], for_offer=True
         )
         current = data.get("item") if isinstance(data, dict) else None
         if (

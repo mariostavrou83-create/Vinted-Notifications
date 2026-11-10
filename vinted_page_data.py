@@ -307,6 +307,21 @@ def _add_photos(result, values):
 
 def parse_purchase_item(html, item_id, *, diagnostics=None):
     """Read current buy eligibility from one consistent, identity-scoped item."""
+    return _parse_transaction_item(html, item_id, diagnostics=diagnostics, require_price=True)
+
+
+def parse_offer_item(html, item_id, *, diagnostics=None):
+    """Read seller-page restrictions; absent price requires fresh wardrobe data.
+
+    The seller's rendered page can omit price entirely. Its same-item seller
+    and restriction flags remain mandatory. The offer caller independently
+    verifies the owned, active wardrobe row and its price before using this.
+    A present but malformed or conflicting page price is never ignored.
+    """
+    return _parse_transaction_item(html, item_id, diagnostics=diagnostics, require_price=False)
+
+
+def _parse_transaction_item(html, item_id, *, diagnostics, require_price):
     def reject(reason, **facts):
         if isinstance(diagnostics, dict):
             diagnostics.update(reason=reason, **facts)
@@ -324,7 +339,9 @@ def parse_purchase_item(html, item_id, *, diagnostics=None):
     pending = deque((root, 0) for root in roots)
     candidates = []
     visited = 0
-    required = ("seller_id", "price", "can_buy", "is_reserved", "is_hidden")
+    required = ("seller_id", "can_buy", "is_reserved", "is_hidden")
+    if require_price:
+        required = ("seller_id", "price", "can_buy", "is_reserved", "is_hidden")
     while pending and visited < MAX_PURCHASE_NODES:
         value, depth = pending.popleft()
         visited += 1
@@ -341,8 +358,8 @@ def parse_purchase_item(html, item_id, *, diagnostics=None):
             continue
         identities = [_item_id(value[key]) for key in ("id", "item_id") if key in value]
         # Recommendations and independent status/description plugins cannot
-        # supply a target item's price or seller. Every field comes from the
-        # same complete item record, including resolved Flight references.
+        # supply a target item's price or seller. Every returned field comes
+        # from the same complete record, including resolved Flight references.
         if _item_id(value.get("id")) == item_id and (
             "price" in value or "can_buy" in value
         ):
@@ -353,7 +370,8 @@ def parse_purchase_item(html, item_id, *, diagnostics=None):
                               complete_records=len(candidates))
             if "url" in value and _url_id(value["url"]) != item_id:
                 return reject("conflicting_url")
-            price = _resolve(value["price"], rows)
+            has_price = "price" in value
+            price = _resolve(value.get("price"), rows)
             seller = _item_id(_resolve(value["seller_id"], rows))
             flags = {
                 key: _resolve(value[key], rows)
@@ -368,9 +386,11 @@ def parse_purchase_item(html, item_id, *, diagnostics=None):
             }
             if (
                 not seller
-                or not isinstance(price, dict)
-                or not isinstance(price.get("currency_code"), str)
-                or "amount" not in price
+                or (has_price and (
+                    not isinstance(price, dict)
+                    or not isinstance(price.get("currency_code"), str)
+                    or "amount" not in price
+                ))
                 or any(type(flag) is not bool for flag in flags.values())
             ):
                 return reject("invalid_field_types", seller_valid=bool(seller),
@@ -380,10 +400,10 @@ def parse_purchase_item(html, item_id, *, diagnostics=None):
             candidate = {
                 "id": item_id,
                 "user_id": seller,
-                "price": {
+                **({"price": {
                     "amount": price["amount"],
                     "currency_code": price["currency_code"],
-                },
+                }} if has_price else {}),
                 **flags,
             }
             # Sold/closed can explain an otherwise generic can_buy=False, but

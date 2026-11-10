@@ -56,6 +56,36 @@ class PurchasePageDataTests(unittest.TestCase):
         self.assertNotIn("do-not-log-this", json.dumps(details))
         self.assertNotIn("private_token", json.dumps(details))
 
+    def test_owner_page_without_price_can_only_supply_offer_restrictions(self):
+        item = purchase_item(can_buy=False)
+        del item["price"]
+        html = flight([("1", item), ("2", {"value": "$1"})])
+        self.assertIsNone(page.parse_purchase_item(html, "123"))
+        parsed = page.parse_offer_item(html, "123")
+        self.assertEqual(parsed["user_id"], "456")
+        self.assertFalse(parsed["is_reserved"])
+        self.assertFalse(parsed["is_hidden"])
+        self.assertNotIn("price", parsed)
+
+    def test_offer_parser_keeps_identity_restrictions_and_present_price_checks(self):
+        item = purchase_item(can_buy=False)
+        del item["price"]
+        for missing in ("seller_id", "can_buy", "is_reserved", "is_hidden"):
+            with self.subTest(missing=missing):
+                self.assertIsNone(page.parse_offer_item(next_data(
+                    {key: value for key, value in item.items() if key != missing}
+                ), "123"))
+        for changes in ({"id": "999"}, {"seller_id": True},
+                        {"item_id": "999"}, {"is_reserved": "false"},
+                        {"is_hidden": None}, {"price": None},
+                        {"price": {"amount": "15"}}, {"price": "$missing"}):
+            with self.subTest(changes=changes):
+                self.assertIsNone(page.parse_offer_item(next_data({**item, **changes}), "123"))
+        self.assertIsNone(page.parse_offer_item(next_data(
+            [item, {**item, "is_reserved": True}]), "123"))
+        self.assertIsNone(page.parse_offer_item(next_data(
+            [purchase_item(), purchase_item(price={"amount": "16", "currency_code": "GBP"})]), "123"))
+
     def test_current_sidebar_resolves_price_and_agrees_with_core_item(self):
         item = purchase_item()
         html = flight(

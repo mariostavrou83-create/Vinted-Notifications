@@ -2,6 +2,7 @@
 
 import unittest
 from contextlib import closing
+from unittest.mock import patch
 
 import test_vinted_offers as fixture
 from test_vinted_offers import NOW
@@ -9,6 +10,8 @@ import search_settings
 import vinted_buyer as buyer
 import vinted_offers as offers
 import vinted_offer_listing_recovery as recovery
+import vinted_page_data as page
+from test_vinted_page_data import next_data, purchase_item
 
 
 class ListingRetryTests(unittest.TestCase):
@@ -71,6 +74,56 @@ class ListingRetryTests(unittest.TestCase):
         f.client.fail = None
         f.worker.tick()
         self.assertEqual(len(f.client.writes()), 1)
+
+
+class OwnerPageOfferTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = fixture.OfferTests("test_new_like_waits_full_five_minutes_across_worker_restart")
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.tearDown)
+        f = self.fixture
+        f.enable()
+        f.add()
+        f.client.wardrobe = [f.client.request("GET", "/api/v2/items/1001")["item"]]
+        self.owner_item = purchase_item(id="1001", seller_id="111", can_buy=False)
+        del self.owner_item["price"]
+        self.worker = offers.OfferWorker(client_factory=f.factory, clock=lambda: f.now)
+
+    def listing_page(self, url, item_id, *, for_offer=False):
+        self.assertTrue(for_offer)
+        parsed = page.parse_offer_item(next_data(self.owner_item), item_id)
+        if parsed is None:
+            raise buyer.BuyerError("Unverified item", reason="item_unavailable")
+        return {"item": parsed}
+
+    def test_real_owner_parser_and_wardrobe_price_send_one_correct_offer(self):
+        f = self.fixture
+        f.client.wardrobe[0]["price"] = {"amount": "30.00", "currency_code": "GBP"}
+        with patch.object(f.client, "listing_page", side_effect=self.listing_page):
+            self.worker.tick()
+        self.assertEqual(f.jobs()[0]["status"], "sent")
+        self.assertEqual(f.jobs()[0]["price"], 3000)
+        self.assertEqual(f.jobs()[0]["offer_price"], 2850)
+        self.assertEqual(len(f.client.writes()), 1)
+
+    def test_owner_restrictions_or_invalid_wardrobe_price_still_block_sending(self):
+        f = self.fixture
+        for changes in ({"is_reserved": True}, {"is_hidden": True}, {"seller_id": "999"}):
+            with self.subTest(changes=changes):
+                original = self.owner_item
+                self.owner_item = {**original, **changes}
+                with patch.object(f.client, "listing_page", side_effect=self.listing_page):
+                    with self.assertRaises(offers.OfferCheck):
+                        data = offers.SellerItems(lambda: f.now).read(
+                            f.client, {"account_id": "111", "item_id": "1001"})
+                        offers.checked_item(data, {"account_id": "111", "item_id": "1001"}, "half_pound")
+                self.owner_item = original
+        f.client.wardrobe[0]["price"] = {"amount": "NaN", "currency_code": "GBP"}
+        with patch.object(f.client, "listing_page", side_effect=self.listing_page) as listing:
+            self.worker.tick()
+            listing.assert_not_called()
+        self.assertEqual(f.jobs()[0]["status"], "skipped")
+        self.assertFalse(f.client.writes())
 
 
 class ListingRecoveryTests(unittest.TestCase):

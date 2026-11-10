@@ -1993,10 +1993,10 @@ class Client:
         self.persist_session()
         return data
 
-    def listing_page(self, url, item_id):
+    def listing_page(self, url, item_id, *, for_offer=False):
         """Read one canonical listing page with the verified account session."""
         from vinted_gallery import listing_url
-        from vinted_page_data import _url_id, parse_purchase_item
+        from vinted_page_data import _url_id, parse_offer_item, parse_purchase_item
 
         target = listing_url(url)
         if not target or _url_id(target) != str(item_id):
@@ -2061,7 +2061,7 @@ class Client:
                 self.update_tokens(response, {})
         except BuyerError as error:
             if self.retry_security_check(response, data, error):
-                return self.listing_page(url, item_id)
+                return self.listing_page(url, item_id, for_offer=for_offer)
             raise
         token = csrf_from_html(response.text)
         if token:
@@ -2069,7 +2069,8 @@ class Client:
             self.headers()
         self.persist_session()
         diagnostics = {}
-        item = parse_purchase_item(response.text, item_id, diagnostics=diagnostics)
+        parse_item = parse_offer_item if for_offer else parse_purchase_item
+        item = parse_item(response.text, item_id, diagnostics=diagnostics)
         if item is None:
             logger.info("Vinted listing verification failed: item_id=%s facts=%s",
                         item_id, json.dumps(diagnostics, separators=(",", ":")))
@@ -2077,7 +2078,9 @@ class Client:
                 "Vinted's current page did not confirm this item's price, seller and availability. No payment was sent.",
                 reason="item_unavailable",
             )
-        logger.info("Vinted listing page: result=verified http=200")
+        logger.info("Vinted listing page: result=verified http=200 purpose=%s price=%s",
+                    "seller_offer" if for_offer else "purchase",
+                    "page" if "price" in item else "wardrobe_required")
         return {"item": item}
 
     def homepage(self):

@@ -43,7 +43,7 @@ class FakeClient:
         self.before_offer = None
         self.wardrobe = []
 
-    def listing_page(self, url, item_id):
+    def listing_page(self, url, item_id, *, for_offer=False):
         item = dict(self.request("GET", f"/api/v2/items/{item_id}")["item"])
         item["user_id"] = item.get("user", {}).get("id")
         return {"item": item}

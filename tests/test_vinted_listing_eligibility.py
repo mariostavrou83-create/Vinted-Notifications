@@ -138,6 +138,18 @@ class RenderedListingEligibilityTests(
                     self.attempt(next_data(payload))["reason"], "item_unavailable"
                 )
 
+    def test_owner_page_price_omission_is_offer_only_and_cannot_authorize_payment(self):
+        item = purchase_item(can_buy=False)
+        del item["price"]
+        html = next_data(item)
+        client = self.client()
+        with self.transport(html):
+            data = client.listing_page(self.row["url"], "123", for_offer=True)
+        self.assertEqual(data["item"]["user_id"], "456")
+        self.assertNotIn("price", data["item"])
+        client.request.assert_not_called()
+        self.assertEqual(self.attempt(html)["reason"], "item_unavailable")
+
     def test_absent_target_status_cannot_be_inferred_from_neighbor_or_plugin(self):
         html = next_data(
             {
