@@ -1584,12 +1584,15 @@ class OfferWorker:
 def run():
     """A small dedicated worker; no sleeping or offer work in the fast poller."""
     from vinted_offer_audit import log_on_start
-    from vinted_offer_listing_recovery import run_once
+    from vinted_offer_listing_recovery import recheck_price_reads_once, run_once
 
     try:
         recovery = run_once()
         if recovery != "not_requested":
             logger.info("Vinted offers listing recovery: result=%s", recovery)
+        rechecks = recheck_price_reads_once()
+        if rechecks:
+            logger.info("Vinted offers repaired listing reads: requeued=%s", rechecks)
     except Exception as exc:
         logger.warning("Vinted offers listing recovery unavailable: %s", type(exc).__name__)
     log_on_start()

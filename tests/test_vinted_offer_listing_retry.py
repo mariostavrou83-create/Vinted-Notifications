@@ -125,6 +125,74 @@ class OwnerPageOfferTests(unittest.TestCase):
         self.assertEqual(f.jobs()[0]["status"], "skipped")
         self.assertFalse(f.client.writes())
 
+    def test_mixed_owner_records_recheck_then_send_once_at_current_page_price(self):
+        f = self.fixture
+        self.owner_item = [self.owner_item, {**self.owner_item,
+            "price": {"amount": "30.00", "currency_code": "GBP"}}]
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_offer_jobs SET reason='listing_check',lease_until=?",
+                         (NOW + 1800,))
+        self.assertEqual(recovery.recheck_price_reads_once(NOW), 1)
+        with patch.object(f.client, "listing_page", side_effect=self.listing_page):
+            self.worker.tick()
+            f.now += 200
+            self.worker.tick()
+        self.assertEqual(f.jobs()[0]["status"], "sent")
+        self.assertEqual(f.jobs()[0]["price"], 3000)
+        self.assertEqual(f.jobs()[0]["offer_price"], 2850)
+        self.assertEqual(len(f.client.writes()), 1)
+
+
+class PriceReadRecheckTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = fixture.OfferTests("test_new_like_waits_full_five_minutes_across_worker_restart")
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.tearDown)
+        self.fixture.enable()
+        self.job = self.fixture.add()
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_offer_jobs SET reason='listing_check',lease_until=?", (NOW+1800,))
+
+    def test_upgrade_wakes_only_read_backoff_once_and_keeps_send_and_cooldown_timers(self):
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_offer_settings SET next_send=?,cooldown_until=?", (NOW+200, NOW+100))
+        before = offers.state()
+        self.assertEqual(recovery.recheck_price_reads_once(NOW), 1)
+        self.assertEqual(offers.state(), before)
+        self.assertEqual(self.fixture.jobs()[0]["lease_until"], 0)
+        self.assertFalse(self.fixture.client.writes())
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_offer_jobs SET lease_until=?", (NOW+1800,))
+        self.assertEqual(recovery.recheck_price_reads_once(NOW), 0)
+        self.assertEqual(self.fixture.jobs()[0]["lease_until"], NOW+1800)
+
+    def test_manual_pause_and_account_change_are_preserved(self):
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_offer_settings SET mode='paused'")
+        self.assertEqual(recovery.recheck_price_reads_once(NOW), 0)
+        self.assertEqual(offers.state()["mode"], "paused")
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_offer_settings SET mode='live'")
+            conn.execute("UPDATE vinted_buyer SET user_id='999'")
+        self.assertEqual(recovery.recheck_price_reads_once(NOW), 0)
+        self.assertEqual(self.fixture.jobs()[0]["lease_until"], NOW+1800)
+
+    def test_previous_write_and_unrelated_jobs_are_never_woken(self):
+        f = self.fixture
+        other = f.add(item=1002, recipient=223)
+        with closing(search_settings.connection()) as conn, conn:
+            offers.event(conn, "sending", job_id=self.job, now=NOW-100)
+            conn.execute("UPDATE vinted_offer_jobs SET lease_until=? WHERE id=?", (NOW+1800, other))
+        self.assertEqual(recovery.recheck_price_reads_once(NOW), 0)
+        self.assertTrue(all(job["lease_until"] == NOW+1800 for job in f.jobs()))
+
+    def test_uncertain_write_blocks_recheck(self):
+        other = self.fixture.add(item=1002, recipient=223)
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_offer_jobs SET status='uncertain' WHERE id=?", (other,))
+        self.assertEqual(recovery.recheck_price_reads_once(NOW), 0)
+        self.assertEqual(self.fixture.jobs()[0]["lease_until"], NOW+1800)
+
 
 class ListingRecoveryTests(unittest.TestCase):
     def setUp(self):

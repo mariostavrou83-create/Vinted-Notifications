@@ -10,6 +10,47 @@ from contextlib import closing
 from search_settings import connection
 
 
+def recheck_price_reads_once(now=None):
+    """After the owner-page repair, wake unattempted listing reads once.
+
+    This clears only local read backoff. It neither enables offers nor changes
+    send spacing, account cooldowns, recipients or any attempted send. Normal
+    worker checks still verify the account, inventory and conversation afresh.
+    """
+    from vinted_offers import history_cutoff
+
+    now = time.time() if now is None else now
+    marker = "offer_owner_price_records_recheck_v1"
+    with closing(connection()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("SELECT 1 FROM parameters WHERE key=?", (marker,)).fetchone():
+            return 0
+        config = conn.execute("SELECT * FROM vinted_offer_settings WHERE id=1").fetchone()
+        account = conn.execute("SELECT user_id,session FROM vinted_buyer WHERE id=1").fetchone()
+        if not (config and config["mode"] in ("live", "preview")
+                and account and account["session"]
+                and str(account["user_id"]) == config["account_id"]):
+            return 0
+        account_id = config["account_id"]
+        if conn.execute("SELECT 1 FROM vinted_offer_jobs WHERE account_id=? "
+                        "AND status IN ('sending','uncertain') LIMIT 1", (account_id,)).fetchone():
+            return 0
+        jobs = conn.execute(
+            "SELECT id FROM vinted_offer_jobs WHERE account_id=? AND status='queued' "
+            "AND reason='listing_check' AND lease_until>? AND liked_at>=? "
+            "AND offer_id IS NULL AND sent_at IS NULL "
+            "AND NOT EXISTS (SELECT 1 FROM vinted_offer_events e "
+            "WHERE e.job_id=vinted_offer_jobs.id AND e.action='sending')",
+            (account_id, now, history_cutoff(dict(config), now)),
+        ).fetchall()
+        for job in jobs:
+            conn.execute("UPDATE vinted_offer_jobs SET lease_until=0 WHERE id=?", (job["id"],))
+            conn.execute("INSERT INTO vinted_offer_events(happened,action,reason,job_id) "
+                         "VALUES (?,'listing_price_recheck','listing_check',?)", (now, job["id"]))
+        conn.execute("INSERT INTO parameters(key,value) VALUES (?,?)", (marker, "applied"))
+    return len(jobs)
+
+
 def run_once(payload=None, now=None):
     now = time.time() if now is None else now
     if payload is None:

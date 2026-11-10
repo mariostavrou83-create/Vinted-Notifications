@@ -86,6 +86,33 @@ class PurchasePageDataTests(unittest.TestCase):
         self.assertIsNone(page.parse_offer_item(next_data(
             [purchase_item(), purchase_item(price={"amount": "16", "currency_code": "GBP"})]), "123"))
 
+    def test_owner_price_omission_agrees_with_same_item_priced_duplicate(self):
+        priced = purchase_item(can_buy=False)
+        unpriced = {k: v for k, v in priced.items() if k != "price"}
+        for records in ([unpriced, priced], [priced, unpriced],
+                        [unpriced, priced, unpriced, priced]):
+            with self.subTest(records=records):
+                html = next_data(records)
+                data = page.parse_offer_item(html, "123")
+                self.assertEqual(data["price"], priced["price"])
+                self.assertEqual(data["user_id"], "456")
+                self.assertFalse(data["can_buy"])
+                self.assertIsNone(page.parse_purchase_item(html, "123"))
+
+    def test_price_omission_cannot_hide_a_later_conflict_or_supply_other_metadata(self):
+        priced = purchase_item(can_buy=False)
+        unpriced = {k: v for k, v in priced.items() if k != "price"}
+        for changes in ({"price": {"amount": "16", "currency_code": "GBP"}},
+                        {"seller_id": "789"}, {"is_reserved": True},
+                        {"is_hidden": True}, {"is_sold": True}, {"can_buy": True}):
+            conflict = {**priced, **changes}
+            for records in ([unpriced, priced, conflict], [priced, unpriced, conflict],
+                            [conflict, unpriced, priced]):
+                with self.subTest(changes=changes, records=records):
+                    self.assertIsNone(page.parse_offer_item(next_data(records), "123"))
+        incomplete = {k: v for k, v in unpriced.items() if k != "seller_id"}
+        self.assertIsNone(page.parse_offer_item(next_data([incomplete, priced]), "123"))
+
     def test_current_sidebar_resolves_price_and_agrees_with_core_item(self):
         item = purchase_item()
         html = flight(

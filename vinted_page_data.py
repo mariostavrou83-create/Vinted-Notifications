@@ -409,10 +409,21 @@ def _parse_transaction_item(html, item_id, *, diagnostics, require_price):
             # Sold/closed can explain an otherwise generic can_buy=False, but
             # only an explicit boolean in this same complete target record is
             # evidence. Optional status must also agree across duplicate records.
-            if candidates and candidate != candidates[0]:
-                return reject("conflicting_records", differing_fields=[
-                    key for key in sorted(set(candidate) | set(candidates[0]))
-                    if candidate.get(key) != candidates[0].get(key)])
+            if candidates:
+                previous = candidates[0]
+                fields = set(candidate) | set(previous)
+                # The owner view repeats an otherwise identical item with and
+                # without price. Absence is not a second price. Only offer reads
+                # may reconcile that omission; identity and every status field
+                # must still agree, and two explicit prices must match exactly.
+                if not require_price and ("price" not in candidate or "price" not in previous):
+                    fields.discard("price")
+                differences = [key for key in sorted(fields)
+                               if candidate.get(key) != previous.get(key)]
+                if differences:
+                    return reject("conflicting_records", differing_fields=differences)
+                if not require_price and "price" in candidate and "price" not in previous:
+                    previous["price"] = candidate["price"]
             candidates.append(candidate)
         children = [
             child for child in value.values() if isinstance(child, (dict, list))
