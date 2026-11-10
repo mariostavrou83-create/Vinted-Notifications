@@ -305,14 +305,22 @@ def _add_photos(result, values):
             seen.add(identity)
 
 
-def parse_purchase_item(html, item_id):
+def parse_purchase_item(html, item_id, *, diagnostics=None):
     """Read current buy eligibility from one consistent, identity-scoped item."""
+    def reject(reason, **facts):
+        if isinstance(diagnostics, dict):
+            diagnostics.update(reason=reason, **facts)
+        return None
+
     item_id = _item_id(item_id)
     if not item_id or not isinstance(html, str) or len(html) > MAX_HTML:
-        return None
+        return reject("invalid_input")
     parser = _Scripts()
     parser.feed(html)
     roots, rows = _records(parser.scripts)
+    if isinstance(diagnostics, dict):
+        diagnostics.update(html_chars=len(html), scripts=len(parser.scripts),
+                           roots=len(roots), flight_rows=len(rows))
     pending = deque((root, 0) for root in roots)
     candidates = []
     visited = 0
@@ -321,12 +329,12 @@ def parse_purchase_item(html, item_id):
         value, depth = pending.popleft()
         visited += 1
         if depth > MAX_DEPTH:
-            return None
+            return reject("depth_limit")
         remaining = max(0, MAX_PURCHASE_NODES - visited - len(pending))
         if isinstance(value, list):
             children = [child for child in value if isinstance(child, (dict, list))]
             if len(children) > remaining:
-                return None
+                return reject("node_limit")
             pending.extend((child, depth + 1) for child in children)
             continue
         if not isinstance(value, dict):
@@ -338,12 +346,13 @@ def parse_purchase_item(html, item_id):
         if _item_id(value.get("id")) == item_id and (
             "price" in value or "can_buy" in value
         ):
-            if any(identity != item_id for identity in identities) or not all(
-                key in value for key in required
-            ):
-                return None
+            if any(identity != item_id for identity in identities):
+                return reject("conflicting_identity")
+            if not all(key in value for key in required):
+                return reject("incomplete_record", missing=[key for key in required if key not in value],
+                              complete_records=len(candidates))
             if "url" in value and _url_id(value["url"]) != item_id:
-                return None
+                return reject("conflicting_url")
             price = _resolve(value["price"], rows)
             seller = _item_id(_resolve(value["seller_id"], rows))
             flags = {
@@ -364,7 +373,10 @@ def parse_purchase_item(html, item_id):
                 or "amount" not in price
                 or any(type(flag) is not bool for flag in flags.values())
             ):
-                return None
+                return reject("invalid_field_types", seller_valid=bool(seller),
+                              price_type=type(price).__name__,
+                              currency_type=type(price.get("currency_code")).__name__ if isinstance(price, dict) else None,
+                              flag_types={key: type(flag).__name__ for key, flag in flags.items()})
             candidate = {
                 "id": item_id,
                 "user_id": seller,
@@ -378,16 +390,20 @@ def parse_purchase_item(html, item_id):
             # only an explicit boolean in this same complete target record is
             # evidence. Optional status must also agree across duplicate records.
             if candidates and candidate != candidates[0]:
-                return None
+                return reject("conflicting_records", differing_fields=[
+                    key for key in sorted(set(candidate) | set(candidates[0]))
+                    if candidate.get(key) != candidates[0].get(key)])
             candidates.append(candidate)
         children = [
             child for child in value.values() if isinstance(child, (dict, list))
         ]
         if len(children) > remaining:
-            return None
+            return reject("node_limit")
         pending.extend((child, depth + 1) for child in children)
     # A truncated traversal cannot rule out a later conflicting target record.
-    return candidates[0] if candidates and not pending else None
+    if pending:
+        return reject("traversal_incomplete")
+    return candidates[0] if candidates else reject("no_target_record")
 
 
 def parse_page_data(html, item_id, *, full_description=False):

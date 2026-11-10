@@ -46,6 +46,16 @@ def purchase_item(**changes):
 
 
 class PurchasePageDataTests(unittest.TestCase):
+    def test_failure_diagnostics_explain_shape_without_disclosing_payload(self):
+        item = purchase_item(private_token="do-not-log-this")
+        del item["seller_id"]
+        details = {}
+        self.assertIsNone(page.parse_purchase_item(next_data(item), "123", diagnostics=details))
+        self.assertEqual(details["reason"], "incomplete_record")
+        self.assertEqual(details["missing"], ["seller_id"])
+        self.assertNotIn("do-not-log-this", json.dumps(details))
+        self.assertNotIn("private_token", json.dumps(details))
+
     def test_current_sidebar_resolves_price_and_agrees_with_core_item(self):
         item = purchase_item()
         html = flight(

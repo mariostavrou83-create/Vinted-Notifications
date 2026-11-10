@@ -2068,8 +2068,11 @@ class Client:
             self.csrf = token
             self.headers()
         self.persist_session()
-        item = parse_purchase_item(response.text, item_id)
+        diagnostics = {}
+        item = parse_purchase_item(response.text, item_id, diagnostics=diagnostics)
         if item is None:
+            logger.info("Vinted listing verification failed: item_id=%s facts=%s",
+                        item_id, json.dumps(diagnostics, separators=(",", ":")))
             raise BuyerError(
                 "Vinted's current page did not confirm this item's price, seller and availability. No payment was sent.",
                 reason="item_unavailable",

@@ -52,6 +52,7 @@ MESSAGES = {
     "stale": "Settings changed while this item was being checked. It will be checked again.",
     "inventory": "Checking your wardrobe for this item.",
     "inventory_missing": "This item was not in the current wardrobe response. Active listings are checked again automatically.",
+    "listing_check": "Waiting to verify this listing again. Other offers continue normally.",
     "closed_conversation": "This buyer's transaction is already paid, completed, cancelled or unavailable.",
     "crash": "The worker restarted during this send. Check Vinted; it will not be retried automatically.",
     "outside_history": "This favourite is outside your selected history period.",
@@ -1048,6 +1049,28 @@ def _error_reason(exc):
     )
 
 
+def defer_listing(job, now):
+    """A failed listing read cannot block other items or authorize an offer."""
+    with closing(connection()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        failures = conn.execute(
+            "SELECT COUNT(*) FROM vinted_offer_events WHERE job_id=? AND action='listing_retry'",
+            (job["id"],),
+        ).fetchone()[0]
+        retry_at = now + min(1800, 60 * (2 ** min(failures, 5)))
+        changed = conn.execute(
+            "UPDATE vinted_offer_jobs SET status='queued',reason='listing_check',lease_until=?,checked_at=? "
+            "WHERE id=? AND status='checking' AND offer_id IS NULL AND sent_at IS NULL "
+            "AND NOT EXISTS (SELECT 1 FROM vinted_offer_events WHERE job_id=? AND action='sending')",
+            (retry_at, now, job["id"], job["id"]),
+        ).rowcount
+        if changed:
+            event(conn, "listing_retry", "listing_check", job["id"], now=now)
+    if changed:
+        logger.info("Vinted offers listing deferred: queue_id=%s item_id=%s retry_at=%s",
+                    job["id"], job["item_id"], retry_at)
+
+
 def _wait_after_failure(exc, now):
     delay = getattr(exc, "retry_after", 0)
     if type(delay) not in (int, float) or not math.isfinite(delay) or delay < 0:
@@ -1232,7 +1255,7 @@ class OfferWorker:
                 "WHERE e.job_id=vinted_offer_jobs.id AND e.action='availability_recheck') "
                 "AS availability_recovered FROM vinted_offer_jobs WHERE account_id=? AND status IN ("
                 + ",".join("?" for _ in statuses)
-                + ") AND liked_at>=? AND liked_at<=? "
+                + ") AND liked_at>=? AND liked_at<=? AND lease_until<=? "
                 "ORDER BY CASE WHEN liked_at>=? AND NOT availability_recovered "
                 "THEN 0 ELSE 1 END,liked_at,id LIMIT 1",
                 (
@@ -1240,6 +1263,7 @@ class OfferWorker:
                     *statuses,
                     cutoff,
                     now - LIKE_DELAY if fresh["mode"] == "live" else now + 60,
+                    now,
                     (
                         fresh["priority_since"]
                         if fresh["priority_since"] is not None
@@ -1423,6 +1447,8 @@ class OfferWorker:
                 pause(reason if reason != "network" else "uncertain")
             elif exc.reason == "busy":
                 _finish(job["id"], "queued")
+            elif stage == "inventory" and exc.reason == "item_unavailable" and exc.status is None:
+                defer_listing(job, self.clock())
             elif reason == "network":
                 _finish(job["id"], "queued", "network")
                 with closing(connection()) as conn, conn:
@@ -1485,12 +1511,13 @@ class OfferWorker:
             pending = conn.execute(
                 """SELECT 1 FROM vinted_offer_jobs WHERE account_id=?
                 AND (status='queued' OR (? AND status='ready'))
-                AND liked_at>=? AND liked_at<=? LIMIT 1""",
+                AND liked_at>=? AND liked_at<=? AND lease_until<=? LIMIT 1""",
                 (
                     config["account_id"],
                     config["mode"] == "live",
                     history_cutoff(config, now),
                     now - LIKE_DELAY if config["mode"] == "live" else now + 60,
+                    now,
                 ),
             ).fetchone()
         if (
@@ -1555,7 +1582,14 @@ class OfferWorker:
 def run():
     """A small dedicated worker; no sleeping or offer work in the fast poller."""
     from vinted_offer_audit import log_on_start
+    from vinted_offer_listing_recovery import run_once
 
+    try:
+        recovery = run_once()
+        if recovery != "not_requested":
+            logger.info("Vinted offers listing recovery: result=%s", recovery)
+    except Exception as exc:
+        logger.warning("Vinted offers listing recovery unavailable: %s", type(exc).__name__)
     log_on_start()
     worker = OfferWorker()
     logger.info("Vinted offers worker ready: minimum send spacing=%ss", SEND_GAP)
