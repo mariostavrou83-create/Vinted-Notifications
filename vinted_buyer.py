@@ -3032,7 +3032,9 @@ def save_limits(form):
     enabled = form.get("buyer_enabled") == "yes"
     if enabled and not current["connected"]:
         raise BuyerError("Connect your Vinted buyer account first.")
-    with exclusive(), closing(connection()) as conn, conn:
+    # Let background reads yield before this brief owner settings write.
+    # Keep the normal bounded lock and leave all fields untouched on timeout.
+    with exclusive(wait_seconds=5), closing(connection()) as conn, conn:
         conn.execute(
             "UPDATE vinted_buyer SET browser_info=?,enabled=?,pickup_mode=?,preferred_card_last4=? WHERE id=1",
             (json.dumps(browser_info), enabled, pickup_mode, preferred_card),
@@ -3045,3 +3047,4 @@ def disconnect():
             "UPDATE vinted_buyer SET session=NULL,pending=NULL,verified_at=NULL,user_id=NULL,username=NULL,enabled=0 WHERE id=1"
         )
         conn.execute("DELETE FROM vinted_buyer_event")
+
