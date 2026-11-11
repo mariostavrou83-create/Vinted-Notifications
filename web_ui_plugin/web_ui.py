@@ -957,6 +957,14 @@ def create_app(test_config=None):
                         "Vinted connection settings saved privately. Check the buyer connection before enabling Autobuy again.",
                         "success",
                     )
+                elif action == "buyer_proxy_check":
+                    import vinted_network_check
+
+                    result = vinted_network_check.check_proxy_transport()
+                    flash(
+                        vinted_network_check.proxy_transport_summary(result),
+                        "success" if result["outcome"] == "verified" else "error",
+                    )
                 elif action == "buyer_network_check":
                     import vinted_network_check
 
@@ -1252,4 +1260,5 @@ def web_ui_process():
         )
     finally:
         MANAGER.shutdown()
+
 

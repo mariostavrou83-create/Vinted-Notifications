@@ -68,6 +68,60 @@ def response_trace(response, *, deadline):
     return {"ip": fields.get("ip"), "country_code": fields.get("loc")}
 
 
+def check_proxy_transport():
+    """One anonymous owner-requested probe; preserve all buying/session settings."""
+    import vinted_buyer as buyer
+
+    result = {"outcome": "unverified", "stage": "configuration"}
+    try:
+        config = buyer.network_configuration()
+        if not config["proxy"]:
+            return result
+        result["stage"] = "proxy_transport"
+        started = time.monotonic()
+        with closing(BrowserSession()) as probe:
+            probe.trust_env = False
+            probe.verify = True
+            probe.proxies.update({"http": config["proxy"], "https": config["proxy"]})
+            if probe.cookies or any(
+                field in probe.headers for field in ("Cookie", "Authorization", "X-CSRF-Token")
+            ):
+                raise CheckFailure("anonymous_probe")
+            data = response_trace(
+                probe.get(EXIT_URL, timeout=(2, 4), allow_redirects=False, stream=True),
+                deadline=started + 6,
+            )
+        address = ipaddress.ip_address(data.get("ip", ""))
+        country = data.get("country_code")
+        if not address.is_global or not isinstance(country, str) or not re.fullmatch(r"[A-Z]{2}", country):
+            raise CheckFailure("proxy_exit")
+        result.update(outcome="verified", stage="complete", country=country)
+    except requests.exceptions.Timeout:
+        result["reason"] = "timeout"
+    except requests.exceptions.ProxyError:
+        result["reason"] = "proxy_refused"
+    except requests.exceptions.SSLError:
+        result["reason"] = "tls"
+    except CheckFailure as exc:
+        result["stage"] = exc.stage
+        if type(exc.status) is int and 100 <= exc.status <= 599:
+            result["http_status"] = exc.status
+    except (buyer.BuyerError, requests.exceptions.RequestException, OSError, ValueError, TypeError):
+        result["reason"] = "unconfirmed"
+    finally:
+        logger.info("Vinted anonymous proxy check: %s", json.dumps(result, sort_keys=True))
+    return result
+
+
+def proxy_transport_summary(result):
+    detail = (
+        "Saved proxy completed an anonymous connection check. Reported country: " + result["country"] + "."
+        if result["outcome"] == "verified"
+        else "Saved proxy could not complete an anonymous connection check (" + result.get("reason", "unconfirmed") + ")."
+    )
+    return detail + " Buying settings were unchanged. No Vinted account request, checkout or payment was made."
+
+
 def run_once():
     """Railway-authorized, opt-in diagnostic; reserve before any network call."""
     release = os.environ.get("MSJ_NETWORK_CHECK_ON_START", "")
@@ -329,3 +383,4 @@ def summary(result):
         + challenge
         + " Autobuy remains off. No checkout or payment was created."
     )
+

@@ -39,6 +39,8 @@
 <label class="checkbox"><input type="checkbox" name="buyer_capsolver_enabled" value="yes" {{'checked' if buyer.network.enabled}}> Enable supported security checks using my CapSolver account</label>
 <p><small>Credentials are stored encrypted and these boxes clear after submission. CapSolver tasks may use paid credit. Saving connection settings turns Autobuy off; verify the connection before enabling it again.</small></p>
 <button class="primary" name="action" value="buyer_network">Save private connection settings</button></form>
+<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="buyer_proxy_check">Check proxy reachability</button></form>
+<p><small>One anonymous connection check through your saved proxy. Preserves buying settings and sends no Vinted account request.</small></p>
 <form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="buyer_network_check">Check proxy, CapSolver and buyer account</button></form>
 <p><small>This checks UK exit stability across three fresh anonymous connections, CapSolver balance and your saved account. It keeps Autobuy off and creates no checkout or payment. A ready solver is reported separately from an accepted supported challenge.</small></p>
 <form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="buyer_alert_check">Check latest alert description and photos</button></form>
@@ -144,3 +146,4 @@
 <details class="guide-section"><summary><b>Purchase history</b><span class="detail-count">{{buying|length - unresolved|length}}</span></summary><p class="muted">Completed and stopped attempts. No new purchase is started by viewing history.</p>{% for attempt in buying if attempt.state not in ['paying','unknown','needs_action'] %}{% include 'msj_purchase_attempt.html' %}{% endfor %}</details>
 {% endif %}
 </section>
+
