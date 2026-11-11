@@ -331,6 +331,12 @@ def migrate(conn):
         action TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '')""")
 
 
+def read_retry_unverified(config):
+    """A retry deadline permits another read; only a later scan proves recovery."""
+    deadline = config["cooldown_until"]
+    return bool(deadline > 0 and (config["last_scan"] is None or config["last_scan"] < deadline))
+
+
 def state():
     with closing(connection()) as conn:
         return dict(
@@ -829,6 +835,8 @@ def snapshot():
         ),
         "cooling_down": config["mode"] in {"live", "preview"}
         and config["cooldown_until"] > time.time(),
+        "retry_unverified": config["mode"] in {"live", "preview"}
+        and read_retry_unverified(config),
     }
 
 
@@ -1609,4 +1617,5 @@ def run():
             )
             pause("shape")
         time.sleep(5)
+
 

@@ -453,6 +453,31 @@ class BrowserSessionTests(unittest.TestCase):
                 self.assertIsNone(raised.exception.request)
                 self.assertIsNone(raised.exception.response)
 
+    def test_transport_failure_logs_only_safe_category_code_and_timing(self):
+        self.session.proxies.update({"https": "http://private-user:private-password@private-proxy:1234"})
+        self.sdk.request.side_effect = curl_errors.ConnectTimeout(
+            "private-token private-proxy private-url", code=28
+        )
+        with self.assertLogs("vinted_http", level="WARNING") as logs:
+            with self.assertRaises(requests.exceptions.ConnectTimeout):
+                self.session.get(BASE + "/", allow_redirects=False)
+        evidence = " ".join(logs.output)
+        self.assertIn("category=ConnectTimeout", evidence)
+        self.assertIn("curl_code=28", evidence)
+        self.assertIn("proxy=True", evidence)
+        self.assertIn("elapsed_ms=", evidence)
+        self.assertNotIn("private", evidence)
+
+    def test_transport_diagnostics_reject_non_numeric_sdk_error_codes(self):
+        error = curl_errors.RequestException("private-body")
+        error.code = "private-code"
+        self.sdk.request.side_effect = error
+        with self.assertLogs("vinted_http", level="WARNING") as logs:
+            with self.assertRaises(requests.exceptions.RequestException):
+                self.session.get(BASE + "/", allow_redirects=False)
+        self.assertIn("curl_code=None", " ".join(logs.output))
+        self.assertNotIn("private", " ".join(logs.output))
+
     def test_stream_failure_is_normalized_and_closes_the_sdk_response(self):
         def chunks():
             yield b"abc"
@@ -497,3 +522,4 @@ class BrowserSessionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

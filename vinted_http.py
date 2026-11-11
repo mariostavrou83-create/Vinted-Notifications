@@ -2,6 +2,7 @@
 
 import copy
 import io
+import logging
 import math
 import time
 from datetime import timedelta
@@ -16,6 +17,8 @@ from requests.cookies import RequestsCookieJar, extract_cookies_to_jar
 from requests.hooks import dispatch_hook
 from requests.structures import CaseInsensitiveDict
 from requests.utils import get_encoding_from_headers, resolve_proxies, select_proxy
+
+logger = logging.getLogger(__name__)
 
 # Native chrome146 is documented by curl_cffi as macOS. The TLS/HTTP2 profile
 # stays pinned to that browser version; HTTP identity is explicitly Windows
@@ -290,7 +293,16 @@ class BrowserSession(requests.Session):
                 allow_redirects=False,
             )
         except curl_errors.RequestException as error:
-            raise _request_error(error) from None
+            safe_error = _request_error(error)
+            code = getattr(error, "code", None)
+            logger.warning(
+                "Vinted HTTP transport failure: category=%s curl_code=%s elapsed_ms=%s proxy=%s",
+                type(safe_error).__name__,
+                int(code) if isinstance(code, int) and not isinstance(code, bool) and 0 <= code <= 999 else None,
+                _duration_ms(time.monotonic() - start),
+                bool(proxy),
+            )
+            raise safe_error from None
         message = HTTPMessage()
         for name, value in result.headers.multi_items():
             if value is not None:
@@ -326,3 +338,4 @@ class BrowserSession(requests.Session):
             raise _request_error(error) from None
         finally:
             super().close()
+

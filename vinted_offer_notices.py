@@ -15,6 +15,7 @@ from telegram.error import RetryAfter
 import db
 from search_settings import connection
 from vinted_connection_notices import ConnectionNotifier, DELIVERY_LEASE, DELIVERY_RETRY
+from vinted_offers import read_retry_unverified
 
 logger = logging.getLogger(__name__)
 COOLDOWN_GRACE = 15 * 60
@@ -83,11 +84,14 @@ def _health(conn, now):
         # exists yet, avoiding a warning while a new worker starts.
         started = heartbeat if heartbeat is not None else now
         return config, (f"{active_id}:stalled", "stalled", "heartbeat", started)
-    if config["cooldown_until"] > now:
+    if config["cooldown_until"] > now or read_retry_unverified(config):
         event = conn.execute(
             "SELECT happened FROM vinted_offer_events WHERE action='cooldown' ORDER BY id DESC LIMIT 1"
         ).fetchone()
-        started = min(now, event[0]) if event else now
+        # An old rate-limit event must not make a new network retry look old.
+        # Successful scans between incidents provide the later lower bound.
+        evidence = [value for value in (event[0] if event else None, config["last_scan"]) if value is not None]
+        started = min(now, max(evidence)) if evidence else now
         return config, (f"{active_id}:cooldown", "cooldown", "cooldown", started)
     return config, None
 
@@ -272,3 +276,4 @@ async def send_test():
         raise ValueError(
             "Telegram did not confirm the offer-warning test. Wait five minutes before retrying."
         ) from None
+

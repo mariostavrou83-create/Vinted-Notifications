@@ -55,6 +55,60 @@ class NoticeFixture(DatabaseFixture):
 
 
 class DeliveryTests(NoticeFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_retry_deadline_expiry_is_not_recovery_without_a_successful_scan(self):
+        self.update(last_scan=NOW, cooldown_until=NOW + 60)
+        self.assertEqual(await self.check(), "quiet")
+        self.update(heartbeat=NOW + 900)
+        self.assertEqual(await self.check(NOW + 900), "sent")
+        incident = self.row()["incident_id"]
+        for offset in (901, 960, 1020, 1200):
+            self.update(heartbeat=NOW + offset, cooldown_until=NOW + offset)
+            restarted = notices.OfferNotifier(self.bot, "123")
+            self.assertEqual(await self.check(NOW + offset, restarted), "quiet")
+            self.assertEqual(self.row()["incident_id"], incident)
+            self.assertEqual(self.row()["active"], 1)
+        self.bot.send_message.assert_awaited_once()
+        self.update(last_scan=NOW + 1201, heartbeat=NOW + 1201)
+        self.assertEqual(await self.check(NOW + 1201), "sent")
+        self.assertIn("recovered", self.bot.send_message.await_args.kwargs["text"])
+        self.assertEqual(await self.check(NOW + 1202), "quiet")
+
+    async def test_account_verification_does_not_recover_a_failed_favourites_scan(self):
+        self.update(last_scan=NOW, cooldown_until=NOW + 60, heartbeat=NOW + 900)
+        self.assertEqual(await self.check(NOW + 900), "sent")
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_buyer SET verified_at=?", (NOW + 901,))
+        self.assertEqual(await self.check(NOW + 901), "quiet")
+        self.assertEqual(self.row()["active"], 1)
+
+    async def test_an_old_cooldown_event_does_not_age_a_new_connection_incident(self):
+        with closing(search_settings.connection()) as conn, conn:
+            offers.event(conn, "cooldown", "read", now=NOW - 86400)
+        self.update(last_scan=NOW, cooldown_until=NOW + 60)
+        self.assertEqual(await self.check(), "quiet")
+        self.assertEqual(self.row()["started"], NOW)
+        self.update(heartbeat=NOW + 899)
+        self.assertEqual(await self.check(NOW + 899), "quiet")
+        self.update(heartbeat=NOW + 900)
+        self.assertEqual(await self.check(NOW + 900), "sent")
+
+    async def test_manual_pause_cancels_retry_incident_without_claiming_recovery(self):
+        self.update(last_scan=NOW, cooldown_until=NOW + 60, heartbeat=NOW + 900)
+        self.assertEqual(await self.check(NOW + 900), "sent")
+        self.pause("", at=NOW + 901)
+        self.assertEqual(await self.check(NOW + 901), "quiet")
+        self.assertEqual(self.row()["active"], 0)
+        self.bot.send_message.assert_awaited_once()
+
+    async def test_missing_successful_scan_does_not_report_recovery(self):
+        self.update(last_scan=None, cooldown_until=NOW + 60)
+        self.assertEqual(await self.check(), "quiet")
+        self.update(heartbeat=NOW + 900)
+        self.assertEqual(await self.check(NOW + 900), "sent")
+        self.assertEqual(await self.check(NOW + 901), "quiet")
+        self.update(last_scan=NOW + 902)
+        self.assertEqual(await self.check(NOW + 902), "sent")
+
     async def test_preexisting_pause_warns_once_and_restart_deduplicates(self):
         self.pause()
         self.assertEqual(await self.check(), "sent")
@@ -328,3 +382,4 @@ class UrlTests(unittest.TestCase):
         for url in ("http://example.test", "https://u:p@example.test", "https://example.test/?token=private", "https://example.test/other"):
             with self.subTest(url=url), patch.dict(notices.os.environ, {"DASHBOARD_URL": url}):
                 self.assertIsNone(notices.dashboard_url())
+
