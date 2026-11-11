@@ -97,7 +97,62 @@ class PurchasePageDataTests(unittest.TestCase):
                 self.assertEqual(data["price"], priced["price"])
                 self.assertEqual(data["user_id"], "456")
                 self.assertFalse(data["can_buy"])
-                self.assertIsNone(page.parse_purchase_item(html, "123"))
+                purchase = page.parse_purchase_item(html, "123")
+                self.assertEqual(purchase["price"], priced["price"])
+                self.assertFalse(purchase["can_buy"])
+
+    def test_purchase_accepts_matching_priced_and_unpriced_records_in_either_order(self):
+        priced = purchase_item()
+        unpriced = {key: value for key, value in priced.items() if key != "price"}
+        for records in ([unpriced, priced], [priced, unpriced],
+                        [unpriced, priced, unpriced, priced]):
+            with self.subTest(records=records):
+                result = page.parse_purchase_item(next_data(records), "123")
+                self.assertEqual(result["price"], priced["price"])
+                self.assertEqual(result["user_id"], "456")
+                self.assertTrue(result["can_buy"])
+                self.assertFalse(result["is_reserved"])
+                self.assertFalse(result["is_hidden"])
+
+    def test_purchase_omission_does_not_borrow_neighbor_or_public_product_prices(self):
+        unpriced = purchase_item()
+        del unpriced["price"]
+        product = {"@type": "Product", "url": "https://www.vinted.co.uk/items/123",
+                   "offers": {"url": "https://www.vinted.co.uk/items/123",
+                              "price": "15.00", "priceCurrency": "GBP"}}
+        records = [unpriced, purchase_item(id="999"), product, unpriced]
+        facts = {}
+        self.assertIsNone(page.parse_purchase_item(next_data(records), "123", diagnostics=facts))
+        self.assertEqual(facts["missing"], ["price"])
+
+    def test_purchase_unpriced_duplicate_cannot_hide_metadata_or_price_conflicts(self):
+        priced = purchase_item()
+        unpriced = {key: value for key, value in priced.items() if key != "price"}
+        for change in ({"seller_id": "789"}, {"can_buy": False},
+                       {"is_reserved": True}, {"is_hidden": True},
+                       {"is_sold": True}, {"is_closed": True},
+                       {"item_id": "999"}, {"price": None},
+                       {"price": {"amount": "16.00", "currency_code": "GBP"}}):
+            conflict = {**priced, **change}
+            for records in ([unpriced, priced, conflict], [priced, unpriced, conflict],
+                            [conflict, unpriced, priced]):
+                with self.subTest(change=change, records=records):
+                    self.assertIsNone(page.parse_purchase_item(next_data(records), "123"))
+
+    def test_purchase_duplicate_cannot_supply_missing_seller_or_restriction(self):
+        priced = purchase_item()
+        for missing in ("seller_id", "can_buy", "is_reserved", "is_hidden"):
+            partial = {key: value for key, value in priced.items() if key != missing}
+            for records in ([partial, priced], [priced, partial]):
+                with self.subTest(missing=missing, records=records):
+                    self.assertIsNone(page.parse_purchase_item(next_data(records), "123"))
+
+    def test_purchase_duplicate_uses_a_complete_flight_record_with_resolved_price(self):
+        priced = purchase_item()
+        unpriced = {key: value for key, value in priced.items() if key != "price"}
+        html = flight([("1", unpriced), ("2", {**priced, "price": "$3"}),
+                       ("3", priced["price"])], chunks=9)
+        self.assertEqual(page.parse_purchase_item(html, "123")["price"], priced["price"])
 
     def test_price_omission_cannot_hide_a_later_conflict_or_supply_other_metadata(self):
         priced = purchase_item(can_buy=False)
@@ -849,3 +904,4 @@ class PageDataTests(unittest.TestCase):
                 page.parse_page_data(html, 123)["description"],
                 "Trusted independent JSON",
             )
+

@@ -306,7 +306,7 @@ def _add_photos(result, values):
 
 
 def parse_purchase_item(html, item_id, *, diagnostics=None):
-    """Read current buy eligibility from one consistent, identity-scoped item."""
+    """Require a priced target record and agreement from its status duplicates."""
     return _parse_transaction_item(html, item_id, diagnostics=diagnostics, require_price=True)
 
 
@@ -340,8 +340,6 @@ def _parse_transaction_item(html, item_id, *, diagnostics, require_price):
     candidates = []
     visited = 0
     required = ("seller_id", "can_buy", "is_reserved", "is_hidden")
-    if require_price:
-        required = ("seller_id", "price", "can_buy", "is_reserved", "is_hidden")
     while pending and visited < MAX_PURCHASE_NODES:
         value, depth = pending.popleft()
         visited += 1
@@ -358,8 +356,9 @@ def _parse_transaction_item(html, item_id, *, diagnostics, require_price):
             continue
         identities = [_item_id(value[key]) for key in ("id", "item_id") if key in value]
         # Recommendations and independent status/description plugins cannot
-        # supply a target item's price or seller. Every returned field comes
-        # from the same complete record, including resolved Flight references.
+        # supply a target item's price or seller. An otherwise complete unpriced
+        # duplicate can constrain availability, but cannot supply purchase data.
+        # Purchases still require a complete price-bearing target record below.
         if _item_id(value.get("id")) == item_id and (
             "price" in value or "can_buy" in value
         ):
@@ -413,17 +412,18 @@ def _parse_transaction_item(html, item_id, *, diagnostics, require_price):
                 previous = candidates[0]
                 fields = set(candidate) | set(previous)
                 # The owner view repeats an otherwise identical item with and
-                # without price. Absence is not a second price. Only offer reads
-                # may reconcile that omission; identity and every status field
-                # must still agree, and two explicit prices must match exactly.
-                if not require_price and ("price" not in candidate or "price" not in previous):
+                # without price. Absence is not a second price. Identity and
+                # every status field must agree, and explicit prices must match.
+                if "price" not in candidate or "price" not in previous:
                     fields.discard("price")
                 differences = [key for key in sorted(fields)
                                if candidate.get(key) != previous.get(key)]
                 if differences:
                     return reject("conflicting_records", differing_fields=differences)
-                if not require_price and "price" in candidate and "price" not in previous:
-                    previous["price"] = candidate["price"]
+                if "price" in candidate and "price" not in previous:
+                    # Return this complete record, rather than manufacturing an
+                    # item from a partial record or an unrelated price source.
+                    candidates[0] = candidate
             candidates.append(candidate)
         children = [
             child for child in value.values() if isinstance(child, (dict, list))
@@ -434,7 +434,11 @@ def _parse_transaction_item(html, item_id, *, diagnostics, require_price):
     # A truncated traversal cannot rule out a later conflicting target record.
     if pending:
         return reject("traversal_incomplete")
-    return candidates[0] if candidates else reject("no_target_record")
+    if not candidates:
+        return reject("no_target_record")
+    if require_price and "price" not in candidates[0]:
+        return reject("incomplete_record", missing=["price"], complete_records=0)
+    return candidates[0]
 
 
 def parse_page_data(html, item_id, *, full_description=False):
@@ -532,3 +536,4 @@ def parse_page_data(html, item_id, *, full_description=False):
             )
         )
     return result
+
