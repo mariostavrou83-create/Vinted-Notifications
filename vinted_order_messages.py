@@ -6,8 +6,8 @@ import re
 import time
 from contextlib import closing
 
-import vinted_buyer as buyer
 import vinted_order_message_store as queue
+import vinted_seller as buyer
 from logger import get_logger
 from search_settings import connection
 from vinted_buyer_priority import yield_to_purchase

@@ -6,8 +6,8 @@ from zoneinfo import ZoneInfo
 
 from flask import abort, flash, redirect, render_template, request, url_for
 
-import vinted_buyer
 import vinted_offers as offers
+import vinted_seller as vinted_buyer
 
 
 def install(app):

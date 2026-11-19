@@ -11,7 +11,7 @@ from pathlib import Path
 
 import db
 
-SCHEMA_VERSION = "32"
+SCHEMA_VERSION = "33"
 
 
 def connection():
@@ -203,6 +203,9 @@ def ensure_schema():
             from vinted_connection_notices import migrate as migrate_connection_notices
 
             migrate_connection_notices(conn)
+            from vinted_accounts import migrate as migrate_accounts
+
+            migrate_accounts(conn)
             from vinted_budget import migrate as migrate_budgets
 
             migrate_budgets(conn)

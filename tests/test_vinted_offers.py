@@ -1586,7 +1586,8 @@ class OfferRouteTests(DashboardTests):
             )
         body = self.client.get("/offers").data
         self.assertIn(b"Cooling down", body)
-        self.assertIn(b"Offers resume automatically after", body)
+        self.assertIn(b"Offers are waiting for a successful Vinted favourites check", body)
+        self.assertIn(b"at or after", body)
         self.assertIn(b'<option value="live" selected>', body)
 
     def test_owner_can_enable_three_month_history_and_see_five_minute_rule(self):
