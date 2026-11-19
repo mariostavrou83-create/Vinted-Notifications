@@ -79,6 +79,21 @@ def migrate(conn):
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (destination,)).fetchone():
             conn.execute(sql)
 
+    # Pause buying once while the owner connects the requested separate account.
+    # A later owner settings change is never overwritten on restart.
+    if not conn.execute("SELECT 1 FROM parameters WHERE key='vinted_separate_accounts_prepared_v1'").fetchone():
+        conn.execute("UPDATE vinted_buyer SET enabled=0 WHERE id=1")
+        conn.execute("INSERT INTO parameters(key,value) VALUES ('vinted_separate_accounts_prepared_v1','1')")
+    from logger import get_logger
+    from vinted_pickup_policy import required_point
+
+    target = required_point()
+    get_logger(__name__).info(
+        "Vinted account storage ready: separate_accounts_supported=True required_inpost=%s point_complete=%s",
+        target is not None,
+        bool(target and all(target.get(field) for field in ("code", "name", "postcode"))),
+    )
+
 
 def preserve_seller(conn):
     """Pin the existing selling account atomically with the first buyer switch."""

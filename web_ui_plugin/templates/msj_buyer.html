@@ -1,6 +1,7 @@
 <section class="form-card guide-section" id="vinted-buying">
 <h2>Vinted buying account</h2>
 <p>Tap <b>Autobuy</b>, or reply <b>BUY</b> to the original Vinted alert, to purchase using your saved delivery and payment choices. Finding a listing alone never purchases it.</p>
+{% if not accounts_separate %}<p>Buying is paused while you connect your different buying account below. Your current account continues to handle offers and messages.</p>{% endif %}
 <p>Saved buyer: <b>{{buyer.username if buyer.connected else 'Not connected'}}</b> · Autobuy permission <b>{{'on' if buyer.enabled else 'off'}}</b>.</p>
 <details class="guide-section" id="vinted-new-buyer">
 <summary><b>Connect a different account for buying</b></summary>

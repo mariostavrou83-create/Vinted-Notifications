@@ -142,6 +142,21 @@ class AccountSeparationTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(self.row("vinted_seller_maintenance")["blocked"], 1)
         self.assertEqual(accounts.current_role(), "buyer")
 
+    def test_preparation_pauses_only_buying_once_and_preserves_settings(self):
+        offers.configure("preview", "half_pound", "today")
+        old_offers = offers.state()
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("DELETE FROM parameters WHERE key='vinted_separate_accounts_prepared_v1'")
+            accounts.migrate(conn)
+        self.assertEqual(self.row()["enabled"], 0)
+        self.assertEqual(self.row()["session"], self.original)
+        self.assertEqual(self.row()["max_total"], 2000)
+        self.assertEqual(offers.state(), old_offers)
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_buyer SET enabled=1 WHERE id=1")
+            accounts.migrate(conn)
+        self.assertEqual(self.row()["enabled"], 1)
+
     def test_seller_factory_uses_seller_scope_and_restores_caller(self):
         self.connect()
         seen = []

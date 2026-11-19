@@ -2155,6 +2155,7 @@ class Client:
         )
 
 
+@client_account
 def save_connected(client):
     user_id, username = client.identity()
     with closing(connection()) as conn, conn:
@@ -2710,6 +2711,7 @@ def verify_code(code):
             client.session.close()
 
 
+@client_account
 def renew_saved_client(client):
     """One selected UK renewal; keep accepted rotations before verifying identity.
 
