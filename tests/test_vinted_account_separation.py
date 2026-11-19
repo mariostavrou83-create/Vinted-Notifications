@@ -1,12 +1,14 @@
 """Real encrypted SQLite storage and owner/CSRF routes; no marketplace writes."""
 
 import hashlib
+import time
 import unittest
 from contextlib import closing
 from unittest.mock import Mock, patch
 
 import requests
 import test_dashboard
+import test_vinted_buying as buying_tests
 from test_search_controls import DatabaseFixture
 
 import search_settings
@@ -17,6 +19,7 @@ import vinted_order_messages as messages
 import vinted_seller as seller
 import vinted_session_worker as worker
 from web_ui_plugin.web_ui import create_app
+from vinted_http import BROWSER_USER_AGENT
 
 ACCESS = "offline-new-access-token-0123456789"
 REFRESH = "offline-new-refresh-token-0123456789"
@@ -167,6 +170,102 @@ class AccountSeparationTests(DatabaseFixture, unittest.TestCase):
             self.assertIs(seller.connected_client(solve_challenges=False), self.candidate)
         self.assertEqual(seen, ["seller"])
         self.assertEqual(accounts.current_role(), "buyer")
+
+    def records(self, prefix):
+        return [
+            {
+                "name": name,
+                "value": prefix + suffix,
+                "domain": ".vinted.co.uk",
+                "path": "/",
+                "secure": True,
+                "expires": int(time.time()) + 3600,
+                "domain_specified": True,
+                "domain_initial_dot": True,
+                "path_specified": True,
+                "discard": False,
+            }
+            for name, suffix in (("access_token_web", "-access-token-0123456789"), ("refresh_token_web", "-refresh-token-0123456789"))
+        ]
+
+    def native_cookie_transport(self, adapter, prepared, **kwargs):
+        from urllib.parse import urlsplit
+
+        path = urlsplit(prepared.url).path
+        self.native_calls.append((prepared.method, path))
+        self.assertEqual(prepared.method, "GET")
+        self.assertIsNone(prepared.body)
+        self.assertEqual(prepared.headers["User-Agent"], BROWSER_USER_AGENT)
+        self.assertEqual(kwargs["proxies"]["https"], self.native_proxy)
+        self.assertTrue(kwargs["verify"])
+        response = buying_tests.NativeCookieTransportTests.transport_response
+        if path == "/":
+            return response(self, prepared, text='<meta name="csrf-token" content="offline-csrf-token-0123456789">')
+        self.assertEqual(path, "/api/v2/users/current")
+        access = prepared.headers.get("Cookie", "")
+        user = {"id": 222, "login": "new-buyer"} if "new-buying-access" in access else {"id": 111, "login": "old-seller"}
+        return response(self, prepared, {"user": user})
+
+    def native_cookie_context(self):
+        from contextlib import ExitStack
+
+        self.native_proxy = "http://offline-user:offline-secret@proxy.example.test:8080"
+        self.native_calls = []
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_buyer SET network=? WHERE id=1", (buyer.encrypt({"proxy": self.native_proxy, "api_key": "", "enabled": False}),))
+        context = ExitStack()
+        def native_session():
+            session = requests.Session()
+            session.headers["User-Agent"] = BROWSER_USER_AGENT
+            return session
+        context.enter_context(patch.object(buyer, "BrowserSession", side_effect=native_session))
+        context.enter_context(patch.object(requests.adapters.HTTPAdapter, "send", autospec=True, side_effect=self.native_cookie_transport))
+        return context
+
+    def test_extension_records_connect_new_buyer_with_original_scope_and_transport(self):
+        records = self.records("new-buying")
+        with self.native_cookie_context():
+            buyer.connect_separate_buyer("new-buyer", cookie_records=records)
+        stored = buyer.decrypt(self.row()["session"])
+        self.assertEqual(self.row("vinted_seller")["session"], self.original)
+        for old, saved in zip(records, stored["cookie_records"], strict=True):
+            for key in old:
+                self.assertEqual(saved[key], old[key])
+        self.assertEqual(self.native_calls, [("GET", "/"), ("GET", "/api/v2/users/current")])
+        self.assertEqual(self.row()["user_id"], "222")
+        self.assertEqual(self.row()["enabled"], 0)
+
+    def test_seller_extension_refresh_preserves_buyer_and_resumes_same_account_offers(self):
+        offers.configure("live", "half_pound", "today", now=time.time() - 60)
+        with self.native_cookie_context():
+            buyer.connect_separate_buyer("new-buyer", cookie_records=self.records("new-buying"))
+            before = self.row()
+            offers.pause("restricted")
+            with closing(search_settings.connection()) as conn, conn:
+                conn.execute("UPDATE vinted_seller SET login_attempt=0 WHERE id=1")
+            seller.link_browser_session_records(self.records("selling-refreshed"))
+            with closing(search_settings.connection()) as conn, conn:
+                offers._recover_auth(conn, time.time() + 1)
+        self.assertEqual(self.row(), before)
+        self.assertEqual(self.row("vinted_seller")["user_id"], "111")
+        self.assertEqual(offers.state()["account_id"], "111")
+        self.assertEqual(offers.state()["mode"], "live")
+        self.assertTrue(all(method == "GET" for method, _ in self.native_calls))
+
+    def test_reconnect_rejects_other_accounts_cookies_and_keeps_both_sessions(self):
+        with self.native_cookie_context():
+            buyer.connect_separate_buyer("new-buyer", cookie_records=self.records("new-buying"))
+            before = (self.row(), self.row("vinted_seller"))
+            with closing(search_settings.connection()) as conn, conn:
+                conn.execute("UPDATE vinted_buyer SET login_attempt=0 WHERE id=1")
+                conn.execute("UPDATE vinted_seller SET login_attempt=0 WHERE id=1")
+            with self.assertRaises(buyer.BuyerError):
+                buyer.link_browser_session_records(self.records("selling-refreshed"))
+            with self.assertRaises(buyer.BuyerError):
+                seller.link_browser_session_records(self.records("new-buying"))
+        self.assertEqual(self.row()["session"], before[0]["session"])
+        self.assertEqual(self.row("vinted_seller")["session"], before[1]["session"])
+        self.assertTrue(all(method == "GET" for method, _ in self.native_calls))
 
 
 class AccountRoutesTests(DatabaseFixture, unittest.TestCase):
