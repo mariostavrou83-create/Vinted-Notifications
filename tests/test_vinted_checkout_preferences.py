@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import json
+import os
 import time
 import unittest
 from contextlib import closing
@@ -345,6 +346,61 @@ class CheckoutPreferencesTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(
             buying.checkout_prices(selected, 1500, 1884, item_id="123"), 1884
         )
+        self.assertFalse(self.payments())
+
+    def test_required_shop_overrides_saved_and_nearest_delivery_modes(self):
+        policy = {
+            "MSJ_INPOST_POINT_CODE": "TEST-SHOP-42",
+            "MSJ_INPOST_POINT_NAME": "Example Shop",
+            "MSJ_INPOST_POINT_POSTCODE": "AA1 1AA",
+        }
+        far = self.points["shipping_points"][0]["point"]
+        far.update(code="TEST-SHOP-42", carrier_name="InPost", postcode="AA11AA")
+        near = self.points["shipping_points"][1]["point"]
+        near.update(name="Example Shop", postcode="AA1 1AA", carrier_name="DPD")
+        with patch.dict(os.environ, policy):
+            for mode in ("saved", "nearest"):
+                with self.subTest(mode=mode):
+                    config = dict(buyer.settings(), pickup_mode=mode, preferred_card_last4="")
+                    result = buying.configure_checkout_choices(self.client, self.checkout, config)
+                    self.assertEqual(buying.checkout_choice_details(result)["signature"]["point_code"], far["code"])
+            self.assertFalse(self.payments())
+
+    def test_required_shop_missing_blocks_ordinary_purchase_before_payment(self):
+        policy = {
+            "MSJ_INPOST_POINT_CODE": "TEST-SHOP-42",
+            "MSJ_INPOST_POINT_NAME": "Example Shop",
+            "MSJ_INPOST_POINT_POSTCODE": "AA1 1AA",
+        }
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("INSERT INTO vinted_search_budgets VALUES (1,2000,350)")
+        with patch.dict(os.environ, policy), patch.object(buyer, "connected_client", return_value=self.client):
+            result = buying.buy(self.row)
+        self.assertEqual(result["state"], "failed_before_payment")
+        self.assertIn("Example Shop", result["message"])
+        self.assertFalse(self.payments())
+
+    def test_required_shop_stops_on_changed_carrier_and_ambiguous_locations(self):
+        policy = {
+            "MSJ_INPOST_POINT_CODE": "TEST-SHOP-42",
+            "MSJ_INPOST_POINT_NAME": "Example Shop",
+            "MSJ_INPOST_POINT_POSTCODE": "AA1 1AA",
+        }
+        far = self.points["shipping_points"][0]["point"]
+        far.update(name="Example Shop", postcode="AA1 1AA", carrier_name="InPost")
+        near = self.points["shipping_points"][1]["point"]
+        with patch.dict(os.environ, policy):
+            def change_carrier(checkout):
+                details = checkout["components"]["shipping_pickup_details"]["pickup_details"]
+                details["shipping_point"]["carrier_name"] = "Royal Mail"
+            self.corrupt = change_carrier
+            with self.assertRaisesRegex(buyer.BuyerError, "Example Shop"):
+                self.configure()
+            near.update(name="Example Shop", postcode="AA1 1AA", carrier_name="InPost")
+            self.client.reset_mock()
+            with self.assertRaisesRegex(buyer.BuyerError, "Example Shop"):
+                self.configure()
+            self.assertEqual(self.client.request.call_count, 1)
         self.assertFalse(self.payments())
 
     def test_already_nearest_only_queries_availability_without_selection_put(self):

@@ -31,6 +31,7 @@ import ebay_privacy
 import ebay_store
 import resource_controls
 import search_settings
+import vinted_pickup_policy
 
 
 def auth_row():
@@ -908,6 +909,28 @@ def create_app(test_config=None):
                         "success" if outcome["state"] == "paid" else "error",
                     )
                     return redirect(url_for("connections"), code=303)
+                elif action == "buyer_switch_account":
+                    reconnect.cancel_current()
+                    raw_records = request.form.get("new_buyer_session_records", "").strip()
+                    records = vinted_buyer.parse_browser_session_records(raw_records) if raw_records else None
+                    flash(vinted_buyer.connect_separate_buyer(
+                        request.form.get("new_buyer_username", ""),
+                        cookie_records=records,
+                        access_token=request.form.get("new_buyer_access_token", ""),
+                        refresh_token=request.form.get("new_buyer_refresh_token", ""),
+                    ), "success")
+                    session.pop("buyer_test_quote", None)
+                    return redirect(url_for("connections"), code=303)
+                elif action == "seller_recheck":
+                    import vinted_seller
+                    flash(vinted_seller.check_saved_connection(), "success")
+                    return redirect(url_for("connections"), code=303)
+                elif action == "seller_session_records":
+                    import vinted_seller
+                    records = vinted_buyer.parse_browser_session_records(request.form.get("seller_session_records", ""))
+                    vinted_seller.link_browser_session_records(records)
+                    flash("Vinted verified and reconnected your existing selling account. Your buying account and buying settings were kept.", "success")
+                    return redirect(url_for("connections"), code=303)
                 elif action == "buyer_session":
                     flash(
                         vinted_buyer.link_session(
@@ -1031,7 +1054,7 @@ def create_app(test_config=None):
                         action, exc.reason, exc.stage, exc.status
                     )
                 flash(str(exc), "error")
-                if action.startswith("buyer_"):
+                if action.startswith(("buyer_", "seller_")):
                     # Refreshing an error page must never resubmit credentials.
                     return redirect(url_for("connections"), code=303)
         return render_template(
@@ -1040,6 +1063,9 @@ def create_app(test_config=None):
             resources=resource_controls.summary(),
             deletion=ebay_privacy.setup_values(),
             photo_controls=__import__("photo_cards").health_summary(),
+            required_inpost=vinted_pickup_policy.required_point(),
+            seller=__import__("vinted_seller").settings(),
+            accounts_separate=__import__("vinted_accounts").separated(),
             buyer=vinted_buyer.settings(),
             buyer_connection_result=vinted_buyer.public_connection_result(),
             buyer_auth_results=vinted_buyer.public_auth_results(),

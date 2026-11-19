@@ -5,6 +5,8 @@ Copyright (c) 2026 masolupo; see third_party/blim/LICENSE.
 Uses MSJ's current UK transport, encryption and cross-process buyer lock.
 """
 
+from vinted_accounts import account_table, account_scope, separated
+
 import asyncio
 import hashlib
 import logging
@@ -152,6 +154,20 @@ async def run(notifier=None):
             logger.warning(
                 "Vinted buyer worker tick unavailable: %s", type(exc).__name__
             )
+        # Selling health is independent: a buyer failure must not pause offers.
+        try:
+            if separated():
+                await asyncio.to_thread(maintain_seller_connection)
+                if notifier is not None:
+                    with account_scope("seller"):
+                        await notifier.check()
+                        from vinted_buyer_events import BuyerEventNotifier
+                        seller_events = BuyerEventNotifier(notifier.bot, notifier.chat_id)
+                        for _ in range(2):
+                            if await seller_events.check() != "sent":
+                                break
+        except Exception as exc:  # noqa: BLE001 -- keep both account workers alive
+            logger.warning("Vinted selling worker tick unavailable: %s", type(exc).__name__)
         # Offers have separate failure states: a healthy buyer identity does
         # not prove that notifications or seller offers are still working.
         # Check their stored state even if this tick's account work failed.
@@ -181,13 +197,13 @@ def check_account_health():
             with closing(connection()) as conn, conn:
                 conn.execute("BEGIN IMMEDIATE")
                 row = conn.execute(
-                    "SELECT session,user_id,verified_at FROM vinted_buyer WHERE id=1"
+                    f"SELECT session,user_id,verified_at FROM {account_table('vinted_buyer')} WHERE id=1"
                 ).fetchone()
                 state = conn.execute(
-                    "SELECT * FROM vinted_buyer_maintenance WHERE id=1"
+                    f"SELECT * FROM {account_table('vinted_buyer_maintenance')} WHERE id=1"
                 ).fetchone()
                 last = conn.execute(
-                    "SELECT last_probe FROM vinted_buyer_access WHERE id=1"
+                    f"SELECT last_probe FROM {account_table('vinted_buyer_access')} WHERE id=1"
                 ).fetchone()[0]
                 if not row or not row[0] or not row[2]:
                     return "idle"
@@ -198,7 +214,7 @@ def check_account_health():
                 ).hexdigest() and (state["blocked"] or state["retry_at"] > now):
                     return "cooldown"
                 conn.execute(
-                    "UPDATE vinted_buyer_access SET last_probe=? WHERE id=1", (now,)
+                    f"UPDATE {account_table('vinted_buyer_access')} SET last_probe=? WHERE id=1", (now,)
                 )
             client = buyer.connected_client()
             logger.info(
@@ -283,7 +299,7 @@ def reserve_renewal(client, *, reservation=None):
     with closing(connection()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
         current = conn.execute(
-            "SELECT session,user_id FROM vinted_buyer WHERE id=1"
+            f"SELECT session,user_id FROM {account_table('vinted_buyer')} WHERE id=1"
         ).fetchone()
         if not current or current[0] != sealed or current[1] != user_id:
             raise buyer.BuyerError(
@@ -292,7 +308,7 @@ def reserve_renewal(client, *, reservation=None):
                 stage="saved_session",
             )
         state = conn.execute(
-            "SELECT * FROM vinted_buyer_maintenance WHERE id=1"
+            f"SELECT * FROM {account_table('vinted_buyer_maintenance')} WHERE id=1"
         ).fetchone()
         if state["session_fingerprint"] == fingerprint:
             if state["blocked"]:
@@ -319,7 +335,7 @@ def reserve_renewal(client, *, reservation=None):
                 )
                 raise error
         conn.execute(
-            "UPDATE vinted_buyer_maintenance SET session_fingerprint=?,retry_at=?,blocked=0 WHERE id=1",
+            f"UPDATE {account_table('vinted_buyer_maintenance')} SET session_fingerprint=?,retry_at=?,blocked=0 WHERE id=1",
             (fingerprint, now + RETRY_DELAY),
         )
 
@@ -340,7 +356,7 @@ def record_renewal_result(error, *, session_fingerprint):
         with closing(connection()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             current = conn.execute(
-                "SELECT session FROM vinted_buyer WHERE id=1"
+                f"SELECT session FROM {account_table('vinted_buyer')} WHERE id=1"
             ).fetchone()
             if (
                 not current
@@ -349,7 +365,7 @@ def record_renewal_result(error, *, session_fingerprint):
             ):
                 return False
             conn.execute(
-                "UPDATE vinted_buyer_maintenance SET session_fingerprint=?,retry_at=?,blocked=? WHERE id=1",
+                f"UPDATE {account_table('vinted_buyer_maintenance')} SET session_fingerprint=?,retry_at=?,blocked=? WHERE id=1",
                 (session_fingerprint, time.time() + delay, int(blocked)),
             )
     except (sqlite3.Error, OSError) as exc:
@@ -377,7 +393,7 @@ def note_ambiguous_failure(error, *, session_fingerprint):
     try:
         with buyer.exclusive(), closing(connection()) as conn, conn:
             row = conn.execute(
-                "SELECT session,verified_at FROM vinted_buyer WHERE id=1"
+                f"SELECT session,verified_at FROM {account_table('vinted_buyer')} WHERE id=1"
             ).fetchone()
             if (
                 not row
@@ -387,7 +403,7 @@ def note_ambiguous_failure(error, *, session_fingerprint):
             ):
                 return False
             conn.execute(
-                "UPDATE vinted_buyer_maintenance SET session_fingerprint=?,retry_at=?,blocked=0 WHERE id=1",
+                f"UPDATE {account_table('vinted_buyer_maintenance')} SET session_fingerprint=?,retry_at=?,blocked=0 WHERE id=1",
                 (session_fingerprint, time.time() + AMBIGUOUS_RENEWAL_DELAY),
             )
         return True
@@ -405,10 +421,10 @@ def maintain_connection():
             now = time.time()
             with closing(connection()) as conn:
                 row = conn.execute(
-                    "SELECT session,verified_at,user_id FROM vinted_buyer WHERE id=1"
+                    f"SELECT session,verified_at,user_id FROM {account_table('vinted_buyer')} WHERE id=1"
                 ).fetchone()
                 state = conn.execute(
-                    "SELECT * FROM vinted_buyer_maintenance WHERE id=1"
+                    f"SELECT * FROM {account_table('vinted_buyer_maintenance')} WHERE id=1"
                 ).fetchone()
             if not row[0] or not row[1]:
                 return "idle"
@@ -444,7 +460,7 @@ def maintain_connection():
             # network failure immediately. Only a hash of encrypted data is saved.
             with closing(connection()) as conn, conn:
                 conn.execute(
-                    "UPDATE vinted_buyer_maintenance SET session_fingerprint=?,retry_at=?,blocked=0 WHERE id=1",
+                    f"UPDATE {account_table('vinted_buyer_maintenance')} SET session_fingerprint=?,retry_at=?,blocked=0 WHERE id=1",
                     (fingerprint, now + RETRY_DELAY),
                 )
             client = None
@@ -490,7 +506,7 @@ def maintain_connection():
                     client.session.close()
                 with closing(connection()) as conn, conn:
                     current = conn.execute(
-                        "SELECT session,user_id FROM vinted_buyer WHERE id=1"
+                        f"SELECT session,user_id FROM {account_table('vinted_buyer')} WHERE id=1"
                     ).fetchone()
                     if (
                         result_fingerprint is not None
@@ -501,7 +517,7 @@ def maintain_connection():
                     ):
                         if not local_gate:
                             conn.execute(
-                                "UPDATE vinted_buyer_maintenance SET session_fingerprint=?,retry_at=?,blocked=? WHERE id=1",
+                                f"UPDATE {account_table('vinted_buyer_maintenance')} SET session_fingerprint=?,retry_at=?,blocked=? WHERE id=1",
                                 (result_fingerprint, time.time() + delay, int(blocked)),
                             )
                     else:
@@ -523,3 +539,12 @@ def maintain_connection():
     except Exception as exc:  # noqa: BLE001 -- never log credentials or stop alerts
         logger.warning("Vinted session maintenance unavailable: %s", type(exc).__name__)
         return "unavailable"
+
+
+def maintain_seller_connection():
+    """Reuse expiry maintenance and account checks in the selling storage scope."""
+    if not separated():
+        return "shared"
+    with account_scope("seller"):
+        maintain_connection()
+        return check_account_health()

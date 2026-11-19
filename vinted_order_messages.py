@@ -6,7 +6,7 @@ import re
 import time
 from contextlib import closing
 
-import vinted_buyer as buyer
+import vinted_seller as buyer
 import vinted_order_message_store as queue
 from logger import get_logger
 from search_settings import connection

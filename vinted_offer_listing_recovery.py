@@ -1,5 +1,7 @@
 """Once-only recovery of an explicitly diagnosed listing-read pause."""
 
+from vinted_accounts import seller_table as account_table
+
 import hashlib
 import json
 import math
@@ -26,7 +28,7 @@ def recheck_price_reads_once(now=None):
         if conn.execute("SELECT 1 FROM parameters WHERE key=?", (marker,)).fetchone():
             return 0
         config = conn.execute("SELECT * FROM vinted_offer_settings WHERE id=1").fetchone()
-        account = conn.execute("SELECT user_id,session FROM vinted_buyer WHERE id=1").fetchone()
+        account = conn.execute(f"SELECT user_id,session FROM {account_table('vinted_buyer')} WHERE id=1").fetchone()
         if not (config and config["mode"] in ("live", "preview")
                 and account and account["session"]
                 and str(account["user_id"]) == config["account_id"]):
@@ -93,7 +95,7 @@ def run_once(payload=None, now=None):
             "SELECT id,action FROM vinted_offer_events WHERE action IN ('live','preview') "
             "ORDER BY id DESC LIMIT 1"
         ).fetchone()
-        account = conn.execute("SELECT user_id,session,verified_at FROM vinted_buyer WHERE id=1").fetchone()
+        account = conn.execute(f"SELECT user_id,session,verified_at FROM {account_table('vinted_buyer')} WHERE id=1").fetchone()
         if not (
             config and config["account_id"] == account_id
             and config["mode"] == "paused" and config["pause_reason"] == "shape"

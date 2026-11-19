@@ -4,6 +4,8 @@ No general response-shape pause recovery, marketplace request or offer replay.
 The exact historical pause window stays in service configuration, not source.
 """
 
+from vinted_accounts import seller_table as account_table
+
 import hashlib
 import json
 import math
@@ -51,7 +53,7 @@ def run_once(*, window=None, now=None):
             "SELECT id,action FROM vinted_offer_events WHERE action IN ('live','preview') "
             "ORDER BY id DESC LIMIT 1"
         ).fetchone()
-        account = conn.execute("SELECT user_id,session,verified_at FROM vinted_buyer WHERE id=1").fetchone()
+        account = conn.execute(f"SELECT user_id,session,verified_at FROM {account_table('vinted_buyer')} WHERE id=1").fetchone()
         if not (
             config and config["mode"] == "paused" and config["pause_reason"] == "shape"
             and control and control["action"] == "paused" and control["reason"] == "shape"

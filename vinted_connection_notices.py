@@ -1,5 +1,7 @@
 """Current-session-bound Telegram warnings; no Vinted requests or buying actions."""
 
+from vinted_accounts import account_table, current_role
+
 import asyncio
 import hashlib
 import logging
@@ -34,20 +36,20 @@ RECONNECT_REASONS = frozenset(
 
 
 def migrate(conn):
-    conn.execute("""CREATE TABLE IF NOT EXISTS vinted_connection_notice (
+    conn.execute(f"""CREATE TABLE IF NOT EXISTS {account_table('vinted_connection_notice')} (
         id INTEGER PRIMARY KEY CHECK(id=1), session_fingerprint TEXT,
         buyer_id TEXT, reason TEXT, stage TEXT, http_status INTEGER,
         checked REAL, incident_started REAL, sent_level INTEGER NOT NULL DEFAULT 0,
         lease_id TEXT, lease_until REAL NOT NULL DEFAULT 0,
         retry_at REAL NOT NULL DEFAULT 0, telegram_message_id INTEGER,
         test_checked REAL NOT NULL DEFAULT 0)""")
-    conn.execute("INSERT OR IGNORE INTO vinted_connection_notice(id) VALUES (1)")
+    conn.execute(f"INSERT OR IGNORE INTO {account_table('vinted_connection_notice')}(id) VALUES (1)")
     columns = {
-        row[1] for row in conn.execute("PRAGMA table_info(vinted_connection_notice)")
+        row[1] for row in conn.execute(f"PRAGMA table_info({account_table('vinted_connection_notice')})")
     }
     if "identity_rejected" not in columns:
         conn.execute(
-            "ALTER TABLE vinted_connection_notice ADD COLUMN identity_rejected INTEGER NOT NULL DEFAULT 0"
+            f"ALTER TABLE {account_table('vinted_connection_notice')} ADD COLUMN identity_rejected INTEGER NOT NULL DEFAULT 0"
         )
     from vinted_buyer_events import migrate as migrate_events
 
@@ -84,7 +86,7 @@ def record_failure(error, session_fingerprint, *, checked_at=None):
         with closing(connection()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             current = conn.execute(
-                "SELECT session,user_id,verified_at FROM vinted_buyer WHERE id=1"
+                f"SELECT session,user_id,verified_at FROM {account_table('vinted_buyer')} WHERE id=1"
             ).fetchone()
             if (
                 not current
@@ -96,7 +98,7 @@ def record_failure(error, session_fingerprint, *, checked_at=None):
             ):
                 return False
             previous = conn.execute(
-                "SELECT * FROM vinted_connection_notice WHERE id=1"
+                f"SELECT * FROM {account_table('vinted_connection_notice')} WHERE id=1"
             ).fetchone()
             same_incident = bool(
                 previous["buyer_id"] == current[1]
@@ -104,7 +106,7 @@ def record_failure(error, session_fingerprint, *, checked_at=None):
                 and previous["checked"] >= current[2]
             )
             conn.execute(
-                """UPDATE vinted_connection_notice SET session_fingerprint=?,buyer_id=?,
+                f"""UPDATE {account_table('vinted_connection_notice')} SET session_fingerprint=?,buyer_id=?,
                 reason=?,stage=?,http_status=?,checked=?,incident_started=?,sent_level=?,
                 lease_id=?,lease_until=?,retry_at=?,telegram_message_id=?,identity_rejected=? WHERE id=1""",
                 (
@@ -170,6 +172,15 @@ def warning_level(row, now):
 
 
 def warning_text(row):
+    if current_role() == "seller":
+        status = row["http_status"]
+        operation = buyer.AUTH_STAGES.get(row["stage"], buyer.AUTH_STAGES["request"])
+        return (
+            "⚠️ Vinted selling connection needs attention\n\n"
+            + buyer.AUTH_REASONS.get(row["reason"], buyer.AUTH_REASONS["not_confirmed"])
+            + "\n" + operation + (f" · HTTP {status}" if status else "")
+            + "\n\nOpen Connections → Selling account to check or reconnect the same account used for offers and messages."
+        )
     reason, stage, status = row["reason"], row["stage"], row["http_status"]
     if row.get("identity_rejected"):
         detail = "Vinted rejected the saved account check (HTTP 401), and the connection could not be restored. Autobuy cannot proceed with this connection."
@@ -233,11 +244,11 @@ class ConnectionNotifier:
         with buyer.exclusive(), closing(connection()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             current = conn.execute(
-                "SELECT session,user_id,verified_at FROM vinted_buyer WHERE id=1"
+                f"SELECT session,user_id,verified_at FROM {account_table('vinted_buyer')} WHERE id=1"
             ).fetchone()
             row = dict(
                 conn.execute(
-                    "SELECT * FROM vinted_connection_notice WHERE id=1"
+                    f"SELECT * FROM {account_table('vinted_connection_notice')} WHERE id=1"
                 ).fetchone()
             )
             if (
@@ -251,7 +262,7 @@ class ConnectionNotifier:
                 # Fresh same-account verification or a removed connection closes
                 # the old episode, including any queued delivery lease.
                 conn.execute(
-                    "UPDATE vinted_connection_notice SET session_fingerprint=NULL,checked=NULL,incident_started=NULL,sent_level=0,lease_id=NULL,lease_until=0,retry_at=0 WHERE id=1"
+                    f"UPDATE {account_table('vinted_connection_notice')} SET session_fingerprint=NULL,checked=NULL,incident_started=NULL,sent_level=0,lease_id=NULL,lease_until=0,retry_at=0 WHERE id=1"
                 )
                 return None
             if (
@@ -269,7 +280,7 @@ class ConnectionNotifier:
                 return None
             lease = uuid.uuid4().hex
             conn.execute(
-                "UPDATE vinted_connection_notice SET lease_id=?,lease_until=? WHERE id=1",
+                f"UPDATE {account_table('vinted_connection_notice')} SET lease_id=?,lease_until=? WHERE id=1",
                 (lease, now + DELIVERY_LEASE),
             )
             row.update(lease_id=lease, level=level)
@@ -280,10 +291,10 @@ class ConnectionNotifier:
             return False
         with closing(connection()) as conn:
             current = conn.execute(
-                "SELECT session,user_id,verified_at FROM vinted_buyer WHERE id=1"
+                f"SELECT session,user_id,verified_at FROM {account_table('vinted_buyer')} WHERE id=1"
             ).fetchone()
             pending = conn.execute(
-                "SELECT lease_id,checked FROM vinted_connection_notice WHERE id=1"
+                f"SELECT lease_id,checked FROM {account_table('vinted_connection_notice')} WHERE id=1"
             ).fetchone()
         return bool(
             current
@@ -301,12 +312,12 @@ class ConnectionNotifier:
         with closing(connection()) as conn, conn:
             if message_id is not None:
                 conn.execute(
-                    "UPDATE vinted_connection_notice SET sent_level=MAX(sent_level,?),telegram_message_id=?,lease_id=NULL,lease_until=0,retry_at=0 WHERE id=1 AND lease_id=?",
+                    f"UPDATE {account_table('vinted_connection_notice')} SET sent_level=MAX(sent_level,?),telegram_message_id=?,lease_id=NULL,lease_until=0,retry_at=0 WHERE id=1 AND lease_id=?",
                     (row["level"], message_id, row["lease_id"]),
                 )
             else:
                 conn.execute(
-                    "UPDATE vinted_connection_notice SET lease_id=NULL,lease_until=0,retry_at=? WHERE id=1 AND lease_id=?",
+                    f"UPDATE {account_table('vinted_connection_notice')} SET lease_id=NULL,lease_until=0,retry_at=? WHERE id=1 AND lease_id=?",
                     (time.time() + delay, row["lease_id"]),
                 )
 
@@ -384,14 +395,14 @@ async def send_test():
     with closing(connection()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
         previous = conn.execute(
-            "SELECT test_checked FROM vinted_connection_notice WHERE id=1"
+            f"SELECT test_checked FROM {account_table('vinted_connection_notice')} WHERE id=1"
         ).fetchone()[0]
         if time.time() - previous < 300:
             raise ValueError(
                 "Wait five minutes before sending another connection-warning test."
             )
         conn.execute(
-            "UPDATE vinted_connection_notice SET test_checked=? WHERE id=1",
+            f"UPDATE {account_table('vinted_connection_notice')} SET test_checked=? WHERE id=1",
             (time.time(),),
         )
     try:

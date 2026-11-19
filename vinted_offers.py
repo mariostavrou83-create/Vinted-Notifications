@@ -6,6 +6,8 @@ of uncertain writes is performed here. Network calls never hold a SQLite write
 transaction. The existing account lock protects encrypted session rotations.
 """
 
+from vinted_accounts import seller_table as account_table
+
 import calendar
 import logging
 import math
@@ -18,7 +20,7 @@ from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
-import vinted_buyer as buyer
+import vinted_seller as buyer
 from search_settings import connection
 from vinted_buyer_priority import yield_to_purchase
 
@@ -379,7 +381,7 @@ def configure(mode, rounding, history, *, now=None):
             conn.execute("SELECT * FROM vinted_offer_settings WHERE id=1").fetchone()
         )
         account = conn.execute(
-            "SELECT user_id,verified_at,session FROM vinted_buyer WHERE id=1"
+            f"SELECT user_id,verified_at,session FROM {account_table('vinted_buyer')} WHERE id=1"
         ).fetchone()
         if mode != "paused" and not (
             account and account[0] and account[1] and account[2]
@@ -860,7 +862,7 @@ def _recover_auth(conn, now):
         "SELECT id,action FROM vinted_offer_events WHERE action IN ('live','preview') ORDER BY id DESC LIMIT 1"
     ).fetchone()
     account = conn.execute(
-        "SELECT user_id,verified_at,session FROM vinted_buyer WHERE id=1"
+        f"SELECT user_id,verified_at,session FROM {account_table('vinted_buyer')} WHERE id=1"
     ).fetchone()
     if not (
         control
@@ -876,7 +878,7 @@ def _recover_auth(conn, now):
         return
     if reason in ("restricted", "cookie_scope"):
         reconnect = conn.execute(
-            "SELECT buyer_id,checked FROM vinted_buyer_event "
+            f"SELECT buyer_id,checked FROM {account_table('vinted_buyer_event')} "
             "WHERE channel='connection' AND kind='reconnected'"
         ).fetchone()
         if not (
@@ -898,9 +900,9 @@ def _recover_auth(conn, now):
     if uncertain:
         return
     updated = conn.execute(
-        """UPDATE vinted_offer_settings SET mode=?,pause_reason='',revision=revision+1
+        f"""UPDATE vinted_offer_settings SET mode=?,pause_reason='',revision=revision+1
         WHERE id=1 AND revision=? AND mode='paused' AND pause_reason=?
-        AND EXISTS (SELECT 1 FROM vinted_buyer WHERE id=1
+        AND EXISTS (SELECT 1 FROM {account_table('vinted_buyer')} WHERE id=1
                     AND user_id=? AND session=? AND verified_at=?)""",
         (
             active["action"], config["revision"], reason,
@@ -931,7 +933,7 @@ def _recover(now):
                 "SELECT action FROM vinted_offer_events WHERE action IN ('live','preview') ORDER BY id DESC LIMIT 1"
             ).fetchone()
             account = conn.execute(
-                "SELECT user_id,verified_at,session FROM vinted_buyer WHERE id=1"
+                f"SELECT user_id,verified_at,session FROM {account_table('vinted_buyer')} WHERE id=1"
             ).fetchone()
             uncertain = conn.execute(
                 "SELECT 1 FROM vinted_offer_jobs WHERE account_id=? AND status IN ('uncertain','sending') LIMIT 1",
@@ -1358,7 +1360,7 @@ class OfferWorker:
                     ).fetchone()
                 )
                 saved = conn.execute(
-                    "SELECT user_id FROM vinted_buyer WHERE id=1"
+                    f"SELECT user_id FROM {account_table('vinted_buyer')} WHERE id=1"
                 ).fetchone()
                 if (
                     current["mode"] != "live"

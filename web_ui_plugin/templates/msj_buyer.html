@@ -1,7 +1,24 @@
 <section class="form-card guide-section" id="vinted-buying">
-<h2>Vinted account &amp; buying</h2>
+<h2>Vinted buying account</h2>
 <p>Tap <b>Autobuy</b>, or reply <b>BUY</b> to the original Vinted alert, to purchase using your saved delivery and payment choices. Finding a listing alone never purchases it.</p>
 <p>Saved buyer: <b>{{buyer.username if buyer.connected else 'Not connected'}}</b> · Autobuy permission <b>{{'on' if buyer.enabled else 'off'}}</b>.</p>
+<details class="guide-section" id="vinted-new-buyer">
+<summary><b>Connect a different account for buying</b></summary>
+<p>Your current selling account stays connected for offers and messages. The new account uses the same Autobuy flow, proxy, search budgets and InPost requirement.</p>
+<form method="post" autocomplete="off"><input type="hidden" name="csrf" value="{{csrf}}">
+<label for="new_buyer_username">New buying account's exact Vinted username</label>
+<input id="new_buyer_username" name="new_buyer_username" type="text" maxlength="100" autocomplete="off" autocapitalize="none" spellcheck="false" required>
+<label for="new_buyer_session_records">New buying account connection details from the Chrome helper</label>
+<input id="new_buyer_session_records" name="new_buyer_session_records" type="password" maxlength="32768" autocomplete="off" spellcheck="false">
+<p><small>Sign into the new buying account on Vinted, then use the same existing connection helper. Its original cookie metadata is preserved. Enter connection details only here.</small></p>
+<details><summary>Use the two existing session-value fields instead</summary>
+<label for="new_buyer_access_token">New account access_token_web value</label><input id="new_buyer_access_token" name="new_buyer_access_token" type="password" maxlength="8192" autocomplete="off" spellcheck="false">
+<label for="new_buyer_refresh_token">New account refresh_token_web value</label><input id="new_buyer_refresh_token" name="new_buyer_refresh_token" type="password" maxlength="8192" autocomplete="off" spellcheck="false">
+<p><small>Values alone do not carry their original domain and path. Use the helper details when available.</small></p></details>
+<p><small>The verified username must match. Unconfirmed payments must be resolved first. After connecting, Autobuy is off and the old account's card preference is cleared. Both saved account sessions remain encrypted.</small></p>
+<button class="primary" name="action" value="buyer_switch_account">Verify and connect separate buying account</button>
+</form></details>
+
 {% if buyer.checkout_health %}
 <div class="guide-section" role="alert"><b>Autobuy checkout needs attention{% if buyer.checkout_health.http_status %} · HTTP {{buyer.checkout_health.http_status}}{% endif %}{% if buyer.checkout_health.api_code is defined and buyer.checkout_health.api_code is not none %} · Vinted code {{buyer.checkout_health.api_code}}{% endif %}</b>
 <p>The last attempt stopped while {{buyer.checkout_health.phase}}. {% if buyer.checkout_health.payment_started %}Payment may have been submitted; check Vinted before retrying.{% else %}No payment was sent.{% endif %}</p>
@@ -24,7 +41,7 @@
 ]</pre></details>
 <form method="post" autocomplete="off"><input type="hidden" name="csrf" value="{{csrf}}">
 <label for="buyer_session_records">Connection details from the Chrome helper</label><input id="buyer_session_records" name="buyer_session_records" type="password" maxlength="32768" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Paste connection details here" required>
-<p><small>These records give access to your Vinted account. Paste them only here, never in ChatGPT, Telegram or screenshots. The input clears after submission. Existing buying permission and preferences are preserved. Eligible offers resume after verified same-account reconnection; uncertain sends remain protected.</small></p>
+<p><small>These records give access to your Vinted account. Paste them only here, never in ChatGPT, Telegram or screenshots. The input clears after submission. Existing buying permission and preferences are preserved. This reconnect applies to the buying account; the selling connection is separate.</small></p>
 <button class="primary" name="action" value="buyer_session_records">Verify and reconnect with original cookie details</button>
 </form><p><small>Account verification and correct cookie scope do not guarantee that Vinted will accept checkout or payment.</small></p>
 </details>
@@ -128,7 +145,8 @@
 <p><small>This button submits real payment. A bank may require confirmation. An uncertain payment is never retried automatically.</small></p></div>{% endif %}
 <details class="guide-section"><summary><b>Delivery &amp; payment settings</b></summary>
 <form method="post" data-buyer-settings><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="buyer_browser_info" data-buyer-browser value="">
-<label for="buyer_pickup_mode">Delivery choice</label><select id="buyer_pickup_mode" name="buyer_pickup_mode"><option value="saved" {{'selected' if buyer.pickup_mode=='saved'}}>Use my saved Vinted delivery choice</option><option value="nearest" {{'selected' if buyer.pickup_mode=='nearest'}}>Nearest pickup point to my saved Vinted address</option></select>
+{% if required_inpost %}<p><b>InPost collection only</b><br>{{ required_inpost.name }} · {{ required_inpost.postcode }}<br><small>If Vinted cannot confirm this shop for the item, checkout stops before payment.</small></p>
+{% else %}<label for="buyer_pickup_mode">Delivery choice</label><select id="buyer_pickup_mode" name="buyer_pickup_mode"><option value="saved" {{'selected' if buyer.pickup_mode=='saved'}}>Use my saved Vinted delivery choice</option><option value="nearest" {{'selected' if buyer.pickup_mode=='nearest'}}>Nearest pickup point to my saved Vinted address</option></select>{% endif %}
 <label for="buyer_card_last4">Saved card ending in</label><input id="buyer_card_last4" name="buyer_card_last4" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" value="{{buyer.preferred_card_last4}}" placeholder="Four ending digits">
 <p><small>Enter only the last four digits of a card already saved in Vinted. That card or an available Vinted balance is used. The bot does not need your full card number.</small></p>
 <p><b>Tap Autobuy on an alert to complete its purchase.</b> A saved “Maximum total including fees &amp; postage” applies to the complete checkout. Without one, Autobuy uses the maximum item price in your search link, with Vinted fees and delivery added. <a href="/">Edit your searches →</a></p>

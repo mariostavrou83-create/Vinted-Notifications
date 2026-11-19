@@ -1,5 +1,7 @@
 """Private encrypted buyer sessions with optional bounded security checks."""
 
+from vinted_accounts import account_table, account_key, current_role, client_account
+
 import base64
 import fcntl
 import hashlib
@@ -567,7 +569,7 @@ def record_auth(reason, stage="sign_in", status=None):
     checked = time.time()
     with closing(connection()) as conn, conn:
         conn.execute(
-            "UPDATE vinted_buyer_access SET checked=?,reason=?,stage=?,http_status=? WHERE id=1",
+            f"UPDATE {account_table('vinted_buyer_access')} SET checked=?,reason=?,stage=?,http_status=? WHERE id=1",
             (checked, reason, stage, status),
         )
         if stage == "renewal":
@@ -633,6 +635,7 @@ def _auth_event(value):
 
 
 def _stored_auth_event(conn, key):
+    key = account_key(key)
     row = conn.execute("SELECT value FROM parameters WHERE key=?", (key,)).fetchone()
     try:
         return _auth_event(json.loads(row[0])) if row else None
@@ -651,7 +654,7 @@ def _write_auth_event(conn, event):
         return False
     conn.execute(
         "INSERT OR REPLACE INTO parameters(key,value) VALUES (?,?)",
-        (key, json.dumps(event, sort_keys=True, allow_nan=False)),
+        (account_key(key), json.dumps(event, sort_keys=True, allow_nan=False)),
     )
     return True
 
@@ -709,8 +712,8 @@ def record_connection_result(kind, reason, stage, status):
         old = _stored_auth_event(conn, "buyer_connection_result")
         if not old or old["checked"] < result["checked"]:
             conn.execute(
-                "INSERT OR REPLACE INTO parameters(key,value) VALUES ('buyer_connection_result',?)",
-                (json.dumps(result, allow_nan=False),),
+                "INSERT OR REPLACE INTO parameters(key,value) VALUES (?,?)",
+                (account_key("buyer_connection_result"), json.dumps(result, allow_nan=False)),
             )
 
 
@@ -731,7 +734,7 @@ def public_auth_results():
         legacy = _stored_auth_event(conn, "buyer_connection_result")
         if legacy and legacy["kind"] not in events:
             events[legacy["kind"]] = legacy
-        row = conn.execute("SELECT * FROM vinted_buyer_access WHERE id=1").fetchone()
+        row = conn.execute(f"SELECT * FROM {account_table('vinted_buyer_access')} WHERE id=1").fetchone()
     results = {kind: _public_auth_event(event) for kind, event in events.items()}
     if row:
         # This shared row is never evidence of a password sign-in succeeding.
@@ -790,21 +793,21 @@ def import_auth_results_once():
 
 
 def migrate(conn):
-    conn.execute("""CREATE TABLE IF NOT EXISTS vinted_buyer (
+    conn.execute(f"""CREATE TABLE IF NOT EXISTS {account_table('vinted_buyer')} (
         id INTEGER PRIMARY KEY CHECK(id=1), session BLOB, pending BLOB,
         login_attempt REAL NOT NULL DEFAULT 0, verified_at REAL,
         user_id TEXT, username TEXT, enabled INTEGER NOT NULL DEFAULT 0,
         max_total INTEGER NOT NULL DEFAULT 0, max_extra INTEGER NOT NULL DEFAULT 0,
-        browser_info TEXT NOT NULL DEFAULT '{}')""")
-    conn.execute("INSERT OR IGNORE INTO vinted_buyer(id) VALUES (1)")
-    buyer_columns = {row[1] for row in conn.execute("PRAGMA table_info(vinted_buyer)")}
+        browser_info TEXT NOT NULL DEFAULT '{{}}')""")
+    conn.execute(f"INSERT OR IGNORE INTO {account_table('vinted_buyer')}(id) VALUES (1)")
+    buyer_columns = {row[1] for row in conn.execute(f"PRAGMA table_info({account_table('vinted_buyer')})")}
     for column, definition in (
         ("network", "BLOB"),
         ("pickup_mode", "TEXT NOT NULL DEFAULT 'saved'"),
         ("preferred_card_last4", "TEXT NOT NULL DEFAULT ''"),
     ):
         if column not in buyer_columns:
-            conn.execute(f"ALTER TABLE vinted_buyer ADD COLUMN {column} {definition}")
+            conn.execute(f"ALTER TABLE {account_table('vinted_buyer')} ADD COLUMN {column} {definition}")
     conn.execute("""CREATE TABLE IF NOT EXISTS vinted_buy_attempts (
         item_id TEXT PRIMARY KEY, state TEXT NOT NULL, checkout_id TEXT,
         total INTEGER, message TEXT NOT NULL, updated REAL NOT NULL)""")
@@ -812,14 +815,14 @@ def migrate(conn):
     for column in ("action_url", "buyer_id", "transaction_id"):
         if column not in columns:
             conn.execute(f"ALTER TABLE vinted_buy_attempts ADD COLUMN {column} TEXT")
-    conn.execute("""CREATE TABLE IF NOT EXISTS vinted_buyer_access (
+    conn.execute(f"""CREATE TABLE IF NOT EXISTS {account_table('vinted_buyer_access')} (
         id INTEGER PRIMARY KEY CHECK(id=1), last_probe REAL NOT NULL DEFAULT 0,
         checked REAL, reason TEXT, stage TEXT, http_status INTEGER)""")
-    conn.execute("INSERT OR IGNORE INTO vinted_buyer_access(id) VALUES (1)")
-    conn.execute("""CREATE TABLE IF NOT EXISTS vinted_buyer_maintenance (
+    conn.execute(f"INSERT OR IGNORE INTO {account_table('vinted_buyer_access')}(id) VALUES (1)")
+    conn.execute(f"""CREATE TABLE IF NOT EXISTS {account_table('vinted_buyer_maintenance')} (
         id INTEGER PRIMARY KEY CHECK(id=1), session_fingerprint TEXT,
         retry_at REAL NOT NULL DEFAULT 0, blocked INTEGER NOT NULL DEFAULT 0)""")
-    conn.execute("INSERT OR IGNORE INTO vinted_buyer_maintenance(id) VALUES (1)")
+    conn.execute(f"INSERT OR IGNORE INTO {account_table('vinted_buyer_maintenance')}(id) VALUES (1)")
 
 
 @contextmanager
@@ -880,12 +883,12 @@ def decrypt(data):
 
 def settings():
     with closing(connection()) as conn:
-        row = dict(conn.execute("SELECT * FROM vinted_buyer WHERE id=1").fetchone())
+        row = dict(conn.execute(f"SELECT * FROM {account_table('vinted_buyer')} WHERE id=1").fetchone())
         access = dict(
-            conn.execute("SELECT * FROM vinted_buyer_access WHERE id=1").fetchone()
+            conn.execute(f"SELECT * FROM {account_table('vinted_buyer_access')} WHERE id=1").fetchone()
         )
         maintenance = dict(
-            conn.execute("SELECT * FROM vinted_buyer_maintenance WHERE id=1").fetchone()
+            conn.execute(f"SELECT * FROM {account_table('vinted_buyer_maintenance')} WHERE id=1").fetchone()
         )
         renewal = _stored_auth_event(conn, "buyer_auth_result_renewal")
         from vinted_buyer_events import checkout_health
@@ -1057,7 +1060,7 @@ def proxy_url(value):
 
 def network_configuration(*, validate=True):
     with closing(connection()) as conn:
-        saved = conn.execute("SELECT network FROM vinted_buyer WHERE id=1").fetchone()
+        saved = conn.execute(f"SELECT network FROM {account_table('vinted_buyer')} WHERE id=1").fetchone()
     values = decrypt(saved[0]) if saved and saved[0] else {}
     configured_proxy = values.get("proxy") or os.environ.get(
         "VINTED_BUYER_PROXY_URL", ""
@@ -1100,7 +1103,7 @@ def save_network(form):
             )
         with closing(connection()) as conn, conn:
             conn.execute(
-                "UPDATE vinted_buyer SET network=?,pending=NULL,enabled=0 WHERE id=1",
+                f"UPDATE {account_table('vinted_buyer')} SET network=?,pending=NULL,enabled=0 WHERE id=1",
                 (encrypt(updated),),
             )
 
@@ -1115,6 +1118,7 @@ def _session_storage_clock():
 
 class Client:
     def __init__(self, saved=None):
+        self.account_role = current_role()
         self.network = network_configuration()
         self.session = BrowserSession()
         self.solver_attempted = False
@@ -1390,6 +1394,7 @@ class Client:
         """Only a same-account identity check may enable session persistence."""
         self._verified_session = (user_id, sealed, saved)
 
+    @client_account
     @timed_operation("session_save")
     def persist_session(self):
         """Keep accepted response rotations without overwriting a newer login."""
@@ -1406,7 +1411,7 @@ class Client:
             opened_at = _session_storage_clock()
             with conn:
                 updated = conn.execute(
-                    "UPDATE vinted_buyer SET session=? WHERE id=1 AND user_id=? AND session=?",
+                    f"UPDATE {account_table('vinted_buyer')} SET session=? WHERE id=1 AND user_id=? AND session=?",
                     (sealed, user_id, previous_sealed),
                 ).rowcount
                 written_at = _session_storage_clock()
@@ -1660,7 +1665,10 @@ class Client:
             self.solver_attempted = self.solver_attempted or public.solver_attempted
             public.session.close()
 
+    @client_account
     def request(self, method, path, body=None, *, allow_challenge=False, params=None):
+        if self.account_role == "seller" and method.upper() not in ("GET", "HEAD") and re.search(r"/(?:purchases|payments|checkout|checkout_build)(?:/|$)", path):
+            raise BuyerError("The selling connection cannot submit a purchase or payment.")
         from vinted_purchase_control import checkpoint
 
         checkpoint()
@@ -2152,7 +2160,7 @@ def save_connected(client):
     user_id, username = client.identity()
     with closing(connection()) as conn, conn:
         previous = conn.execute(
-            "SELECT user_id FROM vinted_buyer WHERE id=1"
+            f"SELECT user_id FROM {account_table('vinted_buyer')} WHERE id=1"
         ).fetchone()[0]
         if previous and user_id != previous:
             raise BuyerError(
@@ -2163,7 +2171,7 @@ def save_connected(client):
         saved = client.exported()
         sealed = encrypt(saved)
         conn.execute(
-            "UPDATE vinted_buyer SET session=?,pending=NULL,verified_at=?,user_id=?,username=?,enabled=0 WHERE id=1",
+            f"UPDATE {account_table('vinted_buyer')} SET session=?,pending=NULL,verified_at=?,user_id=?,username=?,enabled=0 WHERE id=1",
             (sealed, time.time(), user_id, username),
         )
     record_auth("connected", "identity", 200)
@@ -2176,12 +2184,12 @@ def reserve_connection_attempt():
     """Shared cooldown for owner-initiated password and existing-session linking."""
     with closing(connection()) as conn, conn:
         last = conn.execute(
-            "SELECT login_attempt FROM vinted_buyer WHERE id=1"
+            f"SELECT login_attempt FROM {account_table('vinted_buyer')} WHERE id=1"
         ).fetchone()[0]
         if time.time() - last < 30:
             raise BuyerError("Wait 30 seconds between connection attempts.")
         conn.execute(
-            "UPDATE vinted_buyer SET login_attempt=?,pending=NULL,enabled=0 WHERE id=1",
+            f"UPDATE {account_table('vinted_buyer')} SET login_attempt=?,pending=NULL,enabled=0 WHERE id=1",
             (time.time(),),
         )
 
@@ -2210,7 +2218,7 @@ def browser_session_snapshot():
     """Server-owned binding for reconnecting an already verified buyer."""
     with closing(connection()) as conn:
         row = conn.execute(
-            "SELECT session,user_id,verified_at FROM vinted_buyer WHERE id=1"
+            f"SELECT session,user_id,verified_at FROM {account_table('vinted_buyer')} WHERE id=1"
         ).fetchone()
     if (
         not row
@@ -2337,7 +2345,7 @@ def replace_browser_session(
         with closing(connection()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT session,user_id,verified_at,login_attempt FROM vinted_buyer WHERE id=1"
+                f"SELECT session,user_id,verified_at,login_attempt FROM {account_table('vinted_buyer')} WHERE id=1"
             ).fetchone()
             if (
                 not row
@@ -2358,7 +2366,7 @@ def replace_browser_session(
             if now - row[3] < 30:
                 raise BuyerError("Wait 30 seconds between connection attempts.")
             # Reserve without clearing the old session, pending code or permission.
-            conn.execute("UPDATE vinted_buyer SET login_attempt=? WHERE id=1", (now,))
+            conn.execute(f"UPDATE {account_table('vinted_buyer')} SET login_attempt=? WHERE id=1", (now,))
         try:
             client = Client({"cookie_records": records, "csrf": csrf or ""})
             client._reconnect_guard = commit_guard
@@ -2405,7 +2413,7 @@ def replace_browser_session(
                         stage="saved_session",
                     )
                 updated = conn.execute(
-                    "UPDATE vinted_buyer SET session=?,pending=NULL,verified_at=?,username=? "
+                    f"UPDATE {account_table('vinted_buyer')} SET session=?,pending=NULL,verified_at=?,username=? "
                     "WHERE id=1 AND user_id=? AND session=?",
                     (sealed, checked, username, expected_user_id, previous_sealed),
                 ).rowcount
@@ -2416,7 +2424,7 @@ def replace_browser_session(
                         stage="saved_session",
                     )
                 enabled = conn.execute(
-                    "SELECT enabled FROM vinted_buyer WHERE id=1"
+                    f"SELECT enabled FROM {account_table('vinted_buyer')} WHERE id=1"
                 ).fetchone()[0]
             # This result records the durable save before optional diagnostics
             # or cleanup. A later bookkeeping failure cannot unverify it.
@@ -2601,7 +2609,7 @@ def start_login(email, password):
                 )
                 with closing(connection()) as conn, conn:
                     conn.execute(
-                        "UPDATE vinted_buyer SET pending=? WHERE id=1",
+                        f"UPDATE {account_table('vinted_buyer')} SET pending=? WHERE id=1",
                         (encrypt(pending),),
                     )
                 record_auth("verification_code", "sign_in", 401)
@@ -2620,14 +2628,14 @@ def check_signin():
     with exclusive():
         with closing(connection()) as conn, conn:
             last = conn.execute(
-                "SELECT last_probe FROM vinted_buyer_access WHERE id=1"
+                f"SELECT last_probe FROM {account_table('vinted_buyer_access')} WHERE id=1"
             ).fetchone()[0]
             if time.time() - last < 300:
                 raise BuyerError(
                     "The last connection diagnosis is shown below. Wait five minutes before running it again."
                 )
             conn.execute(
-                "UPDATE vinted_buyer_access SET last_probe=? WHERE id=1", (time.time(),)
+                f"UPDATE {account_table('vinted_buyer_access')} SET last_probe=? WHERE id=1", (time.time(),)
             )
         client = Client()
         try:
@@ -2672,7 +2680,7 @@ def verify_code(code):
     with exclusive():
         with closing(connection()) as conn:
             pending = decrypt(
-                conn.execute("SELECT pending FROM vinted_buyer WHERE id=1").fetchone()[
+                conn.execute(f"SELECT pending FROM {account_table('vinted_buyer')} WHERE id=1").fetchone()[
                     0
                 ]
             )
@@ -2765,11 +2773,11 @@ def renew_saved_client(client):
             # Preserve an unbound client's accepted rotation even if the
             # subsequent same-account verification fails. Permissions stay put.
             if reference is None:
-                conn.execute("UPDATE vinted_buyer SET session=? WHERE id=1", (sealed,))
+                conn.execute(f"UPDATE {account_table('vinted_buyer')} SET session=? WHERE id=1", (sealed,))
             else:
                 user_id, previous_sealed, _ = reference
                 updated = conn.execute(
-                    "UPDATE vinted_buyer SET session=? WHERE id=1 AND user_id=? AND session=?",
+                    f"UPDATE {account_table('vinted_buyer')} SET session=? WHERE id=1 AND user_id=? AND session=?",
                     (sealed, user_id, previous_sealed),
                 ).rowcount
                 if updated != 1:
@@ -2795,7 +2803,7 @@ def connected_client(
 ):
     with closing(connection()) as conn:
         row = conn.execute(
-            "SELECT session,user_id FROM vinted_buyer WHERE id=1"
+            f"SELECT session,user_id FROM {account_table('vinted_buyer')} WHERE id=1"
         ).fetchone()
     client = None
     renewal_started = False
@@ -2893,7 +2901,7 @@ def connected_client(
         sealed = previous_sealed if saved == previous_saved else encrypt(saved)
         with closing(connection()) as conn, conn:
             updated = conn.execute(
-                "UPDATE vinted_buyer SET session=?,verified_at=? WHERE id=1 AND user_id=? AND session=?",
+                f"UPDATE {account_table('vinted_buyer')} SET session=?,verified_at=? WHERE id=1 AND user_id=? AND session=?",
                 (sealed, time.time(), user_id, previous_sealed),
             ).rowcount
         if updated != 1:
@@ -2931,7 +2939,7 @@ def connected_client(
             try:
                 with closing(connection()) as conn:
                     current = conn.execute(
-                        "SELECT session,user_id FROM vinted_buyer WHERE id=1"
+                        f"SELECT session,user_id FROM {account_table('vinted_buyer')} WHERE id=1"
                     ).fetchone()
                 if (
                     current
@@ -2965,14 +2973,14 @@ def check_saved_connection():
     with exclusive():
         with closing(connection()) as conn, conn:
             last = conn.execute(
-                "SELECT last_probe FROM vinted_buyer_access WHERE id=1"
+                f"SELECT last_probe FROM {account_table('vinted_buyer_access')} WHERE id=1"
             ).fetchone()[0]
             if time.time() - last < 30:
                 raise BuyerError(
                     "Wait 30 seconds before checking this connection again."
                 )
             conn.execute(
-                "UPDATE vinted_buyer_access SET last_probe=? WHERE id=1", (time.time(),)
+                f"UPDATE {account_table('vinted_buyer_access')} SET last_probe=? WHERE id=1", (time.time(),)
             )
         client = connected_client()
         client.session.close()
@@ -3036,7 +3044,7 @@ def save_limits(form):
     # Keep the normal bounded lock and leave all fields untouched on timeout.
     with exclusive(wait_seconds=5), closing(connection()) as conn, conn:
         conn.execute(
-            "UPDATE vinted_buyer SET browser_info=?,enabled=?,pickup_mode=?,preferred_card_last4=? WHERE id=1",
+            f"UPDATE {account_table('vinted_buyer')} SET browser_info=?,enabled=?,pickup_mode=?,preferred_card_last4=? WHERE id=1",
             (json.dumps(browser_info), enabled, pickup_mode, preferred_card),
         )
 
@@ -3044,7 +3052,66 @@ def save_limits(form):
 def disconnect():
     with exclusive(), closing(connection()) as conn, conn:
         conn.execute(
-            "UPDATE vinted_buyer SET session=NULL,pending=NULL,verified_at=NULL,user_id=NULL,username=NULL,enabled=0 WHERE id=1"
+            f"UPDATE {account_table('vinted_buyer')} SET session=NULL,pending=NULL,verified_at=NULL,user_id=NULL,username=NULL,enabled=0 WHERE id=1"
         )
-        conn.execute("DELETE FROM vinted_buyer_event")
+        conn.execute(f"DELETE FROM {account_table('vinted_buyer_event')}")
 
+
+
+def connect_separate_buyer(expected_username, *, cookie_records=None, access_token="", refresh_token=""):
+    """Verify a new buyer with the existing client and atomically preserve selling."""
+    if current_role() != "buyer":
+        raise BuyerError("Choose the separate buying connection.")
+    expected_username = expected_username.strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,100}", expected_username):
+        raise BuyerError("Enter the exact Vinted username of your new buying account.")
+    if cookie_records is not None:
+        saved = {"cookie_records": _browser_auth_cookie_records(cookie_records)}
+    else:
+        tokens = (access_token.strip(), refresh_token.strip())
+        if any(not re.fullmatch(r"[A-Za-z0-9._~+/=-]{16,8192}", value) for value in tokens):
+            raise BuyerError("Enter the new buying account's two session values privately.")
+        saved = {"cookies": dict(zip(("access_token_web", "refresh_token_web"), tokens))}
+    client = None
+    with exclusive(wait_seconds=5):
+        with closing(connection()) as conn, conn:
+            previous = conn.execute("SELECT user_id,session,verified_at,login_attempt FROM vinted_buyer WHERE id=1").fetchone()
+            if not previous or not all(previous[:3]):
+                raise BuyerError("Keep your existing selling account connected before adding a separate buyer.")
+            if time.time() - previous[3] < 30:
+                raise BuyerError("Wait 30 seconds between connection attempts.")
+            if conn.execute("SELECT 1 FROM vinted_buy_attempts WHERE state IN ('paying','unknown','needs_action') LIMIT 1").fetchone():
+                raise BuyerError("Resolve the existing unconfirmed payment before changing the buying account. No account was changed.")
+            conn.execute("UPDATE vinted_buyer SET login_attempt=? WHERE id=1", (time.time(),))
+        try:
+            client = Client(saved)
+            client.homepage()
+            user_id, username = client.identity()
+            if username.casefold() != expected_username.casefold():
+                raise BuyerError("Vinted verified a different username from the new buying account you entered. Both saved accounts were kept.", reason="account_changed", stage="identity")
+            exported = client.exported()
+            sealed = encrypt(exported)
+            from vinted_accounts import preserve_seller
+            with closing(connection()) as conn, conn:
+                conn.execute("BEGIN IMMEDIATE")
+                current = conn.execute("SELECT user_id,session FROM vinted_buyer WHERE id=1").fetchone()
+                if current is None or tuple(current) != tuple(previous[:2]):
+                    raise BuyerError("The saved connection changed. Check it before changing the buyer.", reason="saved_session", stage="saved_session")
+                seller_id = preserve_seller(conn)
+                if user_id == seller_id:
+                    raise BuyerError("This is your selling account. Sign into the different account you want to use for buying.", reason="account_changed", stage="identity")
+                conn.execute(
+                    "UPDATE vinted_buyer SET session=?,pending=NULL,verified_at=?,user_id=?,username=?,enabled=0,"
+                    "preferred_card_last4='',browser_info='{}' WHERE id=1",
+                    (sealed, time.time(), user_id, username),
+                )
+                conn.execute("UPDATE vinted_buyer_maintenance SET session_fingerprint=NULL,retry_at=0,blocked=0 WHERE id=1")
+            logger.info("Vinted separate accounts: buyer_verified=True seller_preserved=True autobuy_enabled=False; no checkout or payment")
+            record_auth("connected", "identity", 200)
+            record_connection_result("buyer_session", "connected", "identity", 200)
+            from vinted_buyer_events import record_connected
+            record_connected((user_id, sealed, exported), manual=True)
+            return "New buying account verified and connected. Your original account remains connected for offers and messages. Autobuy is off; review the new account's payment choice and buying settings before enabling it."
+        finally:
+            if client is not None:
+                client.session.close()

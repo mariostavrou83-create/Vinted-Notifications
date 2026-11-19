@@ -16,6 +16,7 @@ from telegram.error import BadRequest, TelegramError
 import db
 import vinted_budget
 import vinted_buyer as buyer
+import vinted_pickup_policy as pickup_policy
 from logger import get_logger
 from search_settings import connection
 from vinted_progress import bind_progress, report
@@ -707,10 +708,14 @@ def checkout_prices(checkout, item_price, maximum, *, item_id=None):
 
 
 def choice_preferences(config):
-    return {
+    preferences = {
         "pickup_mode": config["pickup_mode"],
         "preferred_card_last4": config["preferred_card_last4"],
     }
+    target = pickup_policy.required_point()
+    if target is not None:
+        preferences["required_inpost_point"] = target
+    return preferences
 
 
 def coordinates(value):
@@ -736,7 +741,7 @@ def choice_id(value):
     )
 
 
-def nearest_pickup(client, components):
+def nearest_pickup(client, components, *, required=None):
     address_component = components.get("shipping_address") or {}
     address = address_component.get("address") or {}
     shipping = components.get("shipping_pickup_details") or {}
@@ -795,7 +800,7 @@ def nearest_pickup(client, components):
             continue
         if rate["rate_uuid"] in eligible:
             raise buyer.BuyerError("Vinted returned conflicting pickup rates.")
-        eligible[rate["rate_uuid"]] = price
+        eligible[rate["rate_uuid"]] = (price, rate)
     candidates = []
     lat = math.radians(latitude)
     for entry in points:
@@ -807,29 +812,39 @@ def nearest_pickup(client, components):
             or not choice_id(point.get("code"))
         ):
             continue
-        try:
-            point_lat, point_lon = coordinates(point)
-        except (ValueError, TypeError, OverflowError):
-            continue
-        delta_lat = math.radians(point_lat - latitude)
-        delta_lon = math.radians(point_lon - longitude)
-        square = (
-            math.sin(delta_lat / 2) ** 2
-            + math.cos(lat)
-            * math.cos(math.radians(point_lat))
-            * math.sin(delta_lon / 2) ** 2
-        )
-        distance = 6371000 * 2 * math.asin(math.sqrt(min(1, max(0, square))))
+        price, rate = eligible[point["rate_uuid"]]
+        if required is not None:
+            if not pickup_policy.matches(point, rate, required, entry=entry):
+                continue
+            distance = 0  # The required shop is identified independently of distance.
+        else:
+            try:
+                point_lat, point_lon = coordinates(point)
+            except (ValueError, TypeError, OverflowError):
+                continue
+            delta_lat = math.radians(point_lat - latitude)
+            delta_lon = math.radians(point_lon - longitude)
+            square = (
+                math.sin(delta_lat / 2) ** 2
+                + math.cos(lat)
+                * math.cos(math.radians(point_lat))
+                * math.sin(delta_lon / 2) ** 2
+            )
+            distance = 6371000 * 2 * math.asin(math.sqrt(min(1, max(0, square))))
         candidates.append(
             (
                 distance,
-                eligible[point["rate_uuid"]],
+                price,
                 point["code"],
                 point["uuid"],
                 point["rate_uuid"],
                 point,
             )
         )
+    if required is not None:
+        identities = {(code, uuid) for _, _, code, uuid, _, _ in candidates}
+        if len(identities) != 1:
+            raise buyer.BuyerError(pickup_policy.required_message(required))
     if not candidates:
         raise buyer.BuyerError(
             "Vinted did not return an available pickup point for your saved address."
@@ -911,8 +926,9 @@ def configure_checkout_choices(client, checkout, config):
         raise buyer.BuyerError("Vinted did not confirm readable checkout choices.")
     changes = {}
     expected = None
-    if config["pickup_mode"] == "nearest":
-        address_id, pickup_type, point = nearest_pickup(client, components)
+    required = preferences.get("required_inpost_point")
+    if required is not None or config["pickup_mode"] == "nearest":
+        address_id, pickup_type, point = nearest_pickup(client, components, required=required)
         expected = address_id, pickup_type, point
         details = (components.get("shipping_pickup_details") or {}).get(
             "pickup_details"
@@ -977,9 +993,15 @@ def configure_checkout_choices(client, checkout, config):
             point["rate_uuid"],
             pickup_type,
         ):
+            if required is not None:
+                raise buyer.BuyerError(pickup_policy.required_message(required))
             raise buyer.BuyerError(
                 "Vinted did not confirm the nearest available pickup point. No payment was sent."
             )
+        if required is not None:
+            shipping = components.get("shipping_pickup_details") or {}
+            if pickup_policy.conflicts_with_target(required, current_point, details, shipping):
+                raise buyer.BuyerError(pickup_policy.required_message(required))
     if (
         last4
         and preferred_payment(components.get("payment_method") or {}, last4) is not None

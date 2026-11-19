@@ -1,5 +1,7 @@
 """Durable buyer confirmations and checkout failures, separate from login health."""
 
+from vinted_accounts import account_table, current_role
+
 import logging
 import re
 import time
@@ -44,7 +46,7 @@ FAILURES = frozenset(
 
 
 def migrate(conn):
-    conn.execute("""CREATE TABLE IF NOT EXISTS vinted_buyer_event (
+    conn.execute(f"""CREATE TABLE IF NOT EXISTS {account_table('vinted_buyer_event')} (
         channel TEXT PRIMARY KEY CHECK(channel IN ('connection','checkout')),
         event_id TEXT NOT NULL, buyer_id TEXT NOT NULL, kind TEXT NOT NULL,
         checked REAL NOT NULL, reason TEXT, stage TEXT, http_status INTEGER,
@@ -52,18 +54,18 @@ def migrate(conn):
         phase TEXT, payment_started INTEGER NOT NULL DEFAULT 0,
         sent INTEGER NOT NULL DEFAULT 0, lease_id TEXT,
         lease_until REAL NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0)""")
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(vinted_buyer_event)")}
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({account_table('vinted_buyer_event')})")}
     if "api_code" not in columns:
-        conn.execute("ALTER TABLE vinted_buyer_event ADD COLUMN api_code INTEGER")
+        conn.execute(f"ALTER TABLE {account_table('vinted_buyer_event')} ADD COLUMN api_code INTEGER")
     if "checkout_id" not in columns:
-        conn.execute("ALTER TABLE vinted_buyer_event ADD COLUMN checkout_id TEXT")
+        conn.execute(f"ALTER TABLE {account_table('vinted_buyer_event')} ADD COLUMN checkout_id TEXT")
 
 
 def _current(conn, reference):
     if not isinstance(reference, tuple) or len(reference) != 3:
         return None
     current = conn.execute(
-        "SELECT session,user_id,verified_at FROM vinted_buyer WHERE id=1"
+        f"SELECT session,user_id,verified_at FROM {account_table('vinted_buyer')} WHERE id=1"
     ).fetchone()
     return (
         current
@@ -86,7 +88,7 @@ def record_connected(reference, *, manual=False):
             if current is None:
                 return False
             failure = conn.execute(
-                "SELECT buyer_id,checked,sent_level FROM vinted_connection_notice WHERE id=1"
+                f"SELECT buyer_id,checked,sent_level FROM {account_table('vinted_connection_notice')} WHERE id=1"
             ).fetchone()
             recovered = bool(
                 failure
@@ -98,7 +100,7 @@ def record_connected(reference, *, manual=False):
             if not manual and not recovered:
                 return False
             conn.execute(
-                """INSERT OR REPLACE INTO vinted_buyer_event
+                f"""INSERT OR REPLACE INTO {account_table('vinted_buyer_event')}
                 (channel,event_id,buyer_id,kind,checked,reason,stage,http_status)
                 VALUES ('connection',?,?,?,?, 'connected','identity',200)""",
                 (
@@ -111,7 +113,7 @@ def record_connected(reference, *, manual=False):
             # Close the reported account incident atomically so repeated healthy
             # checks cannot enqueue another recovery. Checkout evidence is separate.
             conn.execute(
-                "UPDATE vinted_connection_notice SET checked=NULL,incident_started=NULL,"
+                f"UPDATE {account_table('vinted_connection_notice')} SET checked=NULL,incident_started=NULL,"
                 "sent_level=0,lease_id=NULL,lease_until=0,retry_at=0 WHERE id=1"
             )
         return True
@@ -143,7 +145,7 @@ def record_checkout_failure(client, error, phase, *, payment_started=False, chec
             if current is None:
                 return False
             previous = conn.execute(
-                "SELECT * FROM vinted_buyer_event WHERE channel='checkout'"
+                f"SELECT * FROM {account_table('vinted_buyer_event')} WHERE channel='checkout'"
             ).fetchone()
             # One warning per unresolved checkout episode, with one escalation
             # if a later attempt leaves a payment result uncertain.
@@ -161,13 +163,13 @@ def record_checkout_failure(client, error, phase, *, payment_started=False, chec
             api_code = buyer.api_error_code(getattr(error, "api_code", None))
             if same:
                 conn.execute(
-                    "UPDATE vinted_buyer_event SET checked=?,reason=?,stage=?,http_status=?,phase=?,api_code=?,checkout_id=? "
+                    f"UPDATE {account_table('vinted_buyer_event')} SET checked=?,reason=?,stage=?,http_status=?,phase=?,api_code=?,checkout_id=? "
                     "WHERE channel='checkout'",
                     (time.time(), error.reason, error.stage, status, phase, api_code, checkout_id),
                 )
             else:
                 conn.execute(
-                    """INSERT OR REPLACE INTO vinted_buyer_event
+                    f"""INSERT OR REPLACE INTO {account_table('vinted_buyer_event')}
                     (channel,event_id,buyer_id,kind,checked,reason,stage,http_status,phase,payment_started,api_code,checkout_id)
                     VALUES ('checkout',?,?,'blocked',?,?,?,?,?,?,?,?)""",
                     (
@@ -205,7 +207,7 @@ def clear_checkout_failure(client, *, checkout_id=None):
                 # erase a refusal from another checkout or an unbound legacy
                 # warning. A newly completed purchase retains the existing
                 # unscoped recovery behavior.
-                sql = "DELETE FROM vinted_buyer_event WHERE channel='checkout' AND buyer_id=?"
+                sql = f"DELETE FROM {account_table('vinted_buyer_event')} WHERE channel='checkout' AND buyer_id=?"
                 params = (current[1],)
                 if checkout_id is not None:
                     sql += " AND checkout_id=?"
@@ -219,7 +221,7 @@ def clear_checkout_failure(client, *, checkout_id=None):
 
 def checkout_health(conn, user_id):
     row = conn.execute(
-        "SELECT checked,reason,http_status,phase,payment_started,api_code FROM vinted_buyer_event "
+        f"SELECT checked,reason,http_status,phase,payment_started,api_code FROM {account_table('vinted_buyer_event')} "
         "WHERE channel='checkout' AND buyer_id=? AND kind='blocked'",
         (user_id,),
     ).fetchone()
@@ -239,16 +241,16 @@ class BuyerEventNotifier(ConnectionNotifier):
         with closing(connection()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             current = conn.execute(
-                "SELECT session,user_id,verified_at FROM vinted_buyer WHERE id=1"
+                f"SELECT session,user_id,verified_at FROM {account_table('vinted_buyer')} WHERE id=1"
             ).fetchone()
             if not current or not current[0] or not current[2]:
-                conn.execute("DELETE FROM vinted_buyer_event")
+                conn.execute(f"DELETE FROM {account_table('vinted_buyer_event')}")
                 return None
             conn.execute(
-                "DELETE FROM vinted_buyer_event WHERE buyer_id<>?", (current[1],)
+                f"DELETE FROM {account_table('vinted_buyer_event')} WHERE buyer_id<>?", (current[1],)
             )
             selected = conn.execute(
-                "SELECT * FROM vinted_buyer_event WHERE sent=0 AND retry_at<=? AND lease_until<=? "
+                f"SELECT * FROM {account_table('vinted_buyer_event')} WHERE sent=0 AND retry_at<=? AND lease_until<=? "
                 "ORDER BY checked LIMIT 1",
                 (now, now),
             ).fetchone()
@@ -257,7 +259,7 @@ class BuyerEventNotifier(ConnectionNotifier):
             row = dict(selected)
             lease = uuid.uuid4().hex
             conn.execute(
-                "UPDATE vinted_buyer_event SET lease_id=?,lease_until=? WHERE channel=?",
+                f"UPDATE {account_table('vinted_buyer_event')} SET lease_id=?,lease_until=? WHERE channel=?",
                 (lease, now + DELIVERY_LEASE, row["channel"]),
             )
             row.update(lease_id=lease, level=1)
@@ -269,7 +271,7 @@ class BuyerEventNotifier(ConnectionNotifier):
         with closing(connection()) as conn:
             return (
                 conn.execute(
-                    "SELECT 1 FROM vinted_buyer_event e JOIN vinted_buyer b ON b.id=1 "
+                    f"SELECT 1 FROM {account_table('vinted_buyer_event')} e JOIN {account_table('vinted_buyer')} b ON b.id=1 "
                     "WHERE e.event_id=? AND e.lease_id=? AND e.buyer_id=b.user_id "
                     "AND b.session IS NOT NULL AND b.verified_at IS NOT NULL",
                     (row["event_id"], row["lease_id"]),
@@ -280,7 +282,7 @@ class BuyerEventNotifier(ConnectionNotifier):
     def finish(self, row, message_id=None, delay=DELIVERY_RETRY):
         with closing(connection()) as conn, conn:
             conn.execute(
-                "UPDATE vinted_buyer_event SET sent=?,lease_id=NULL,lease_until=0,retry_at=? "
+                f"UPDATE {account_table('vinted_buyer_event')} SET sent=?,lease_id=NULL,lease_until=0,retry_at=? "
                 "WHERE event_id=? AND lease_id=?",
                 (
                     int(message_id is not None),
@@ -291,6 +293,8 @@ class BuyerEventNotifier(ConnectionNotifier):
             )
 
     def notice_text(self, row):
+        if current_role() == "seller" and row["channel"] == "connection":
+            return "✅ Vinted selling account verified\n\nYour saved selling connection is usable for offers and messages. The separate buying connection is unchanged."
         checked = buyer._display_auth_time(row["checked"])
         if row["channel"] == "connection":
             title = (
@@ -300,11 +304,11 @@ class BuyerEventNotifier(ConnectionNotifier):
             )
             with closing(connection()) as conn:
                 config = conn.execute(
-                    "SELECT enabled FROM vinted_buyer WHERE id=1"
+                    f"SELECT enabled FROM {account_table('vinted_buyer')} WHERE id=1"
                 ).fetchone()
                 checkout = checkout_health(conn, row["buyer_id"])
                 failure = conn.execute(
-                    "SELECT checked FROM vinted_connection_notice WHERE id=1"
+                    f"SELECT checked FROM {account_table('vinted_connection_notice')} WHERE id=1"
                 ).fetchone()
             text = (
                 title
