@@ -5,8 +5,6 @@ Copyright (c) 2026 masolupo; see third_party/blim/LICENSE.
 Uses MSJ's current UK transport, encryption and cross-process buyer lock.
 """
 
-from vinted_accounts import account_table, account_scope, separated
-
 import asyncio
 import hashlib
 import logging
@@ -17,6 +15,7 @@ from contextlib import closing
 
 import vinted_buyer as buyer
 from search_settings import connection
+from vinted_accounts import account_scope, account_table, separated
 from vinted_buyer_priority import yield_to_purchase
 
 logger = logging.getLogger(__name__)

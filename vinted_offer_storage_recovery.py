@@ -4,8 +4,6 @@ No general response-shape pause recovery, marketplace request or offer replay.
 The exact historical pause window stays in service configuration, not source.
 """
 
-from vinted_accounts import seller_table as account_table
-
 import hashlib
 import json
 import math
@@ -14,6 +12,7 @@ import time
 from contextlib import closing
 
 from search_settings import connection
+from vinted_accounts import seller_table as account_table
 
 VARIABLE = "MSJ_OFFERS_STORAGE_RECOVERY_WINDOW"
 

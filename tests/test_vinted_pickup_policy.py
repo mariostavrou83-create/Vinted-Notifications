@@ -4,7 +4,6 @@ from unittest.mock import patch
 
 import vinted_pickup_policy as policy
 
-
 TARGET = {"name": "Example Shop", "postcode": "AA1 1AA", "code": "TEST-SHOP-42"}
 RATE = {"carrier": {"name": "InPost", "code": "INPOST_UK"}}
 

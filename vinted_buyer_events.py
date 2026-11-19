@@ -1,7 +1,5 @@
 """Durable buyer confirmations and checkout failures, separate from login health."""
 
-from vinted_accounts import account_table, current_role
-
 import logging
 import re
 import time
@@ -10,6 +8,7 @@ from contextlib import closing
 
 import vinted_buyer as buyer
 from search_settings import connection
+from vinted_accounts import account_table, current_role
 from vinted_connection_notices import DELIVERY_LEASE, DELIVERY_RETRY, ConnectionNotifier
 
 logger = logging.getLogger(__name__)

@@ -1,9 +1,9 @@
 """Explicit buyer/seller storage scopes; credentials remain inside this service."""
 
+import sqlite3
 from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from functools import wraps
-import sqlite3
 
 _ROLE = ContextVar("vinted_account_role", default="buyer")
 TABLES = {
@@ -63,7 +63,8 @@ def client_account(method):
     """A returned client retains its own role after its factory returns."""
     @wraps(method)
     def scoped(self, *args, **kwargs):
-        with account_scope(getattr(self, "account_role", "buyer")):
+        role = getattr(self, "account_role", "buyer")
+        with account_scope(role if isinstance(role, str) else current_role()):
             return method(self, *args, **kwargs)
     return scoped
 

@@ -6,6 +6,8 @@ from contextlib import closing
 from unittest.mock import Mock, patch
 
 import requests
+import test_dashboard
+from test_search_controls import DatabaseFixture
 
 import search_settings
 import vinted_accounts as accounts
@@ -14,8 +16,6 @@ import vinted_offers as offers
 import vinted_order_messages as messages
 import vinted_seller as seller
 import vinted_session_worker as worker
-from test_search_controls import DatabaseFixture
-from test_dashboard import DashboardTests
 from web_ui_plugin.web_ui import create_app
 
 ACCESS = "offline-new-access-token-0123456789"
@@ -170,12 +170,12 @@ class AccountRoutesTests(DatabaseFixture, unittest.TestCase):
                 self.assertEqual(response.status_code, 302)
                 self.assertEqual(response.location, "/login")
                 connect.assert_not_called()
-        DashboardTests.owner(self)
+        test_dashboard.DashboardTests.owner(self)
         for action in ("buyer_switch_account", "seller_recheck", "seller_session_records"):
             self.assertEqual(self.client.post("/connections", data={"action": action}).status_code, 400)
 
     def test_owner_switch_redirects_and_does_not_echo_credentials(self):
-        DashboardTests.owner(self)
+        test_dashboard.DashboardTests.owner(self)
         with patch.object(buyer, "connect_separate_buyer", return_value="New buying account verified.") as connect:
             response = self.client.post("/connections", data={
                 "csrf": "offline-csrf", "action": "buyer_switch_account", "new_buyer_username": "new-buyer",

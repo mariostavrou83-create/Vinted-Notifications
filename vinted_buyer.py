@@ -1,7 +1,5 @@
 """Private encrypted buyer sessions with optional bounded security checks."""
 
-from vinted_accounts import account_table, account_key, current_role, client_account
-
 import base64
 import fcntl
 import hashlib
@@ -26,6 +24,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 import db
 from search_settings import connection
+from vinted_accounts import account_key, account_table, client_account, current_role
 from vinted_http import API_HEADERS, NAVIGATION_HEADERS, BrowserSession
 from vinted_timing import (
     log_duration,
@@ -1394,8 +1393,8 @@ class Client:
         """Only a same-account identity check may enable session persistence."""
         self._verified_session = (user_id, sealed, saved)
 
-    @client_account
     @timed_operation("session_save")
+    @client_account
     def persist_session(self):
         """Keep accepted response rotations without overwriting a newer login."""
         if self._verified_session is None:

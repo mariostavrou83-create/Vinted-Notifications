@@ -1,7 +1,5 @@
 """Once-only recovery of an explicitly diagnosed listing-read pause."""
 
-from vinted_accounts import seller_table as account_table
-
 import hashlib
 import json
 import math
@@ -10,6 +8,7 @@ import time
 from contextlib import closing
 
 from search_settings import connection
+from vinted_accounts import seller_table as account_table
 
 
 def recheck_price_reads_once(now=None):

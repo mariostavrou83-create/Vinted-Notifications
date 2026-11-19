@@ -27,7 +27,7 @@
 <label for="offer-mode">Mode</label>
 <select id="offer-mode" name="mode"><option value="preview" {{'selected' if config.mode=='preview'}}>Preview queue — send nothing</option><option value="live" {{'selected' if config.mode=='live'}}>Live — send 5% offers</option><option value="paused" {{'selected' if config.mode=='paused'}}>Paused</option></select>
 <button class="primary" {{'disabled' if not buyer.connected}}>Save offer settings</button>
-{% if not buyer.connected %}<p><a href="/connections#vinted-buying">Connect your Vinted account →</a></p>{% endif %}
+{% if not buyer.connected %}<p><a href="/connections#vinted-selling">Connect your Vinted selling account →</a></p>{% endif %}
 </form>
 <form class="offer-pause" method="post" action="{{url_for('offers_pause')}}"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary">Pause offers now</button></form>
 </section>

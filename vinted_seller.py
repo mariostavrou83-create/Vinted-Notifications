@@ -1,8 +1,8 @@
 """The existing selling connection, using the same verified Vinted client."""
 
+import inspect
 from contextlib import contextmanager
 from functools import wraps
-import inspect
 
 import vinted_buyer as _buyer
 from vinted_accounts import account_scope, seller_role
@@ -16,7 +16,7 @@ def exclusive(*, wait_seconds=0):
 
 def __getattr__(name):
     value = getattr(_buyer, name)
-    if not inspect.isfunction(value):
+    if not callable(value) or inspect.isclass(value):
         return value
     @wraps(value)
     def scoped(*args, **kwargs):

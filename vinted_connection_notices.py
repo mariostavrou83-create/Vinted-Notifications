@@ -1,7 +1,5 @@
 """Current-session-bound Telegram warnings; no Vinted requests or buying actions."""
 
-from vinted_accounts import account_table, current_role
-
 import asyncio
 import hashlib
 import logging
@@ -19,6 +17,7 @@ from telegram.error import RetryAfter
 import db
 import vinted_buyer as buyer
 from search_settings import connection
+from vinted_accounts import account_table, current_role
 
 logger = logging.getLogger(__name__)
 TRANSIENT_GRACE = 15 * 60

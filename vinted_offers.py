@@ -6,8 +6,6 @@ of uncertain writes is performed here. Network calls never hold a SQLite write
 transaction. The existing account lock protects encrypted session rotations.
 """
 
-from vinted_accounts import seller_table as account_table
-
 import calendar
 import logging
 import math
@@ -22,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 import vinted_seller as buyer
 from search_settings import connection
+from vinted_accounts import seller_table as account_table
 from vinted_buyer_priority import yield_to_purchase
 
 logger = logging.getLogger(__name__)
