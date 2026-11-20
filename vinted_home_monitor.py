@@ -30,13 +30,40 @@ MAX_DETAILS = 6
 CYCLE_SECONDS = 30
 MAX_AGE = 180
 ROLES = ("seller", "buyer")
-COUNTERS = ("candidates", "checked", "fresh", "matched", "alerts", "rejected_age", "rejected_match", "duplicates")
-ERROR_CODES = frozenset({
-    "busy", "security_challenge", "credentials", "rate_limited", "network",
-    "account_changed", "session_refresh", "saved_session", "source_unavailable",
-    "age_unverified", "response_too_large", "response_time_unverified",
-})
-SOURCE_CODES = frozenset({"invalid_document", "home_cards_unavailable", "home_not_authenticated", "home_auth_unverified"})
+COUNTERS = (
+    "candidates",
+    "checked",
+    "fresh",
+    "matched",
+    "alerts",
+    "rejected_age",
+    "rejected_match",
+    "duplicates",
+)
+ERROR_CODES = frozenset(
+    {
+        "busy",
+        "security_challenge",
+        "credentials",
+        "rate_limited",
+        "network",
+        "account_changed",
+        "session_refresh",
+        "saved_session",
+        "source_unavailable",
+        "age_unverified",
+        "response_too_large",
+        "response_time_unverified",
+    }
+)
+SOURCE_CODES = frozenset(
+    {
+        "invalid_document",
+        "home_cards_unavailable",
+        "home_not_authenticated",
+        "home_auth_unverified",
+    }
+)
 
 
 def enabled():
@@ -44,8 +71,11 @@ def enabled():
 
 
 def active_searches():
-    return [search for row in search_settings.active_queries()
-            if (search := search_settings.get_search(row[0])) is not None]
+    return [
+        search
+        for row in search_settings.active_queries()
+        if (search := search_settings.get_search(row[0])) is not None
+    ]
 
 
 def global_filters_allow(item):
@@ -53,7 +83,9 @@ def global_filters_allow(item):
     from core import contains_banwords
 
     words = db.get_parameter("banwords")
-    if words and contains_banwords(item.get("title", "") + " " + item.get("description", ""), words):
+    if words and contains_banwords(
+        item.get("title", "") + " " + item.get("description", ""), words
+    ):
         return False
     allowed = db.get_allowlist()
     # Home does not infer seller location from currency or from the buyer.
@@ -65,9 +97,13 @@ def _account_ready(role):
         return "not_separated"
     if not (Path(db.DB_PATH).resolve().parent / "vinted-buyer.key").is_file():
         return "key_missing"
-    with vinted_accounts.account_scope(role), closing(search_settings.connection()) as conn:
+    with vinted_accounts.account_scope(role), closing(
+        search_settings.connection()
+    ) as conn:
         table = vinted_accounts.account_table("vinted_buyer")
-        row = conn.execute(f"SELECT user_id,session,verified_at FROM {table} WHERE id=1").fetchone()
+        row = conn.execute(
+            f"SELECT user_id,session,verified_at FROM {table} WHERE id=1"
+        ).fetchone()
         if not row or not all(row):
             return "account_unavailable"
     return None
@@ -80,7 +116,9 @@ def _page(role, url):
         client = account.connected_client(solve_challenges=False, allow_refresh=False)
         try:
             if client.account_role != role:
-                raise buyer.BuyerError("Home account did not match.", reason="account_changed")
+                raise buyer.BuyerError(
+                    "Home account did not match.", reason="account_changed"
+                )
             yield_to_purchase()
             return read_html(client, url)
         finally:
@@ -93,41 +131,67 @@ def _publish(item, search, match, age, role, *, now):
 
     observed = age.get("checked_at")
     upper = age.get("max_age_seconds")
-    if (age.get("verified") is not True or type(observed) not in (int, float)
-            or type(upper) not in (int, float) or not math.isfinite(observed)
-            or not math.isfinite(upper) or not 0 <= upper <= MAX_AGE
-            or observed > now or now >= observed + MAX_AGE - upper):
+    if (
+        age.get("verified") is not True
+        or type(observed) not in (int, float)
+        or type(upper) not in (int, float)
+        or not math.isfinite(observed)
+        or not math.isfinite(upper)
+        or not 0 <= upper <= MAX_AGE
+        or observed > now
+        or now >= observed + MAX_AGE - upper
+    ):
         return False
     price = item["price"]
     raw = dict(item)
     photos = item.get("photos") or []
     photo = photos[0] if photos else (item.get("photo") or {}).get("url")
     listing = SimpleNamespace(
-        id=item["id"], title=item["title"], url=item["url"],
-        price=price["amount"], currency=price["currency_code"], photo=photo,
-        brand_title=item.get("brand_title"), size_title=item.get("size_title"),
+        id=item["id"],
+        title=item["title"],
+        url=item["url"],
+        price=price["amount"],
+        currency=price["currency_code"],
+        photo=photo,
+        brand_title=item.get("brand_title"),
+        size_title=item.get("size_title"),
         raw_data=raw,
     )
     details = vinted_alerts.snapshot(listing, search)
     details.update(
-        description_pending=False, description_checked=True,
-        description_state="available", description_complete=True,
-        home_discovery={"version": 1, "source_role": role,
-                        "reason": match["reason"], "observed_at": observed,
-                        "max_age_seconds": upper,
-                        "expires_at": observed + MAX_AGE - upper},
+        description_pending=False,
+        description_checked=True,
+        description_state="available",
+        description_complete=True,
+        home_discovery={
+            "version": 1,
+            "source_role": role,
+            "reason": match["reason"],
+            "observed_at": observed,
+            "max_age_seconds": upper,
+            "expires_at": observed + MAX_AGE - upper,
+        },
     )
     # Discovery uses its own proven style evidence. Existing keyword searches
     # still require their exact words, unchanged in the normal alert pipeline.
     details.pop("keyword_evidence", None)
     details.pop("keyword_description", None)
     return db.add_item_to_db(
-        id=item["id"], title=item["title"], query_id=search["id"],
-        price=listing.price, currency=listing.currency, timestamp=observed,
-        photo_url=photo, update_search_timestamp=False,
-        alert={"url": item["url"], "search_name": search["query_name"] or f"Search #{search['id']}",
-               "reference_id": search.get("reference_id"), "vinted_details": details,
-               "content": vinted_alerts.fast_text(listing, search, details)},
+        id=item["id"],
+        title=item["title"],
+        query_id=search["id"],
+        price=listing.price,
+        currency=listing.currency,
+        timestamp=observed,
+        photo_url=photo,
+        update_search_timestamp=False,
+        alert={
+            "url": item["url"],
+            "search_name": search["query_name"] or f"Search #{search['id']}",
+            "reference_id": search.get("reference_id"),
+            "vinted_details": details,
+            "content": vinted_alerts.fast_text(listing, search, details),
+        },
     )
 
 
@@ -143,29 +207,58 @@ class Monitor:
         self.retry_at = dict.fromkeys(ROLES, 0)
         for role in ROLES:
             try:
-                saved = json.loads(db.get_parameter("home_monitor_status_" + role) or "{}")
+                saved = json.loads(
+                    db.get_parameter("home_monitor_status_" + role) or "{}"
+                )
                 retry = saved.get("retry_at", 0) if isinstance(saved, dict) else 0
-                if type(retry) in (int, float) and math.isfinite(retry) and 0 <= retry < 4102444800:
+                if (
+                    type(retry) in (int, float)
+                    and math.isfinite(retry)
+                    and 0 <= retry < 4102444800
+                ):
                     self.retry_at[role] = retry
             except (ValueError, TypeError):
                 pass
 
     def status(self, role, code, stage, http_status=None, *, detail_code=""):
-        data = {"code": code, "stage": stage, "checked_at": self.clock(),
-                "detail_code": detail_code if detail_code in SOURCE_CODES else "",
-                "retry_at": self.retry_at[role],
-                "http_status": http_status if type(http_status) is int and 100 <= http_status <= 599 else None,
-                **self.counts[role]}
+        data = {
+            "code": code,
+            "stage": stage,
+            "checked_at": self.clock(),
+            "detail_code": detail_code if detail_code in SOURCE_CODES else "",
+            "retry_at": self.retry_at[role],
+            "http_status": (
+                http_status
+                if type(http_status) is int and 100 <= http_status <= 599
+                else None
+            ),
+            **self.counts[role],
+        }
         with closing(search_settings.connection()) as conn, conn:
-            conn.execute("INSERT INTO parameters(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                         ("home_monitor_status_" + role, json.dumps(data, separators=(",", ":"))))
-        logger.info("Vinted Home monitor: role=%s code=%s detail=%s stage=%s http=%s retry_at=%s candidates=%s checked=%s fresh=%s matched=%s alerts=%s rejected_age=%s rejected_match=%s duplicates=%s",
-                    role, code, data["detail_code"], stage, data["http_status"], data["retry_at"], *(data[key] for key in COUNTERS))
+            conn.execute(
+                "INSERT INTO parameters(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (
+                    "home_monitor_status_" + role,
+                    json.dumps(data, separators=(",", ":")),
+                ),
+            )
+        logger.info(
+            "Vinted Home monitor: role=%s code=%s detail=%s stage=%s http=%s retry_at=%s candidates=%s checked=%s fresh=%s matched=%s alerts=%s rejected_age=%s rejected_match=%s duplicates=%s",
+            role,
+            code,
+            data["detail_code"],
+            stage,
+            data["http_status"],
+            data["retry_at"],
+            *(data[key] for key in COUNTERS),
+        )
 
     def remember(self, item_id, now):
         self.examined[str(item_id)] = now
         self.examined.move_to_end(str(item_id))
-        while self.examined and (len(self.examined) > 2000 or next(iter(self.examined.values())) < now - 1800):
+        while self.examined and (
+            len(self.examined) > 2000 or next(iter(self.examined.values())) < now - 1800
+        ):
             self.examined.popitem(last=False)
 
     def tick(self):
@@ -212,7 +305,13 @@ class Monitor:
                 if code != "busy":
                     self.pending[role].clear()
                     delay = exc.retry_after
-                    delay = delay if type(delay) in (int, float) and math.isfinite(delay) and delay >= 0 else 0
+                    delay = (
+                        delay
+                        if type(delay) in (int, float)
+                        and math.isfinite(delay)
+                        and delay >= 0
+                        else 0
+                    )
                     self.retry_at[role] = self.clock() + max(300, delay)
                     self.next_home[role] = self.retry_at[role]
                 else:
@@ -223,7 +322,9 @@ class Monitor:
                 self.retry_at[role] = self.clock() + 300
                 self.next_home[role] = self.retry_at[role]
                 self.status(role, "error", stage)
-                logger.warning("Vinted Home monitor paused: error_type=%s", type(exc).__name__)
+                logger.warning(
+                    "Vinted Home monitor paused: error_type=%s", type(exc).__name__
+                )
             return  # At most one account page per tick; release before any wait.
 
     def home(self, role, now):
@@ -233,7 +334,13 @@ class Monitor:
         result = parse_home(html)
         if result.get("reason") != "ok":
             self.retry_at[role] = self.clock() + 300
-            self.status(role, "source_unavailable", "home", 200, detail_code=result.get("reason"))
+            self.status(
+                role,
+                "source_unavailable",
+                "home",
+                200,
+                detail_code=result.get("reason"),
+            )
             return
         candidates = result["items"]
         self.counts[role]["candidates"] = len(candidates)
@@ -241,7 +348,9 @@ class Monitor:
         # ID ordering only determines which candidates get the bounded read;
         # it never establishes age. The target upload field must do that.
         fresh_ids = []
-        for item in sorted(candidates, key=lambda value: int(value["id"]), reverse=True):
+        for item in sorted(
+            candidates, key=lambda value: int(value["id"]), reverse=True
+        ):
             if str(item["id"]) in seen or str(item["id"]) in self.examined:
                 self.counts[role]["duplicates"] += 1
                 continue
@@ -252,7 +361,9 @@ class Monitor:
 
     def listing(self, role, searches, now):
         candidate = self.pending[role][0]
-        if str(candidate["id"]) in self.examined or str(candidate["id"]) in db.get_seen_item_ids([candidate["id"]]):
+        if str(candidate["id"]) in self.examined or str(
+            candidate["id"]
+        ) in db.get_seen_item_ids([candidate["id"]]):
             self.pending[role].popleft()
             self.counts[role]["duplicates"] += 1
             return
@@ -263,15 +374,23 @@ class Monitor:
         parsed = parse_listing(html, candidate["id"], observed)
         age = parsed.get("age") or {}
         upper = age.get("max_age_seconds")
-        if (age.get("verified") is not True or type(upper) not in (int, float)
-                or not math.isfinite(upper) or not 0 <= upper <= MAX_AGE
-                or self.clock() >= observed + MAX_AGE - upper):
+        if (
+            age.get("verified") is not True
+            or type(upper) not in (int, float)
+            or not math.isfinite(upper)
+            or not 0 <= upper <= MAX_AGE
+            or self.clock() >= observed + MAX_AGE - upper
+        ):
             self.counts[role]["rejected_age"] += 1
             self.status(role, "checked", "listing", 200)
             return
         self.counts[role]["fresh"] += 1
         item = parsed.get("item")
-        match = match_candidate(item, searches) if isinstance(item, dict) and global_filters_allow(item) else None
+        match = (
+            match_candidate(item, searches)
+            if isinstance(item, dict) and global_filters_allow(item)
+            else None
+        )
         if not match:
             self.counts[role]["rejected_match"] += 1
             self.status(role, "checked", "listing", 200)
@@ -281,14 +400,22 @@ class Monitor:
         # active/budget decision after the owner changes the saved search.
         search = search_settings.get_search(match["query_id"])
         current = match_candidate(item, [search]) if search else None
-        if current and enabled() and global_filters_allow(item) and _publish(item, search, current, age, role, now=self.clock()):
+        if (
+            current
+            and enabled()
+            and global_filters_allow(item)
+            and _publish(item, search, current, age, role, now=self.clock())
+        ):
             self.counts[role]["alerts"] += 1
         self.status(role, "checked", "listing", 200)
 
 
 def run():
     monitor = Monitor()
-    logger.info("Vinted Home monitor ready: both_accounts=True maximum_age_seconds=180 enabled=%s", enabled())
+    logger.info(
+        "Vinted Home monitor ready: both_accounts=True maximum_age_seconds=180 enabled=%s",
+        enabled(),
+    )
     while True:
         try:
             monitor.tick()
@@ -296,5 +423,7 @@ def run():
             return
         except Exception as exc:  # noqa: BLE001 -- isolated background worker
             # Fixed class name only; no exception text may contain credentials.
-            logger.warning("Vinted Home monitor retry: error_type=%s", type(exc).__name__)
+            logger.warning(
+                "Vinted Home monitor retry: error_type=%s", type(exc).__name__
+            )
         time.sleep(1)

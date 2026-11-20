@@ -28,9 +28,18 @@ _FILTERS = {
     "video_game_platform": ("video_game_platform_ids[]", "video_game_platform_ids"),
 }
 _IGNORED_PARAMS = {
-    "search_text", "price_to", "price_from", "currency", "order", "page",
-    "per_page", "time", "search_id", "disabled_personalization",
-    "referrer", "catalog_from",
+    "search_text",
+    "price_to",
+    "price_from",
+    "currency",
+    "order",
+    "page",
+    "per_page",
+    "time",
+    "search_id",
+    "disabled_personalization",
+    "referrer",
+    "catalog_from",
 }
 # Equivalent garment descriptors only. In particular, vintage/Y2K, authenticity,
 # condition and material are not inferred or removed to manufacture a match.
@@ -48,7 +57,9 @@ _NEGATIONS = {"no", "not", "without", "never", "non"}
 
 
 def _words(value):
-    return tuple(re.findall(r"[^\W_]+", unicodedata.normalize("NFKC", value).casefold()))
+    return tuple(
+        re.findall(r"[^\W_]+", unicodedata.normalize("NFKC", value).casefold())
+    )
 
 
 def _canonical_words(value):
@@ -126,7 +137,10 @@ def _filters(query):
             structural[field] = identities
     category = re.match(r"/catalog/([0-9]+)", parts.path)
     if category:
-        if structural.get("category_ids") and category[1] not in structural["category_ids"]:
+        if (
+            structural.get("category_ids")
+            and category[1] not in structural["category_ids"]
+        ):
             return None
         structural.setdefault("category_ids", set()).add(category[1])
     if set(values) - allowed:
@@ -182,9 +196,17 @@ def _price_limits(item, search, values):
 
 
 def _match(item, search):
-    if not isinstance(search, dict) or type(search.get("id")) is not int or search["id"] <= 0:
+    if (
+        not isinstance(search, dict)
+        or type(search.get("id")) is not int
+        or search["id"] <= 0
+    ):
         return None
-    if search.get("paused") or search.get("archived") or not search.get("vinted_enabled", True):
+    if (
+        search.get("paused")
+        or search.get("archived")
+        or not search.get("vinted_enabled", True)
+    ):
         return None
     parsed = _filters(search.get("query"))
     if parsed is None:
@@ -195,7 +217,9 @@ def _match(item, search):
         if not observed or not observed & allowed:
             return None
     fields = tuple(_words(text) for text in (item["title"], item["description"]))
-    styles = tuple(_canonical_words(text) for text in (item["title"], item["description"]))
+    styles = tuple(
+        _canonical_words(text) for text in (item["title"], item["description"])
+    )
     exclusions = search.get("exclusions", [])
     if (
         not isinstance(exclusions, list)
@@ -209,7 +233,11 @@ def _match(item, search):
         return None
     if must_have and not _phrase_in(must_have, styles, synonyms=True):
         return None
-    words = search.get("shared_keywords") if search.get("shared_alert_version") == 1 else search.get("vinted_keywords")
+    words = (
+        search.get("shared_keywords")
+        if search.get("shared_alert_version") == 1
+        else search.get("vinted_keywords")
+    )
     words = words or values.get("search_text", [])
     if not isinstance(words, list) or len(words) > 100:
         return None
@@ -222,11 +250,17 @@ def _match(item, search):
     if budget is None:
         return None
     literal = bool(words and any(_phrase_in(word, fields) for word in words))
-    scope = "brand_category" if "brand_id" in structural and "category_ids" in structural else "brand" if "brand_id" in structural else "category"
+    scope = (
+        "brand_category"
+        if "brand_id" in structural and "category_ids" in structural
+        else "brand" if "brand_id" in structural else "category"
+    )
     return {
         "query_id": search["id"],
         "reason": scope + "_style" if words or must_have else "saved_filters",
-        "style_evidence": "literal" if literal else "equivalent_words" if words else "not_required",
+        "style_evidence": (
+            "literal" if literal else "equivalent_words" if words else "not_required"
+        ),
         "budget": budget,
     }
 
@@ -240,7 +274,10 @@ def match_candidate(item, searches):
     """
     if not isinstance(item, dict) or item.get("description_complete") is not True:
         return None
-    if any(not isinstance(item.get(key), str) or len(item[key]) > MAX_TEXT for key in ("title", "description")):
+    if any(
+        not isinstance(item.get(key), str) or len(item[key]) > MAX_TEXT
+        for key in ("title", "description")
+    ):
         return None
     if not isinstance(searches, (list, tuple)) or len(searches) > MAX_SEARCHES:
         return None

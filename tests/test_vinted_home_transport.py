@@ -23,7 +23,9 @@ class HomeTransportTests(unittest.TestCase):
         return client
 
     def read(self, client, url="https://www.vinted.co.uk/"):
-        with patch.object(transport, "yield_to_purchase"), patch.object(transport.time, "time", return_value=1795212002):
+        with patch.object(transport, "yield_to_purchase"), patch.object(
+            transport.time, "time", return_value=1795212002
+        ):
             return transport.read_html(client, url)
 
     def test_bounded_one_get_preserves_existing_session(self):
@@ -39,7 +41,12 @@ class HomeTransportTests(unittest.TestCase):
         client.request.assert_not_called()
 
     def test_foreign_urls_and_unverified_sessions_cannot_read(self):
-        for url in ("https://example.com/", "https://www.vinted.co.uk/inbox", "https://www.vinted.co.uk/?token=x", "https://www.vinted.co.uk@evil.test/"):
+        for url in (
+            "https://example.com/",
+            "https://www.vinted.co.uk/inbox",
+            "https://www.vinted.co.uk/?token=x",
+            "https://www.vinted.co.uk@evil.test/",
+        ):
             client = self.client()
             with self.assertRaises(BuyerError):
                 self.read(client, url)
@@ -50,7 +57,11 @@ class HomeTransportTests(unittest.TestCase):
             self.read(client)
 
     def test_refusal_redirect_size_and_missing_date_never_replay(self):
-        cases = [self.client(status=403), self.client(status=302), self.client(body=b"x"*(transport.MAX_HTML_BYTES+1))]
+        cases = [
+            self.client(status=403),
+            self.client(status=302),
+            self.client(body=b"x" * (transport.MAX_HTML_BYTES + 1)),
+        ]
         for client in cases:
             with self.assertRaises(BuyerError):
                 self.read(client)
