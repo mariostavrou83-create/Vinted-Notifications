@@ -735,6 +735,11 @@ def create_app(test_config=None):
                         "eBay connection details saved. They apply automatically.",
                         "success",
                     )
+                elif action == "home_discovery":
+                    import vinted_home_controls
+
+                    vinted_home_controls.configure(request.form.get("home_enabled", ""))
+                    flash("Home discovery setting saved. Existing searches and buying settings are unchanged.", "success")
                 elif action == "live_searches":
                     ebay_store.save_live_selection(request.form.getlist("live_search"))
                     flash(
@@ -1059,6 +1064,7 @@ def create_app(test_config=None):
                     return redirect(url_for("connections"), code=303)
         return render_template(
             "msj_connections.html",
+            home_discovery=__import__("vinted_home_controls").summary(),
             info=ebay_store.connection_summary(),
             resources=resource_controls.summary(),
             deletion=ebay_privacy.setup_values(),

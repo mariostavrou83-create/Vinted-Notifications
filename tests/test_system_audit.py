@@ -459,6 +459,7 @@ class WatchdogTests(unittest.TestCase):
             "ebay_worker_process": Mock(),
             "offers_worker_process": Mock(),
             "order_messages_process": Mock(),
+            "home_monitor_process": Mock(),
             "scrape_process": Mock(),
             "item_extractor_process": Mock(),
             "dispatcher_process": Mock(),
@@ -486,6 +487,7 @@ class WatchdogTests(unittest.TestCase):
                 "dashboard",
                 "vinted-offers",
                 "vinted-order-messages",
+                "vinted-home-monitor",
             },
         )
         namespace["shutdown_requested"].set()
@@ -493,6 +495,11 @@ class WatchdogTests(unittest.TestCase):
             monitor("items", "telegram", "rss", "new")
             ensure.assert_not_called()
         tree = ast.parse((root / "vinted_notifications.py").read_text())
+        cleanup_loops = [n for n in ast.walk(tree) if isinstance(n, ast.For)
+                         and isinstance(n.target, ast.Name) and n.target.id == "process"
+                         and isinstance(n.iter, ast.Tuple)]
+        self.assertTrue(any(any(isinstance(value, ast.Name) and value.id == "home_monitor_process"
+                                for value in loop.iter.elts) for loop in cleanup_loops))
         queues = [
             n
             for n in ast.walk(tree)
