@@ -77,6 +77,46 @@ class HomeTransportTests(unittest.TestCase):
         client.update_tokens.assert_called_once()
         client.persist_session.assert_called_once()
 
+    def test_only_plain_same_item_redirect_can_be_skipped_without_cooldown(self):
+        item_url = "https://www.vinted.co.uk/items/500-old-title"
+        for location in (
+            "/items/500-new-title",
+            "https://www.vinted.co.uk/items/500-new-title/",
+        ):
+            client = self.client(status=307)
+            client.session.get.return_value.headers["Location"] = location
+            with self.assertRaises(BuyerError) as caught:
+                self.read(client, item_url)
+            self.assertEqual(caught.exception.reason, "listing_redirect")
+            client.session.get.assert_called_once()
+            client.persist_session.assert_not_called()
+
+        for location in (
+            "/items/501-another-item",
+            "/items/500-new-title?challenge=private",
+            "/items/500-new-title#private",
+            "/member/login",
+            "/",
+            "https://other.test/items/500-new-title",
+            "http://www.vinted.co.uk/items/500-new-title",
+            "https://name:secret@www.vinted.co.uk/items/500-new-title",
+        ):
+            client = self.client(status=307)
+            client.session.get.return_value.headers["Location"] = location
+            with self.assertRaises(BuyerError) as caught:
+                self.read(client, item_url)
+            self.assertNotEqual(caught.exception.reason, "listing_redirect")
+            client.session.get.assert_called_once()
+
+    def test_challenge_body_precedes_same_item_redirect_classification(self):
+        client = self.client(body=b"<html>Verify you are human</html>", status=307)
+        client.session.get.return_value.headers["Location"] = "/items/500-new-title"
+        with self.assertRaises(BuyerError) as caught:
+            self.read(client, "https://www.vinted.co.uk/items/500-old-title")
+        self.assertEqual(caught.exception.reason, "security_challenge")
+        client.session.get.assert_called_once()
+        client.solve_challenge.assert_not_called()
+
     def test_cache_age_is_added_not_erased(self):
         headers = {"Date": "Fri, 20 Nov 2026 22:00:00 GMT", "Age": "120"}
         self.assertEqual(transport.response_time(headers, 1795212002), 1795211880)
