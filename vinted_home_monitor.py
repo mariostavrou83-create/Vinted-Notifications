@@ -39,6 +39,9 @@ COUNTERS = (
     "rejected_age",
     "rejected_match",
     "duplicates",
+    "age_unverified",
+    "age_expired",
+    "skipped_redirect",
 )
 ERROR_CODES = frozenset(
     {
@@ -243,7 +246,7 @@ class Monitor:
                 ),
             )
         logger.info(
-            "Vinted Home monitor: role=%s code=%s detail=%s stage=%s http=%s retry_at=%s candidates=%s checked=%s fresh=%s matched=%s alerts=%s rejected_age=%s rejected_match=%s duplicates=%s",
+            "Vinted Home monitor: role=%s code=%s detail=%s stage=%s http=%s retry_at=%s candidates=%s checked=%s fresh=%s matched=%s alerts=%s rejected_age=%s rejected_match=%s duplicates=%s age_unverified=%s age_expired=%s skipped_redirect=%s",
             role,
             code,
             data["detail_code"],
@@ -367,21 +370,44 @@ class Monitor:
             self.pending[role].popleft()
             self.counts[role]["duplicates"] += 1
             return
-        html, observed = self.fetch(role, candidate["url"])
+        try:
+            html, observed = self.fetch(role, candidate["url"])
+        except buyer.BuyerError as exc:
+            # The transport distinguishes a local listing redirect from login,
+            # refresh and security refusals. Never follow it or retry this item.
+            # One inaccessible listing must not pause both discovery sources.
+            if exc.reason != "listing_redirect" or exc.status not in (
+                301,
+                302,
+                303,
+                307,
+                308,
+            ):
+                raise
+            self.pending[role].popleft()
+            self.remember(candidate["id"], self.clock())
+            self.counts[role]["checked"] += 1
+            self.counts[role]["skipped_redirect"] += 1
+            self.status(role, "checked", "listing", exc.status)
+            return
         self.pending[role].popleft()
         self.remember(candidate["id"], self.clock())
         self.counts[role]["checked"] += 1
         parsed = parse_listing(html, candidate["id"], observed)
         age = parsed.get("age") or {}
         upper = age.get("max_age_seconds")
-        if (
+        unverified = (
             age.get("verified") is not True
             or type(upper) not in (int, float)
             or not math.isfinite(upper)
-            or not 0 <= upper <= MAX_AGE
-            or self.clock() >= observed + MAX_AGE - upper
-        ):
+            or upper < 0
+        )
+        expired = not unverified and (
+            upper > MAX_AGE or self.clock() >= observed + MAX_AGE - upper
+        )
+        if unverified or expired:
             self.counts[role]["rejected_age"] += 1
+            self.counts[role]["age_unverified" if unverified else "age_expired"] += 1
             self.status(role, "checked", "listing", 200)
             return
         self.counts[role]["fresh"] += 1

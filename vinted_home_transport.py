@@ -4,7 +4,7 @@ import math
 import re
 import time
 from email.utils import parsedate_to_datetime
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import requests
 
@@ -14,6 +14,36 @@ from vinted_buyer_priority import yield_to_purchase
 from vinted_http import NAVIGATION_HEADERS
 
 MAX_HTML_BYTES = 4 * 1024 * 1024
+
+
+def same_item_redirect(response, requested_url):
+    """Recognize a canonical item redirect without following or exposing it."""
+    if response.status_code not in (301, 302, 303, 307, 308):
+        return False
+    location = response.headers.get("Location", "")
+    if (
+        not isinstance(location, str)
+        or not location
+        or len(location) > 4096
+        or any(ord(char) <= 32 for char in location)
+    ):
+        return False
+    try:
+        source = urlsplit(requested_url)
+        target = urlsplit(urljoin(requested_url, location))
+        original = re.fullmatch(r"/items/([0-9]{1,20})(?:-[\w-]+)?", source.path)
+        redirected = re.fullmatch(r"/items/([0-9]{1,20})(?:-[\w-]+)?/?", target.path)
+        return bool(
+            original
+            and redirected
+            and original[1] == redirected[1]
+            and target.scheme == "https"
+            and target.netloc == "www.vinted.co.uk"
+            and not target.query
+            and not target.fragment
+        )
+    except ValueError:
+        return False
 
 
 def response_time(headers, started):
@@ -86,7 +116,14 @@ def read_html(client, url):
             response._content_consumed = True
             data = buyer.homepage_data(response)
             if response.status_code != 200 or buyer.security_challenge(response, data):
-                raise buyer.response_error(response, data, "request")
+                error = buyer.response_error(response, data, "request")
+                if error.reason == "redirect" and same_item_redirect(response, url):
+                    raise buyer.BuyerError(
+                        "Home listing was redirected and skipped.",
+                        response.status_code,
+                        reason="listing_redirect",
+                    )
+                raise error
             client.update_tokens(response, {})
         token = buyer.csrf_from_html(html)
         if token:

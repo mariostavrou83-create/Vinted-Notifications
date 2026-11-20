@@ -209,6 +209,82 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(restarted_fetch.call_args.args[0], "buyer")
         self.assertEqual(restarted.retry_at["seller"], 2800)
 
+    def test_listing_redirect_skips_only_item_without_following_or_cooldown(self):
+        with patch.object(
+            home,
+            "parse_home",
+            return_value={
+                "reason": "ok",
+                "authenticated": True,
+                "items": [
+                    self.item,
+                    dict(
+                        self.item,
+                        id="501",
+                        url="https://www.vinted.co.uk/items/501-top",
+                    ),
+                ],
+            },
+        ):
+            self.worker.tick()
+        self.fetch.side_effect = home.buyer.BuyerError(
+            "private location must not persist", status=307, reason="listing_redirect"
+        )
+        self.now += 1
+        self.worker.tick()
+        self.assertEqual(self.fetch.call_count, 2)
+        self.assertEqual(self.status()["skipped_redirect"], 1)
+        self.assertEqual(self.status()["http_status"], 307)
+        self.assertEqual(self.status()["retry_at"], 0)
+        self.assertEqual(self.status()["code"], "checked")
+        self.assertEqual(
+            [item["id"] for item in self.worker.pending["seller"]], ["500"]
+        )
+        self.assertIn("501", self.worker.examined)
+        self.assertNotIn(
+            "private location", db.get_parameter("home_monitor_status_seller")
+        )
+        self.fetch.side_effect = None
+        self.now += 1
+        self.worker.tick()
+        self.assertEqual(self.fetch.call_count, 3)
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_security_or_auth_redirect_still_pauses_role(self):
+        for reason in (
+            "security_challenge",
+            "session_refresh",
+            "signin_redirect",
+            "home_redirect",
+            "redirect",
+        ):
+            with self.subTest(reason=reason):
+                self.worker = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
+                self.worker.retry_at = dict.fromkeys(home.ROLES, 0)
+                self.fetch.side_effect = None
+                self.worker.tick()
+                self.fetch.side_effect = home.buyer.BuyerError(
+                    "private", status=307, reason=reason
+                )
+                self.now += 1
+                self.worker.tick()
+                self.assertEqual(self.status()["skipped_redirect"], 0)
+                self.assertEqual(self.status()["retry_at"], self.now + 300)
+                self.assertFalse(self.worker.pending["seller"])
+
+    def test_age_counts_distinguish_missing_from_old(self):
+        self.age = {"verified": False, "checked_at": 1000, "max_age_seconds": None}
+        self.discover()
+        self.assertEqual(
+            (self.status()["age_unverified"], self.status()["age_expired"]), (1, 0)
+        )
+        self.worker = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
+        self.age = {"verified": True, "checked_at": 1000, "max_age_seconds": 240}
+        self.discover()
+        self.assertEqual(
+            (self.status()["age_unverified"], self.status()["age_expired"]), (0, 1)
+        )
+
     def test_source_failure_preserves_only_fixed_detail_code(self):
         with patch.object(
             home,
