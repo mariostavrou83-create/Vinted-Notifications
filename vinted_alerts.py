@@ -1,6 +1,8 @@
 """A Vinted alert is one message, enriched in place after its fast text delivery."""
 
 import json
+import math
+import time
 from contextlib import closing
 from html import escape
 from pathlib import Path
@@ -25,6 +27,29 @@ def enabled():
     return (
         Path(db.DB_PATH).is_file()
         and db.get_parameter("vinted_single_message_alerts") == "1"
+    )
+
+
+def home_discovery_fresh(details, *, now=None):
+    """Only Home discoveries expire; ordinary alert timing remains unchanged."""
+    if "home_discovery" not in details:
+        return True
+    evidence = details["home_discovery"]
+    if not isinstance(evidence, dict):
+        return False
+    now = time.time() if now is None else now
+    observed, expires = evidence.get("observed_at"), evidence.get("expires_at")
+    age = evidence.get("max_age_seconds")
+    return bool(
+        type(evidence.get("version")) is int
+        and evidence["version"] == 1
+        and type(age) is int
+        and 0 <= age < 180
+        and evidence.get("source_role") in ("seller", "buyer")
+        and all(type(value) in (int, float) and math.isfinite(value)
+                for value in (observed, expires, now))
+        and 0 < observed <= now <= expires <= observed + 180 - age
+        and expires > observed
     )
 
 
@@ -65,8 +90,23 @@ def prepare_listing(row, details=None):
             LEFT JOIN vinted_search_budgets b ON b.query_id=q.id WHERE q.id=?""",
             (current["query_id"],),
         ).fetchone()
+        saved = conn.execute(
+            "SELECT payload FROM vinted_alert_details WHERE item_id=?",
+            (row["item_id"],),
+        ).fetchone()
+        saved_details = json.loads(saved[0]) if saved else {}
         reason, estimate = "", None
-        if (
+        home_enabled = True
+        if "home_discovery" in saved_details:
+            setting = conn.execute(
+                "SELECT value FROM parameters WHERE key='home_monitor_enabled'"
+            ).fetchone()
+            home_enabled = bool(setting and setting[0] == "1")
+        if not home_enabled:
+            reason = "Home discovery is paused"
+        elif not home_discovery_fresh(saved_details):
+            reason = "Home discovery no longer has verified listing age within three minutes"
+        elif (
             not rules
             or rules["paused"]
             or rules["archived"]
@@ -80,11 +120,6 @@ def prepare_listing(row, details=None):
             search["shared_alert_version"] = json.loads(search["platform_config"]).get(
                 "shared_alert_version", 0
             )
-            saved = conn.execute(
-                "SELECT payload FROM vinted_alert_details WHERE item_id=?",
-                (row["item_id"],),
-            ).fetchone()
-            saved_details = json.loads(saved[0]) if saved else {}
             old_budget = saved_details.get("budget") or {}
             raw = {}
             price = vinted_budget.money(
@@ -173,6 +208,9 @@ def sections(row, details):
     marketplace = "eBay" if ebay else "Vinted"
     name = escape(details.get("name") or row["search_name"][:100])
     heading = f"🔎 <b>{'eBay · ' if ebay else ''}#{row['query_id'] or '—'} · {name}</b>"
+    discovery = details.get("home_discovery")
+    if not ebay and isinstance(discovery, dict):
+        heading = f"🏠 <b>Home feed find · #{row['query_id'] or '—'} · {name}</b>"
     link = (
         f'<a href="{escape(row["url"], quote=True)}">Open {marketplace} listing ↗</a>'
     )
@@ -192,6 +230,16 @@ def sections(row, details):
         f"<b>{escape(row['title'][:500])}</b>\n{price_line}"
         f"\n{escape(details.get('brand_label', 'Brand'))}: {escape(details['brand'])}"
     )
+    if not ebay and isinstance(discovery, dict):
+        reasons = {
+            "brand_category_style": "Brand, category and style match your buying guide",
+            "brand_style": "Brand and style match your buying guide",
+            "category_style": "Category and style match your buying guide",
+        }
+        listing += "\nListing age verified within 3 minutes when alerted."
+        listing += "\n" + reasons.get(
+            discovery.get("reason"), "Matches your saved buying criteria"
+        )
     if ebay:
         shipping = details.get("shipping")
         listing += "\nPostage: " + (

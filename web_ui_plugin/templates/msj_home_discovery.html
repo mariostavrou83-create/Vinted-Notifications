@@ -1,0 +1,10 @@
+<section class="form-card guide-section" id="home-discovery">
+<h2>Fresh Home finds</h2>
+<p>Check recommendations from both connected accounts, starting with the original account. Only listings confirmed to be under three minutes old qualify. Unknown ages and expired alerts are skipped.</p>
+<p class="muted">Matches use your active searches' brands, categories, sizes, style descriptions and price limits, including supported alternative wording. Photos remain available for your review; visual similarity is not scored. Autobuy uses the buying account and its existing checkout and payment safeguards.</p>
+<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="action" value="home_discovery">
+<input type="hidden" name="home_enabled" value="{{'0' if home_discovery.enabled else '1'}}">
+<button class="{{'secondary' if home_discovery.enabled else 'primary'}}">{{'Pause Home discovery' if home_discovery.enabled else 'Start Home discovery'}}</button>
+<span>{{'Running' if home_discovery.enabled else 'Paused'}} · target one feed check per account per minute, with cooldowns when needed</span></form>
+<div class="connection-grid">{% for account in home_discovery.accounts %}<div><h3>{{account.label}}</h3><p>{{account.state}} · {{account.time}}</p><p class="muted">Latest cycle: {{account.candidates}} candidates · {{account.checked}} age checks · {{account.fresh}} fresh · {{account.matched}} matches · {{account.alerts}} alerts queued</p></div>{% endfor %}</div>
+</section>

@@ -153,7 +153,8 @@ def update_last_timestamp(query_id, timestamp):
 
 
 def add_item_to_db(
-    id, title, query_id, price, timestamp, photo_url, currency="EUR", alert=None
+    id, title, query_id, price, timestamp, photo_url, currency="EUR", alert=None,
+    *, update_search_timestamp=True,
 ):
     conn = None
     try:
@@ -174,10 +175,11 @@ def add_item_to_db(
             (id, title, price, currency, timestamp, photo_url, query_id),
         )
         # Update the last item for the query
-        cursor.execute(
-            "UPDATE queries SET last_item=MAX(COALESCE(last_item,0),?) WHERE id=?",
-            (timestamp, query_id),
-        )
+        if update_search_timestamp:
+            cursor.execute(
+                "UPDATE queries SET last_item=MAX(COALESCE(last_item,0),?) WHERE id=?",
+                (timestamp, query_id),
+            )
         if alert is not None:
             import time
 
