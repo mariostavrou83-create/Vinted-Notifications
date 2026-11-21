@@ -11,7 +11,7 @@ from pathlib import Path
 
 import db
 
-SCHEMA_VERSION = "33"
+SCHEMA_VERSION = "34"
 
 
 def connection():
@@ -203,6 +203,9 @@ def ensure_schema():
             from vinted_connection_notices import migrate as migrate_connection_notices
 
             migrate_connection_notices(conn)
+            from finder_buy_guides import migrate as migrate_visual_guides
+
+            migrate_visual_guides(conn)
             from vinted_accounts import migrate as migrate_accounts
 
             migrate_accounts(conn)
@@ -240,7 +243,8 @@ def get_search(query_id):
             COALESCE(p.reminder, '') AS reminder,
             COALESCE(p.exclusions, '[]') AS exclusions,
             COALESCE(d.paused, 0) AS paused, COALESCE(d.archived, 0) AS archived,
-            COALESCE(d.rebaseline, 0) AS rebaseline, d.reference_id,
+            COALESCE(d.rebaseline, 0) AS rebaseline, COALESCE(d.reference_id,vg.reference_id) reference_id,
+            vg.guidance AS buying_advice, vg.display_name AS visual_guide_name, vg.style_alert_cap,
             COALESCE(d.revision, 0) AS revision,
             g.max_buy, g.resale_low, g.resale_high, COALESCE(g.must_have,'') AS must_have,
             g.folder_id, f.name AS folder_name, b.max_total AS vinted_max_total,
@@ -250,6 +254,7 @@ def get_search(query_id):
             LEFT JOIN search_buying_guide g ON g.query_id=q.id
             LEFT JOIN search_folders f ON f.id=g.folder_id
             LEFT JOIN vinted_search_budgets b ON b.query_id=q.id
+            LEFT JOIN finder_buy_guides vg ON vg.query_id=q.id
             WHERE q.id=?""",
             (query_id,),
         ).fetchone()

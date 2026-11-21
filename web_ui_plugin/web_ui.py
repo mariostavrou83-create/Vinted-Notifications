@@ -378,10 +378,48 @@ def create_app(test_config=None):
                      "photos": store.reference_photos(row["id"])} for row in rows[page*12:(page+1)*12]]
         return render_template_string('''<!doctype html><title>Reference photo review</title>
         
-        <h1>Reference photo review</h1><p>Page {{page+1}} · {{total}} searches with examples</p>
+        <h1>Reference photo review</h1><p><a href="/search-review/buying-guides">Import buying guides</a></p><p>Page {{page+1}} · {{total}} searches with examples</p>
         {% for row in rows %}<section><h2>#{{row.id}} · {{row.name}}</h2>
         <table><tr>{% for photo in row.photos %}<td><img width="110" height="125" src="/reference/{{photo.media_id}}" alt="Search {{row.id}} photo {{photo.position+1}}"><br>{{photo.position+1}}</td>{% endfor %}</tr></table></section>{% endfor %}
         <a href="?page={{page+1}}">Next page</a>''', rows=selected, page=page, total=len(rows))
+
+    @app.get("/buying-guides")
+    def buying_guides():
+        from contextlib import closing
+        from search_settings import connection
+
+        term = request.args.get("q", "").strip()[:100]
+        page = min(10000, max(1, request.args.get("page", 1, type=int)))
+        with closing(connection()) as conn:
+            rows = conn.execute("""SELECT q.id, vg.display_name name, vg.guidance,
+                COALESCE(d.reference_id,vg.reference_id) ref
+                FROM finder_buy_guides vg JOIN queries q ON q.id=vg.query_id
+                LEFT JOIN search_dashboard d ON d.query_id=q.id
+                WHERE COALESCE(d.paused,0)=0 AND COALESCE(d.archived,0)=0
+                AND (instr(lower(vg.display_name),lower(?))>0 OR CAST(q.id AS TEXT)=?)
+                ORDER BY q.id DESC LIMIT 13 OFFSET ?""", (term,term.lstrip("#"),(page-1)*12)).fetchall()
+        return render_template("msj_buying_guides.html",term=term,page=page,rows=rows[:12],has_next=len(rows)>12)
+
+    @app.route("/search-review/buying-guides", methods=["GET", "POST"])
+    def import_buying_guides():
+        import zipfile
+        from flask import render_template_string
+        from finder_buy_guides import save_pack
+
+        if request.method == "POST":
+            upload = request.files.get("guides")
+            if not upload:
+                return "Choose a buying guide pack.", 400
+            try:
+                count = save_pack(upload.stream)
+            except (ValueError, KeyError, OSError, zipfile.BadZipFile) as exc:
+                return "Could not import the guide pack: " + str(exc)[:130], 400, {"Content-Type": "text/plain"}
+            return render_template_string("<h1>Buying guides saved</h1><p>{{count}} active search guides updated.</p><a href='/finds'>Recent Finds</a>", count=count)
+        return render_template_string("""<h1>Import buying guides</h1>
+          <p>Choose the comparison photos and buying limits prepared for your active searches.</p>
+          <form method="post" enctype="multipart/form-data"><input name="csrf" type="hidden" value="{{csrf}}">
+          <label>Buying guides ZIP <input type="file" name="guides" accept=".zip" required></label>
+          <button>Save buying guides</button></form>""", csrf=session.get("csrf"))
 
     @app.route("/search-review/apply", methods=["GET", "POST"])
     def search_review_apply():
@@ -1115,6 +1153,7 @@ def create_app(test_config=None):
                 else ""
             ),
             "folder": source.get("folder", "")[:20],
+            "source": source.get("source", "") if source.get("source", "") in ("home","saved") else "",
             "page": min(100000, max(1, source.get("page", 1, type=int) or 1)),
         }
 
@@ -1194,12 +1233,13 @@ def create_app(test_config=None):
             filters["folder"],
             filters["page"],
             filters["platform"],
+            filters["source"],
         )
         for row in rows:
             row["safe_photo"] = store.safe_photo_url(row["photo_url"])
             row["home_source"] = (
                 "Home · photo match" if row["content"].startswith("🏠 <b>Home photo match")
-                else "Home feed" if row["content"].startswith("🏠") else ""
+                else "Home feed" if row["content"].startswith("🏠") else "Saved search"
             )
             row["found_label"] = datetime.fromtimestamp(
                 row["found_at"], ZoneInfo("Europe/London")

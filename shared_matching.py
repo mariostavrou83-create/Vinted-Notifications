@@ -44,6 +44,7 @@ def keyword_evidence(
     *,
     description_complete=False,
     description_html=False,
+    brand="",
 ):
     """Require one alternative within either title or seller description.
 
@@ -56,6 +57,15 @@ def keyword_evidence(
     if not words:
         return result
     title = title[:MAX_TEXT] if isinstance(title, str) else ""
+    from vinted_scraper_styles import garment_quality, named_profile
+
+    profile = named_profile(search)
+    if profile:
+        text, complete = description_text(description, html=description_html)
+        quality = garment_quality(profile, title, text, brand)
+        if quality != "distinctive":
+            certain = quality == "blocked" or (description_complete and complete)
+            return {"state": "absent" if certain else "unverified", "keyword": None, "field": None}
     found = excluded_by(title, words)
     if found:
         return {"state": "matched", "keyword": found, "field": "title"}

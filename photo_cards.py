@@ -413,15 +413,16 @@ def record(row, details, result):
                 return False
             conn.execute(
                 """INSERT INTO telegram_photo_cards
-                (platform,message_id,item_id,reference_id,details,listing_file_id)
-                VALUES (?,?,?,?,?,?)""",
+                (platform,message_id,item_id,reference_id,details,listing_file_id,view)
+                VALUES (?,?,?,?,?,?,?)""",
                 (
                     platform,
                     result.message_id,
                     row["item_id"],
                     row.get("reference_id"),
                     json.dumps(details),
-                    file_id,
+                    None if details.get("initial_comparison") else file_id,
+                    "comparison" if details.get("initial_comparison") else "listing",
                 ),
             )
             from alert_delivery import acknowledge_listing
@@ -515,6 +516,14 @@ async def send_initial(bot, chat_id, row, details, before_send, *, require_photo
     ):
         details["photos"] = [row["photo_url"]]
     raw = await listing_photo(details)
+    if row.get("reference_id") and details.get("buying_advice") and (raw or not require_photo):
+        reference = dashboard_store.get_media(row["reference_id"])
+        if reference:
+            from vinted_native import comparison_image
+
+            raw = await asyncio.to_thread(comparison_image, raw, reference["image"], {"platform": details.get("platform")})
+            details["initial_comparison"] = True
+            details["reference_photo_present"] = True
     if raw is None and require_photo:
         raise ValueError("The listing photo is unavailable. Try a newer find.")
     await before_send()

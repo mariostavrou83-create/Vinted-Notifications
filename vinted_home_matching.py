@@ -285,18 +285,21 @@ def _match(item, search, fields, styles, observed, photo_styles, eligible, diag)
         return None
     words = [word.strip() for word in words if word.strip()]
     budget = _price_limits(item, search, values)
-    if budget is None:
+    if budget is None or (search.get("style_alert_cap") and budget["total"] > search["style_alert_cap"]):
         return None
     diag.add("budget")
     literal = any(_phrase_in(word, fields, positive=True) for word in words)
     equivalent = bool(words and not literal and any(_phrase_in(word, styles, synonyms=True) for word in words))
     profile = scraper_styles.profile_for(words, structural)
     style_evidence = "literal" if literal else "equivalent_words" if equivalent else "not_required"
-    if words and not (literal or equivalent):
+    quality = scraper_styles.garment_quality(profile, item["title"], item["description"], item.get("brand_title")) if profile else None
+    if quality in {"blocked", "weak_high_street"}:
+        return None
+    if words and (not (literal or equivalent) or quality == "unconfirmed"):
         if not profile:
             return None
         guide = scraper_styles.STYLES[profile]
-        if any(scraper_styles.evidence(item[f], guide) for f in ("title", "description")):
+        if quality == "distinctive" and any(scraper_styles.evidence(item[f], guide) for f in ("title", "description")):
             style_evidence = "scraper_style"
         else:
             # An image may only supply a style after the same search's price,

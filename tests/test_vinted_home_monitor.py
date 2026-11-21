@@ -209,6 +209,16 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(restarted_fetch.call_args.args[0], "buyer")
         self.assertEqual(restarted.retry_at["seller"], 2800)
 
+    def test_removed_listing_does_not_pause_remaining_home_items(self):
+        self.worker.tick()
+        self.worker.pending["seller"].append(dict(self.item,id="501"))
+        self.fetch.side_effect = home.buyer.BuyerError("Gone", status=404, reason="http_error")
+        self.now += 1
+        self.worker.tick()
+        self.assertEqual(self.worker.retry_at["seller"],0)
+        self.assertEqual(self.status()["listing_unavailable"],1)
+        self.assertEqual(self.worker.pending["seller"][0]["id"],"501")
+
     def test_listing_redirect_skips_only_item_without_following_or_cooldown(self):
         with patch.object(
             home,

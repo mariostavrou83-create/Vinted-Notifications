@@ -185,7 +185,8 @@ def snapshot(item, search):
         "single_message": enabled(),
         "native_photo": enabled() and vinted_native.enabled(),
         "photo_card": photo_cards.enabled(),
-        "name": (search.get("query_name") or keyword or "Filtered search")[:100],
+        "name": (search.get("query_name") or search.get("visual_guide_name") or keyword or "Filtered search")[:100],
+        "buying_advice": search.get("buying_advice") or "",
         "brand": (getattr(item, "brand_title", None) or "Not specified")[:120],
         "photos": alert_images.photo_urls(item),
         "guide": "\n".join(guide),
@@ -207,7 +208,7 @@ def sections(row, details):
     ebay = details.get("platform") == "ebay"
     marketplace = "eBay" if ebay else "Vinted"
     name = escape(details.get("name") or row["search_name"][:100])
-    heading = f"🔎 <b>{'eBay · ' if ebay else ''}#{row['query_id'] or '—'} · {name}</b>"
+    heading = f"🔎 <b>{marketplace} saved search · #{row['query_id'] or '—'} · {name}</b>"
     discovery = details.get("home_discovery")
     if not ebay and isinstance(discovery, dict):
         source = "Home photo match" if discovery.get("reason") == "scraper_photo" else "Home feed find"
@@ -231,6 +232,8 @@ def sections(row, details):
         f"<b>{escape(row['title'][:500])}</b>\n{price_line}"
         f"\n{escape(details.get('brand_label', 'Brand'))}: {escape(details['brand'])}"
     )
+    if details.get("buying_advice"):
+        listing += "\n<b>Buying guide</b> · " + escape(details["buying_advice"][:720])
     if not ebay and isinstance(discovery, dict):
         reasons = {
             "brand_category_style": "Brand, category and style match your buying guide",

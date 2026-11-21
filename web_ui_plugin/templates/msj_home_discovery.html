@@ -2,7 +2,7 @@
 <h2>Fresh Home finds</h2>
 <p>Check recommendations from both connected accounts, starting with the original account. Only listings confirmed to be under three minutes old qualify. Unknown ages and expired alerts are skipped.</p>
 <p class="muted">Fresh listings can match a saved brand or one of your scraper-style searches across labels. Finder checks women’s sizes, garment details, exclusions and the all-in price.</p>
-<p><b>{{home_discovery.sent_24h}}</b> Home alerts sent in the last 24 hours · {{home_discovery.pending_24h}} waiting for delivery.</p>
+<p><b>{{home_discovery.sent_24h}}</b> Home alerts sent in the last 24 hours · {{home_discovery.pending_24h}} waiting for delivery. <a href="/finds?source=home">View Home finds</a></p>
 <form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="action" value="home_discovery">
 <input type="hidden" name="home_enabled" value="{{'0' if home_discovery.enabled else '1'}}">
 <button class="{{'secondary' if home_discovery.enabled else 'primary'}}">{{'Pause Home discovery' if home_discovery.enabled else 'Start Home discovery'}}</button>

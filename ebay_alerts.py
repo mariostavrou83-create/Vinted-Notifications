@@ -129,6 +129,7 @@ def snapshot(item, search):
         auction=item["auction"],
         shipping=item["shipping"],
         brand_label=item.get("brand_label", "Brand"),
+        buying_advice=search.get("buying_advice") or "",
         description=item.get("description", ""),
     )
     if item.get("shared_alert_version") == 1:

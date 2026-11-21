@@ -422,7 +422,7 @@ def _clear_item_queue(items_queue, new_items_queue):
             import vinted_budget
 
             budget = vinted_budget.estimate(item, search)
-            if budget and not budget["within_budget"]:
+            if budget and (not budget["within_budget"] or (search.get("style_alert_cap") and budget["total"] > search["style_alert_cap"])):
                 filtered_ids.append(item.id)
                 continue
 
@@ -471,6 +471,7 @@ def _clear_item_queue(items_queue, new_items_queue):
                 search,
                 item.title,
                 details.get("keyword_description", ""),
+                brand=details.get("brand", ""),
                 description_complete=details.get("description_complete", False),
             )
             if evidence["state"] == "absent":

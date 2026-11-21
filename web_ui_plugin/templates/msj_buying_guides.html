@@ -1,0 +1,8 @@
+{% extends 'msj_base.html' %}{% block content %}
+<div class="page-heading"><div><h1>Buying guides</h1><p class="muted">The caps include the item, buyer fee and postage. An asking price in the scraper is a comparison. Check completed sales before paying the higher price.</p></div></div>
+<form class="find-filters" method="get"><div><label for="guide-query">Find a brand, style or search number</label><input name="q" id="guide-query" type="search" value="{{term}}" maxlength="100"></div><button class="primary">Find guides</button></form>
+<div class="search-grid">{% for row in rows %}<article class="search-card">
+{% if row.ref %}<a href="/reference/{{row.ref}}"><img src="/reference/{{row.ref}}" alt="Reference examples for {{row.name}}" loading="lazy" style="width:100%;height:245px;object-fit:contain"></a>{% endif %}
+<div class="card-body"><span class="search-number">Search #{{row.id}}</span><h2>{{row.name}}</h2><p>{{row.guidance}}</p><a href="/search/{{row.id}}">Open search</a></div></article>{% endfor %}</div>
+{% if not rows %}<p>No buying guide matches this search.</p>{% endif %}
+<div class="card-actions">{% if page>1 %}<a href="{{url_for('buying_guides',q=term,page=page-1)}}">Previous guides</a>{% endif %}{% if has_next %}<a href="{{url_for('buying_guides',q=term,page=page+1)}}">Next guides</a>{% endif %}</div>{% endblock %}

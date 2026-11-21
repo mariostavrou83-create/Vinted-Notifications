@@ -124,6 +124,7 @@ def stage(platform, item, search, alert, *, conn=None, timing=None, now=None):
         search,
         item["title"],
         data.get("keyword_description", data.get("description", "")),
+        brand=(alert.get(platform + "_details") or {}).get("brand", ""),
         description_complete=data.get("description_complete", False),
     )
     if evidence["state"] in {"matched", "absent"}:
@@ -153,11 +154,12 @@ def _search(conn, candidate):
         COALESCE(s.ebay_enabled,0) AS ebay_enabled,
         COALESCE(s.ebay_generation,0) AS ebay_generation,
         COALESCE(s.ebay_config,'{}') AS ebay_config,
-        b.max_total AS vinted_max_total,
+        vg.style_alert_cap, b.max_total AS vinted_max_total,
         COALESCE(b.postage_estimate,220) AS vinted_postage_estimate
         FROM queries q LEFT JOIN search_dashboard d ON d.query_id=q.id
         LEFT JOIN search_preferences p ON p.query_id=q.id
         LEFT JOIN search_platforms s ON s.query_id=q.id
+        LEFT JOIN finder_buy_guides vg ON vg.query_id=q.id
         LEFT JOIN vinted_search_budgets b ON b.query_id=q.id WHERE q.id=?""",
         (candidate["query_id"],),
     ).fetchone()
@@ -207,7 +209,7 @@ def _budget(item, search, platform):
             ),
             search,
         )
-        return budget is not None and budget["within_budget"]
+        return budget is not None and budget["within_budget"] and (not search.get("style_alert_cap") or budget["total"] <= search["style_alert_cap"])
     total = item.get("estimated_total")
     maximum = search["ebay"].get("max_price")
     minimum = search["ebay"].get("min_price")
@@ -222,7 +224,8 @@ def _decision(conn, candidate, data, now):
     search = _search(conn, candidate)
     if search is None:
         return "cancelled", "Saved search changed", None
-    item = json.loads(candidate["payload"])["item"]
+    payload = json.loads(candidate["payload"])
+    item = payload["item"]
     if excluded_by(item["title"], search["exclusions"]):
         return "rejected", "Blocked by current title exclusions", search
     if not _budget(item, search, candidate["platform"]):
@@ -233,6 +236,7 @@ def _decision(conn, candidate, data, now):
         search,
         item["title"],
         data.get("keyword_description", data.get("description", "")),
+        brand=(payload.get("alert", {}).get(candidate["platform"] + "_details") or {}).get("brand", ""),
         description_complete=data.get("description_complete", False),
     )
     if evidence["state"] in {"matched", "unrestricted"}:

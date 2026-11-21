@@ -115,3 +115,50 @@ def profile_for(search_terms, filters):
         if scope and scope <= set(profile.categories) and len(terms.intersection(profile.anchors)) >= 2:
             return key
     return None
+
+# Specific construction required on open-label searches, in addition to a relevant
+# garment. The scraper contains older high-street pieces with distinctive cuts.
+_CONSTRUCTION = {
+    "utility_jacket": ("ribbed hem|elasticated waist|cropped|fitted|multi pocket|multipocket|epaulettes|asymmetric|buckle|bomber|military",),
+    "leather_jacket": ("fitted|cropped|buckle|belted|racer|ribbed|bomber|asymmetric",),
+    "peacoat": ("double breasted|wool|swing|fitted|cropped|pleated|military|chunky button",),
+    "afghan_coat": ("suede|shearling|embroidered|fur trim|fur collar|mongolian|mongolian fur|shaggy",),
+    "mesh_top": ("tattoo|graphic|printed|print|floral|ruched|corset|embroidery|layered|asymmetric|beaded|contrast trim",),
+    "cowl_top": ("beaded|asymmetric|ruched|gathered|printed|lace|keyhole|wrap|halter|embellished|draped",),
+    "lace_cami": ("empire|butterfly|beaded|boned|boning|panelled|lace trim|polka dot|asymmetric|floral|ribbon|embroidered|buckle|tiered|satin|lace up",),
+    "zip_knit": ("cable|cabled|ribbed|fitted|cropped|stripe|striped|stripes|funnel|embroidery",),
+    "fine_cardigan": ("pointelle|ballet|bolero|shrug|ribbon|wrap cardigan|cropped|eyelet",),
+    "shaped_skirt": ("tiered|bias cut|handkerchief|hanky|asymmetric|asymmetrical|mesh overlay|ruched",),
+    "shaped_trousers": ("pinstripe|pinstriped|pin stripe|cargo capri|cargo capris|multi pocket|side pockets",),
+    "shaped_dress": ("asymmetric|asymmetrical|layered|handkerchief|hanky|ruched|graphic|beaded|floral print",),
+}
+_DISCOUNT = ("shein","romwe","temu","primark","boohoo","pretty little thing","prettylittlething",
+             "fashion nova","missguided","nasty gal","cider")
+_HIGH_STREET = ("zara","h m","hm","new look","bershka","stradivarius","pull bear","pull and bear",
+                "asos","next","debenhams","atmosphere","topshop","george","george at asda","ovs","forever 21")
+_PERIOD = r"\b(?:old label|original label|made in (?:the )?(?:90s|00s|1990s|2000s)|1990s|2000s|early 00s|late 90s|90s vintage|00s vintage)\b"
+
+
+def named_profile(search):
+    words = search.get("shared_keywords") or (search.get("ebay") or {}).get("shared_keywords") or []
+    if not words or not search.get("query"):
+        return None
+    from vinted_home_matching import _filters
+    parsed = _filters(search["query"])
+    return profile_for(words, parsed[1]) if parsed else None
+
+
+def garment_quality(profile, title, description, brand=""):
+    """Return a hard rejection or whether the seller supplied distinctive features."""
+    name = " " + " ".join(words(brand or "") + words(title or "")) + " "
+    if any(" " + x + " " in name for x in _DISCOUNT):
+        return "blocked"
+    high_street = any(" " + x + " " in name for x in _HIGH_STREET)
+    fields = [str(f or "")[:6000] for f in (title, description)]
+    fields = [re.split(r"#|\b(?:styled with|paired with|search tags|tags\s*:|keywords\s*:)", f, maxsplit=1, flags=re.I)[0] for f in fields]
+    if high_street and not any(re.search(_PERIOD, f, flags=re.I) for f in fields):
+        return "weak_high_street"
+    detail = Style((), (), tuple((x,) for x in _CONSTRUCTION[profile]))
+    if any(evidence(f, detail) for f in fields):
+        return "distinctive"
+    return "weak_high_street" if high_street else "unconfirmed"

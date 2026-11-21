@@ -395,18 +395,14 @@ class Monitor:
             # The transport distinguishes a local listing redirect from login,
             # refresh and security refusals. Never follow it or retry this item.
             # One inaccessible listing must not pause both discovery sources.
-            if exc.reason != "listing_redirect" or exc.status not in (
-                301,
-                302,
-                303,
-                307,
-                308,
-            ):
+            redirected = exc.reason == "listing_redirect" and exc.status in (301, 302, 303, 307, 308)
+            removed = exc.status in (404, 410) and exc.reason in {"http_error", "unreadable", "not_found", "item_unavailable"}
+            if not (redirected or removed):
                 raise
             self.pending[role].popleft()
             self.remember(candidate["id"], self.clock())
             self.counts[role]["checked"] += 1
-            self.counts[role]["skipped_redirect"] += 1
+            self.counts[role]["listing_unavailable" if removed else "skipped_redirect"] += 1
             self.status(role, "checked", "listing", exc.status)
             return
         self.pending[role].popleft()

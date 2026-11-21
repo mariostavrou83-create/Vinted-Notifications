@@ -315,6 +315,7 @@ def _store_media(conn, photo, *, media_id=None):
         """DELETE FROM dashboard_media WHERE created<? AND id NOT IN
                 (SELECT reference_id FROM search_dashboard WHERE reference_id IS NOT NULL)
                 AND id NOT IN (SELECT media_id FROM search_reference_photos)
+                AND id NOT IN (SELECT reference_id FROM finder_buy_guides WHERE reference_id IS NOT NULL)
                 AND id NOT IN (SELECT media_id FROM dashboard_reference_pages)
                 AND id NOT IN (SELECT reference_id FROM telegram_photo_cards
                     WHERE reference_id IS NOT NULL)
@@ -482,7 +483,7 @@ def _list_searches(archived=False):
             for row in conn.execute(
                 """SELECT q.*,
             COALESCE(p.reminder,'') reminder, COALESCE(p.exclusions,'[]') exclusions,
-            COALESCE(d.paused,0) paused, COALESCE(d.archived,0) archived, d.reference_id,
+            COALESCE(d.paused,0) paused, COALESCE(d.archived,0) archived, COALESCE(d.reference_id,vg.reference_id) reference_id,
             COALESCE(d.revision,0) revision, h.last_success, h.actual_interval, h.failures,
             g.folder_id, f.name folder_name, g.max_buy, b.max_total vinted_max_total
             FROM queries q LEFT JOIN search_preferences p ON p.query_id=q.id
@@ -491,6 +492,7 @@ def _list_searches(archived=False):
             LEFT JOIN search_buying_guide g ON g.query_id=q.id
             LEFT JOIN search_folders f ON f.id=g.folder_id
             LEFT JOIN vinted_search_budgets b ON b.query_id=q.id
+            LEFT JOIN finder_buy_guides vg ON vg.query_id=q.id
             WHERE COALESCE(d.archived,0)=? ORDER BY q.id DESC""",
                 (int(archived),),
             )
@@ -645,8 +647,12 @@ def recent_finds_marker(conn):
     return hashlib.blake2s(json.dumps(snapshot).encode(), digest_size=12).hexdigest()
 
 
-def list_finds(text="", status="", folder="", page=1, platform=""):
+def list_finds(text="", status="", folder="", page=1, platform="", source=""):
     clauses, params = [], []
+    if source == "home":
+        clauses.append("a.platform='vinted' AND substr(a.content,1,1)='🏠'")
+    elif source == "saved":
+        clauses.append("substr(a.content,1,1)<>'🏠'")
     if platform in ("vinted", "ebay"):
         clauses.append("a.platform=?")
         params.append(platform)
