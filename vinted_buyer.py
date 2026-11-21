@@ -24,7 +24,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 import db
 from search_settings import connection
-from vinted_accounts import account_key, account_table, client_account, current_role
+from vinted_accounts import account_key, account_table, client_account, current_role, separated
 from vinted_http import API_HEADERS, NAVIGATION_HEADERS, BrowserSession
 from vinted_timing import (
     log_duration,
@@ -583,7 +583,8 @@ def record_auth(reason, stage="sign_in", status=None):
                 },
             )
     logger.info(
-        "Vinted buyer access: stage=%s reason=%s http=%s", stage, reason, status
+        "Vinted buyer access: stage=%s reason=%s http=%s role=%s",
+        stage, reason, status, current_role(),
     )
 
 
@@ -826,11 +827,14 @@ def migrate(conn):
 
 @contextmanager
 def exclusive(*, wait_seconds=0):
-    path = Path(db.DB_PATH).resolve().parent / "vinted-buyer.lock"
+    # Seller calls use the buyer scope until the original account is separated.
+    # A busy Home feed must never hold the independent buyer's session lock.
+    role = current_role()
+    path = Path(db.DB_PATH).resolve().parent / f"vinted-{role}.lock"
     from vinted_buyer_priority import purchase_waiter
     from vinted_purchase_control import checkpoint
 
-    with purchase_waiter() if wait_seconds > 0 else nullcontext():
+    with purchase_waiter() if wait_seconds > 0 and role == "buyer" else nullcontext():
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             started = time.perf_counter()
@@ -890,6 +894,11 @@ def settings():
             conn.execute(f"SELECT * FROM {account_table('vinted_buyer_maintenance')} WHERE id=1").fetchone()
         )
         renewal = _stored_auth_event(conn, "buyer_auth_result_renewal")
+        rejected_identity = conn.execute(
+            f"SELECT session_fingerprint,checked,stage,reason,http_status FROM {account_table('vinted_connection_notice')} "
+            "WHERE id=1 AND identity_rejected=1 AND buyer_id=? AND checked>=?",
+            (row["user_id"], row["verified_at"]),
+        ).fetchone()
         from vinted_buyer_events import checkout_health
 
         row["checkout_health"] = checkout_health(conn, row["user_id"])
@@ -897,7 +906,7 @@ def settings():
     sealed = row.pop("session")
     row["connected"] = bool(sealed and row["verified_at"])
     row["connection_health"] = connection_health(
-        sealed, row["verified_at"], access, renewal, maintenance
+        sealed, row["verified_at"], access, renewal, maintenance, rejected_identity
     )
     row["password_saved"] = False
     pending = decrypt(row.pop("pending"))
@@ -938,7 +947,7 @@ def _display_auth_time(value):
     return datetime.fromtimestamp(value, display_zone).strftime("%d %b %Y, %H:%M:%S %Z")
 
 
-def connection_health(sealed, verified_at, access, renewal, maintenance):
+def connection_health(sealed, verified_at, access, renewal, maintenance, rejected_identity=None):
     """Historical storage is separate from the latest accepted account evidence."""
     verified_time = _display_auth_time(verified_at)
     saved = bool(sealed and verified_time)
@@ -964,6 +973,10 @@ def connection_health(sealed, verified_at, access, renewal, maintenance):
     if not saved:
         return result
     candidates = []
+    fingerprint = hashlib.sha256(sealed).hexdigest()
+    identity_rejected = bool(rejected_identity and rejected_identity["session_fingerprint"] == fingerprint)
+    if identity_rejected:
+        candidates.append(dict(rejected_identity))
     if isinstance(access, dict) and access.get("stage") in (
         "identity",
         "renewal",
@@ -1007,7 +1020,6 @@ def connection_health(sealed, verified_at, access, renewal, maintenance):
             result.update(
                 state="awaiting_verification", message=AUTH_REASONS["renewed"]
             )
-    fingerprint = hashlib.sha256(sealed).hexdigest()
     if maintenance.get("session_fingerprint") == fingerprint:
         if maintenance.get("blocked"):
             result.update(
@@ -1021,6 +1033,11 @@ def connection_health(sealed, verified_at, access, renewal, maintenance):
                 result.update(
                     state="cooldown", retry_at=retry_at, retry_time=retry_time
                 )
+    if identity_rejected:
+        result.update(
+            state="reconnect_required",
+            message="Vinted rejected this account's sign-in. Reconnect the same account in Finder.",
+        )
     return result
 
 
@@ -2155,14 +2172,20 @@ class Client:
         )
 
 
+def _reconnect_confirmation(enabled):
+    return f"Vinted verified the same buying account. Autobuy is {'on' if enabled else 'off'}."
+
+
 @client_account
 def save_connected(client):
     user_id, username = client.identity()
     with closing(connection()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
         previous = conn.execute(
-            f"SELECT user_id FROM {account_table('vinted_buyer')} WHERE id=1"
-        ).fetchone()[0]
-        if previous and user_id != previous:
+            f"SELECT user_id,session IS NOT NULL AS saved,verified_at,enabled "
+            f"FROM {account_table('vinted_buyer')} WHERE id=1"
+        ).fetchone()
+        if previous["user_id"] and user_id != previous["user_id"]:
             raise BuyerError(
                 AUTH_REASONS["account_changed"],
                 reason="account_changed",
@@ -2170,27 +2193,37 @@ def save_connected(client):
             )
         saved = client.exported()
         sealed = encrypt(saved)
+        reconnecting = (
+            current_role() == "buyer" and previous["user_id"] == user_id
+            and previous["saved"] and previous["verified_at"] and separated(conn)
+        )
         conn.execute(
-            f"UPDATE {account_table('vinted_buyer')} SET session=?,pending=NULL,verified_at=?,user_id=?,username=?,enabled=0 WHERE id=1",
-            (sealed, time.time(), user_id, username),
+            f"UPDATE {account_table('vinted_buyer')} SET session=?,pending=NULL,verified_at=?,user_id=?,username=?,enabled=? WHERE id=1",
+            (sealed, time.time(), user_id, username, previous["enabled"] if reconnecting else 0),
         )
     record_auth("connected", "identity", 200)
     from vinted_buyer_events import record_connected
 
     record_connected((user_id, sealed, saved), manual=True)
+    if reconnecting:
+        return _reconnect_confirmation(previous["enabled"])
+    return None
 
 
 def reserve_connection_attempt():
     """Shared cooldown for owner-initiated password and existing-session linking."""
     with closing(connection()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
         last = conn.execute(
             f"SELECT login_attempt FROM {account_table('vinted_buyer')} WHERE id=1"
         ).fetchone()[0]
         if time.time() - last < 30:
             raise BuyerError("Wait 30 seconds between connection attempts.")
         conn.execute(
-            f"UPDATE {account_table('vinted_buyer')} SET login_attempt=?,pending=NULL,enabled=0 WHERE id=1",
-            (time.time(),),
+            f"""UPDATE {account_table('vinted_buyer')} SET login_attempt=?,pending=NULL,
+            enabled=CASE WHEN ? AND session IS NOT NULL AND user_id IS NOT NULL
+                   AND verified_at>0 THEN enabled ELSE 0 END WHERE id=1""",
+            (time.time(), current_role() == "buyer" and separated(conn)),
         )
 
 
@@ -2565,7 +2598,11 @@ def link_session(access_token, refresh_token):
         )
         try:
             client.homepage()
-            save_connected(client)
+            confirmation = save_connected(client)
+            if confirmation:
+                return confirmation
+            if current_role() == "seller":
+                return "Vinted verified the selling account."
             import vinted_session_recovery
 
             recovered = vinted_session_recovery.recover_linked_client(client)
@@ -2615,8 +2652,7 @@ def start_login(email, password):
                 record_auth("verification_code", "sign_in", 401)
                 return "Vinted sent a sign-in code. Enter it in the verification box below."
             client.homepage()
-            save_connected(client)
-            return "Vinted buyer connected. Choose your spending limits before enabling Autobuy."
+            return save_connected(client) or "Vinted buyer connected. Choose your spending limits before enabling Autobuy."
         except BuyerError as exc:
             record_auth(exc.reason, exc.stage, exc.status)
             raise
@@ -2702,8 +2738,7 @@ def verify_code(code):
                 },
             )
             client.homepage()
-            save_connected(client)
-            return "Vinted buyer connected. Choose your spending limits before enabling Autobuy."
+            return save_connected(client) or "Vinted buyer connected. Choose your spending limits before enabling Autobuy."
         except BuyerError as exc:
             record_auth(exc.reason, exc.stage, exc.status)
             raise
@@ -3095,23 +3130,28 @@ def connect_separate_buyer(expected_username, *, cookie_records=None, access_tok
             from vinted_accounts import preserve_seller
             with closing(connection()) as conn, conn:
                 conn.execute("BEGIN IMMEDIATE")
-                current = conn.execute("SELECT user_id,session FROM vinted_buyer WHERE id=1").fetchone()
-                if current is None or tuple(current) != tuple(previous[:2]):
+                current = conn.execute("SELECT user_id,session,enabled FROM vinted_buyer WHERE id=1").fetchone()
+                if current is None or current[:2] != previous[:2]:
                     raise BuyerError("The saved connection changed. Check it before changing the buyer.", reason="saved_session", stage="saved_session")
                 seller_id = preserve_seller(conn)
                 if user_id == seller_id:
                     raise BuyerError("This is your selling account. Sign into the different account you want to use for buying.", reason="account_changed", stage="identity")
+                same_buyer = user_id == current["user_id"]
                 conn.execute(
-                    "UPDATE vinted_buyer SET session=?,pending=NULL,verified_at=?,user_id=?,username=?,enabled=0,"
-                    "preferred_card_last4='',browser_info='{}' WHERE id=1",
+                    "UPDATE vinted_buyer SET session=?,pending=NULL,verified_at=?,user_id=?,username=? WHERE id=1",
                     (sealed, time.time(), user_id, username),
                 )
+                if not same_buyer:
+                    conn.execute("UPDATE vinted_buyer SET enabled=0,preferred_card_last4='',browser_info='{}' WHERE id=1")
                 conn.execute("UPDATE vinted_buyer_maintenance SET session_fingerprint=NULL,retry_at=0,blocked=0 WHERE id=1")
-            logger.info("Vinted separate accounts: buyer_verified=True seller_preserved=True autobuy_enabled=False; no checkout or payment")
+            logger.info("Vinted separate accounts: buyer_verified=True seller_preserved=True autobuy_enabled=%s; no checkout or payment",
+                        bool(same_buyer and current["enabled"]))
             record_auth("connected", "identity", 200)
             record_connection_result("buyer_session", "connected", "identity", 200)
             from vinted_buyer_events import record_connected
             record_connected((user_id, sealed, exported), manual=True)
+            if same_buyer:
+                return _reconnect_confirmation(current["enabled"])
             return "New buying account verified and connected. Your original account remains connected for offers and messages. Autobuy is off; review the new account's payment choice and buying settings before enabling it."
         finally:
             if client is not None:

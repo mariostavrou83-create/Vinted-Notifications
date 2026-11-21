@@ -299,6 +299,22 @@ class BuyerEventTests(NoticeFixture, unittest.IsolatedAsyncioTestCase):
                 await events.BuyerEventNotifier(self.bot, 123).check(), "sent"
             )
 
+    async def test_rejected_identity_remains_visible_until_the_same_account_is_verified(self):
+        error = self.error()
+        error.identity_rejected = True
+        self.assertTrue(self.record(error, at=1010))
+        self.assertTrue(self.record(self.error("network", "renewal", 503), at=1020))
+        health = buyer.settings()["connection_health"]
+        self.assertEqual((health["state"], health["last_checked_at"]), ("reconnect_required", 1020))
+        self.assertEqual(health["http_status"], 503)
+        with patch("vinted_connection_notices.time.time", return_value=1030):
+            self.assertEqual(await self.notifier.check(), "sent")
+            self.assertEqual(await self.notifier.check(), "quiet")
+        self.update_buyer(verified_at=1040)
+        self.assertTrue(events.record_connected(self.client._verified_session))
+        self.assertEqual(buyer.settings()["connection_health"]["state"], "verified")
+        self.assertFalse(events.record_connected(self.client._verified_session))
+
     async def test_uncertain_payment_escalates_and_never_claims_no_payment(self):
         self.failure()
         await self.events.check()

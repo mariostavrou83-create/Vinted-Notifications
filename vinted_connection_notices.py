@@ -121,7 +121,10 @@ def record_failure(error, session_fingerprint, *, checked_at=None):
                     previous["lease_until"] if same_incident else 0,
                     previous["retry_at"] if same_incident else 0,
                     previous["telegram_message_id"] if same_incident else None,
-                    int(getattr(error, "identity_rejected", False) is True),
+                    int(getattr(error, "identity_rejected", False) is True or (
+                        same_incident and previous["session_fingerprint"] == session_fingerprint
+                        and previous["identity_rejected"]
+                    )),
                 ),
             )
         return True
@@ -349,13 +352,14 @@ class ConnectionNotifier:
             )
             await asyncio.to_thread(self.finish, row, sent.message_id)
             logger.info(
-                "Vinted buyer notification accepted: channel=%s kind=%s level=%s stage=%s reason=%s http=%s",
+                "Vinted buyer notification accepted: channel=%s kind=%s level=%s stage=%s reason=%s http=%s role=%s",
                 row.get("channel", "account"),
                 row.get("kind", "warning"),
                 row["level"],
                 row["stage"],
                 row["reason"],
                 row["http_status"],
+                current_role(),
             )
             return "sent"
         except buyer.BuyerError as exc:

@@ -15,7 +15,7 @@ from contextlib import closing
 
 import vinted_buyer as buyer
 from search_settings import connection
-from vinted_accounts import account_scope, account_table, separated
+from vinted_accounts import account_scope, account_table, current_role, separated
 from vinted_buyer_priority import yield_to_purchase
 
 logger = logging.getLogger(__name__)
@@ -124,7 +124,7 @@ async def run(notifier=None):
     """Owned by Telegram's lifecycle; no buyer lock in the forking parent."""
     logger.info(
         "Vinted session maintenance: worker started; interval=60s "
-        "access_margin_seconds=%s network_retry_seconds=%s renewal_retry_seconds=%s",
+        "access_margin_seconds=%s network_retry_seconds=%s renewal_retry_seconds=%s role_scoped_locks=True",
         ACCESS_MARGIN,
         RETRY_DELAY,
         AMBIGUOUS_RENEWAL_DELAY,
@@ -217,17 +217,18 @@ def check_account_health():
                 )
             client = buyer.connected_client()
             logger.info(
-                "Vinted account health: verified; interval=300s; no checkout or payment"
+                "Vinted account health: verified; interval=300s; no checkout or payment; role=%s", current_role()
             )
             return "verified"
     except buyer.BuyerError as exc:
         if exc.reason == "busy":
             return "busy"
         logger.info(
-            "Vinted account health: stage=%s reason=%s http=%s; no checkout or payment",
+            "Vinted account health: stage=%s reason=%s http=%s role=%s; no checkout or payment",
             exc.stage if exc.stage in buyer.AUTH_STAGES else "request",
             exc.reason if exc.reason in buyer.AUTH_REASONS else "not_confirmed",
             exc.status if type(exc.status) is int else None,
+            current_role(),
         )
         return "unavailable"
     except Exception as exc:  # noqa: BLE001 -- keep maintenance running
@@ -446,7 +447,7 @@ def maintain_connection():
             refresh_expiry = session_cookie_expiry(saved, "refresh_token_web")
             logger.info(
                 "Vinted session maintenance: due access_remaining_seconds=%s "
-                "refresh_due=%s access_margin_seconds=%s",
+                "refresh_due=%s access_margin_seconds=%s role=%s",
                 (
                     math.floor(access_expiry - now)
                     if access_expiry is not None
@@ -454,6 +455,7 @@ def maintain_connection():
                 ),
                 refresh_expiry is not None and refresh_expiry <= now + REFRESH_MARGIN,
                 ACCESS_MARGIN,
+                current_role(),
             )
             # Reserve before contacting Vinted so a restart cannot repeat a
             # network failure immediately. Only a hash of encrypted data is saved.
@@ -490,11 +492,12 @@ def maintain_connection():
                         "blocked" if exc.reason == "renewal_blocked" else "cooldown"
                     )
                 logger.info(
-                    "Vinted session maintenance: result=%s stage=%s reason=%s http=%s",
+                    "Vinted session maintenance: result=%s stage=%s reason=%s http=%s role=%s",
                     outcome,
                     exc.stage if exc.stage in buyer.AUTH_STAGES else "request",
                     exc.reason if exc.reason in buyer.AUTH_REASONS else "not_confirmed",
                     exc.status if isinstance(exc.status, int) else None,
+                    current_role(),
                 )
                 from vinted_connection_notices import record_failure
 
@@ -527,7 +530,7 @@ def maintain_connection():
                             "Vinted session maintenance: result=session_changed; no purchase"
                         )
             if outcome == "verified":
-                logger.info("Vinted session maintenance: result=verified; no purchase")
+                logger.info("Vinted session maintenance: result=verified; no purchase; role=%s", current_role())
             return outcome
     except buyer.BuyerError as exc:
         if exc.reason == "busy":

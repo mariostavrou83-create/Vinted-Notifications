@@ -105,11 +105,88 @@ class AccountSeparationTests(DatabaseFixture, unittest.TestCase):
         self.connect()
         original_seller = self.row("vinted_seller")
         with closing(search_settings.connection()) as conn, conn:
-            conn.execute("UPDATE vinted_buyer SET login_attempt=0 WHERE id=1")
+            conn.execute("UPDATE vinted_buyer SET enabled=1,preferred_card_last4='6789',login_attempt=0 WHERE id=1")
         self.candidate.identity.return_value = ("333", "another-buyer")
         self.connect("another-buyer")
         self.assertEqual(self.row("vinted_seller"), original_seller)
         self.assertEqual(self.row()["user_id"], "333")
+        self.assertEqual((self.row()["enabled"], self.row()["preferred_card_last4"]), (0, ""))
+
+    def test_seller_home_and_buyer_health_can_run_together_only_after_account_split(self):
+        with seller.exclusive():
+            self.assertEqual(worker.check_account_health(), "busy")
+        self.connect()
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_buyer SET verified_at=1 WHERE id=1")
+        with seller.exclusive():
+            with self.assertRaises(buyer.BuyerError):
+                with seller.exclusive():
+                    self.fail("The same seller must stay serialized")
+            # The production buyer and Home loops run in independent contexts.
+            with accounts.account_scope("buyer"), patch.object(buyer, "connected_client", return_value=self.candidate):
+                with self.assertLogs(worker.logger, "INFO") as logs:
+                    self.assertEqual(worker.check_account_health(), "verified")
+            self.assertIn("role=buyer", " ".join(logs.output))
+        with buyer.exclusive():
+            with self.assertRaises(buyer.BuyerError):
+                with buyer.exclusive():
+                    self.fail("The same buyer must stay serialized")
+            with seller.exclusive():
+                self.assertEqual(accounts.current_role(), "seller")
+
+    def test_seller_operation_waiting_during_first_split_rechecks_its_role(self):
+        self.connect()
+        with patch.object(seller, "seller_role", side_effect=["buyer", "seller", "seller"]):
+            with seller.exclusive():
+                self.assertEqual(accounts.current_role(), "seller")
+                with accounts.account_scope("buyer"), buyer.exclusive():
+                    pass
+
+    def test_same_buyer_reconnect_preserves_both_permission_choices_and_saved_preferences(self):
+        self.connect()
+        selling = self.row("vinted_seller")
+        with patch.object(buyer, "Client", return_value=self.candidate):
+            for enabled in (True, False):
+                for route in ("existing", "separate"):
+                    with self.subTest(route=route, enabled=enabled):
+                        with closing(search_settings.connection()) as conn, conn:
+                            conn.execute("UPDATE vinted_buyer SET enabled=?,preferred_card_last4='6789',"
+                                         "browser_info=?,login_attempt=0 WHERE id=1", (enabled, '{"width":1280}'))
+                        if route == "existing":
+                            receipt = buyer.link_session(ACCESS, REFRESH)
+                        else:
+                            receipt = self.connect()
+                        row = self.row()
+                        self.assertIn("Autobuy is " + ("on" if enabled else "off"), receipt)
+                        self.assertEqual((row["user_id"], row["enabled"], row["preferred_card_last4"], row["browser_info"]),
+                                         ("222", enabled, "6789", '{"width":1280}'))
+        self.assertEqual(self.row("vinted_seller"), selling)
+        self.candidate.request.assert_not_called()
+
+    def test_reconnect_with_seller_identity_preserves_buyer_session_and_permission(self):
+        self.connect()
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_buyer SET enabled=1,login_attempt=0 WHERE id=1")
+        original = self.row()
+        self.candidate.identity.return_value = ("111", "old-seller")
+        with patch.object(buyer, "Client", return_value=self.candidate), self.assertRaises(buyer.BuyerError) as error:
+            buyer.link_session(ACCESS, REFRESH)
+        self.assertEqual(error.exception.reason, "account_changed")
+        row = self.row()
+        self.assertEqual((row["user_id"], row["session"], row["enabled"]), ("222", original["session"], 1))
+        self.candidate.request.assert_not_called()
+
+    def test_seller_reconnect_cannot_trigger_buyer_recovery(self):
+        self.connect()
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_seller SET login_attempt=0 WHERE id=1")
+        buying = self.row()
+        self.candidate.identity.return_value = ("111", "old-seller")
+        with patch.object(buyer, "Client", return_value=self.candidate), patch("vinted_session_recovery.recover_linked_client") as recovery:
+            receipt = seller.link_session(ACCESS, REFRESH)
+        self.assertIn("selling account", receipt)
+        recovery.assert_not_called()
+        self.assertEqual(self.row(), buying)
 
     def test_returned_seller_client_persists_only_selling_rotations(self):
         self.connect()

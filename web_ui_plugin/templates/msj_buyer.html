@@ -16,7 +16,7 @@
 <label for="new_buyer_access_token">New account access_token_web value</label><input id="new_buyer_access_token" name="new_buyer_access_token" type="password" maxlength="8192" autocomplete="off" spellcheck="false">
 <label for="new_buyer_refresh_token">New account refresh_token_web value</label><input id="new_buyer_refresh_token" name="new_buyer_refresh_token" type="password" maxlength="8192" autocomplete="off" spellcheck="false">
 <p><small>Values alone do not carry their original domain and path. Use the helper details when available.</small></p></details>
-<p><small>The verified username must match. Unconfirmed payments must be resolved first. After connecting, Autobuy is off and the old account's card preference is cleared. Both saved account sessions remain encrypted.</small></p>
+<p><small>The verified username must match. Resolve any unconfirmed payments first. Switching buyers turns Autobuy off and clears the old card preference. Reconnecting the same buyer keeps your existing choices.</small></p>
 <button class="primary" name="action" value="buyer_switch_account">Verify and connect separate buying account</button>
 </form></details>
 
@@ -88,7 +88,7 @@
 <form method="post" autocomplete="off"><input type="hidden" name="csrf" value="{{csrf}}">
 <label for="buyer_access_token">Vinted access token</label><input id="buyer_access_token" name="buyer_access_token" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="8192" required>
 <label for="buyer_refresh_token">Vinted refresh token</label><input id="buyer_refresh_token" name="buyer_refresh_token" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="8192" required>
-<p><small>Linking lets your private bot verify this account and store its session encrypted. Both boxes clear after submission. Autobuy stays off until you enable it with spending limits.</small></p>
+<p><small>Both fields clear after verification. {% if accounts_separate %}Reconnecting the same buying account preserves your current Autobuy permission and payment choices.{% else %}Enable Autobuy in buyer settings after the initial connection.{% endif %}</small></p>
 <button class="primary" name="action" value="buyer_session">Verify and link existing session</button></form>
 </details>
 <details class="guide-section"><summary><b>Connect with a Vinted password</b></summary>

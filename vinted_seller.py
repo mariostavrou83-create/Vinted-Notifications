@@ -10,8 +10,14 @@ from vinted_accounts import account_scope, seller_role
 
 @contextmanager
 def exclusive(*, wait_seconds=0):
-    with account_scope(seller_role()), _buyer.exclusive(wait_seconds=wait_seconds):
-        yield
+    while True:
+        role = seller_role()
+        with account_scope(role), _buyer.exclusive(wait_seconds=wait_seconds):
+            if role == "buyer" and seller_role() != role:
+                # The first account split completed while this caller waited.
+                continue
+            yield
+            return
 
 
 def __getattr__(name):
