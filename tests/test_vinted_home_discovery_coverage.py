@@ -45,6 +45,9 @@ class RecognitionTests(unittest.TestCase):
         for size in ("L / UK 16-18","13 years / 158 cm","XXS / UK 2"):
             self.assertEqual(priority({"size_title":size,"title":"Ralph Lauren"}),-1)
         self.assertEqual(priority({"brand_title":"SHEIN","title":"Beaded silk halter"}),-1)
+        for title in ("Apple headphones","Dumbells","Model guitars","Untested Canon PowerShot A590"):
+            self.assertEqual(priority({"title":title}),-1)
+        self.assertGreaterEqual(priority({"title":"Headphones print fitted T-shirt"}),0)
         self.assertGreaterEqual(priority({"size_title":"M / UK 12-14"}),0)
 
     def test_target_timestamp_recovers_genuine_third_minute(self):

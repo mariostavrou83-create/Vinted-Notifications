@@ -81,6 +81,10 @@ _CUT_TEXT = re.compile(r"#|\b(?:styled with|paired with|search tags|tags\s*:|key
 _NEGATIONS = {"not", "no", "without", "non", "never"}
 _LARGER_TITLE = re.compile(r"\b(?:size|tagged|labelled)\s+(?:uk\s*)?(?:xl|xxl|xxxl|l|large|16|18|20)\b", re.I)
 _OUTSIDE_CARD_SIZE = re.compile(r"^(?:xxs|xxxs|l|xl|xxl|xxxl|large|extra large|one size kids)(?:\s*[/,·]|$)|\b(?:years?|months?)\s*/?\s*\d*\s*(?:cm)?\b", re.I)
+_NON_CLOTHING = re.compile(
+    r"\b(?:dumbbells?|dumbells?|headphones?|earbuds?|airpods?|powershot|dslr|model guitars?|game controllers?)\b", re.I)
+_APPAREL = re.compile(
+    r"\b(?:tops?|tees?|shirts?|hoodies?|jumpers?|cardigans?|jackets?|coats?|skirts?|dresses?|trousers?|pants|vests?|camisoles?)\b", re.I)
 _PART_ZIP = re.compile(r"\b(?:quarter|half|partial)\s*[- ]?zip\b|[¼½]|\b1\s*/\s*[24]\s*[- ]?zip\b", re.I)
 
 
@@ -131,7 +135,12 @@ def ralph_guide(terms, structural):
 def card_priority(card):
     """Choose promising detail reads; the visible card alone can never trigger an alert."""
     title, brand = card.get("title") or "", card.get("brand_title") or ""
-    if _OUTSIDE_CARD_SIZE.search((card.get("size_title") or "").strip()) or discount_label(brand):
+    size = (card.get("size_title") or "").strip()
+    if _OUTSIDE_CARD_SIZE.search(size) or discount_label(brand):
+        return -1
+    # The All feed mixes clothing with electronics and weights. Avoid spending
+    # one of six detail reads on an unmistakable non-clothing card.
+    if not size and _NON_CLOTHING.search(title) and not _APPAREL.search(title):
         return -1
     looks = matching_looks(title, "")
     ralph = bool(re.search(r"\bralph lauren\b", brand, re.I))
