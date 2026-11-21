@@ -106,6 +106,10 @@ def prepare_listing(row, details=None):
             reason = "Home discovery is paused"
         elif not home_discovery_fresh(saved_details):
             reason = "Home discovery no longer has verified listing age within three minutes"
+        elif current["query_id"] is None and (saved_details.get("home_discovery") or {}).get("reason") == "recommendation":
+            # The live Home switch and verified upload deadline above govern an
+            # unguided notification. It has no search budget or purchase authority.
+            return True
         elif (
             not rules
             or rules["paused"]
@@ -152,6 +156,25 @@ def prepare_listing(row, details=None):
                 )
                 if details is not None:
                     details["budget"] = estimate
+        if (reason in {"Search no longer active for Vinted", "Blocked by current exclusions",
+                       "Outside current estimated total budget"} and home_enabled
+                and home_discovery_fresh(saved_details) and (saved_details.get("home_discovery") or {}).get("all_recommendations")):
+            # A changed buying guide removes its spending permission. The same
+            # fresh recommendation can still reach the owner in view-only mode.
+            saved_details["home_discovery"]["reason"] = "recommendation"
+            saved_details.update(name="Personalised Home recommendation", guide="", buying_advice="", reminder="")
+            if isinstance(saved_details.get("budget"), dict):
+                saved_details["budget"].update(max_total=None, within_budget=True)
+            plain = dict(current, query_id=None, reference_id=None, search_name=saved_details["name"])
+            plain["content"] = "\n\n".join(part for part in sections(plain, saved_details) if part)
+            conn.execute("""UPDATE alert_outbox SET query_id=NULL,reference_id=NULL,search_name=?,content=?
+                WHERE item_id=?""", (plain["search_name"], plain["content"], row["item_id"]))
+            conn.execute("UPDATE vinted_alert_details SET payload=? WHERE item_id=?",
+                         (json.dumps(saved_details, ensure_ascii=False), row["item_id"]))
+            row.update(query_id=None, reference_id=None, search_name=plain["search_name"], content=plain["content"])
+            if details is not None:
+                details.update(saved_details)
+            return True
         if reason:
             conn.execute(
                 """UPDATE alert_outbox SET status='cancelled',error=?,lease_token=NULL,
@@ -212,7 +235,10 @@ def sections(row, details):
     discovery = details.get("home_discovery")
     if not ebay and isinstance(discovery, dict):
         source = "Vinted Home · photo match" if discovery.get("reason") == "scraper_photo" else "Vinted Home · feed find"
-        heading = f"🏠 <b>{source} · #{row['query_id'] or '—'} · {name}</b>"
+        if not row["query_id"] and discovery.get("reason") == "recommendation":
+            heading = "🏠 <b>Vinted Home · recommendation</b>"
+        else:
+            heading = f"🏠 <b>{source} · #{row['query_id'] or '—'} · {name}</b>"
     link = (
         f'<a href="{escape(row["url"], quote=True)}">Open {marketplace} listing ↗</a>'
     )
@@ -239,6 +265,8 @@ def sections(row, details):
             "brand_category_style": "Brand, category and style match your buying guide",
             "brand_style": "Brand and style match your buying guide",
             "category_style": "Category and style match your buying guide",
+            "recommendation": "From your personalised Vinted Home feed",
+            "also_saved_search": "Also matched your saved search",
             "scraper_style": "Seller describes the cut or fabric in your scraper examples",
             "scraper_look": "The garment details match a style in your scraper",
             "scraper_photo": "Photo resembles your scraper examples. Check the cut, fabric and condition.",

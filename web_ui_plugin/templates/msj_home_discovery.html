@@ -1,12 +1,12 @@
 <section class="form-card guide-section" id="home-discovery">
 <h2>Fresh Home finds</h2>
 <p>Check recommendations from both connected accounts, starting with the original account. Only listings confirmed to be under three minutes old qualify. Unknown ages and expired alerts are skipped.</p>
-<p class="muted">Fresh listings can match a saved brand or one of your scraper-style searches across labels. Finder checks women’s sizes, garment details, exclusions and the all-in price.</p>
+<p class="muted">Every available recommendation verified under three minutes old can trigger an alert, across all prices, brands, sizes and categories. Matching buying guides add reference photos and a spending limit.</p>
 <p><b>{{home_discovery.sent_24h}}</b> Home alerts sent in the last 24 hours · {{home_discovery.pending_24h}} waiting for delivery. <a href="/finds?source=home">View Home finds</a></p>
 <form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="action" value="home_discovery">
 <input type="hidden" name="home_enabled" value="{{'0' if home_discovery.enabled else '1'}}">
 <button class="{{'secondary' if home_discovery.enabled else 'primary'}}">{{'Pause Home discovery' if home_discovery.enabled else 'Start Home discovery'}}</button>
 <span>{{'Running' if home_discovery.enabled else 'Paused'}} · available accounts refresh about every 32–60 seconds, with up to seven Home and listing page reads per account per minute</span></form>
-<div class="connection-grid">{% for account in home_discovery.accounts %}<div><h3>{{account.label}}</h3><p>{{account.state}} · {{account.time}}</p><p class="muted">Latest cycle: {{account.candidates}} candidates · {{account.checked}} age checks · {{account.card_screened}} off-target cards skipped · {{account.fresh}} fresh · {{account.matched}} matches · {{account.alerts}} alerts queued</p>
-{% if account.fresh %}<p class="muted">Fresh-item checks · {{account.listing_unavailable + account.details_unverified}} unavailable or missing details · {{account.global_blocked}} global filters · {{account.scope_miss}} outside search filters · {{account.budget_or_exclusions}} price or exclusions · {{account.style_miss}} outside target style · {{account.photo_checked}} photos compared</p>{% endif %}</div>{% endfor %}</div>
+<div class="connection-grid">{% for account in home_discovery.accounts %}<div><h3>{{account.label}}</h3><p>{{account.state}} · {{account.time}}</p><p class="muted">Latest cycle: {{account.candidates}} candidates · {{account.checked}} age checks · {{account.fresh}} fresh · {{account.matched}} matches · {{account.alerts}} alerts queued</p>
+{% if account.fresh %}<p class="muted">Fresh-item checks · {{account.listing_unavailable + account.details_unverified}} unavailable or missing details · {{account.matched}} buying-guide matches</p>{% endif %}</div>{% endfor %}</div>
 </section>

@@ -135,6 +135,56 @@ def age_bounds(value):
     return count * multiplier, (count + 1) * multiplier
 
 
+def _home_uploads(body, cards):
+    """Use only same-item listing creation fields already supplied with visible cards."""
+    scripts = _Scripts()
+    scripts.feed(body)
+    roots, refs = _records(scripts.scripts)
+    listed = {card["id"]: card for card in cards}
+    stamps, available, unavailable = {}, set(), set()
+    queue, visited = deque(roots), 0
+    while queue:
+        record = queue.popleft()
+        visited += 1
+        if visited + len(queue) > MAX_NODES:
+            return  # Incomplete pages cannot establish consistent timestamps.
+        if isinstance(record, list):
+            queue.extend(child for child in record if isinstance(child, (dict, list)))
+            continue
+        if not isinstance(record, dict):
+            continue
+        queue.extend(child for child in record.values() if isinstance(child, (dict, list)))
+        identity = _identity(record.get("id"))
+        card = listed.get(identity)
+        if not card or not (_identity(record.get("seller_id")) or _identity(record.get("user_id"))):
+            continue
+        if record.get("item_id") is not None and _identity(record.get("item_id")) != identity:
+            continue
+        title, price = _resolve(record.get("title"), refs), _resolve(record.get("price"), refs)
+        if title != card["title"] or not isinstance(price, dict) or price.get("currency_code") != "GBP":
+            continue
+        if _money("£" + str(price.get("amount", ""))) != card["price"]:
+            continue
+        for key in ("created_at_ts", "created_at"):
+            stamp = _upload_time(_resolve(record.get(key), refs))
+            if stamp is not None:
+                stamps.setdefault(identity, set()).add(stamp)
+        can_buy = _resolve(record.get("can_buy"), refs)
+        if can_buy is True:
+            available.add(identity)
+        if can_buy is False or any(_resolve(record.get(k), refs) is True
+                                   for k in ("is_reserved", "is_hidden", "is_sold", "is_closed")):
+            unavailable.add(identity)
+    for identity, values in stamps.items():
+        if max(values) - min(values) <= 1:
+            card = listed[identity]
+            card["home_created_at"] = min(values)
+            if identity in unavailable:
+                card["home_available"] = False
+            elif identity in available:
+                card["home_available"] = True
+
+
 def parse_home(body):
     """Return only visible Home feed cards with a valid UK item URL and GBP price."""
     tree = _tree(body)
@@ -171,7 +221,7 @@ def parse_home(body):
             continue
         caption = links[0].get("title") or links[0].get("aria-label") or ""
         title = re.split(r", (?:brand|condition): ", caption, maxsplit=1)[0].strip()
-        if not title or len(title) > 500 or title == caption:
+        if not title or len(title) > 500:
             continue
         images = card.xpath('.//img[@data-testid="feed-item--image--img"]/@src')
         brand = card.xpath('.//*[@data-testid="feed-item--description-title"]')
@@ -197,6 +247,8 @@ def parse_home(body):
             item["total_item_price"] = total
         seen.add(identity)
         items.append(item)
+    if items:
+        _home_uploads(body, items)
     return {
         "items": items,
         "reason": "ok" if items else "home_cards_unavailable",

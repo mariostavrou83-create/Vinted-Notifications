@@ -1,5 +1,5 @@
 <div class="home-results-heading">
-  {% if home_panel.detail %}<h2>Deal alerts</h2>{% else %}<h2><a href="/vinted-home">Vinted Home</a></h2>{% endif %}
+  {% if home_panel.detail %}<h2>Fresh Home alerts</h2>{% else %}<h2><a href="/vinted-home">Vinted Home</a></h2>{% endif %}
   <p><strong>{{ home_panel.sent }}</strong> sent to Telegram in 24h{% if home_panel.waiting %} · {{ home_panel.waiting }} waiting{% endif %}</p>
   <a href="{{ '/finds?source=home' if home_panel.detail else '/vinted-home' }}">{{ 'All Home alerts' if home_panel.detail else 'Open Home feed' }} →</a>
 </div>
@@ -11,13 +11,22 @@
     </a>
     <div><a class="home-item-title" href="{{ row.url }}" target="_blank" rel="noopener noreferrer">{{ row.title }}</a>
       <div class="home-price"><strong>£{{ row.price }}</strong> · <time>{{ row.time }}</time></div>
-      <small>{{ 'Sent to Telegram' if row.status == 'sent' else 'Waiting for Telegram' }} · <a href="/buying-guides?q={{ row.query_id }}">Guide #{{ row.query_id }}</a></small>
+      <small>{{ 'Sent to Telegram' if row.status == 'sent' else 'Waiting for Telegram' }}{% if row.query_id %} · <a href="/buying-guides?q={{ row.query_id }}">Guide #{{ row.query_id }}</a>{% endif %}</small>
     </div>
   </article>{% endfor %}
 </div>
-{% else %}<p>No Home deals have qualified in the past 24 hours.</p>{% endif %}
+{% else %}<p>No fresh Home alerts in the past 24 hours.</p>{% endif %}
 {% if home_panel.detail %}
-{% if home_panel.guides %}<details class="home-guide-links"><summary>Home-only styles and buying limits</summary>
+{% for page in home_panel.pages %}<details class="home-guide-links" data-home-section="{{ page.role }}">
+  <summary>{{ 'Original' if page.role == 'seller' else 'Buying' }} account · all {{ page.cards|length }} recommendations at {{ page.time }}</summary>
+  <p class="muted">In Vinted’s order on the latest refresh. The time above is when Finder saw the page. Fresh alerts appear above once the upload time is verified.</p>
+  <div class="home-deals">{% for card in page.cards %}<article class="home-deal">
+    <a class="home-cover" href="{{ card.url }}" target="_blank" rel="noopener noreferrer">{% if card.photo %}<img src="{{ card.photo }}" loading="lazy" alt="">{% else %}<span>Vinted ↗</span>{% endif %}</a>
+    <div><a class="home-item-title" href="{{ card.url }}" target="_blank" rel="noopener noreferrer">{{ card.title }}</a>
+      <div class="home-price"><strong>£{{ card.price }}</strong></div><small>{{ card.brand }}{% if card.brand and card.size %} · {% endif %}{{ card.size }}</small>{% if card.sent_via %}<small>Alerted via {{ card.sent_via }}</small>{% endif %}</div>
+  </article>{% endfor %}</div>
+</details>{% endfor %}
+{% if home_panel.guides %}<details class="home-guide-links" data-home-section="guides"><summary>Home-only styles and buying limits</summary>
   <p class="muted">These guides look across labels. Open one for example photos and the maximum including fees and postage.</p>
   <ul>{% for guide in home_panel.guides %}<li><a href="/buying-guides?q={{ guide.query_id }}">{{ guide.name.removeprefix('Home only · ') }}</a>{% if guide.max_total %} · £{{ '%g'|format(guide.max_total / 100) }} all-in{% endif %}</li>{% endfor %}</ul>
 </details>{% endif %}

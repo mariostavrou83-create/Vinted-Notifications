@@ -22,7 +22,7 @@ import vinted_seller as seller
 from logger import get_logger
 from vinted_buyer_priority import yield_to_purchase
 from vinted_home_feed import parse_home, parse_listing
-from vinted_home_looks import card_priority
+import vinted_home_activity as activity
 from vinted_home_matching import match_candidate
 from vinted_home_transport import read_html
 
@@ -55,6 +55,7 @@ COUNTERS = (
     "photo_checked",
     "photo_matches",
     "card_screened",
+    "feed_verified",
 )
 ERROR_CODES = frozenset(
     {
@@ -178,16 +179,20 @@ def _publish(item, search, match, age, role, *, now):
         size_title=item.get("size_title"),
         raw_data=raw,
     )
+    if not search:
+        search = {"id": None, "query": "", "query_name": "Personalised Home recommendation"}
     details = vinted_alerts.snapshot(listing, search)
     details.update(
         description_pending=False,
         description_checked=True,
-        description_state="available",
-        description_complete=True,
+        description_state="available" if item.get("description_complete") else "unavailable",
+        description_complete=bool(item.get("description_complete")),
+        gallery_checked=not bool(search["id"]),
         home_discovery={
             "version": 1,
             "source_role": role,
-            "reason": match["reason"],
+            "all_recommendations": True,
+            "reason": match["reason"] if match else "recommendation",
             "observed_at": observed,
             "max_age_seconds": upper,
             "expires_at": observed + MAX_AGE - upper,
@@ -282,7 +287,7 @@ class Monitor:
                 ),
             )
         logger.info(
-            "Vinted Home monitor: role=%s code=%s detail=%s stage=%s http=%s retry_at=%s candidates=%s checked=%s fresh=%s matched=%s alerts=%s rejected_age=%s rejected_match=%s duplicates=%s age_unverified=%s age_expired=%s skipped_redirect=%s listing_unavailable=%s details_unverified=%s global_blocked=%s scope_miss=%s budget_or_exclusions=%s style_miss=%s photo_checked=%s photo_matches=%s card_screened=%s",
+            "Vinted Home monitor: role=%s code=%s detail=%s stage=%s http=%s retry_at=%s candidates=%s checked=%s fresh=%s matched=%s alerts=%s rejected_age=%s rejected_match=%s duplicates=%s age_unverified=%s age_expired=%s skipped_redirect=%s listing_unavailable=%s details_unverified=%s global_blocked=%s scope_miss=%s budget_or_exclusions=%s style_miss=%s photo_checked=%s photo_matches=%s card_screened=%s feed_verified=%s",
             role,
             code,
             data["detail_code"],
@@ -338,11 +343,6 @@ class Monitor:
                     self.searches = active_searches()
                     self.searches_until = now + 30
                 searches = self.searches
-                if not searches:
-                    self.pending[role].clear()
-                    self.next_home[role] = now + INTERVAL
-                    self.status(role, "no_searches", "idle")
-                    return
                 if stage == "home":
                     reads.append(now)
                     self.home(role, now)
@@ -385,7 +385,7 @@ class Monitor:
     def home(self, role, now):
         self.next_home[role] = now + INTERVAL
         self.counts[role] = dict.fromkeys(COUNTERS, 0)
-        html, _ = self.fetch(role, buyer.BASE + "/")
+        html, observed = self.fetch(role, buyer.BASE + "/")
         result = parse_home(html)
         if result.get("reason") != "ok":
             self.retry_at[role] = self.clock() + 300
@@ -399,37 +399,40 @@ class Monitor:
             return
         candidates = result["items"]
         self.counts[role]["candidates"] = len(candidates)
-        seen = db.get_seen_item_ids([item["id"] for item in candidates])
-        # ID ordering only determines which candidates get the bounded read;
-        # it never establishes age. The target upload field must do that.
+        try:
+            activity.save_feed(role, candidates, observed)
+        except sqlite3.Error as exc:
+            logger.warning("Home page snapshot deferred: %s", type(exc).__name__)
+        seen = activity.alerted_ids([item["id"] for item in candidates])
+        # IDs order the checks when Vinted supplies no reliable upload timestamp.
         fresh_ids = []
-        ranked = {}
-        for item in sorted(
-            candidates, key=lambda value: int(value["id"]), reverse=True
-        ):
-            if str(item["id"]) in seen or str(item["id"]) in self.examined:
+        for item in sorted(candidates, key=lambda card: int(card["id"]), reverse=True):
+            identifier = str(item["id"])
+            if identifier in seen or identifier in self.examined:
                 self.counts[role]["duplicates"] += 1
                 continue
-            priority = card_priority(item)
-            if priority >= 0:
+            stamp = item.get("home_created_at")
+            if stamp is None or stamp > observed or stamp <= 0:
                 fresh_ids.append(item)
-                ranked[str(item["id"])] = priority
-            else:
-                self.counts[role]["card_screened"] += 1
+                continue
+            if self.clock() >= stamp + MAX_AGE or item.get("home_available") is False:
+                self.remember(identifier, self.clock())
+                continue
+            if item.get("home_available") is not True:
+                fresh_ids.append(item)
+                continue
+            age = {"verified": True, "checked_at": observed, "max_age_seconds": math.ceil(observed - stamp)}
+            self.counts[role]["fresh"] += 1
+            self.counts[role]["feed_verified"] += 1
+            self.notify_item(item, age, role, self.searches)
+            self.remember(identifier, self.clock())
         repeat_heavy = len(candidates) >= 10 and self.counts[role]["duplicates"] >= len(candidates) // 2
-        # Some old reads will leave the rolling window before this queue expires.
-        # tick() still enforces the actual cap immediately before each request.
         retained = sum(at > now + CYCLE_SECONDS - INTERVAL for at in self.page_reads[role])
         limit = min(MAX_DETAILS, PAGE_BUDGET - retained)
         if repeat_heavy and len(fresh_ids) <= 5 and len(self.page_reads[role]) <= 2:
             self.next_home[role] = now + REPEAT_INTERVAL
             limit = min(limit, 3)
-        # Reserve half the slots for the newest IDs even with vague listing titles.
-        # Among the next newest cards, use the owner's priority looks to spend the remaining reads.
-        newest = fresh_ids[:(limit + 1) // 2]
-        others = fresh_ids[len(newest):MAX_DETAILS * 2]
-        priority = sorted(others, key=lambda entry: ranked[str(entry["id"])], reverse=True)[:limit-len(newest)]
-        self.pending[role] = deque(newest + priority)
+        self.pending[role] = deque(fresh_ids[:limit])
         self.deadline[role] = self.clock() + CYCLE_SECONDS
         self.status(role, "checked", "home", 200)
 
@@ -437,7 +440,7 @@ class Monitor:
         candidate = self.pending[role][0]
         if str(candidate["id"]) in self.examined or str(
             candidate["id"]
-        ) in db.get_seen_item_ids([candidate["id"]]):
+        ) in activity.alerted_ids([candidate["id"]]):
             self.pending[role].popleft()
             self.counts[role]["duplicates"] += 1
             return
@@ -480,7 +483,7 @@ class Monitor:
             return
         self.counts[role]["fresh"] += 1
         item = parsed.get("item")
-        if not isinstance(item, dict) or item.get("description_complete") is not True:
+        if not isinstance(item, dict):
             key = "listing_unavailable" if parsed.get("reason") == "unavailable" else "details_unverified"
             self.counts[role][key] += 1
             self.counts[role]["rejected_match"] += 1
@@ -494,45 +497,45 @@ class Monitor:
             item["size_title"] = candidate.get("size_title", "")
         if not item.get("photos") and candidate.get("photo"):
             item["photo"] = candidate["photo"]
-        eligible, diagnostics = set(), set()
-        photo_styles = ()
-        match = None
-        if not global_filters_allow(item):
-            reason = "global_blocked"
-        else:
-            match = match_candidate(item, searches, eligible=eligible, diagnostics=diagnostics)
-            reason = "scope_miss" if "scope" not in diagnostics else "budget_or_exclusions" if "budget" not in diagnostics else "style_miss"
-            if not match and eligible and self.clock() + 6 < observed + MAX_AGE - upper:
-                from vinted_style_photos import photo_matches
-
-                photo = (candidate.get("photo") or {}).get("url") or next(iter(item.get("photos") or ()), "")
-                photo_styles, checked = photo_matches(photo, eligible)
-                if checked:
-                    self.counts[role]["photo_checked"] += 1
-                if photo_styles:
-                    match = match_candidate(item, searches, photo_styles=photo_styles)
-                    if match:
-                        self.counts[role]["photo_matches"] += 1
-        if not match:
-            self.counts[role][reason] += 1
-            self.counts[role]["rejected_match"] += 1
-            if reason != "global_blocked":
-                _record_decision(item, observed, reason, role)
-            self.status(role, "checked", "listing", 200)
-            return
-        self.counts[role]["matched"] += 1
-        # Fetch the live target again after collection or local photo processing.
-        search = search_settings.get_search(match["query_id"])
-        current = match_candidate(item, [search], photo_styles=photo_styles) if search else None
-        if (
-            current
-            and enabled()
-            and global_filters_allow(item)
-            and _publish(item, search, current, age, role, now=self.clock())
-        ):
-            self.counts[role]["alerts"] += 1
-            _record_decision(item, observed, "qualified", role, search["id"])
+        self.notify_item(item, age, role, searches)
         self.status(role, "checked", "listing", 200)
+
+    def notify_item(self, item, age, role, searches):
+        # A guide adds the owner's reference photos and buying limit. It is
+        # optional and can never delay a Home alert for another photo request.
+        search = match = None
+        eligible = set()
+        if searches and item.get("description_complete") and global_filters_allow(item):
+            proposed = match_candidate(item, searches, eligible=eligible)
+            if proposed:
+                search = search_settings.get_search(proposed["query_id"])
+                match = match_candidate(item, [search]) if search else None
+        if not match:
+            search = None
+        else:
+            self.counts[role]["matched"] += 1
+        if enabled() and _publish(item, search, match, age, role, now=self.clock()):
+            self.counts[role]["alerts"] += 1
+            _record_decision(item, age["checked_at"], "qualified" if match else "recommendation", role,
+                             search["id"] if search else None)
+            if not match and eligible and self.clock() + 6 < age["checked_at"] + MAX_AGE - age["max_age_seconds"]:
+                self.enrich_photo(item, searches, eligible, age, role)
+
+    def enrich_photo(self, item, searches, eligible, age, role):
+        from vinted_style_photos import photo_matches
+        photo = (item.get("photo") or {}).get("url") or next(iter(item.get("photos") or ()), "")
+        styles, checked = photo_matches(photo, eligible)
+        self.counts[role]["photo_checked"] += int(checked)
+        if not styles or not enabled():
+            return
+        candidate = match_candidate(item, searches, photo_styles=styles)
+        search = search_settings.get_search(candidate["query_id"]) if candidate else None
+        match = match_candidate(item, [search], photo_styles=styles) if search else None
+        if match and _publish(item, search, match, age, role, now=self.clock()):
+            self.counts[role]["photo_matches"] += 1
+            self.counts[role]["matched"] += 1
+            _record_decision(item, age["checked_at"], "qualified", role, search["id"])
+
 
 
 def run():

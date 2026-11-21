@@ -8,7 +8,6 @@ import vinted_home_controls
 import search_settings
 import vinted_home_feed
 import vinted_home_guides
-import vinted_home_looks
 import vinted_home_monitor
 from test_search_controls import DatabaseFixture
 from test_home_style_discovery import jacket
@@ -37,18 +36,6 @@ class RecognitionTests(unittest.TestCase):
                         {"price":{"amount":"40","currency_code":"GBP"}}):
             self.assertIsNone(match_candidate(dict(garment,**changes),[target]))
         self.assertTrue(match_candidate(dict(garment,title="Ribbed jumper size UK 12-14"),[target]))
-
-    def test_card_priority_keeps_unknown_titles_and_screens_obvious_ineligible_cards(self):
-        priority = vinted_home_looks.card_priority
-        self.assertEqual(priority({"title":"Brown jacket"}),0)
-        self.assertGreater(priority({"brand_title":"Polo Ralph Lauren","title":"Full zip cable knit cardigan"}),0)
-        for size in ("L / UK 16-18","13 years / 158 cm","XXS / UK 2"):
-            self.assertEqual(priority({"size_title":size,"title":"Ralph Lauren"}),-1)
-        self.assertEqual(priority({"brand_title":"SHEIN","title":"Beaded silk halter"}),-1)
-        for title in ("Apple headphones","Dumbells","Model guitars","Untested Canon PowerShot A590"):
-            self.assertEqual(priority({"title":title}),-1)
-        self.assertGreaterEqual(priority({"title":"Headphones print fitted T-shirt"}),0)
-        self.assertGreaterEqual(priority({"size_title":"M / UK 12-14"}),0)
 
     def test_target_timestamp_recovers_genuine_third_minute(self):
         body = listing(age="2 minutes ago",created_at_ts=850)
@@ -103,7 +90,7 @@ class HomeGuideTests(DatabaseFixture, unittest.TestCase):
         self.assertNotIn(henley["id"],{q[0] for q in search_settings.active_queries(include_home=True)})
         self.assertEqual(vinted_home_guides.install(),0)
 
-    def test_repeat_heavy_feed_uses_spare_capacity_and_reserves_vague_titles(self):
+    def test_repeat_heavy_feed_checks_newest_cards_across_all_styles(self):
         worker = vinted_home_monitor.Monitor(clock=lambda:1000,fetch=lambda *args:("home",1000))
         cards = [{"id":str(v),"title":"Simple title"} for v in range(100,120)]
         cards[15].update(brand_title="Polo Ralph Lauren",title="Full zip ribbed cardigan")
@@ -113,8 +100,8 @@ class HomeGuideTests(DatabaseFixture, unittest.TestCase):
         with patch.object(vinted_home_monitor,"parse_home",return_value={"reason":"ok","items":cards}):
             worker.home("seller",1000)
         self.assertEqual(worker.next_home["seller"],1032)
-        self.assertEqual([x["id"] for x in worker.pending["seller"]],["119","118","115"])
-        self.assertEqual(worker.counts["seller"]["card_screened"],1)
+        self.assertEqual([x["id"] for x in worker.pending["seller"]],["119","118","117"])
+        self.assertEqual(worker.counts["seller"]["card_screened"],0)
 
     def test_budget_is_enforced_across_overlapping_cycles(self):
         now=[1000]

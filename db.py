@@ -161,7 +161,9 @@ def add_item_to_db(
         conn = get_db_connection()
         conn.execute("BEGIN IMMEDIATE")
         cursor = conn.cursor()
-        if cursor.execute("SELECT 1 FROM items WHERE item=?", (id,)).fetchone():
+        discovery = ((alert or {}).get("vinted_details") or {}).get("home_discovery") or {}
+        recommendation = query_id is None and discovery.get("reason") == "recommendation"
+        if not recommendation and cursor.execute("SELECT 1 FROM items WHERE item=?", (id,)).fetchone():
             # A borrowed batch connection stays open after this helper returns.
             # End the duplicate's transaction before another item is recorded.
             from search_match_audit import record
@@ -169,11 +171,13 @@ def add_item_to_db(
             record(conn, id, query_id, (alert or {}).get("match_audit"))
             conn.commit()
             return False
-        # Insert into db the id and the query_id related to the item
-        cursor.execute(
-            "INSERT INTO items (item, title, price, currency, timestamp, photo_url, query_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (id, title, price, currency, timestamp, photo_url, query_id),
-        )
+        # Unguided Home recommendations are deduplicated by the outbox. A later
+        # saved-search match can still attach its guide to that same listing.
+        if not recommendation:
+            cursor.execute(
+                "INSERT INTO items (item, title, price, currency, timestamp, photo_url, query_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (id, title, price, currency, timestamp, photo_url, query_id),
+            )
         # Update the last item for the query
         if update_search_timestamp:
             cursor.execute(
@@ -183,10 +187,18 @@ def add_item_to_db(
         if alert is not None:
             import time
 
-            cursor.execute(
+            inserted = cursor.execute(
                 """INSERT INTO alert_outbox
                 (item_id,query_id,search_name,content,url,title,price,currency,photo_url,
-                 reference_id,found_at,photo_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 reference_id,found_at,photo_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(item_id) DO UPDATE SET query_id=excluded.query_id, search_name=excluded.search_name,
+                content=excluded.content,url=excluded.url,title=excluded.title,price=excluded.price,
+                currency=excluded.currency,photo_url=excluded.photo_url,reference_id=excluded.reference_id,
+                found_at=excluded.found_at,status='pending',attempts=0,next_attempt=0,error='',
+                photo_status=excluded.photo_status,photo_attempts=0,photo_next_attempt=0,photo_error='',
+                lease_token=NULL,leased_until=0
+                WHERE ? AND alert_outbox.platform='vinted' AND alert_outbox.telegram_message_id IS NULL
+                AND alert_outbox.status IN ('cancelled','failed') AND alert_outbox.leased_until<=?""",
                 (
                     str(id),
                     query_id,
@@ -213,13 +225,22 @@ def add_item_to_db(
                         )
                         else "none"
                     ),
+                    recommendation,
+                    time.time(),
                 ),
-            )
-            if alert.get("vinted_details"):
+            ).rowcount
+            if not inserted:
+                from vinted_home_activity import attach_guide
+
+                if recommendation or not attach_guide(conn, str(id), query_id, alert, alert.get("vinted_details") or {}):
+                    conn.rollback()
+                    return False
+            elif alert.get("vinted_details"):
                 import json
 
                 cursor.execute(
-                    "INSERT INTO vinted_alert_details(item_id,payload) VALUES (?,?)",
+                    """INSERT INTO vinted_alert_details(item_id,payload) VALUES (?,?)
+                    ON CONFLICT(item_id) DO UPDATE SET payload=excluded.payload""",
                     (str(id), json.dumps(alert["vinted_details"], ensure_ascii=False)),
                 )
         if alert is not None:

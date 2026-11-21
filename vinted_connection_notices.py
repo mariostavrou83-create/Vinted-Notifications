@@ -132,7 +132,7 @@ def record_failure(error, session_fingerprint, *, checked_at=None):
         return False
 
 
-def dashboard_url():
+def dashboard_url(*, reconnect=False):
     base = os.environ.get("DASHBOARD_URL", "").strip().rstrip("/")
     if not base:
         domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
@@ -152,7 +152,7 @@ def dashboard_url():
             or parsed.port not in (None, 443)
         ):
             return None
-        return base.rstrip("/") + "/connections#vinted-buying"
+        return base.rstrip("/") + ("/vinted/reconnect" if reconnect else "/connections#vinted-buying")
     except ValueError:
         return None
 

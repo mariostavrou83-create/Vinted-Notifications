@@ -18,7 +18,11 @@
       } else if (response.ok && response.headers.get("Content-Type")?.includes("application/json")) {
         const update = await response.json();
         if (visible() && !current.signal.aborted) {
+          const opened = new Set([...panel.querySelectorAll("details[data-home-section][open]")].map(node => node.dataset.homeSection));
           panel.innerHTML = update.html;
+          for (const node of panel.querySelectorAll("details[data-home-section]")) {
+            node.open = opened.has(node.dataset.homeSection);
+          }
           panel.dataset.marker = update.marker;
         }
       } else {

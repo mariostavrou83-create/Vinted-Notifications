@@ -2173,6 +2173,13 @@ def feedback_buttons(row, feedback=None):
             "unexpected_error": "Checkout error · details",
         }.get(reason, label)
     buttons = [[InlineKeyboardButton(label, callback_data="buy:status")]]
+    if state in {"setup_required", "failed_before_payment"} and reason in {
+        "credentials", "renewal_cooldown", "renewal_blocked", "refresh_rejected"
+    }:
+        from vinted_connection_notices import dashboard_url
+        reconnect = dashboard_url(reconnect=True)
+        if reconnect:
+            buttons.append([InlineKeyboardButton("Reconnect buying account ↗", url=reconnect)])
     if state in ("in_progress", "stopping", "closed"):
         token = feedback.get("stop_token")
         if (

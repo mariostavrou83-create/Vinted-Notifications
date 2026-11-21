@@ -311,7 +311,8 @@ def markup(row, details, *, view="listing", note_page=None):
     buttons = [
         [InlineKeyboardButton("Open " + marketplace + " listing ↗", url=row["url"])]
     ]
-    if marketplace == "Vinted":
+    unguided_home = not row.get("query_id") and (details.get("home_discovery") or {}).get("reason") == "recommendation"
+    if marketplace == "Vinted" and not unguided_home:
         from vinted_buying import feedback_buttons
 
         buttons.extend(feedback_buttons(row, details.get("buy_feedback")))
@@ -384,13 +385,21 @@ def load(platform, message_id):
             "SELECT * FROM alert_outbox WHERE item_id=? AND platform=?",
             (card["item_id"], platform),
         ).fetchone()
-    if row is None:
-        return None
-    return (
-        dict(row, reference_id=card["reference_id"], telegram_message_id=message_id),
-        json.loads(card["details"]),
-        dict(card),
-    )
+        if row is None:
+            return None
+        details = json.loads(card["details"])
+        reference = card["reference_id"]
+        # The original notification can reach Telegram while a saved search is
+        # attaching its guide. Always present the committed guide on later edits.
+        if row["query_id"] and (details.get("home_discovery") or {}).get("reason") == "recommendation":
+            bound = conn.execute("SELECT payload FROM vinted_alert_details WHERE item_id=?",
+                                 (row["item_id"],)).fetchone()
+            if bound:
+                details.update(json.loads(bound[0]))
+                details.pop("reference_page_ids", None)
+                reference = row["reference_id"]
+    return dict(row, reference_id=reference, telegram_message_id=message_id), details, dict(card)
+
 
 
 def record(row, details, result):

@@ -399,6 +399,12 @@ def _enqueue(conn, candidate, data, search):
             platform,
         ),
     ).rowcount
+    if not inserted and platform == "vinted":
+        from vinted_home_activity import attach_guide
+        if attach_guide(conn, item_id, candidate["query_id"], alert, details):
+            from search_match_audit import capture, record
+            record(conn, item_id, candidate["query_id"], capture(search, details), canonical=True)
+            return True
     if inserted:
         table = "ebay_alert_details" if platform == "ebay" else "vinted_alert_details"
         conn.execute(

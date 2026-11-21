@@ -1,0 +1,135 @@
+import json
+import time
+import unittest
+from contextlib import closing
+from unittest.mock import patch
+
+import alert_delivery
+import db
+import photo_cards
+import search_settings
+import vinted_alerts
+import vinted_buying
+import vinted_home_activity as activity
+import vinted_home_controls as controls
+import vinted_home_feed as feed
+import vinted_home_monitor as monitor
+from test_search_controls import DatabaseFixture
+from test_vinted_home_feed import home, card, native
+
+
+class HomeRecommendationsTests(DatabaseFixture, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        controls.configure("1")
+        self.now = time.time()
+        self.item = {"id":"8123", "url":"https://www.vinted.co.uk/items/8123-headphones", "title":"Headphones",
+                     "brand_title":"Apple", "size_title":"", "price":{"amount":"35.00","currency_code":"GBP"},
+                     "photo":{"url":"https://images1.vinted.net/t/01_test/f800/image.webp"},
+                     "description":"", "description_complete":False}
+        self.age = {"verified":True, "max_age_seconds":20, "checked_at":self.now}
+        self.worker = monitor.Monitor(clock=lambda:self.now)
+        self.search = search_settings.get_search(1)
+
+    def row(self):
+        with closing(search_settings.connection()) as conn:
+            return dict(conn.execute("SELECT * FROM alert_outbox WHERE item_id='8123'").fetchone())
+
+    def new(self):
+        self.worker.notify_item(self.item, self.age, "seller", [])
+
+    def test_no_guides_or_description_needed_and_no_authority_to_spend(self):
+        self.new()
+        self.worker.notify_item(self.item, self.age, "buyer", [])
+        row = self.row()
+        self.assertIsNone(row["query_id"])
+        self.assertIn("Vinted Home · recommendation", row["content"])
+        self.assertNotIn("saved buying criteria", row["content"])
+        self.assertFalse(db.get_seen_item_ids(["8123"]))
+        self.assertEqual(activity.alerted_ids(["8123"]), {"8123"})
+        details = vinted_alerts.get_details(row)
+        buttons = [btn for group in photo_cards.markup(row, details).inline_keyboard for btn in group]
+        self.assertTrue(any(btn.url == self.item["url"] for btn in buttons))
+        self.assertFalse(any(btn.callback_data == "buy:click" for btn in buttons))
+        ready = alert_delivery.claim(now=self.now + 1)
+        self.assertTrue(vinted_alerts.prepare_listing(ready))
+        controls.configure("0")
+        self.assertFalse(vinted_alerts.prepare_listing(ready))
+
+    def test_fresh_home_can_replace_an_unsent_cancelled_saved_match(self):
+        monitor._publish(self.item,self.search,{"reason":"brand_style"},self.age,"seller",now=self.now)
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE alert_outbox SET status='cancelled' WHERE item_id='8123'")
+        self.new()
+        row = self.row()
+        self.assertEqual((row["status"],row["query_id"]), ("pending",None))
+        self.assertEqual(vinted_alerts.get_details(row)["home_discovery"]["reason"],"recommendation")
+
+    def test_native_old_unavailable_or_unconfirmed_stock_never_sends_on_card_alone(self):
+        for identity, changes in (("192", {"created_at_ts":int(self.now)-300}),
+                                  ("193", {"created_at_ts":int(self.now)-20, "is_reserved": True}),
+                                  ("194", {"created_at_ts":int(self.now)-20, "can_buy": None})):
+            body=home(card(identity)+native(id=identity,**changes))
+            self.worker.fetch=lambda role,url: (body,self.now)
+            self.worker.home("seller",self.now)
+            self.assertFalse(activity.alerted_ids([identity]))
+            self.assertEqual(bool(self.worker.pending["seller"]),identity=="194")
+
+    def test_later_real_saved_match_enriches_sent_home_item_once(self):
+        self.new()
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE alert_outbox SET status='sent',telegram_message_id=222 WHERE item_id='8123'")
+        details = vinted_alerts.get_details(self.row())
+        details.pop("home_discovery")
+        details.update(name="Named saved guide", buying_advice="Check the seam.")
+        self.assertTrue(db.add_item_to_db("8123", "Headphones", 1, "35.00", self.now,
+            self.item["photo"]["url"], currency="GBP", alert={"search_name":"Named saved guide",
+                "url":self.item["url"], "content":"saved", "vinted_details":details}))
+        row = self.row()
+        self.assertEqual((row["query_id"],row["telegram_message_id"],row["status"]),(1,222,"sent"))
+        self.assertIn("Also matched your saved search", row["content"])
+        self.assertIn("Check the seam",row["content"])
+        with closing(search_settings.connection()) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM alert_outbox WHERE item_id='8123'").fetchone()[0],1)
+            self.assertEqual(conn.execute("SELECT query_id FROM items WHERE item=8123").fetchone()[0],1)
+
+    def test_saved_matches_first_and_latest_page_still_shows_it_in_vinted_order(self):
+        monitor._publish(self.item,self.search,{"reason":"brand_style"},self.age,"seller",now=self.now)
+        self.assertFalse(monitor._publish(self.item,None,None,self.age,"buyer",now=self.now))
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE alert_outbox SET status='sent',content='saved match' WHERE item_id='8123'")
+        extra = dict(self.item,id="8125",url="https://www.vinted.co.uk/items/8125",title="Jeans size XL")
+        activity.save_feed("seller",[self.item,extra],self.now)
+        cards = activity.panel(True)["pages"][0]["cards"]
+        self.assertEqual([c["id"] for c in cards], ["8123","8125"])
+        self.assertEqual(cards[0]["sent_via"], "saved search")
+
+    def test_guide_paused_before_delivery_becomes_general_fresh_recommendation(self):
+        monitor._publish(self.item,self.search,{"reason":"brand_style"},self.age,"seller",now=self.now)
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("INSERT OR REPLACE INTO search_dashboard(query_id,paused) VALUES(1,1)")
+        claimed = alert_delivery.claim(now=self.now + 1)
+        self.assertTrue(vinted_alerts.prepare_listing(claimed))
+        self.assertIsNone(self.row()["query_id"])
+        self.assertIn("Vinted Home · recommendation",self.row()["content"])
+
+    def test_complete_home_card_can_alert_with_zero_listing_reads(self):
+        stamp = int(self.now) - 20
+        body = home(card() + native(created_at_ts=stamp))
+        self.worker.fetch = lambda role,url: (body,self.now)
+        self.worker.home("seller",self.now)
+        self.assertFalse(self.worker.pending["seller"])
+        self.assertEqual(activity.alerted_ids(["123"]),{"123"})
+        self.assertEqual(self.worker.counts["seller"]["feed_verified"],1)
+        for fixture in (home(card()+native(id="999",created_at_ts=stamp)),
+                        home(card()+native(created_at_ts=stamp, title="Different title")),
+                        home(card()+native(created_at_ts=stamp, price={"amount":"9.00","currency_code":"GBP"})),
+                        home(card()+native(created_at_ts=stamp,created_at=stamp-8))):
+            parsed = feed.parse_home(fixture)["items"][0]
+            self.assertNotIn("home_created_at",parsed)
+
+    def test_cooldown_feedback_links_to_buyer_signin(self):
+        with patch.dict("os.environ",{"DASHBOARD_URL":"https://finder.example"}):
+            buttons = vinted_buying.feedback_buttons({"query_id":1},
+                {"state":"failed_before_payment","reason":"renewal_cooldown"})
+        self.assertTrue(any(btn.url == "https://finder.example/vinted/reconnect" for row in buttons for btn in row))

@@ -164,11 +164,6 @@ def named_profile(search):
     return profile_for(words, parsed[1]) if parsed else None
 
 
-def discount_label(brand):
-    label = " " + " ".join(words(brand or "")) + " "
-    return any(" " + name + " " in label for name in _DISCOUNT)
-
-
 def brand_quality(title, description, brand=""):
     """Screen discount and modern high-street labels using the seller’s own period evidence."""
     name = " " + " ".join(words(brand or "") + words(title or "")) + " "
