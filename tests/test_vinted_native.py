@@ -211,6 +211,17 @@ class NativeDeliveryTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.bot.send_photo.assert_awaited_once()
         self.bot.do_api_request.assert_not_awaited()
 
+    async def test_buying_guide_attaches_comparison_to_first_notification(self):
+        self.enqueue()
+        row = outbox(110)
+        details = vinted_alerts.get_details(row)
+        details["buying_advice"] = "Max £10 delivered for a full placket."
+        with patch.object(vinted_native, "comparison_image", return_value=b"comparison") as image:
+            await vinted_native.send_initial(self.bot, "123", row, details, AsyncMock())
+        image.assert_called_once()
+        self.assertEqual(self.bot.send_photo.await_args.kwargs["photo"].input_file_content, b"comparison")
+        self.assertIn("£10 delivered", self.bot.send_photo.await_args.kwargs["caption"])
+
     async def test_edit_retry_does_not_resend_notification_and_survives_restart(self):
         self.enqueue()
         await self.worker.tick(now=1000)

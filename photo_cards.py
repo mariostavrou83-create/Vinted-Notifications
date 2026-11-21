@@ -399,7 +399,8 @@ def record(row, details, result):
     details = dict(details)
     snapshot_references(row, details)
     if file_id:
-        details["rendered_listing_photos"] = details.get("photos", [])[:4]
+        rendered_count = 1 if details.get("initial_comparison") and platform == "vinted" else 4
+        details["rendered_listing_photos"] = details.get("photos", [])[:rendered_count]
     try:
         with closing(connection()) as conn, conn:
             if not conn.execute(
@@ -515,15 +516,26 @@ async def send_initial(bot, chat_id, row, details, before_send, *, require_photo
         row.get("photo_url")
     ):
         details["photos"] = [row["photo_url"]]
-    raw = await listing_photo(details)
-    if row.get("reference_id") and details.get("buying_advice") and (raw or not require_photo):
-        reference = dashboard_store.get_media(row["reference_id"])
-        if reference:
-            from vinted_native import comparison_image
+    reference = (
+        dashboard_store.get_media(row["reference_id"])
+        if row.get("reference_id") and details.get("buying_advice") else None
+    )
+    if reference and details.get("platform", "vinted") == "vinted":
+        # The main listing photo and local board are enough for the first alert.
+        # The listing button can fetch the entire gallery on demand.
+        raw = await listing_photo(dict(details, photos=details.get("photos", [])[:1]))
+        if not raw and require_photo and len(details.get("photos", [])) > 1:
+            raw = await listing_photo(details)
+    else:
+        raw = await listing_photo(details)
+    if reference and (raw or not require_photo):
+        from vinted_native import comparison_image
 
-            raw = await asyncio.to_thread(comparison_image, raw, reference["image"], {"platform": details.get("platform")})
-            details["initial_comparison"] = True
-            details["reference_photo_present"] = True
+        raw = await asyncio.to_thread(
+            comparison_image, raw, reference["image"], {"platform": details.get("platform")}
+        )
+        details["initial_comparison"] = True
+        details["reference_photo_present"] = True
     if raw is None and require_photo:
         raise ValueError("The listing photo is unavailable. Try a newer find.")
     await before_send()
@@ -561,10 +573,11 @@ async def send_initial(bot, chat_id, row, details, before_send, *, require_photo
         )
     record(row, details, result)
     logger.info(
-        "Photo alert accepted for item %s; message_id=%s; native_photo=%s",
+        "Photo alert accepted for item %s; message_id=%s; native_photo=%s; reference_comparison=%s",
         row["item_id"],
         result.message_id,
         bool(raw),
+        bool(details.get("initial_comparison")),
     )
     return result
 

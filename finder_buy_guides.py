@@ -1,8 +1,10 @@
 """Owner-imported visual buying guidance. Alert selection settings stay independent."""
 import io
 import json
+import time
 import zipfile
 from contextlib import closing
+from pathlib import Path
 
 from PIL import Image
 
@@ -17,7 +19,7 @@ def migrate(conn):
         display_name TEXT NOT NULL, style_alert_cap INTEGER)""")
 
 
-def save_pack(stream):
+def save_pack(stream, *, missing_only=False, release_key=None):
     """Validate the complete pack before updating any live guide. Existing user photos win."""
     proposed = []
     with zipfile.ZipFile(stream) as archive:
@@ -59,13 +61,53 @@ def save_pack(stream):
             proposed.append((qid, guidance, name, image, cap))
     with closing(connection()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
+        if release_key and conn.execute("SELECT 1 FROM parameters WHERE key=?", (release_key,)).fetchone():
+            return 0
+        count = 0
         for qid, guidance, name, image, cap in proposed:
             row = conn.execute("SELECT q.id,COALESCE(d.archived,0),COALESCE(d.paused,0) FROM queries q LEFT JOIN search_dashboard d ON d.query_id=q.id WHERE q.id=?", (qid,)).fetchone()
             if row is None or row[1] or row[2]:
+                if missing_only:
+                    continue
                 raise ValueError("Search is no longer active: " + str(qid))
+            if missing_only and conn.execute("SELECT 1 FROM finder_buy_guides WHERE query_id=?", (qid,)).fetchone():
+                continue
             ref = dashboard_store._store_media(conn, image) if image else None
             conn.execute("""INSERT INTO finder_buy_guides VALUES (?,?,?,?,?) ON CONFLICT(query_id)
                 DO UPDATE SET guidance=excluded.guidance,display_name=excluded.display_name,
                 style_alert_cap=excluded.style_alert_cap, reference_id=COALESCE(excluded.reference_id,finder_buy_guides.reference_id)""",
                 (qid, ref, guidance, name, cap))
-    return len(proposed)
+            count += 1
+        if release_key:
+            conn.execute("INSERT INTO parameters(key,value) VALUES(?,?)", (release_key,str(count)))
+    return count
+
+
+def apply_release(pack_path=None):
+    """Install missing guides once on an existing Finder. Owner edits always take precedence."""
+    path = Path(pack_path) if pack_path else (
+        Path(__file__).with_name("style_assets") / "finder-buying-guides-20261121.zip"
+    )
+    if not path.is_file():
+        return 0
+    key = "finder_visual_guides_20261121"
+    with closing(connection()) as conn:
+        if conn.execute("SELECT 1 FROM parameters WHERE key=?", (key,)).fetchone():
+            return 0
+    with path.open("rb") as stream:
+        return save_pack(stream, missing_only=True, release_key=key)
+
+
+def coverage():
+    since = time.time() - 86400
+    with closing(connection()) as conn:
+        counts = conn.execute("""SELECT count(*),count(vg.query_id),count(COALESCE(d.reference_id,vg.reference_id))
+            FROM queries q LEFT JOIN search_dashboard d ON d.query_id=q.id
+            LEFT JOIN finder_buy_guides vg ON vg.query_id=q.id
+            WHERE COALESCE(d.archived,0)=0 AND COALESCE(d.paused,0)=0""").fetchone()
+        home = conn.execute("""SELECT item_id,query_id,substr(title,1,100),price,sent_at FROM alert_outbox
+            WHERE found_at>=? AND status='sent' AND platform='vinted' AND substr(content,1,1)='🏠'
+            ORDER BY found_at DESC LIMIT 3""", (since,)).fetchall()
+        sent = dict(conn.execute("""SELECT substr(content,1,1)='🏠',count(*) FROM alert_outbox
+            WHERE found_at>=? AND status='sent' AND platform='vinted' GROUP BY 1""", (since,)))
+    return (*counts, sent.get(1, 0), sent.get(0, 0), [tuple(row) for row in home])

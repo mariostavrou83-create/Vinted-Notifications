@@ -3,6 +3,7 @@ import json
 import unittest
 import zipfile
 from contextlib import closing
+from pathlib import Path
 
 from test_dashboard import photo_bytes
 from test_search_controls import DatabaseFixture
@@ -24,6 +25,22 @@ def pack(entries, image=None):
 
 
 class BuyingGuideTests(DatabaseFixture, unittest.TestCase):
+    def test_packaged_guides_fill_active_gaps_and_preserve_owner_edits(self):
+        owner = {"id": 1, "name": "Owner guide", "guidance": "My limit is £7"}
+        self.assertEqual(finder_buy_guides.save_pack(pack([owner])), 1)
+        entries = [
+            dict(owner, guidance="Packaged default"),
+            dict(owner, id=2, guidance="Max £10 delivered"),
+            dict(owner, id=999),
+        ]
+        path = Path(self.temp.name) / "release.zip"
+        path.write_bytes(pack(entries).getvalue())
+        self.assertEqual(finder_buy_guides.apply_release(path), 1)
+        self.assertEqual(finder_buy_guides.apply_release(path), 0)
+        self.assertEqual(search_settings.get_search(1)["buying_advice"], "My limit is £7")
+        self.assertEqual(search_settings.get_search(2)["buying_advice"], "Max £10 delivered")
+        self.assertEqual(finder_buy_guides.coverage(), (44, 2, 0, 0, 0, []))
+
     def test_fallback_guide_preserves_owner_search_and_is_idempotent(self):
         before = search_settings.get_search(1)
         guide = {"id":1,"name":"Vintage jacket","guidance":"Max £8 all-in","photo":"1.jpg","style_alert_cap":1100}

@@ -59,6 +59,15 @@ def caption(row, details):
         brand=short(details.get("brand") or "Not specified", 120),
     )
     heading, link, listing, *_ = sections(row, details)
+    if details.get("buying_advice"):
+        from photo_cards import plain, units
+
+        length = units(plain(f"{heading}\n\n{link}\n\n{listing}"))
+        if length > 1024:
+            advice = details["buying_advice"]
+            allowance = max(0, units(advice) - (length - 1024))
+            details["buying_advice"] = short(advice, allowance) if allowance > 1 else ""
+            heading, link, listing, *_ = sections(row, details)
     return f"{heading}\n\n{link}\n\n{listing}"
 
 
@@ -150,10 +159,18 @@ async def initial_photo(details):
 
 
 async def send_initial(bot, chat_id, row, details, before_send, *, require_photo=False):
-    """Attach the listing image to the first notification, before any silent edits."""
+    """Show a known comparison in the first notification when the search has buying guidance."""
     listing = await initial_photo(details)
     if require_photo and listing is None:
         raise ValueError("The listing photo is unavailable. Try a newer find.")
+    reference = (
+        dashboard_store.get_media(row["reference_id"])
+        if row.get("reference_id") and details.get("buying_advice") else None
+    )
+    if reference:
+        listing = await asyncio.to_thread(
+            comparison_image, listing, reference["image"], {"platform": details.get("platform")}
+        )
     await before_send()
     common = {
         "chat_id": chat_id,
@@ -173,9 +190,10 @@ async def send_initial(bot, chat_id, row, details, before_send, *, require_photo
         if not result.message_id or not result.photo:
             raise TelegramError("Telegram did not confirm the listing photo")
         logger.info(
-            "Native listing photo accepted for item %s; message_id=%s",
+            "Native listing photo accepted for item %s; message_id=%s; reference_comparison=%s",
             row["item_id"],
             result.message_id,
+            bool(reference),
         )
         return result
     # An unavailable image must never prevent the deal link reaching the buyer.

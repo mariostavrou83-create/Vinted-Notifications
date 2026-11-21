@@ -103,6 +103,19 @@ class PhotoCardTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         if self.worker.photo_task:
             await self.worker.photo_task
 
+    async def test_guide_shows_reference_and_one_listing_photo_immediately(self):
+        details = dict(self.details, buying_advice="Max £10 delivered")
+        with patch("vinted_native.comparison_image", return_value=b"comparison") as compare:
+            await photo_cards.send_initial(self.bot, "123", self.row, details, AsyncMock())
+        self.download.assert_awaited_once_with(details["photos"][:1])
+        compare.assert_called_once()
+        sent = self.bot.send_photo.await_args.kwargs
+        self.assertEqual(sent["photo"].input_file_content, b"comparison")
+        saved = photo_cards.load("vinted", 42)
+        self.assertEqual(saved[2]["view"], "comparison")
+        self.assertEqual(saved[1]["photos"], details["photos"])
+        self.assertEqual(saved[1]["rendered_listing_photos"], details["photos"][:1])
+
     async def test_actual_worker_sends_photo_notes_and_controls_once_without_conversion(
         self,
     ):

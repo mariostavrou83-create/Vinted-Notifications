@@ -267,6 +267,18 @@ if __name__ == "__main__":
             backup_path,
         )
 
+    from finder_buy_guides import apply_release as load_buying_guides, coverage as buying_guide_coverage
+
+    try:
+        load_buying_guides()
+        logger.info(
+            "Finder buying guides: active=%s with_guidance=%s with_reference=%s "
+            "Home_sent_24h=%s Vinted_saved_sent_24h=%s recent_Home_receipts=%s",
+            *buying_guide_coverage(),
+        )
+    except Exception as exc:
+        logger.warning("Finder buying guide release deferred: %s", type(exc).__name__)
+
     from search_audit_release import apply_once as apply_search_audit
 
     try:
