@@ -505,11 +505,15 @@ class Monitor:
         # optional and can never delay a Home alert for another photo request.
         search = match = None
         eligible = set()
-        if searches and item.get("description_complete") and global_filters_allow(item):
-            proposed = match_candidate(item, searches, eligible=eligible)
-            if proposed:
-                search = search_settings.get_search(proposed["query_id"])
-                match = match_candidate(item, [search]) if search else None
+        try:
+            if searches and item.get("description_complete") and global_filters_allow(item):
+                proposed = match_candidate(item, searches, eligible=eligible)
+                if proposed:
+                    search = search_settings.get_search(proposed["query_id"])
+                    match = match_candidate(item, [search]) if search else None
+        except (KeyError, TypeError, ValueError, sqlite3.Error) as exc:
+            eligible.clear()
+            logger.warning("Home buying-guide lookup deferred: %s", type(exc).__name__)
         if not match:
             search = None
         else:

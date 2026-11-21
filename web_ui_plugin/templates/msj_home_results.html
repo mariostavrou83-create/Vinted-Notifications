@@ -17,6 +17,10 @@
 </div>
 {% else %}<p>No fresh Home alerts in the past 24 hours.</p>{% endif %}
 {% if home_panel.detail %}
+{% if home_panel.incidents %}<details class="home-guide-links" data-home-section="warnings">
+  <summary>Finder notifications · alerts and Autobuy</summary>
+  <ul>{% for event in home_panel.incidents %}<li><strong>{{ event.time }}</strong> · {{ event.text }} · {{ 'Sent to Telegram' if event.sent else 'Waiting for Telegram' }}</li>{% endfor %}</ul>
+</details>{% endif %}
 {% for page in home_panel.pages %}<details class="home-guide-links" data-home-section="{{ page.role }}">
   <summary>{{ 'Original' if page.role == 'seller' else 'Buying' }} account · all {{ page.cards|length }} recommendations at {{ page.time }}</summary>
   <p class="muted">In Vinted’s order on the latest refresh. The time above is when Finder saw the page. Fresh alerts appear above once the upload time is verified.</p>

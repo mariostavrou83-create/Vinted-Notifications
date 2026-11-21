@@ -16,12 +16,16 @@ logger = get_logger(__name__)
 BUY_REPLY = re.compile(r"\A\s*buy\s*\Z", re.IGNORECASE)
 
 
-async def send_status(message, text):
+async def send_status(message, text, *, failure=None):
     try:
         await message.reply_text(text, do_quote=True, **photo_cards.TIMEOUTS)
     except TelegramError as exc:
         # A missing status notification must never replay a purchase.
         logger.warning("BUY reply status failed: %s", type(exc).__name__)
+        if failure:
+            from finder_incidents import queue_buy_failure
+            row, outcome = failure
+            await queue_buy_failure(row, outcome, f"reply-{message.message_id}")
 
 
 async def stop_preparation(preparation):
@@ -160,7 +164,7 @@ async def reply_buy(update, context):
                 "cancelled",
             ):
                 text += "\nNo payment was sent again."
-        notification = send_status(message, text)
+        notification = send_status(message, text, failure=(row, outcome) if outcome else None)
         if progress:
             await progress.settle(notification)
         else:

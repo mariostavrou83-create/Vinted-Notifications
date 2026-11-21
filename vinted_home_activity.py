@@ -163,6 +163,8 @@ def panel(detail=False):
                 for card in page["cards"]:
                     if card["id"] in sent:
                         card["sent_via"] = "Vinted Home" if sent[card["id"]] == "🏠" else "saved search"
+        from finder_incidents import recent
+        incidents = recent(conn) if detail else []
         guides = [dict(row) for row in conn.execute("""SELECT hg.query_id, q.query_name AS name, b.max_total
             FROM vinted_home_guides hg JOIN queries q ON q.id=hg.query_id
             JOIN vinted_search_budgets b ON b.query_id=q.id JOIN search_platforms s ON s.query_id=q.id
@@ -178,4 +180,4 @@ def panel(detail=False):
         if "outcome" in row:
             row["reason"] = REASONS.get(row["outcome"], "")
     return {"sent": totals.get("sent", 0), "waiting": totals.get("pending", 0),
-            "deals": deals, "checked": checked, "guides": guides, "pages": pages, "detail": detail}
+            "deals": deals, "checked": checked, "guides": guides, "pages": pages, "incidents": incidents, "detail": detail}

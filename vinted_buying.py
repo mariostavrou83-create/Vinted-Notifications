@@ -2538,12 +2538,11 @@ async def callback(update, context):
         ready(row)
     except buyer.BuyerError as exc:
         log_setup_block(row, exc, source="callback")
+        from finder_incidents import queue_buy_failure
+        outcome = {"state": "setup_required", "message": str(exc), "reason": exc.reason}
+        await queue_buy_failure(row, outcome, getattr(query, "id", None))
         await photo_cards.answer(query, str(exc)[:190], alert=True)
-        await show_purchase_feedback(
-            context.bot,
-            query.message,
-            {"state": "setup_required", "message": str(exc), "reason": exc.reason},
-        )
+        await show_purchase_feedback(context.bot, query.message, outcome)
         return
     lock = purchase_lock(query.message.message_id)
     if lock.locked():
@@ -2595,6 +2594,8 @@ async def callback(update, context):
             finally:
                 await progress.finish()
             if outcome:
+                from finder_incidents import queue_buy_failure
+                await queue_buy_failure(row, outcome, getattr(query, "id", None))
                 await progress.settle(
                     show_purchase_feedback(context.bot, query.message, outcome)
                 )

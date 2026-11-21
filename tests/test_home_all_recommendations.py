@@ -56,6 +56,12 @@ class HomeRecommendationsTests(DatabaseFixture, unittest.TestCase):
         controls.configure("0")
         self.assertFalse(vinted_alerts.prepare_listing(ready))
 
+    def test_guide_error_cannot_suppress_a_verified_home_listing(self):
+        self.item["description_complete"] = True
+        with patch.object(monitor, "global_filters_allow", return_value=True), patch.object(monitor, "match_candidate", side_effect=ValueError):
+            self.worker.notify_item(self.item, self.age, "seller", [self.search])
+        self.assertIsNone(self.row()["query_id"])
+
     def test_fresh_home_can_replace_an_unsent_cancelled_saved_match(self):
         monitor._publish(self.item,self.search,{"reason":"brand_style"},self.age,"seller",now=self.now)
         with closing(search_settings.connection()) as conn, conn:
