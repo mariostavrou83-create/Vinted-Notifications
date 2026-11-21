@@ -135,8 +135,24 @@ _CONSTRUCTION = {
 _DISCOUNT = ("shein","romwe","temu","primark","boohoo","pretty little thing","prettylittlething",
              "fashion nova","missguided","nasty gal","cider")
 _HIGH_STREET = ("zara","h m","hm","new look","bershka","stradivarius","pull bear","pull and bear",
-                "asos","next","debenhams","atmosphere","topshop","george","george at asda","ovs","forever 21")
-_PERIOD = r"\b(?:old label|original label|made in (?:the )?(?:90s|00s|1990s|2000s)|1990s|2000s|early 00s|late 90s|90s vintage|00s vintage)\b"
+                "asos","next","debenhams","atmosphere","topshop","george","george at asda","ovs","forever 21",
+                "river island")
+_PERIOD = re.compile(
+    r"\b(?:old label|vintage original label|made in (?:the )?(?:90s|00s|1990s|2000s)|"
+    r"1990s|2000s|early 00s|late 90s|90s vintage|00s vintage)\b", re.I,
+)
+
+
+def _period_evidence(field):
+    for match in _PERIOD.finditer(field):
+        before = field[max(0, match.start() - 48):match.start()]
+        after = field[match.end():match.end() + 32]
+        if re.search(r"\b(?:not(?: (?:an?|the|from|original|authentic)){0,3}|inspired by(?: the)?|in the style of(?: the)?)\s*$", before, re.I):
+            continue
+        if re.match(r"^[\s-]*(?:inspired|style|vibes?|lookalike|aesthetic|replica|reproduction)\b", after, re.I):
+            continue
+        return True
+    return False
 
 
 def named_profile(search):
@@ -156,7 +172,7 @@ def garment_quality(profile, title, description, brand=""):
     high_street = any(" " + x + " " in name for x in _HIGH_STREET)
     fields = [str(f or "")[:6000] for f in (title, description)]
     fields = [re.split(r"#|\b(?:styled with|paired with|search tags|tags\s*:|keywords\s*:)", f, maxsplit=1, flags=re.I)[0] for f in fields]
-    if high_street and not any(re.search(_PERIOD, f, flags=re.I) for f in fields):
+    if high_street and not any(_period_evidence(f) for f in fields):
         return "weak_high_street"
     detail = Style((), (), tuple((x,) for x in _CONSTRUCTION[profile]))
     if any(evidence(f, detail) for f in fields):

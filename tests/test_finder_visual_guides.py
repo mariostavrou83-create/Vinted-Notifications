@@ -73,3 +73,12 @@ class BuyingGuideTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(proof("Original 2000s cropped funnel neck bomber","Zara"),"matched")
         self.assertEqual(proof("Funnel neck jacket","Other"),"absent")
         self.assertEqual(proof("Funnel neck military jacket with waist buckle","Other"),"matched")
+
+    def test_river_island_needs_period_evidence_in_addition_to_mesh_construction(self):
+        from vinted_scraper_styles import garment_quality
+
+        blouse = "Black sheer striped puff sleeve blouse"
+        self.assertEqual(garment_quality("mesh_top", blouse, "Floral print", "River Island"), "weak_high_street")
+        for wording in ("2000s-inspired floral print", "inspired by the 2000s, floral print", "Not from the 2000s, printed"):
+            self.assertEqual(garment_quality("mesh_top", blouse, wording, "River Island"), "weak_high_street")
+        self.assertEqual(garment_quality("mesh_top", blouse, "Original 2000s piece, floral print", "River Island"), "distinctive")

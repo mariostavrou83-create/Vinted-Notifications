@@ -107,7 +107,7 @@ def coverage():
             WHERE COALESCE(d.archived,0)=0 AND COALESCE(d.paused,0)=0""").fetchone()
         home = conn.execute("""SELECT item_id,query_id,substr(title,1,100),price,sent_at FROM alert_outbox
             WHERE found_at>=? AND status='sent' AND platform='vinted' AND substr(content,1,1)='🏠'
-            ORDER BY found_at DESC LIMIT 3""", (since,)).fetchall()
+            ORDER BY found_at DESC LIMIT 6""", (since,)).fetchall()
         sent = dict(conn.execute("""SELECT substr(content,1,1)='🏠',count(*) FROM alert_outbox
             WHERE found_at>=? AND status='sent' AND platform='vinted' GROUP BY 1""", (since,)))
     return (*counts, sent.get(1, 0), sent.get(0, 0), [tuple(row) for row in home])
