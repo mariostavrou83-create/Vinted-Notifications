@@ -10,7 +10,7 @@ import math
 import re
 from collections import deque
 from decimal import Decimal, InvalidOperation
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from lxml import html as lhtml
 
@@ -262,7 +262,7 @@ def _native_attributes(body, identity):
     scripts.feed(body)
     roots, rows = _records(scripts.scripts)
     pending = deque((root, 0) for root in roots)
-    fields, visited = {}, 0
+    fields, conflicts, visited = {}, set(), 0
     keys = (
         "brand_id",
         "catalog_id",
@@ -278,14 +278,38 @@ def _native_attributes(body, identity):
         if depth > MAX_DEPTH:
             return {}
         if isinstance(value, dict):
-            if _identity(value.get("id")) == identity and "seller_id" in value:
+            same_item = _identity(value.get("id")) == identity
+            if same_item and any(
+                (key in value and _resolve(value[key], rows) is blocked)
+                for key, blocked in (("can_buy", False), ("is_sold", True), ("is_reserved", True),
+                                     ("is_hidden", True), ("is_closed", True))
+            ):
+                fields["unavailable"] = True
+            if same_item and "seller_id" in value:
                 if "item_id" in value and _identity(value["item_id"]) != identity:
                     return {}
+                user = _resolve(value.get("user"), rows)
+                country = value.get("seller_country_code")
+                if isinstance(user, dict) and _identity(user.get("id")) == _identity(value.get("seller_id")):
+                    country = country or user.get("country_iso_code") or user.get("country_code")
+                if isinstance(country, str) and re.fullmatch(r"[A-Za-z]{2}", country) and "seller_country" not in conflicts:
+                    country = country.upper()
+                    if fields.get("seller_country", country) == country:
+                        fields["seller_country"] = country
+                    else:
+                        fields.pop("seller_country", None)
+                        conflicts.add("seller_country")
                 for key in keys:
-                    if key in value:
-                        found = _identity(_resolve(value[key], rows))
-                        if found is None or (key in fields and fields[key] != found):
-                            return {}
+                    if key not in value or key in conflicts:
+                        continue
+                    raw = _resolve(value[key], rows)
+                    if raw is None:
+                        continue  # Optional colours and materials are commonly null.
+                    found = _identity(raw)
+                    if found is None or (key in fields and fields[key] != found):
+                        conflicts.add(key)
+                        fields.pop(key, None)
+                    else:
                         fields[key] = found
             children = [x for x in value.values() if isinstance(x, (dict, list))]
         elif isinstance(value, list):
@@ -295,7 +319,48 @@ def _native_attributes(body, identity):
         if len(children) + len(pending) + visited > MAX_NODES:
             return {}
         pending.extend((child, depth + 1) for child in children)
-    return fields if not pending else {}
+    return {**fields, "conflicting_fields": sorted(conflicts)} if not pending else {}
+
+
+def _catalog_evidence(tree):
+    """Read same-site links in the target breadcrumb, including absolute URLs."""
+    containers = tree.xpath(
+        '//main//*[self::ul or self::ol][.//a[contains(@href,"referrer=item-crumbs")]]'
+        ' | //main//nav[@aria-label="Breadcrumb" or @aria-label="Breadcrumbs"]'
+        ' | //main//*[@data-testid="breadcrumbs" or @data-testid="item-breadcrumbs"]'
+    )
+    ids, labels = set(), set()
+    for container in containers:
+        for a in container.xpath(".//a[@href]"):
+            try:
+                url = urlsplit(a.get("href"))
+                if url.netloc and (url.scheme != "https" or url.netloc not in {"vinted.co.uk", "www.vinted.co.uk"}):
+                    continue
+                if not url.netloc and url.scheme:
+                    continue
+                match = re.fullmatch(r"/catalog/(\d{1,20})(?:-[\w-]+)?/?", url.path)
+                category = {match[1]} if match else set()
+                if url.path.rstrip("/") == "/catalog":
+                    category.update(v for v in parse_qs(url.query).get("catalog[]", []) if _identity(v))
+                if category:
+                    ids.update(category)
+                    labels.add(_text(a).casefold())
+            except (TypeError, ValueError):
+                continue
+    return ids, labels
+
+
+def _visible_stock(side):
+    """Return True, False or None for target-scoped public availability."""
+    if side.xpath('.//*[@data-testid="item-status--sold" or @data-testid="item-status--reserved" or @data-testid="item-status--unavailable"]'):
+        return False
+    values = {str(v).strip().rstrip("/").rsplit("/", 1)[-1].casefold()
+              for node in side.xpath('.//*[@itemprop="availability"]')
+              for v in [node.get("href") or node.get("content") or _text(node)] if v}
+    if values:
+        return values == {"instock"}
+    controls = side.xpath('.//button[not(@disabled) and not(@aria-disabled="true") and not(@hidden)]')
+    return True if any(_text(button).casefold() == "buy now" for button in controls) else None
 
 
 def parse_listing(body, item_id, now):
@@ -307,29 +372,34 @@ def parse_listing(body, item_id, now):
     tree = _tree(body)
     identity = str(item_id)
     side = _sidebar(tree, identity)
-    native = parse_purchase_item(body, identity)
-    if (
-        not native
-        or native.get("can_buy") is not True
-        or any(
-            native.get(k) is True
-            for k in ("is_reserved", "is_hidden", "is_sold", "is_closed")
-        )
-    ):
+    diagnostic = {}
+    native = parse_purchase_item(body, identity, diagnostics=diagnostic)
+    attrs = _native_attributes(body, identity)
+    public_stock = _visible_stock(side)
+    if attrs.get("unavailable") or public_stock is False:
+        result["reason"] = "unavailable"
+        return result
+    if native:
+        if native.get("can_buy") is not True or any(native.get(k) is True for k in ("is_reserved", "is_hidden", "is_sold", "is_closed")):
+            result["reason"] = "unavailable"
+            return result
+    elif diagnostic.get("reason") not in {"no_target_record", "incomplete_record"} or public_stock is not True:
+        result["reason"] = "availability_unverified"
         return result
     titles = side.xpath('.//*[@data-testid="item-page-summary-plugin"]//h1')
     prices = side.xpath('.//*[@data-testid="item-price"]')
     if len(titles) != 1 or len(prices) != 1:
         return result
     price = _money(_text(prices[0]))
-    native_price = native.get("price") or {}
-    if not price or native_price.get("currency_code") != "GBP":
+    native_price = (native or {}).get("price")
+    if not price:
         return result
-    try:
-        if Decimal(str(native_price.get("amount"))) != Decimal(price["amount"]):
+    if native_price:
+        try:
+            if native_price.get("currency_code") != "GBP" or Decimal(str(native_price.get("amount"))) != Decimal(price["amount"]):
+                return result
+        except InvalidOperation:
             return result
-    except InvalidOperation:
-        return result
     details = parse_page_data(body, identity, full_description=True)
     descriptions = side.xpath('.//*[@itemprop="description"]')
     full_text = (
@@ -338,7 +408,7 @@ def parse_listing(body, item_id, now):
         else details.get("description", "")
     )
     complete = (
-        bool(full_text)
+        (bool(full_text) or len(descriptions) == 1)
         and len(full_text) <= 6000
         and "[Description shortened" not in full_text
     )
@@ -352,8 +422,9 @@ def parse_listing(body, item_id, now):
     sizes = side.xpath('.//*[@itemprop="size"]')
     conditions = side.xpath('.//*[@itemprop="status" or @itemprop="condition"]')
     canonical = tree.xpath('//link[@rel="canonical"]/@href')[0]
-    attrs = _native_attributes(body, identity)
     if len(brands) == 1:
+        if "brand_id" in attrs.get("conflicting_fields", ()):
+            return result
         brand_id = next(iter(brands))
         if attrs.get("brand_id") and attrs["brand_id"] != brand_id:
             return result
@@ -363,7 +434,7 @@ def parse_listing(body, item_id, now):
         "url": item_url(canonical, identity),
         "title": _text(titles[0])[:500],
         "price": price,
-        "seller_id": native["user_id"],
+        "seller_id": (native or {}).get("user_id"),
         "description": description,
         "description_complete": complete,
         "photos": details.get("photos", []),
@@ -372,13 +443,8 @@ def parse_listing(body, item_id, now):
         "condition": _text(conditions[0])[:80] if len(conditions) == 1 else "",
         **attrs,
     }
-    # Breadcrumb list is observed before the sidebar, not category links in similar items.
-    breadcrumbs = tree.xpath('//main//ul[.//a[contains(@href,"referrer=item-crumbs")]]')
-    categories = set()
-    if len(breadcrumbs) == 1:
-        for href in breadcrumbs[0].xpath(".//a/@href"):
-            if match := re.match(r"^/catalog/([0-9]{1,20})(?:-|[?]|$)", href):
-                categories.add(match[1])
+    categories, labels = _catalog_evidence(tree)
+    item["category_labels"] = sorted(labels)
     if attrs.get("catalog_id"):
         categories.add(attrs["catalog_id"])
     item["category_ids"] = sorted(categories)

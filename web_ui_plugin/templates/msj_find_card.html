@@ -1,0 +1,18 @@
+<article class="search-card find-card" data-find-key="{{row.card_key}}">
+<a class="find-photo" href="{{row.url}}" target="_blank" rel="noopener noreferrer">{% if row.safe_photo %}<img src="{{row.safe_photo}}" loading="lazy" alt="{{row.title}}">{% else %}<span>View photo on {{'eBay' if row.platform=='ebay' else 'Vinted'}} ↗</span>{% endif %}<span class="find-state {{row.user_status}}">{{row.user_status|capitalize}}</span>
+</a>
+<div class="card-body">
+<span class="search-number">{{'eBay' if row.platform=='ebay' else 'Vinted'}} · {% if row.home_source %}{{row.home_source}} · {% endif %}{{row.search_name}}</span>
+<h2>
+<a href="{{row.url}}" target="_blank" rel="noopener noreferrer">{{row.title}}</a>
+</h2>
+<div class="find-price">
+<b>{{'£' if row.currency=='GBP' else row.currency+' '}}{{row.price}}</b>
+<span>{{row.found_label}}</span>
+</div>
+<small class="delivery-status">{% if row.status=='sent' %}Sent to Telegram{% elif row.status=='cancelled' %}Cancelled · {{row.error}}{% elif row.status=='failed' %}Telegram delivery failed · {{row.error}}{% elif row.attempts %}Telegram delivery retrying{% else %}Waiting for Telegram{% endif %}{% if row.photo_status=='failed' %} · Photo unavailable{% elif row.photo_status=='pending' and row.photo_attempts %} · Photo retrying{% endif %}</small>
+<form class="find-actions" method="post" action="/finds/{{row.item_id}}/status">
+<input type="hidden" name="csrf" value="{{csrf}}">{% for key,value in filters.items() %}<input type="hidden" name="{{key}}" value="{{value}}">{% endfor %}{% for value,label in [('interested','Interested'),('bought','Bought'),('pass','Pass')] %}<button name="new_status" value="{{value}}" class="{{'chosen' if row.user_status==value}}" aria-pressed="{{'true' if row.user_status==value else 'false'}}">{{label}}</button>{% endfor %}{% if row.user_status!='new' %}<button name="new_status" value="new" class="reset-find">Reset</button>{% endif %}</form>
+<a class="find-open" href="{{row.url}}" target="_blank" rel="noopener noreferrer">Open {{'eBay' if row.platform=='ebay' else 'Vinted'}} ↗</a>
+</div>
+</article>

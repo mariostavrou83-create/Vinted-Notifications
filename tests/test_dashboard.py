@@ -3,6 +3,7 @@
 import io
 import sqlite3
 import threading
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
@@ -58,6 +59,7 @@ class DashboardTests(DatabaseFixture, unittest.TestCase):
             "/",
             "/search/1",
             "/reference/abc",
+            "/finds/updates",
             "/config",
             "/queries",
             "/logs",
@@ -70,6 +72,39 @@ class DashboardTests(DatabaseFixture, unittest.TestCase):
         for path in ("/config", "/logs", "/queries"):
             self.assertEqual(self.client.get(path).status_code, 404)
         self.assertEqual(self.client.get("/healthz").json, {"status": "ok"})
+
+    def test_live_finds_wakes_on_insert_and_reuses_unchanged_filtered_cards(self):
+        self.owner()
+
+        def add(item, title):
+            with closing(search_settings.connection()) as conn, conn:
+                conn.execute(
+                    "INSERT INTO alert_outbox(item_id,query_id,search_name,content,url,"
+                    "title,price,currency,found_at) VALUES (?,1,'Test search','','',?,'5','GBP',?)",
+                    (item, title, time.time()),
+                )
+
+        add("1", "Ralph striped tee")
+        page = self.client.get("/finds?q=Ralph").get_data(as_text=True)
+        cursor = page.split('data-cursor="')[1].split('"')[0]
+        card = page.split('data-find-key="')[1].split('"')[0]
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(
+                self.client.get, "/finds/updates?q=Ralph&after=" + cursor + "&known=" + card
+            )
+            add("2", "Unrelated jacket")
+            packet = pending.result(timeout=3).json
+        self.assertEqual((packet["order"], packet["cards"], packet["total"]), ([card], {}, 1))
+        add("3", "Ralph full-button cable knit")
+        update = self.client.get(
+            "/finds/updates?q=Ralph&after=" + packet["cursor"] + "&known=" + card
+        ).json
+        self.assertEqual(update["total"], 2)
+        self.assertEqual(update["order"][1], card)
+        self.assertEqual(list(update["cards"]), [update["order"][0]])
+        self.assertIn("Ralph full-button cable knit", next(iter(update["cards"].values())))
+        self.assertNotIn("msj_finds.js", self.client.get("/finds?page=2").get_data(as_text=True))
+        self.assertEqual(self.client.get("/finds/updates?after=no").status_code, 400)
 
     def test_setup_login_csrf_logout_persistence_and_one_time_code(self):
         code = (

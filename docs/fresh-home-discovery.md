@@ -1,40 +1,39 @@
 # Fresh Home discovery
 
-The private Connections page controls an independent Home-feed monitor. It is
-disabled until the owner starts it. Both existing account sessions are read with
-the existing fixed proxy/browser transport; seller gets the first scan and the
-buyer starts30 seconds later. Each account targets one Home scan/minute, at most
-six candidate details/cycle. Checkout priority, account locks and provider
-cooldowns take precedence. No paid solver task, login, renewal, transaction,
-reservation or payment is initiated by the monitor.
+The Connections page controls the Home monitor for the original and buying
+accounts. It uses their ordinary authenticated Home views. Each available
+account targets one feed scan per minute and up to six item pages per cycle.
+A cooldown on one account leaves the other eligible. The existing scheduler,
+account locks and checkout priority apply.
 
-Only authenticated Home cards qualify as candidates. The canonical target page
-must confirm availability, GBP price and its own upload_date. The age interval's
-upper bound plus request/cache/queue delay must stay under180 seconds. Rounded
-three-minute labels and unknown ages are excluded; first_seen, item ID ordering,
-photo timestamps, likes and seller activity never establish listing age. HTTP
-Date/Age are accounted for, and expiry is checked again after photo download,
-immediately before Telegram submission. No exact delivery-time guarantee is
-possible once Telegram has accepted a message.
+The item page must identify the same listing, show availability and a GBP price,
+and give a verified upper bound for the upload age. Unknown ages and rounded
+three-minute labels are excluded. Cache age, elapsed processing time and the
+queue are counted. Delivery checks the three-minute limit again before submitting
+to Telegram. The shared item claim prevents duplicates across Home and saved
+searches. Home alerts retain the exact saved query and its price cap.
 
-Matching preserves all recognized structural filters and existing price caps,
-blocked words and must-have requirements. A small explicit synonym vocabulary
-recognizes equivalent descriptions without demanding identical keyword spelling.
-Missing filter evidence fails closed. This release does not score image
-similarity. Existing example/listing photo controls are reused for owner review.
+The matcher respects active queries, budgets, categories, sizes, exclusions and
+must-have terms. It supports literal terms, equivalent spellings, and individual
+garment features from the owner's open-label styles. Scope can use the target
+page's verified women's breadcrumb and an unambiguous displayed garment size.
+An eligible, fresh listing with incomplete style wording can use one cover photo
+for utility jackets, leather-look jackets, lace camis or shaped skirts. Both
+a visual-description test and proximity to scraper examples are required. This
+is visual similarity, not verification of fabric composition. The other style
+families use seller-described features. Photos do not establish age, price,
+brand, size, availability or condition. Photo suggestions are labelled in the
+dashboard and Telegram.
 
-Home alerts retain the matching active query ID and budget. Atomic shared item
-deduplication suppresses duplicates from either account and ordinary searches;
-Home discovery does not advance saved-search watermarks. Pausing discovery
-cancels pending Home delivery only. Existing Telegram Autobuy uses the buying
-account, InPost policy, spending checks and payment idempotency unchanged. Finding
-an item is not authorization to submit a payment.
+A short-lived CPU subprocess loads the quantized OpenAI CLIP ViT-B/32 image
+encoder only for otherwise-unmatched, eligible Home covers. One capped download
+and one inference serve all eligible profiles. The model is verified and
+installed in the image at build time. The reference file contains quantized
+vectors, without the workbook, seller IDs or original photographs. The container
+includes the model's MIT license in style_assets/CLIP-LICENSE.txt.
+Source: https://huggingface.co/Xenova/clip-vit-base-patch32/tree/6b7c523703ae26e39be4b03774966f8571c7f523
 
-Status contains fixed labels, counts and times only. Credentials, raw responses
-and challenge data never enter diagnostics. Existing key files must exist before
-account client loading. No backup/key changes or database schema migration.
-
-Live DOM evidence reviewed20 November2026: feed-item card selectors, canonical
-item link, target item-page-summary-plugin/sidebar and itemprop=upload_date.
-Tests use synthetic page fixtures and mocked networking, plus real temporary
-SQLite for deduplication, owner/CSRF controls and delivery safeguards.
+The Connections page reports sent and pending Home alerts in the last 24 hours,
+and per-account counts for freshness, scope, budget, style, image checks and
+matches. The account cards show the most recent scan cycle. Recent Finds identifies
+Home results and refreshes while the newest page is visible.

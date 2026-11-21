@@ -42,6 +42,14 @@ COUNTERS = (
     "age_unverified",
     "age_expired",
     "skipped_redirect",
+    "listing_unavailable",
+    "details_unverified",
+    "global_blocked",
+    "scope_miss",
+    "budget_or_exclusions",
+    "style_miss",
+    "photo_checked",
+    "photo_matches",
 )
 ERROR_CODES = frozenset(
     {
@@ -74,11 +82,12 @@ def enabled():
 
 
 def active_searches():
-    return [
-        search
-        for row in search_settings.active_queries()
-        if (search := search_settings.get_search(row[0])) is not None
-    ]
+    with db.connection_scope():
+        return [
+            search
+            for row in search_settings.active_queries()
+            if (search := search_settings.get_search(row[0])) is not None
+        ]
 
 
 def global_filters_allow(item):
@@ -92,7 +101,11 @@ def global_filters_allow(item):
         return False
     allowed = db.get_allowlist()
     # Home does not infer seller location from currency or from the buyer.
-    return not allowed or item.get("seller_country") in allowed
+    def normalize(country):
+        value = str(country or "").strip().upper()
+        return "GB" if value in {"UK", "UNITED KINGDOM", "GREAT BRITAIN"} else value
+
+    return not allowed or normalize(item.get("seller_country")) in {normalize(x) for x in allowed}
 
 
 def _account_ready(role):
@@ -207,6 +220,8 @@ class Monitor:
         self.deadline = {role: 0 for role in ROLES}
         self.counts = {role: dict.fromkeys(COUNTERS, 0) for role in ROLES}
         self.examined = OrderedDict()
+        self.searches = []
+        self.searches_until = 0
         self.retry_at = dict.fromkeys(ROLES, 0)
         for role in ROLES:
             try:
@@ -246,7 +261,7 @@ class Monitor:
                 ),
             )
         logger.info(
-            "Vinted Home monitor: role=%s code=%s detail=%s stage=%s http=%s retry_at=%s candidates=%s checked=%s fresh=%s matched=%s alerts=%s rejected_age=%s rejected_match=%s duplicates=%s age_unverified=%s age_expired=%s skipped_redirect=%s",
+            "Vinted Home monitor: role=%s code=%s detail=%s stage=%s http=%s retry_at=%s candidates=%s checked=%s fresh=%s matched=%s alerts=%s rejected_age=%s rejected_match=%s duplicates=%s age_unverified=%s age_expired=%s skipped_redirect=%s listing_unavailable=%s details_unverified=%s global_blocked=%s scope_miss=%s budget_or_exclusions=%s style_miss=%s photo_checked=%s photo_matches=%s",
             role,
             code,
             data["detail_code"],
@@ -272,6 +287,7 @@ class Monitor:
                     self.pending[role].clear()
                     self.status(role, "disabled", "idle")
             self.started = False
+            self.searches_until = 0
             return
         if not self.started:
             self.next_home = {"seller": now, "buyer": now + INTERVAL / 2}
@@ -292,7 +308,10 @@ class Monitor:
                     self.next_home[role] = self.retry_at[role]
                     self.status(role, reason, "identity")
                     return
-                searches = active_searches()
+                if now >= self.searches_until:
+                    self.searches = active_searches()
+                    self.searches_until = now + 30
+                searches = self.searches
                 if not searches:
                     self.pending[role].clear()
                     self.next_home[role] = now + INTERVAL
@@ -412,20 +431,42 @@ class Monitor:
             return
         self.counts[role]["fresh"] += 1
         item = parsed.get("item")
-        match = (
-            match_candidate(item, searches)
-            if isinstance(item, dict) and global_filters_allow(item)
-            else None
-        )
+        if not isinstance(item, dict) or item.get("description_complete") is not True:
+            key = "listing_unavailable" if parsed.get("reason") == "unavailable" else "details_unverified"
+            self.counts[role][key] += 1
+            self.counts[role]["rejected_match"] += 1
+            self.status(role, "checked", "listing", 200)
+            return
+        if str(item.get("id")) == str(candidate.get("id")) and not item.get("size_title"):
+            item["size_title"] = candidate.get("size_title", "")
+        eligible, diagnostics = set(), set()
+        photo_styles = ()
+        match = None
+        if not global_filters_allow(item):
+            reason = "global_blocked"
+        else:
+            match = match_candidate(item, searches, eligible=eligible, diagnostics=diagnostics)
+            reason = "scope_miss" if "scope" not in diagnostics else "budget_or_exclusions" if "budget" not in diagnostics else "style_miss"
+            if not match and eligible and self.clock() + 6 < observed + MAX_AGE - upper:
+                from vinted_style_photos import photo_matches
+
+                photo = (candidate.get("photo") or {}).get("url") or next(iter(item.get("photos") or ()), "")
+                photo_styles, checked = photo_matches(photo, eligible)
+                if checked:
+                    self.counts[role]["photo_checked"] += 1
+                if photo_styles:
+                    match = match_candidate(item, searches, photo_styles=photo_styles)
+                    if match:
+                        self.counts[role]["photo_matches"] += 1
         if not match:
+            self.counts[role][reason] += 1
             self.counts[role]["rejected_match"] += 1
             self.status(role, "checked", "listing", 200)
             return
         self.counts[role]["matched"] += 1
-        # Re-read rules after the request and before insertion; never use a stale
-        # active/budget decision after the owner changes the saved search.
+        # Fetch the live target again after collection or local photo processing.
         search = search_settings.get_search(match["query_id"])
-        current = match_candidate(item, [search]) if search else None
+        current = match_candidate(item, [search], photo_styles=photo_styles) if search else None
         if (
             current
             and enabled()

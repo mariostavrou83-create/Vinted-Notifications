@@ -5,6 +5,7 @@ import io
 import json
 import os
 import secrets
+import threading
 import time
 import zipfile
 from contextlib import closing
@@ -1183,9 +1184,10 @@ def create_app(test_config=None):
             )
         return redirect(url_for("edit", query_id=query_id))
 
-    @app.get("/finds")
-    def finds():
-        filters = find_filters(request.args)
+    # Keep at least two of the four HTTP threads available for normal dashboard use.
+    finds_watchers = threading.BoundedSemaphore(2)
+
+    def find_cards(filters):
         rows, total = store.list_finds(
             filters["q"],
             filters["status"],
@@ -1195,17 +1197,80 @@ def create_app(test_config=None):
         )
         for row in rows:
             row["safe_photo"] = store.safe_photo_url(row["photo_url"])
+            row["home_source"] = (
+                "Home · photo match" if row["content"].startswith("🏠 <b>Home photo match")
+                else "Home feed" if row["content"].startswith("🏠") else ""
+            )
             row["found_label"] = datetime.fromtimestamp(
                 row["found_at"], ZoneInfo("Europe/London")
             ).strftime("%d %b · %H:%M")
+            visible = (
+                "item_id", "platform", "url", "safe_photo", "title", "user_status",
+                "search_name", "currency", "price", "found_label", "status", "error",
+                "attempts", "photo_status", "photo_attempts", "home_source",
+            )
+            row["card_key"] = hashlib.blake2s(
+                json.dumps([row[k] for k in visible]).encode(), digest_size=8
+            ).hexdigest()
+        return rows, total
+
+    @app.get("/finds")
+    def finds():
+        filters = find_filters(request.args)
+        marker = ""
+        if filters["page"] == 1:
+            # Read the cursor first, so an insert during rendering is never missed.
+            with closing(search_settings.connection()) as conn:
+                marker = store.recent_finds_marker(conn)
+        rows, total = find_cards(filters)
         return render_template(
             "msj_finds.html",
             rows=rows,
             total=total,
+            marker=marker,
             filters=filters,
             folders=store.list_folders(),
             pages=max(1, (total + 35) // 36),
         )
+
+    @app.get("/finds/updates")
+    def find_updates():
+        filters = find_filters(request.args)
+        previous = request.args.get("after", "")
+        if filters["page"] != 1 or len(previous) != 24 or any(
+            c not in "0123456789abcdef" for c in previous
+        ):
+            abort(400)
+        known = set(request.args.get("known", "")[:611].split(","))
+        wait = finds_watchers.acquire(blocking=False)
+        try:
+            with closing(search_settings.connection()) as conn:
+                deadline = time.monotonic() + (20 if wait else 0)
+                while True:
+                    current = store.recent_finds_marker(conn)
+                    if current != previous:
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return "", 204, {"Retry-After": "0" if wait else "2"}
+                    time.sleep(min(0.20, remaining))
+        finally:
+            if wait:
+                finds_watchers.release()
+        rows, total = find_cards(filters)
+        return {
+            "cursor": current,
+            "total": total,
+            "order": [r["card_key"] for r in rows],
+            "cards": {
+                r["card_key"]: render_template("msj_find_card.html", row=r, filters=filters)
+                for r in rows if r["card_key"] not in known
+            },
+            "footer": render_template(
+                "msj_find_pages.html", rows=rows, filters=filters,
+                pages=max(1, (total + 35) // 36),
+            ),
+        }
 
     @app.post("/finds/<item_id>/status")
     def find_status(item_id):

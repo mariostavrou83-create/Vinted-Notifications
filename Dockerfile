@@ -28,6 +28,12 @@ RUN python -m playwright install --with-deps chromium \
  && chmod -R a+rX /opt/msj-browsers \
  && rm -rf /var/lib/apt/lists/*
 
+# The pinned image encoder is loaded only by short-lived Home photo checks.
+COPY style_assets/requirements.txt /tmp/home-style-requirements.txt
+RUN pip install --no-cache-dir -r /tmp/home-style-requirements.txt
+COPY style_assets/install_model.py /tmp/install-home-style-model.py
+RUN python /tmp/install-home-style-model.py
+
 # Copy the rest of the application
 COPY . .
 

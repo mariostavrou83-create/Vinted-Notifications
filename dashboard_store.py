@@ -635,6 +635,16 @@ def delete_folder(folder_id):
 FIND_STATUSES = ("new", "interested", "bought", "pass")
 
 
+def recent_finds_marker(conn):
+    """Watch new inserts and delivery changes without scanning the finds history."""
+    rows = conn.execute(
+        "SELECT rowid,item_id,status,attempts,photo_status,photo_attempts,user_status "
+        "FROM alert_outbox ORDER BY rowid DESC LIMIT 36"
+    )
+    snapshot = [tuple(row) for row in rows]
+    return hashlib.blake2s(json.dumps(snapshot).encode(), digest_size=12).hexdigest()
+
+
 def list_finds(text="", status="", folder="", page=1, platform=""):
     clauses, params = [], []
     if platform in ("vinted", "ebay"):

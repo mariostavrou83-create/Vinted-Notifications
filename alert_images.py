@@ -89,21 +89,21 @@ def photo_urls(item):
     return list(dict.fromkeys(url for url in candidates if safe_listing_photo(url)))[:4]
 
 
-def download_photo(url):
+def download_photo(url, *, max_bytes=8 * 1024 * 1024, max_seconds=5):
     """Only approved public listing image CDNs; bounded reads, no redirects."""
     if not safe_listing_photo(url):
         return None
     started = time.monotonic()
     try:
         with requests.get(
-            url, stream=True, timeout=(2, 3), allow_redirects=False
+            url, stream=True, timeout=(min(2, max_seconds), min(3, max_seconds)), allow_redirects=False
         ) as response:
             if response.status_code != 200:
                 return None
             chunks, size = [], 0
             for chunk in response.iter_content(65536):
                 size += len(chunk)
-                if size > 8 * 1024 * 1024 or time.monotonic() - started > 5:
+                if size > max_bytes or time.monotonic() - started > max_seconds:
                     return None
                 chunks.append(chunk)
             return b"".join(chunks)

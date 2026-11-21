@@ -210,7 +210,8 @@ def sections(row, details):
     heading = f"🔎 <b>{'eBay · ' if ebay else ''}#{row['query_id'] or '—'} · {name}</b>"
     discovery = details.get("home_discovery")
     if not ebay and isinstance(discovery, dict):
-        heading = f"🏠 <b>Home feed find · #{row['query_id'] or '—'} · {name}</b>"
+        source = "Home photo match" if discovery.get("reason") == "scraper_photo" else "Home feed find"
+        heading = f"🏠 <b>{source} · #{row['query_id'] or '—'} · {name}</b>"
     link = (
         f'<a href="{escape(row["url"], quote=True)}">Open {marketplace} listing ↗</a>'
     )
@@ -235,6 +236,8 @@ def sections(row, details):
             "brand_category_style": "Brand, category and style match your buying guide",
             "brand_style": "Brand and style match your buying guide",
             "category_style": "Category and style match your buying guide",
+            "scraper_style": "Seller describes the cut or fabric in your scraper examples",
+            "scraper_photo": "Photo resembles your scraper examples. Check the cut, fabric and condition.",
         }
         listing += "\nListing age verified within 3 minutes when alerted."
         listing += "\n" + reasons.get(

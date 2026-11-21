@@ -2,6 +2,7 @@
 
 import json
 import math
+import time
 from contextlib import closing
 from datetime import UTC, datetime
 
@@ -52,7 +53,11 @@ def summary():
             "label": label,
             "state": CODES.get(raw.get("code", "waiting"), "Check incomplete"),
         }
-        for key in ("candidates", "checked", "fresh", "matched", "alerts"):
+        for key in (
+            "candidates", "checked", "fresh", "matched", "alerts", "listing_unavailable",
+            "details_unverified", "global_blocked", "scope_miss", "budget_or_exclusions",
+            "style_miss", "photo_checked", "photo_matches",
+        ):
             number = raw.get(key, 0)
             value[key] = number if type(number) is int and 0 <= number <= 1000000 else 0
         stamp = raw.get("checked_at")
@@ -64,7 +69,17 @@ def summary():
             else "Not checked"
         )
         rows.append(value)
+    with closing(connection()) as conn:
+        # Home cards have had a stable house prefix since the feature launched.
+        # Restrict the scan to recent finds using the existing found_at index.
+        totals = dict(conn.execute(
+            "SELECT status,COUNT(*) FROM alert_outbox WHERE found_at>=? "
+            "AND platform='vinted' AND substr(content,1,1)='🏠' GROUP BY status",
+            (time.time() - 86400,),
+        ))
     return {
+        "sent_24h": totals.get("sent", 0),
+        "pending_24h": totals.get("pending", 0),
         "enabled": db.get_parameter("home_monitor_enabled") == "1",
         "accounts": rows,
     }
