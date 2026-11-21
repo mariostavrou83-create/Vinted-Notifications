@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 import time
 from contextlib import closing
 from datetime import datetime
@@ -157,6 +158,10 @@ def panel(detail=False):
             "SELECT item_id,title,url,price,photo_url AS photo,found_at AS checked_at,status,query_id "
             "FROM alert_outbox WHERE " + HOME_ALERT + " AND found_at>=? AND status IN ('pending','sent') "
             "ORDER BY found_at DESC,item_id DESC LIMIT ?", (since, 12 if detail else 4))]
+        username = conn.execute("SELECT value FROM parameters WHERE key='home_telegram_bot_username'").fetchone()
+        for deal in deals:
+            if username and re.fullmatch(r"[A-Za-z0-9_]{5,32}",username[0]) and deal["status"] == "sent":
+                deal["autobuy_url"] = f"https://t.me/{username[0]}?start=home_{deal['item_id']}"
         pages = [dict(row) for row in conn.execute("SELECT * FROM vinted_home_pages WHERE role='seller' AND fetched_at>=? ORDER BY fetched_at DESC",
                                                   (since,))] if detail else []
         for page in pages:

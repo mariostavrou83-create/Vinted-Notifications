@@ -163,10 +163,25 @@ class PurchaseLimits:
         )
 
 
+def home_cap(details):
+    home = (details or {}).get("home_discovery") or {}
+    budget = (details or {}).get("budget") or {}
+    total = budget.get("total")
+    if (home.get("source_role") == "seller" and home.get("womens_clothing") is True
+            and home.get("reason") == "recommendation" and type(total) is int and total > 0):
+        return total
+    return None
+
+
 def purchase_limits(row):
     from search_settings import get_search
     from vinted_buyer import BuyerError
 
+    if row.get("query_id") is None and row.get("item_id"):
+        from vinted_alerts import get_details
+        cap = home_cap(get_details(row))
+        if cap is not None:
+            return PurchaseLimits(total_maximum=cap)
     search = get_search(row.get("query_id"))
     if (
         not search

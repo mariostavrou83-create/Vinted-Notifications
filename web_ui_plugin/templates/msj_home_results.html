@@ -11,6 +11,7 @@
     </a>
     <div><a class="home-item-title" href="{{ row.url }}" target="_blank" rel="noopener noreferrer">{{ row.title }}</a>
       <div class="home-price"><strong>£{{ row.price }}</strong> · <time>{{ row.time }}</time></div>
+      {% if row.autobuy_url %}<a class="secondary" href="{{ row.autobuy_url }}">Open Autobuy in Telegram</a>{% endif %}
       <small>{{ 'Sent to Telegram' if row.status == 'sent' else 'Waiting for Telegram' }}{% if row.query_id %} · <a href="/buying-guides?q={{ row.query_id }}">Guide #{{ row.query_id }}</a>{% endif %}</small>
     </div>
   </article>{% endfor %}

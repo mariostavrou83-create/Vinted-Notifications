@@ -38,7 +38,7 @@ class HomeRecommendationsTests(DatabaseFixture, unittest.TestCase):
     def new(self):
         self.worker.notify_item(self.item, self.age, "seller", [])
 
-    def test_no_guides_or_description_needed_and_no_authority_to_spend(self):
+    def test_unguided_home_button_is_limited_to_the_displayed_total(self):
         self.new()
         self.worker.notify_item(self.item, self.age, "buyer", [])
         row = self.row()
@@ -50,7 +50,9 @@ class HomeRecommendationsTests(DatabaseFixture, unittest.TestCase):
         details = vinted_alerts.get_details(row)
         buttons = [btn for group in photo_cards.markup(row, details).inline_keyboard for btn in group]
         self.assertTrue(any(btn.url == self.item["url"] for btn in buttons))
-        self.assertFalse(any(btn.callback_data == "buy:click" for btn in buttons))
+        self.assertTrue(any(btn.callback_data == "buy:click" for btn in buttons))
+        import vinted_budget
+        self.assertEqual(vinted_budget.purchase_limits(row).total_maximum,details["budget"]["total"])
         ready = alert_delivery.claim(now=self.now + 1)
         self.assertTrue(vinted_alerts.prepare_listing(ready))
         controls.configure("0")

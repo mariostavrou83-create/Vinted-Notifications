@@ -108,6 +108,11 @@ class LeRobot:
             raise ApplicationHandlerStop
 
     async def open_dashboard(self, update, context):
+        match = re.fullmatch(r"/start(?:@\w+)? home_([0-9]{1,24})", update.message.text or "")
+        if match:
+            from home_autobuy_controls import open_alert
+            await open_alert(update.message, context.bot, match[1])
+            return
         url = os.environ.get("DASHBOARD_URL", "")
         if not url:
             domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
@@ -460,6 +465,8 @@ class LeRobot:
             monitor_incidents(application.bot, db.get_parameter("telegram_chat_id")),
             name="finder-incidents",
         )
+        from home_autobuy_controls import refresh
+        self._home_buy_task = asyncio.create_task(refresh(application.bot, db.get_parameter("telegram_chat_id")))
         from vinted_owner_controls import refresh_existing
 
         self._owner_controls_task = asyncio.create_task(
@@ -479,7 +486,7 @@ class LeRobot:
         self._owner_controls_task = None
         tasks = [
             running
-            for running in (task, maintenance, owner_controls, incidents)
+            for running in (task, maintenance, owner_controls, incidents, getattr(self, "_home_buy_task", None))
             if running is not None
         ]
         for running in tasks:
