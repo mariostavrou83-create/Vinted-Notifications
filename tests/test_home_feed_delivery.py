@@ -22,6 +22,7 @@ def discovery(**changes):
         expires_at=1060.0,
         max_age_seconds=120,
         source_role="seller",
+        womens_clothing=True,
         reason="brand_category_style",
         **changes,
     )
@@ -42,7 +43,7 @@ class FreshnessTests(unittest.TestCase):
             "observed_at": [None, True, "1000", float("nan"), float("inf"), 1001],
             "expires_at": [None, True, "1060", float("nan"), float("inf"), 999, 1180],
             "max_age_seconds": [-1, 180, 181, True, "120", 120.1],
-            "source_role": [None, "unknown", "msj-studio"],
+            "source_role": [None, "unknown", "msj-studio", "buyer"],
         }.items():
             for value in values:
                 cases.append(dict(discovery(), **{key: value}))

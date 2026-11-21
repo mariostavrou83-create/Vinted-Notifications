@@ -35,6 +35,15 @@ class RequiredShopTests(unittest.TestCase):
         self.assertFalse(policy.matches(point, dict(RATE, restriction="unavailable"), TARGET))
         self.assertFalse(policy.matches(point, RATE, TARGET, entry={"is_available": False}))
 
+    def test_new_courier_can_qualify_only_at_the_exact_shop_and_postcode(self):
+        rate = {"rate_uuid":"shipping-rate","carrier_name":"CitySprint"}
+        point = {"name":"CitySprint Pickup Point - Example Shop","code":"CITY-77","postcode":"AA11AA"}
+        self.assertEqual(policy.choice(point,rate,TARGET),(2,"citysprint"))
+        self.assertIsNone(policy.choice(dict(point, postcode="AA11AB"),rate,TARGET))
+        self.assertIsNone(policy.choice(dict(point, name="Example Shop West"),rate,TARGET))
+        self.assertIsNone(policy.choice(point,dict(rate,service_type="home_delivery"),TARGET))
+        self.assertIsNone(policy.choice({"code":TARGET["code"]},rate,TARGET))
+
     def test_incomplete_configuration_stays_restrictive(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertIsNone(policy.required_point())

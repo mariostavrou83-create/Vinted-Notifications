@@ -11,7 +11,14 @@ from alert_images import safe_listing_photo
 from search_settings import connection
 
 
-HOME_ALERT = "platform='vinted' AND substr(content,1,1)='🏠'"
+def original_home_source(item_column):
+    # Callers pass a fixed column of the enclosing query.
+    return ("EXISTS (SELECT 1 FROM vinted_alert_details hd WHERE hd.item_id=" + item_column
+            + " AND CASE WHEN json_valid(hd.payload) THEN json_extract(hd.payload,'$.home_discovery.source_role')='seller'"
+            + " AND json_type(hd.payload,'$.home_discovery.womens_clothing')='true' END)")
+
+
+HOME_ALERT = "platform='vinted' AND substr(content,1,1)='🏠' AND " + original_home_source("alert_outbox.item_id")
 REASONS = {
     "qualified": "Matched a buying guide",
     "recommendation": "Home recommendation alerted",
@@ -38,9 +45,9 @@ def migrate(conn):
 
 
 def save_feed(role, items, observed):
-    """Keep the latest visible page from each account, in Vinted's order."""
+    """Keep the latest MSJ Vinted page in its original order."""
     from vinted_home_feed import item_url
-    if role not in ("seller", "buyer"):
+    if role != "seller":
         return
     cards = []
     for item in items:
@@ -136,7 +143,7 @@ def marker(conn, detail=False):
     alerts = conn.execute("SELECT item_id,status FROM alert_outbox WHERE " + HOME_ALERT +
                           " ORDER BY found_at DESC,item_id DESC LIMIT ?", (12 if detail else 4,))
     seen = conn.execute("SELECT item_id FROM vinted_home_activity ORDER BY checked_at DESC LIMIT 1").fetchone()
-    pages = conn.execute("SELECT role,fetched_at FROM vinted_home_pages ORDER BY role").fetchall() if detail else []
+    pages = conn.execute("SELECT role,fetched_at FROM vinted_home_pages WHERE role='seller'").fetchall() if detail else []
     data = [list(map(tuple, alerts)), seen[0] if detail and seen else "", list(map(tuple, pages)), int(time.time() // 60)]
     return hashlib.blake2s(json.dumps(data).encode(), digest_size=12).hexdigest()
 
@@ -150,7 +157,7 @@ def panel(detail=False):
             "SELECT item_id,title,url,price,photo_url AS photo,found_at AS checked_at,status,query_id "
             "FROM alert_outbox WHERE " + HOME_ALERT + " AND found_at>=? AND status IN ('pending','sent') "
             "ORDER BY found_at DESC,item_id DESC LIMIT ?", (since, 12 if detail else 4))]
-        pages = [dict(row) for row in conn.execute("SELECT * FROM vinted_home_pages WHERE fetched_at>=? ORDER BY fetched_at DESC",
+        pages = [dict(row) for row in conn.execute("SELECT * FROM vinted_home_pages WHERE role='seller' AND fetched_at>=? ORDER BY fetched_at DESC",
                                                   (since,))] if detail else []
         for page in pages:
             page["cards"] = json.loads(page["cards"])
@@ -172,7 +179,7 @@ def panel(detail=False):
             WHERE COALESCE(d.paused,0)=0 AND COALESCE(d.archived,0)=0 AND s.vinted_enabled=1
             ORDER BY hg.query_id""")] if detail else []
         checked = [dict(row) for row in conn.execute(
-            "SELECT * FROM vinted_home_activity WHERE checked_at>=? ORDER BY checked_at DESC LIMIT 24",
+            "SELECT * FROM vinted_home_activity WHERE checked_at>=? AND " + original_home_source("vinted_home_activity.item_id") + " ORDER BY checked_at DESC LIMIT 24",
             (since,))] if detail else []
     for row in deals + checked:
         row["photo"] = safe_listing_photo(row.get("photo"))

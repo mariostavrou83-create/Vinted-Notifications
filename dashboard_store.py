@@ -650,7 +650,8 @@ def recent_finds_marker(conn):
 def list_finds(text="", status="", folder="", page=1, platform="", source=""):
     clauses, params = [], []
     if source == "home":
-        clauses.append("a.platform='vinted' AND substr(a.content,1,1)='🏠'")
+        from vinted_home_activity import original_home_source
+        clauses.append("a.platform='vinted' AND substr(a.content,1,1)='🏠' AND " + original_home_source("a.item_id"))
     elif source == "saved":
         clauses.append("substr(a.content,1,1)<>'🏠'")
     if platform in ("vinted", "ebay"):

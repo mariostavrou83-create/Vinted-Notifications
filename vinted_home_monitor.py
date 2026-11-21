@@ -1,6 +1,6 @@
 """Bounded Home discovery; only existing Telegram user taps can purchase.
 
-The original seller feed gets the first slot. A fresh current-account identity
+Only the original MSJ Vinted account supplies recommendations. A fresh current-account identity
 read precedes each bounded page read, under the existing shared account lock.
 No cookie copies, login, renewal, solver tasks or checkout writes originate here.
 """
@@ -23,7 +23,7 @@ from logger import get_logger
 from vinted_buyer_priority import yield_to_purchase
 from vinted_home_feed import parse_home, parse_listing
 import vinted_home_activity as activity
-from vinted_home_matching import match_candidate
+from vinted_home_matching import match_candidate, womens_clothing
 from vinted_home_transport import read_html
 
 logger = get_logger(__name__)
@@ -33,7 +33,7 @@ PAGE_BUDGET = 1 + MAX_DETAILS
 REPEAT_INTERVAL = 32
 CYCLE_SECONDS = 30
 MAX_AGE = 180
-ROLES = ("seller", "buyer")
+ROLES = ("seller",)
 COUNTERS = (
     "candidates",
     "checked",
@@ -115,6 +115,8 @@ def global_filters_allow(item):
 
 
 def _account_ready(role):
+    if role != "seller":
+        return "source_not_selected"
     if not vinted_accounts.separated():
         return "not_separated"
     if not (Path(db.DB_PATH).resolve().parent / "vinted-buyer.key").is_file():
@@ -132,10 +134,11 @@ def _account_ready(role):
 
 
 def _page(role, url):
-    account = seller if role == "seller" else buyer
-    with account.exclusive():
+    if role != "seller":
+        raise buyer.BuyerError("Only the MSJ Vinted account supplies Home recommendations.", reason="account_changed")
+    with seller.exclusive():
         yield_to_purchase()
-        client = account.connected_client(solve_challenges=False, allow_refresh=False)
+        client = seller.connected_client(solve_challenges=False, allow_refresh=False)
         try:
             if client.account_role != role:
                 raise buyer.BuyerError(
@@ -151,6 +154,8 @@ def _publish(item, search, match, age, role, *, now):
     """One atomic global seen/outbox insertion, without search watermark changes."""
     import vinted_alerts
 
+    if role != "seller" or not womens_clothing(item):
+        return False
     observed = age.get("checked_at")
     upper = age.get("max_age_seconds")
     if (
@@ -192,6 +197,7 @@ def _publish(item, search, match, age, role, *, now):
             "version": 1,
             "source_role": role,
             "all_recommendations": True,
+            "womens_clothing": True,
             "reason": match["reason"] if match else "recommendation",
             "observed_at": observed,
             "max_age_seconds": upper,
@@ -316,7 +322,7 @@ class Monitor:
             self.searches_until = 0
             return
         if not self.started:
-            self.next_home = {"seller": now, "buyer": now + INTERVAL / 2}
+            self.next_home = {"seller": now}
             self.started = True
         for role in ROLES:
             if now < self.retry_at[role]:
@@ -418,7 +424,7 @@ class Monitor:
             if self.clock() >= stamp + MAX_AGE or item.get("home_available") is False:
                 self.remember(identifier, self.clock())
                 continue
-            if item.get("home_available") is not True:
+            if item.get("home_available") is not True or not womens_clothing(item):
                 fresh_ids.append(item)
                 continue
             age = {"verified": True, "checked_at": observed, "max_age_seconds": math.ceil(observed - stamp)}
@@ -501,6 +507,11 @@ class Monitor:
         self.status(role, "checked", "listing", 200)
 
     def notify_item(self, item, age, role, searches):
+        if role != "seller":
+            return
+        if not womens_clothing(item):
+            self.counts[role]["scope_miss"] += 1
+            return
         # A guide adds the owner's reference photos and buying limit. It is
         # optional and can never delay a Home alert for another photo request.
         search = match = None
@@ -545,7 +556,7 @@ class Monitor:
 def run():
     monitor = Monitor()
     logger.info(
-        "Vinted Home monitor ready: both_accounts=True maximum_age_seconds=180 enabled=%s",
+        "Vinted Home monitor ready: source=MSJ_Vinted role=seller category=womens_clothing maximum_age_seconds=180 enabled=%s",
         enabled(),
     )
     while True:

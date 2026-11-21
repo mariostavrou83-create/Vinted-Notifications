@@ -120,63 +120,64 @@ def observe(conn, now, started):
         "SELECT value FROM parameters WHERE key='home_monitor_enabled'"
     ).fetchone()
     if home and home[0] == "1":
-        pages = dict(conn.execute("SELECT role,fetched_at FROM vinted_home_pages"))
-        for role, label in [
-            ("seller", "Original account Home"),
-            ("buyer", "Buying account Home"),
-        ]:
-            row = read(conn, "home_monitor_status_" + role, {})
-            code = row.get("code")
-            last_page = pages.get(role)
-            if (
-                code in HOME_ERRORS
-                and (row.get("checked_at") or 0) > 0
-                and row["checked_at"] >= (last_page or 0)
-            ):
-                http = row.get("http_status")
-                stamp = row.get("checked_at")
-                detail = HOME_ERRORS[code] + (f" (HTTP {http})" if http else "")
-                if role == "buyer" and code in {
-                    "credentials",
-                    "account_changed",
-                    "account_unavailable",
-                    "saved_session",
-                }:
-                    detail += ". The buying connection also needs attention before Autobuy can be used"
-                signals[label] = (
-                    code,
-                    f"{detail} at {uk(stamp)}.",
-                    "reconnect"
-                    if role == "buyer" and code == "credentials"
-                    else "alerts",
-                )
-            elif last_page and now - last_page < 300 and code == "checked":
-                signals[label] = (
-                    "",
-                    f"Vinted returned the personalised page at {uk(last_page)}.",
-                    "alerts",
-                )
-            elif now - (last_page or started) >= 300 and now - started >= 60:
-                signals[label] = (
-                    "stalled",
-                    "No successful page refresh for five minutes."
-                    + (f" Last page at {uk(last_page)}." if last_page else ""),
-                    "alerts",
-                )
-    account = conn.execute(
-        """SELECT enabled, user_id IS NOT NULL AND session IS NOT NULL, verified_at FROM vinted_buyer WHERE id=1"""
-    ).fetchone()
-    if account and account[0]:
-        if not account[1]:
+        page = conn.execute(
+            "SELECT fetched_at FROM vinted_home_pages WHERE role='seller'"
+        ).fetchone()
+        last_page = page[0] if page else None
+        row = read(conn, "home_monitor_status_seller", {})
+        code, checked = row.get("code"), row.get("checked_at") or 0
+        if code in HOME_ERRORS and checked > 0 and checked >= (last_page or 0):
+            status = row.get("http_status")
+            detail = HOME_ERRORS[code] + (f" (HTTP {status})" if status else "")
+            signals["MSJ Vinted Home"] = (code, f"{detail} at {uk(checked)}.", "alerts")
+        elif last_page and now - last_page < 300 and code == "checked":
+            signals["MSJ Vinted Home"] = (
+                "",
+                f"Vinted returned the personalised page at {uk(last_page)}.",
+                "alerts",
+            )
+        elif now - (last_page or started) >= 300 and now - started >= 60:
+            detail = "No successful page refresh for five minutes." + (
+                f" Last page at {uk(last_page)}." if last_page else ""
+            )
+            signals["MSJ Vinted Home"] = ("stalled", detail, "alerts")
+    account = conn.execute("""SELECT b.enabled, b.user_id IS NOT NULL AND b.session IS NOT NULL AS connected,
+        b.verified_at,a.checked,a.reason,a.stage,a.http_status,n.checked AS rejected_at,n.identity_rejected
+        FROM vinted_buyer b LEFT JOIN vinted_buyer_access a ON a.id=b.id
+        LEFT JOIN vinted_connection_notice n ON n.id=b.id AND n.buyer_id=b.user_id WHERE b.id=1""").fetchone()
+    if account and account["enabled"]:
+        verified = account["verified_at"] or 0
+        if not account["connected"]:
             signals["Autobuy account"] = (
                 "disconnected",
                 "Reconnect the buying account to use Autobuy.",
                 "reconnect",
             )
-        elif account[2] and now - account[2] <= 300:
+        elif (
+            account["identity_rejected"] and (account["rejected_at"] or 0) >= verified
+        ) or (
+            (account["checked"] or 0) >= verified
+            and account["stage"] in {"identity", "renewal", "saved_session"}
+            and (
+                account["reason"]
+                in {
+                    "credentials",
+                    "refresh_rejected",
+                    "signin_redirect",
+                    "account_changed",
+                }
+                or account["http_status"] == 401
+            )
+        ):
+            signals["Autobuy account"] = (
+                "credentials",
+                "Vinted rejected the buying account sign-in. Reconnect before using Autobuy.",
+                "reconnect",
+            )
+        elif verified and now - verified <= 300:
             signals["Autobuy account"] = (
                 "",
-                f"Buying account identity verified at {uk(account[2])}.",
+                f"Buying account identity verified at {uk(verified)}.",
                 "buyer",
             )
     active = conn.execute("""SELECT q.id,h.last_success,h.failures,h.last_attempt FROM queries q
@@ -274,7 +275,7 @@ def observe(conn, now, started):
         recently_checked = any(
             not s[0]
             for key, s in signals.items()
-            if key in ("Saved searches", "Original account Home", "Buying account Home")
+            if key in ("Saved searches", "MSJ Vinted Home")
         )
         detail = (
             " Finder is still checking listings."
@@ -340,6 +341,9 @@ def claim(now):
             "SELECT key,value FROM parameters WHERE key GLOB ?", (PREFIX + "*",)
         ):
             event = json.loads(raw)
+            if event.get("kind") == "Buying account Home" and not event.get("sent"):
+                conn.execute("DELETE FROM parameters WHERE key=?", (key,))
+                continue
             if event.get("sent"):
                 if now - event["sent"] > 86400:
                     conn.execute("DELETE FROM parameters WHERE key=?", (key,))

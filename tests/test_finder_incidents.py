@@ -100,17 +100,32 @@ class FinderIncidentsTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
 
     def test_home_rejection_and_real_recovery_are_reported_once(self):
         vinted_home_controls.configure("1")
-        self.set_home("buyer", "credentials", self.now, page=self.now - 20)
+        self.set_home("seller", "credentials", self.now, page=self.now - 20)
         incidents.check_health(self.now)
         incidents.check_health(self.now + 1)
-        self.set_home("buyer", "busy", self.now + 2)
+        self.set_home("seller", "busy", self.now + 2)
         incidents.check_health(self.now + 2)
         self.assertEqual(len(self.events()), 1)
         self.assertIn("HTTP 401", self.events()[0]["text"])
-        self.set_home("buyer", "checked", self.now + 3, page=self.now + 3)
+        self.set_home("seller", "checked", self.now + 3, page=self.now + 3)
         incidents.check_health(self.now + 3)
         self.assertEqual(len(self.events()), 2)
         self.assertTrue(any("recovered" in e["text"] for e in self.events()))
+
+    def test_buying_account_is_checked_without_reading_its_home(self):
+        vinted_home_controls.configure("1")
+        self.set_home("buyer", "credentials", self.now)
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute(
+                "UPDATE vinted_buyer SET user_id='99',session=X'01',enabled=1,verified_at=? WHERE id=1",
+                (self.now - 40,),
+            )
+            conn.execute(
+                "UPDATE vinted_buyer_access SET reason='credentials',stage='identity',http_status=401,checked=? WHERE id=1",
+                (self.now,),
+            )
+        incidents.check_health(self.now)
+        self.assertEqual([e["kind"] for e in self.events()], ["Autobuy account"])
 
     def test_quiet_period_and_failed_delivery_are_different_incidents(self):
         self.add_delivery("1", self.now - 1930, "sent")

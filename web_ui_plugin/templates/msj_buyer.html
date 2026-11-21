@@ -5,7 +5,7 @@
 <p>Saved buyer: <b>{{buyer.username if buyer.connected else 'Not connected'}}</b> · Autobuy permission <b>{{'on' if buyer.enabled else 'off'}}</b>.</p>
 <details class="guide-section" id="vinted-new-buyer">
 <summary><b>Connect a different account for buying</b></summary>
-<p>Your current selling account stays connected for offers and messages. The new account uses the same Autobuy flow, proxy, search budgets and InPost requirement.</p>
+<p>Your current selling account stays connected for offers and messages. The new account uses the same Autobuy flow, proxy, search budgets and collection shop.</p>
 <form method="post" autocomplete="off"><input type="hidden" name="csrf" value="{{csrf}}">
 <label for="new_buyer_username">New buying account's exact Vinted username</label>
 <input id="new_buyer_username" name="new_buyer_username" type="text" maxlength="100" autocomplete="off" autocapitalize="none" spellcheck="false" required>
@@ -146,7 +146,7 @@
 <p><small>This button submits real payment. A bank may require confirmation. An uncertain payment is never retried automatically.</small></p></div>{% endif %}
 <details class="guide-section"><summary><b>Delivery &amp; payment settings</b></summary>
 <form method="post" data-buyer-settings><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="buyer_browser_info" data-buyer-browser value="">
-{% if required_inpost %}<p><b>InPost collection only</b><br>{{ required_inpost.name }} · {{ required_inpost.postcode }}<br><small>If Vinted cannot confirm this shop for the item, checkout stops before payment.</small></p>
+{% if required_inpost %}<p><b>Collection at your selected shop</b><br>{{ required_inpost.name }} · {{ required_inpost.postcode }}<br><small>InPost is first choice. If unavailable, Autobuy selects the lowest-priced available courier confirmed for this same shop.</small></p>
 {% else %}<label for="buyer_pickup_mode">Delivery choice</label><select id="buyer_pickup_mode" name="buyer_pickup_mode"><option value="saved" {{'selected' if buyer.pickup_mode=='saved'}}>Use my saved Vinted delivery choice</option><option value="nearest" {{'selected' if buyer.pickup_mode=='nearest'}}>Nearest pickup point to my saved Vinted address</option></select>{% endif %}
 <label for="buyer_card_last4">Saved card ending in</label><input id="buyer_card_last4" name="buyer_card_last4" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" value="{{buyer.preferred_card_last4}}" placeholder="Four ending digits">
 <p><small>Enter only the last four digits of a card already saved in Vinted. That card or an available Vinted balance is used. The bot does not need your full card number.</small></p>

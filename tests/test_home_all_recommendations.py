@@ -23,8 +23,8 @@ class HomeRecommendationsTests(DatabaseFixture, unittest.TestCase):
         super().setUp()
         controls.configure("1")
         self.now = time.time()
-        self.item = {"id":"8123", "url":"https://www.vinted.co.uk/items/8123-headphones", "title":"Headphones",
-                     "brand_title":"Apple", "size_title":"", "price":{"amount":"35.00","currency_code":"GBP"},
+        self.item = {"id":"8123", "url":"https://www.vinted.co.uk/items/8123-vintage-find", "title":"Vintage find",
+                     "category_ids":["1904","4","13"], "brand_title":"", "size_title":"", "price":{"amount":"35.00","currency_code":"GBP"},
                      "photo":{"url":"https://images1.vinted.net/t/01_test/f800/image.webp"},
                      "description":"", "description_complete":False}
         self.age = {"verified":True, "max_age_seconds":20, "checked_at":self.now}
@@ -56,11 +56,39 @@ class HomeRecommendationsTests(DatabaseFixture, unittest.TestCase):
         controls.configure("0")
         self.assertFalse(vinted_alerts.prepare_listing(ready))
 
+    def test_only_confirmed_womens_clothing_can_alert_regardless_of_the_title(self):
+        for categories,labels in [(["2309","3037"],["Entertainment","Books"]),(["1904","19","156"],["Women","Bags"]),
+                                  (["5","1859"],["Men","Clothes"]),([],["Kids","Clothes"]),([],[])]:
+            row=dict(self.item, title="Vintage women's dress", category_ids=categories, category_labels=labels)
+            self.worker.notify_item(row,self.age,"seller",[])
+            self.assertEqual(activity.alerted_ids([row["id"]]),set())
+        body=home(card()+native(created_at_ts=int(self.now)-15,catalog_id=9999))
+        self.worker.fetch=lambda role,url:(body,self.now)
+        self.worker.home("seller",self.now)
+        self.assertEqual([i["id"] for i in self.worker.pending["seller"]],["123"])
+        self.new()
+        self.assertIs(vinted_alerts.get_details(self.row())["home_discovery"]["womens_clothing"],True)
+
     def test_guide_error_cannot_suppress_a_verified_home_listing(self):
         self.item["description_complete"] = True
         with patch.object(monitor, "global_filters_allow", return_value=True), patch.object(monitor, "match_candidate", side_effect=ValueError):
             self.worker.notify_item(self.item, self.age, "seller", [self.search])
         self.assertIsNone(self.row()["query_id"])
+
+    def test_buying_account_cannot_supply_a_page_or_send_a_pending_home_alert(self):
+        self.worker.notify_item(self.item, self.age, "buyer", [])
+        with closing(search_settings.connection()) as conn:
+            self.assertFalse(conn.execute("SELECT 1 FROM alert_outbox").fetchone())
+        with self.assertRaises(monitor.buyer.BuyerError), patch.object(monitor.seller,"exclusive") as lock:
+            monitor._page("buyer","https://www.vinted.co.uk/")
+        lock.assert_not_called()
+        self.new()
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_alert_details SET payload=json_set(payload,'$.home_discovery.source_role','buyer')")
+            conn.execute("INSERT OR REPLACE INTO vinted_home_pages VALUES('buyer',?,'[]')",(self.now,))
+        self.assertEqual(activity.panel(detail=True)["pages"], [])
+        self.assertEqual(activity.panel(detail=True)["deals"], [])
+        self.assertFalse(vinted_alerts.prepare_listing(alert_delivery.claim(now=self.now + 1)))
 
     def test_fresh_home_can_replace_an_unsent_cancelled_saved_match(self):
         monitor._publish(self.item,self.search,{"reason":"brand_style"},self.age,"seller",now=self.now)
@@ -88,7 +116,7 @@ class HomeRecommendationsTests(DatabaseFixture, unittest.TestCase):
         details = vinted_alerts.get_details(self.row())
         details.pop("home_discovery")
         details.update(name="Named saved guide", buying_advice="Check the seam.")
-        self.assertTrue(db.add_item_to_db("8123", "Headphones", 1, "35.00", self.now,
+        self.assertTrue(db.add_item_to_db("8123", "Vintage find", 1, "35.00", self.now,
             self.item["photo"]["url"], currency="GBP", alert={"search_name":"Named saved guide",
                 "url":self.item["url"], "content":"saved", "vinted_details":details}))
         row = self.row()
@@ -121,7 +149,7 @@ class HomeRecommendationsTests(DatabaseFixture, unittest.TestCase):
 
     def test_complete_home_card_can_alert_with_zero_listing_reads(self):
         stamp = int(self.now) - 20
-        body = home(card() + native(created_at_ts=stamp))
+        body = home(card() + native(created_at_ts=stamp, catalog_id=13))
         self.worker.fetch = lambda role,url: (body,self.now)
         self.worker.home("seller",self.now)
         self.assertFalse(self.worker.pending["seller"])

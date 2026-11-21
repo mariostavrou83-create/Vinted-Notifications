@@ -366,6 +366,37 @@ class CheckoutPreferencesTests(DatabaseFixture, unittest.TestCase):
                     self.assertEqual(buying.checkout_choice_details(result)["signature"]["point_code"], far["code"])
             self.assertFalse(self.payments())
 
+    def test_other_courier_at_baba_uses_cheapest_confirmed_shop_rate(self):
+        policy = {"MSJ_INPOST_POINT_CODE":"old-inpost-code", "MSJ_INPOST_POINT_NAME":"Baba Food",
+                  "MSJ_INPOST_POINT_POSTCODE":"AA1 1AA"}
+        first, second, _ = [entry["point"] for entry in self.points["shipping_points"]]
+        first.update(name="DPD Pickup - Baba Food", postcode="AA11AA", carrier_name="DPD")
+        second.update(name="Evri ParcelShop - Baba Food", postcode="AA11AA", carrier_name="Evri")
+        with patch.dict(os.environ,policy):
+            result = self.configure()
+            self.assertEqual(buying.checkout_choice_details(result)["signature"]["point_code"],first["code"])
+            first["available"] = False
+            result = self.configure()
+            self.assertEqual(buying.checkout_choice_details(result)["signature"]["point_code"],second["code"])
+            second["postcode"] = "AA1 2BB"
+            with self.assertRaisesRegex(buyer.BuyerError,"Baba Food"):
+                self.configure()
+        self.assertFalse(self.payments())
+
+    def test_fallback_rechecks_selected_shop_and_courier_on_final_quote(self):
+        policy = {"MSJ_INPOST_POINT_CODE":"old-inpost-code", "MSJ_INPOST_POINT_NAME":"Baba Food",
+                  "MSJ_INPOST_POINT_POSTCODE":"AA1 1AA"}
+        point = self.points["shipping_points"][1]["point"]
+        point.update(name="Baba Food", postcode="AA11AA", carrier_name="Evri")
+        with patch.dict(os.environ,policy):
+            for changed in ({"postcode":"AA1 2BB"},{"name":"Baba Food Annex"},{"carrier_name":"DPD"}):
+                def change(checkout):
+                    checkout["components"]["shipping_pickup_details"]["pickup_details"]["shipping_point"].update(changed)
+                self.corrupt = change
+                with self.subTest(changed=changed), self.assertRaisesRegex(buyer.BuyerError,"Baba Food"):
+                    self.configure()
+        self.assertFalse(self.payments())
+
     def test_required_shop_missing_blocks_ordinary_purchase_before_payment(self):
         policy = {
             "MSJ_INPOST_POINT_CODE": "TEST-SHOP-42",

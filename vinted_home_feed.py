@@ -141,7 +141,7 @@ def _home_uploads(body, cards):
     scripts.feed(body)
     roots, refs = _records(scripts.scripts)
     listed = {card["id"]: card for card in cards}
-    stamps, available, unavailable = {}, set(), set()
+    stamps, category_ids, available, unavailable = {}, {}, set(), set()
     queue, visited = deque(roots), 0
     while queue:
         record = queue.popleft()
@@ -165,6 +165,9 @@ def _home_uploads(body, cards):
             continue
         if _money("£" + str(price.get("amount", ""))) != card["price"]:
             continue
+        category = _identity(_resolve(record.get("catalog_id"), refs))
+        if category:
+            category_ids.setdefault(identity,set()).add(category)
         for key in ("created_at_ts", "created_at"):
             stamp = _upload_time(_resolve(record.get(key), refs))
             if stamp is not None:
@@ -175,6 +178,9 @@ def _home_uploads(body, cards):
         if can_buy is False or any(_resolve(record.get(k), refs) is True
                                    for k in ("is_reserved", "is_hidden", "is_sold", "is_closed")):
             unavailable.add(identity)
+    for identity, values in category_ids.items():
+        if len(values) == 1:
+            listed[identity]["category_ids"] = list(values)
     for identity, values in stamps.items():
         if max(values) - min(values) <= 1:
             card = listed[identity]

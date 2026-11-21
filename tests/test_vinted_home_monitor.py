@@ -24,6 +24,7 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         self.item = {
             "id": "500",
             "title": "Fitted vintage top",
+            "category_ids": ["1904", "4", "12"],
             "url": "https://www.vinted.co.uk/items/500-top",
             "price": {"amount": "5.00", "currency_code": "GBP"},
             "brand_title": "Test",
@@ -76,7 +77,7 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         self.now += 1
         self.worker.tick()
 
-    def test_original_account_first_buyer_at_half_minute(self):
+    def test_only_original_account_is_polled_across_multiple_intervals(self):
         self.worker.tick()
         self.assertEqual(self.fetch.call_args.args, ("seller", home.buyer.BASE + "/"))
         self.worker.pending["seller"].clear()
@@ -85,7 +86,11 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(self.fetch.call_count, 1)
         self.now = 1030
         self.worker.tick()
-        self.assertEqual(self.fetch.call_args.args, ("buyer", home.buyer.BASE + "/"))
+        self.assertEqual(self.fetch.call_count, 1)
+        self.now = 1061
+        self.worker.tick()
+        self.assertEqual(self.fetch.call_count, 2)
+        self.assertTrue(all(call.args[0] == "seller" for call in self.fetch.call_args_list))
 
     def test_fresh_alert_preserves_watermark_search_and_description(self):
         self.discover()
@@ -145,11 +150,11 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
             )
         )
 
-    def test_both_feeds_and_searches_share_global_deduplication(self):
+    def test_original_feed_and_searches_share_global_deduplication(self):
         self.discover()
         self.now = 1030
         self.worker.tick()
-        self.assertFalse(self.worker.pending["buyer"])
+        self.assertNotIn("buyer", self.worker.pending)
         self.assertEqual(len(self.rows()), 1)
         self.assertFalse(
             db.add_item_to_db(
@@ -222,7 +227,7 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         restarted_fetch.assert_not_called()
         self.now = 1030
         restarted.tick()
-        self.assertEqual(restarted_fetch.call_args.args[0], "buyer")
+        restarted_fetch.assert_not_called()
         self.assertEqual(restarted.retry_at["seller"], 2800)
 
     def test_removed_listing_does_not_pause_remaining_home_items(self):
@@ -340,7 +345,11 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         self.now = 1030
         self.worker.tick()
         self.assertFalse(self.worker.pending["seller"])
-        self.assertEqual(self.fetch.call_args.args, ("buyer", home.buyer.BASE + "/"))
+        self.assertEqual(self.fetch.call_count, 1)
+        self.now = 1061
+        self.worker.tick()
+        self.assertEqual(self.fetch.call_count, 2)
+        self.assertTrue(all(call.args[0] == "seller" for call in self.fetch.call_args_list))
 
     def test_global_banwords_and_country_settings_are_preserved(self):
         db.set_parameter("banwords", "fitted|||aviator")

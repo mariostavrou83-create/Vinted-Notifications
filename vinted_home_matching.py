@@ -217,6 +217,20 @@ _WOMEN_CRUMBS = {
 }
 
 
+def womens_clothing(item):
+    """Use the listing's UK catalogue or visible breadcrumb, independently of the title."""
+    if "catalog_id" in item.get("conflicting_fields", ()):
+        return False
+    categories = {str(value) for value in item.get("category_ids", ())}
+    labels = {str(label).strip().casefold().replace("’","'") for label in item.get("category_labels", ())}
+    if "5" in categories or labels & {"men", "men's clothing", "kids", "children", "boys", "girls", "books", "entertainment", "bags", "handbags", "shoes", "accessories"}:
+        return False
+    if "4" in categories or categories & _WOMEN_CLOTHING or "women's clothing" in labels:
+        return True
+    return bool(("1904" in categories or "women" in labels) and
+                (labels & (set(_WOMEN_CRUMBS) | {"clothing", "clothes", "women's clothes"})))
+
+
 def _item_scope(item):
     observed = {field: _ids(item.get(field)) for _, field in _FILTERS.values()}
     categories = observed["category_ids"] or set()

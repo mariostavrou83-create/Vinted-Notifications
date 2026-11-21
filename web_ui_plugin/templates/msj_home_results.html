@@ -1,5 +1,5 @@
 <div class="home-results-heading">
-  {% if home_panel.detail %}<h2>Fresh Home alerts</h2>{% else %}<h2><a href="/vinted-home">Vinted Home</a></h2>{% endif %}
+  {% if home_panel.detail %}<h2>Fresh Home alerts · women’s clothing</h2>{% else %}<h2><a href="/vinted-home">Vinted Home</a></h2>{% endif %}
   <p><strong>{{ home_panel.sent }}</strong> sent to Telegram in 24h{% if home_panel.waiting %} · {{ home_panel.waiting }} waiting{% endif %}</p>
   <a href="{{ '/finds?source=home' if home_panel.detail else '/vinted-home' }}">{{ 'All Home alerts' if home_panel.detail else 'Open Home feed' }} →</a>
 </div>
@@ -22,8 +22,8 @@
   <ul>{% for event in home_panel.incidents %}<li><strong>{{ event.time }}</strong> · {{ event.text }} · {{ 'Sent to Telegram' if event.sent else 'Waiting for Telegram' }}</li>{% endfor %}</ul>
 </details>{% endif %}
 {% for page in home_panel.pages %}<details class="home-guide-links" data-home-section="{{ page.role }}">
-  <summary>{{ 'Original' if page.role == 'seller' else 'Buying' }} account · all {{ page.cards|length }} recommendations at {{ page.time }}</summary>
-  <p class="muted">In Vinted’s order on the latest refresh. The time above is when Finder saw the page. Fresh alerts appear above once the upload time is verified.</p>
+  <summary>MSJ Vinted · all {{ page.cards|length }} recommendations at {{ page.time }}</summary>
+  <p class="muted">In Vinted’s order on the latest refresh. The time above is when Finder saw the page. The full page includes all categories. Fresh alerts above show women’s clothing with a verified upload time.</p>
   <div class="home-deals">{% for card in page.cards %}<article class="home-deal">
     <a class="home-cover" href="{{ card.url }}" target="_blank" rel="noopener noreferrer">{% if card.photo %}<img src="{{ card.photo }}" loading="lazy" alt="">{% else %}<span>Vinted ↗</span>{% endif %}</a>
     <div><a class="home-item-title" href="{{ card.url }}" target="_blank" rel="noopener noreferrer">{{ card.title }}</a>

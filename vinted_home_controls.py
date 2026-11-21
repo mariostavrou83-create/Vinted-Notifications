@@ -41,7 +41,7 @@ def configure(value):
 
 def summary():
     rows = []
-    for role, label in (("seller", "Original account"), ("buyer", "Buying account")):
+    for role, label in (("seller", "MSJ Vinted"),):
         try:
             raw = json.loads(db.get_parameter("home_monitor_status_" + role) or "{}")
         except (ValueError, TypeError):
@@ -72,9 +72,9 @@ def summary():
     with closing(connection()) as conn:
         # Home cards have had a stable house prefix since the feature launched.
         # Restrict the scan to recent finds using the existing found_at index.
+        from vinted_home_activity import HOME_ALERT
         totals = dict(conn.execute(
-            "SELECT status,COUNT(*) FROM alert_outbox WHERE found_at>=? "
-            "AND platform='vinted' AND substr(content,1,1)='🏠' GROUP BY status",
+            "SELECT status,COUNT(*) FROM alert_outbox WHERE found_at>=? AND " + HOME_ALERT + " GROUP BY status",
             (time.time() - 86400,),
         ))
     return {

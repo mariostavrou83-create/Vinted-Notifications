@@ -45,7 +45,8 @@ def home_discovery_fresh(details, *, now=None):
         and evidence["version"] == 1
         and type(age) is int
         and 0 <= age < 180
-        and evidence.get("source_role") in ("seller", "buyer")
+        and evidence.get("source_role") == "seller"
+        and evidence.get("womens_clothing") is True
         and all(type(value) in (int, float) and math.isfinite(value)
                 for value in (observed, expires, now))
         and 0 < observed <= now <= expires <= observed + 180 - age
@@ -104,6 +105,10 @@ def prepare_listing(row, details=None):
             home_enabled = bool(setting and setting[0] == "1")
         if not home_enabled:
             reason = "Home discovery is paused"
+        elif "home_discovery" in saved_details and isinstance(saved_details["home_discovery"], dict) and saved_details["home_discovery"].get("source_role") != "seller":
+            reason = "Home recommendation is outside the selected MSJ Vinted account"
+        elif "home_discovery" in saved_details and isinstance(saved_details["home_discovery"],dict) and saved_details["home_discovery"].get("womens_clothing") is not True:
+            reason = "Home listing has no verified women's clothing category"
         elif not home_discovery_fresh(saved_details):
             reason = "Home discovery no longer has verified listing age within three minutes"
         elif current["query_id"] is None and (saved_details.get("home_discovery") or {}).get("reason") == "recommendation":
@@ -234,9 +239,10 @@ def sections(row, details):
     heading = f"🔎 <b>{marketplace} saved search · #{row['query_id'] or '—'} · {name}</b>"
     discovery = details.get("home_discovery")
     if not ebay and isinstance(discovery, dict):
-        source = "Vinted Home · photo match" if discovery.get("reason") == "scraper_photo" else "Vinted Home · feed find"
+        account = "MSJ Vinted Home" if discovery.get("source_role") == "seller" else "Vinted Home"
+        source = account + (" · photo match" if discovery.get("reason") == "scraper_photo" else " · feed find")
         if not row["query_id"] and discovery.get("reason") == "recommendation":
-            heading = "🏠 <b>Vinted Home · recommendation</b>"
+            heading = f"🏠 <b>{account} · recommendation</b>"
         else:
             heading = f"🏠 <b>{source} · #{row['query_id'] or '—'} · {name}</b>"
     link = (

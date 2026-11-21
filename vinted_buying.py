@@ -814,9 +814,11 @@ def nearest_pickup(client, components, *, required=None):
             continue
         price, rate = eligible[point["rate_uuid"]]
         if required is not None:
-            if not pickup_policy.matches(point, rate, required, entry=entry):
+            choice = pickup_policy.choice(point, rate, required, entry=entry)
+            if choice is None:
                 continue
-            distance = 0  # The required shop is identified independently of distance.
+            distance, operator = choice  # Rank the exact shop's available pickup services.
+            point = dict(point, finder_selected_carrier=operator, finder_fallback=distance == 2)
         else:
             try:
                 point_lat, point_lon = coordinates(point)
@@ -842,8 +844,15 @@ def nearest_pickup(client, components, *, required=None):
             )
         )
     if required is not None:
-        identities = {(code, uuid) for _, _, code, uuid, _, _ in candidates}
-        if len(identities) != 1:
+        # One shop can have a different point code for each pickup network.
+        # Multiple locations for the same operator at the same preference are ambiguous.
+        locations = {}
+        for rank, _, code, point_id, _, point in candidates:
+            group = (rank, point["finder_selected_carrier"])
+            locations.setdefault(group, set()).add((code, point_id))
+        candidates = [candidate for candidate in candidates
+                      if len(locations[(candidate[0], candidate[-1]["finder_selected_carrier"])]) == 1]
+        if not candidates:
             raise buyer.BuyerError(pickup_policy.required_message(required))
     if not candidates:
         raise buyer.BuyerError(
@@ -1000,7 +1009,10 @@ def configure_checkout_choices(client, checkout, config):
             )
         if required is not None:
             shipping = components.get("shipping_pickup_details") or {}
-            if pickup_policy.conflicts_with_target(required, current_point, details, shipping):
+            if pickup_policy.conflicts_with_target(
+                required, current_point, details, shipping,
+                selected_carrier=point["finder_selected_carrier"], fallback=point["finder_fallback"],
+            ):
                 raise buyer.BuyerError(pickup_policy.required_message(required))
     if (
         last4

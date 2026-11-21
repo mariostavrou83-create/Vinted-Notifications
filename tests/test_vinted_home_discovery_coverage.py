@@ -120,8 +120,8 @@ class HomeGuideTests(DatabaseFixture, unittest.TestCase):
             for instant in range(1000,1150):
                 now[0]=instant
                 worker.tick()
-        for role in ("seller","buyer"):
-            reads=[at for key,at in calls if key==role]
-            self.assertGreaterEqual(len(reads),8)
-            for at in reads:
-                self.assertLessEqual(sum(at-60 < r <= at for r in reads),7)
+        self.assertEqual({role for role, _ in calls}, {"seller"})
+        reads = [at for _,at in calls]
+        self.assertGreaterEqual(len(reads),8)
+        for at in reads:
+            self.assertLessEqual(sum(at-60 < r <= at for r in reads),7)
