@@ -285,11 +285,12 @@ class DeliveryWorker:
                 finish(row, message_id=result.message_id, now=now)
                 self.preferred_photo = row["item_id"]
                 logger.info(
-                    "Telegram accepted item %s; message_id=%s; outbox-to-accepted %.3fs; send %.3fs",
+                    "Telegram accepted item %s; message_id=%s; outbox-to-accepted %.3fs; send %.3fs; source=%s",
                     row["item_id"],
                     result.message_id,
                     max(0, time.time() - row["found_at"]),
                     time.monotonic() - send_started,
+                    "Vinted Home" if (row.get("content") or "").startswith("🏠") else "saved search",
                 )
         except ListingCancelled:
             # The validator already cancelled the bound pending lease. Calling

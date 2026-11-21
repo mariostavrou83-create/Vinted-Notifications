@@ -1,0 +1,29 @@
+<div class="home-results-heading">
+  {% if home_panel.detail %}<h2>Deal alerts</h2>{% else %}<h2><a href="/vinted-home">Vinted Home</a></h2>{% endif %}
+  <p><strong>{{ home_panel.sent }}</strong> sent to Telegram in 24h{% if home_panel.waiting %} · {{ home_panel.waiting }} waiting{% endif %}</p>
+  <a href="{{ '/finds?source=home' if home_panel.detail else '/vinted-home' }}">{{ 'All Home alerts' if home_panel.detail else 'Open Home feed' }} →</a>
+</div>
+{% if home_panel.deals %}
+<div class="home-deals">
+  {% for row in home_panel.deals %}<article class="home-deal">
+    <a class="home-cover" href="{{ row.url }}" target="_blank" rel="noopener noreferrer">
+      {% if row.photo %}<img src="{{ row.photo }}" loading="lazy" alt="">{% else %}<span>Vinted ↗</span>{% endif %}
+    </a>
+    <div><a class="home-item-title" href="{{ row.url }}" target="_blank" rel="noopener noreferrer">{{ row.title }}</a>
+      <div class="home-price"><strong>£{{ row.price }}</strong> · <time>{{ row.time }}</time></div>
+      <small>{{ 'Sent to Telegram' if row.status == 'sent' else 'Waiting for Telegram' }} · <a href="/buying-guides?q={{ row.query_id }}">Guide #{{ row.query_id }}</a></small>
+    </div>
+  </article>{% endfor %}
+</div>
+{% else %}<p>No Home deals have qualified in the past 24 hours.</p>{% endif %}
+{% if home_panel.detail %}
+<h2 class="home-activity-title">Recently checked on your Home feed</h2>
+<p class="muted">These listings were under three minutes old when Finder checked them. Each row shows the decision.</p>
+{% if home_panel.checked %}
+<div class="home-activity-list">{% for row in home_panel.checked %}
+  <article><time>{{ row.time }}</time><div><a class="home-item-title" href="{{ row.url }}" target="_blank" rel="noopener noreferrer">{{ row.title }}</a>
+    <small>{{ row.brand }}{% if row.brand and row.size %} · {% endif %}{{ row.size }}</small></div>
+    <strong>£{{ row.price }}</strong><span>{{ row.reason }}</span></article>
+{% endfor %}</div>
+{% else %}<p>The next verified fresh listing will appear here.</p>{% endif %}
+{% endif %}

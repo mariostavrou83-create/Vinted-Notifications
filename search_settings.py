@@ -11,7 +11,7 @@ from pathlib import Path
 
 import db
 
-SCHEMA_VERSION = "34"
+SCHEMA_VERSION = "35"
 
 
 def connection():
@@ -206,6 +206,9 @@ def ensure_schema():
             from finder_buy_guides import migrate as migrate_visual_guides
 
             migrate_visual_guides(conn)
+            from vinted_home_activity import migrate as migrate_home_activity
+
+            migrate_home_activity(conn)
             from vinted_accounts import migrate as migrate_accounts
 
             migrate_accounts(conn)

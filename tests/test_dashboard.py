@@ -1,6 +1,7 @@
 """Dashboard integration tests: real SQLite, Flask requests and mocked Telegram transport."""
 
 import io
+import re
 import sqlite3
 import threading
 import time
@@ -60,6 +61,8 @@ class DashboardTests(DatabaseFixture, unittest.TestCase):
             "/search/1",
             "/reference/abc",
             "/finds/updates",
+            "/vinted-home",
+            "/vinted-home/updates",
             "/config",
             "/queries",
             "/logs",
@@ -105,6 +108,27 @@ class DashboardTests(DatabaseFixture, unittest.TestCase):
         self.assertIn("Ralph full-button cable knit", next(iter(update["cards"].values())))
         self.assertNotIn("msj_finds.js", self.client.get("/finds?page=2").get_data(as_text=True))
         self.assertEqual(self.client.get("/finds/updates?after=no").status_code, 400)
+
+    def test_home_finds_appear_on_landing_and_fresh_checks_are_separate(self):
+        import vinted_home_activity
+
+        self.owner()
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("""INSERT INTO alert_outbox
+                (item_id,query_id,search_name,content,url,title,price,currency,found_at,status)
+                VALUES ('1234',1,'Biker jackets','🏠 Home feed','https://www.vinted.co.uk/items/1234',
+                'Fitted leather jacket','6.00','GBP',?,'sent')""", (time.time(),))
+        landing = self.client.get("/").get_data(as_text=True)
+        self.assertIn("Fitted leather jacket", landing)
+        self.assertIn("Open Home feed", landing)
+        full = self.client.get("/vinted-home").get_data(as_text=True)
+        cursor = re.search(r'data-marker="([0-9a-f]+)"', full)[1]
+        vinted_home_activity.record({"id":"4567", "title":"Plain red top", "url":"https://www.vinted.co.uk/items/4567",
+                                     "price":{"amount":"4.00"}}, time.time(), "style_miss")
+        update = self.client.get("/vinted-home/updates?detail=1&after=" + cursor).json
+        self.assertIn("Too little evidence", update["html"])
+        self.assertIn("Fitted leather jacket", update["html"])
+        self.assertEqual(self.client.get("/vinted-home/updates?after=x").status_code, 400)
 
     def test_setup_login_csrf_logout_persistence_and_one_time_code(self):
         code = (

@@ -7,6 +7,7 @@ No cookie copies, login, renewal, solver tasks or checkout writes originate here
 
 import json
 import math
+import sqlite3
 import time
 from collections import OrderedDict, deque
 from contextlib import closing
@@ -208,6 +209,21 @@ def _publish(item, search, match, age, role, *, now):
             "vinted_details": details,
             "content": vinted_alerts.fast_text(listing, search, details),
         },
+    )
+
+
+def _record_decision(item, observed, outcome, role, query_id=None):
+    from vinted_home_activity import record
+
+    try:
+        record(item, observed, outcome)
+    except sqlite3.Error as exc:
+        logger.warning("Home activity history deferred: %s", type(exc).__name__)
+    logger.info(
+        "Home listing reviewed: role=%s item=%s result=%s guide=%s title=%r brand=%r size=%r "
+        "categories=%r price=%s",
+        role, item["id"], outcome, query_id, item["title"][:100], (item.get("brand_title") or "")[:60],
+        (item.get("size_title") or "")[:60], item.get("category_ids", [])[:12], item["price"]["amount"],
     )
 
 
@@ -433,8 +449,14 @@ class Monitor:
             self.counts[role]["rejected_match"] += 1
             self.status(role, "checked", "listing", 200)
             return
-        if str(item.get("id")) == str(candidate.get("id")) and not item.get("size_title"):
+        if str(item.get("id")) != str(candidate.get("id")):
+            self.counts[role]["details_unverified"] += 1
+            self.status(role, "checked", "listing", 200)
+            return
+        if not item.get("size_title"):
             item["size_title"] = candidate.get("size_title", "")
+        if not item.get("photos") and candidate.get("photo"):
+            item["photo"] = candidate["photo"]
         eligible, diagnostics = set(), set()
         photo_styles = ()
         match = None
@@ -457,6 +479,8 @@ class Monitor:
         if not match:
             self.counts[role][reason] += 1
             self.counts[role]["rejected_match"] += 1
+            if reason != "global_blocked":
+                _record_decision(item, observed, reason, role)
             self.status(role, "checked", "listing", 200)
             return
         self.counts[role]["matched"] += 1
@@ -470,6 +494,7 @@ class Monitor:
             and _publish(item, search, current, age, role, now=self.clock())
         ):
             self.counts[role]["alerts"] += 1
+            _record_decision(item, observed, "qualified", role, search["id"])
         self.status(role, "checked", "listing", 200)
 
 

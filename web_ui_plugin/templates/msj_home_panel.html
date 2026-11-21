@@ -1,0 +1,5 @@
+<section class="home-panel" data-home-panel data-marker="{{ home_marker }}"
+         data-updates="{{ url_for('vinted_home_updates') }}" data-detail="{{ 1 if home_panel.detail else 0 }}">
+  {% include 'msj_home_results.html' %}
+</section>
+<script src="{{ url_for('static',filename='msj_home_live.js',v=asset_version) }}" defer></script>

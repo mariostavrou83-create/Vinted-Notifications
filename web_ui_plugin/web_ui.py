@@ -29,6 +29,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 import dashboard_store as store
 import db
 import ebay_privacy
+import vinted_home_activity as home_activity
 import ebay_store
 import resource_controls
 import search_settings
@@ -541,6 +542,8 @@ def create_app(test_config=None):
             )
         return render_template(
             "msj_dashboard.html",
+            home_marker=home_marker_value() if not archived else "",
+            home_panel=home_activity.panel() if not archived else None,
             match_audit=__import__("search_match_audit").summary(),
             rows=rows,
             archived=archived,
@@ -1225,6 +1228,40 @@ def create_app(test_config=None):
 
     # Keep at least two of the four HTTP threads available for normal dashboard use.
     finds_watchers = threading.BoundedSemaphore(2)
+
+    def home_marker_value(detail=False):
+        with closing(search_settings.connection()) as conn:
+            return home_activity.marker(conn, detail)
+
+    @app.get("/vinted-home")
+    def vinted_home_page():
+        # Read the marker first so a concurrent new find can also wake this view.
+        marker = home_marker_value(True)
+        return render_template("msj_home_page.html", home_marker=marker, home_panel=home_activity.panel(True))
+
+    @app.get("/vinted-home/updates")
+    def vinted_home_updates():
+        previous = request.args.get("after", "")
+        if len(previous) != 24 or any(c not in "0123456789abcdef" for c in previous):
+            abort(400)
+        detail = request.args.get("detail") == "1"
+        wait = finds_watchers.acquire(blocking=False)
+        try:
+            with closing(search_settings.connection()) as conn:
+                end = time.monotonic() + (20 if wait else 0)
+                while True:
+                    current = home_activity.marker(conn, detail)
+                    if current != previous:
+                        break
+                    left = end - time.monotonic()
+                    if left <= 0:
+                        return "", 204, {"Retry-After": "0" if wait else "2"}
+                    time.sleep(min(.35, left))
+        finally:
+            if wait:
+                finds_watchers.release()
+        return {"marker": current, "html": render_template(
+            "msj_home_results.html", home_panel=home_activity.panel(detail))}
 
     def find_cards(filters):
         rows, total = store.list_finds(
