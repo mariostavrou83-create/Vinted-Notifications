@@ -194,6 +194,22 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(self.fetch.call_count, 1)
         self.assertFalse(self.worker.pending["seller"])
 
+    def test_busy_account_returns_unused_page_slot_and_rechecks_feed_in_five_seconds(self):
+        self.fetch.side_effect = [home.buyer.BuyerError("Local account lock", reason="busy"),
+                                  ("home", 1005.0)]
+        self.worker.tick()
+        self.assertEqual(self.status()["code"], "busy")
+        self.assertFalse(self.worker.page_reads["seller"])
+        self.now = 1004
+        self.worker.tick()
+        self.assertEqual(self.fetch.call_count, 1)
+        self.now = 1005
+        self.worker.tick()
+        self.assertEqual(self.fetch.call_count, 2)
+        self.assertEqual(self.fetch.call_args.args, ("seller", home.buyer.BASE + "/"))
+        self.assertEqual(list(self.worker.page_reads["seller"]), [1005])
+        self.assertEqual(self.status()["code"], "checked")
+
     def test_provider_cooldown_survives_worker_restart(self):
         self.fetch.side_effect = home.buyer.BuyerError(
             "private challenge", reason="rate_limited", status=429, retry_after=1800

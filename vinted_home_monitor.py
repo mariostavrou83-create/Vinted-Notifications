@@ -364,7 +364,13 @@ class Monitor:
                     self.retry_at[role] = self.clock() + max(300, delay)
                     self.next_home[role] = self.retry_at[role]
                 else:
+                    # A local lock or purchase priority is checked before the
+                    # Home/listing GET. Keep the slot and retry after yielding.
+                    if reads and reads[-1] == now:
+                        reads.pop()
                     self.retry_at[role] = self.clock() + 5
+                    if stage == "home":
+                        self.next_home[role] = self.retry_at[role]
                 self.status(role, code, stage, exc.status)
             except Exception as exc:  # noqa: BLE001 -- isolate parsing/storage failures
                 self.pending[role].clear()
