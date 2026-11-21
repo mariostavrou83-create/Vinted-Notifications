@@ -54,6 +54,10 @@ def cents(value):
         ) from None
 
 
+def alert_item_price(row):
+    return cents({"amount": row["price"], "currency_code": row["currency"]})
+
+
 def record(
     item_id,
     state,
@@ -555,7 +559,7 @@ def checkout_amounts(checkout):
     }
 
 
-def checkout_prices(checkout, item_price, maximum, *, item_id=None):
+def checkout_prices(checkout, item_price, maximum, *, item_id=None, alert_price_limit=None):
     amounts = checkout_amounts(checkout)
     total = amounts["total"]
     components = checkout["components"]
@@ -566,12 +570,14 @@ def checkout_prices(checkout, item_price, maximum, *, item_id=None):
         summary = components.get("order_summary")
     if summary is None and current:
         summary = pay_button.get("order_summary_v2")
-    if total < item_price:
+    current_item = checkout_item_details(components, summary, item_id=item_id)
+    minimum_total = item_price if alert_price_limit is None else current_item["price"]
+    if total < minimum_total:
         raise buyer.BuyerError(
             "Autobuy stopped: Vinted's checkout total could not be verified."
         )
-    current_item = checkout_item_details(components, summary, item_id=item_id)
-    if current_item["price"] > item_price:
+    item_maximum = item_price if alert_price_limit is None else alert_price_limit
+    if current_item["price"] > item_maximum:
         raise buyer.BuyerError(
             f"The item price changed during checkout to £{current_item['price']/100:.2f}. No payment was sent.",
             reason="price_increased",
@@ -741,7 +747,7 @@ def choice_id(value):
     )
 
 
-def nearest_pickup(client, components, *, required=None):
+def nearest_pickup(client, components, *, required=None, shipping_maximum=None):
     address_component = components.get("shipping_address") or {}
     address = address_component.get("address") or {}
     shipping = components.get("shipping_pickup_details") or {}
@@ -858,7 +864,13 @@ def nearest_pickup(client, components, *, required=None):
         raise buyer.BuyerError(
             "Vinted did not return an available pickup point for your saved address."
         )
-    point = min(candidates, key=lambda candidate: candidate[:5])[-1]
+    if shipping_maximum is not None:
+        affordable = [candidate for candidate in candidates if candidate[1] <= shipping_maximum]
+        if affordable:
+            candidates = affordable
+    _, price, _, _, _, point = min(candidates, key=lambda candidate: candidate[:5])
+    if shipping_maximum is not None:
+        point = dict(point, finder_rate_price=price)
     return address["id"], pickup["pickup_option_type"], point
 
 
@@ -921,11 +933,52 @@ def preferred_payment(payment, last4):
     )
 
 
-def configure_checkout_choices(client, checkout, config):
+def check_shipping_charge(components, maximum, *, selected_rate_price=None):
+    """Use the final shipping line or the GBP rate confirmed for this exact pickup."""
+    button = components.get("pay_button_v2") or {}
+    amounts = []
+    summaries = (
+        components.get("order_summary"),
+        components.get("order_summary_v2"),
+        button.get("order_summary_v2") if isinstance(button, dict) else None,
+    )
+    for summary in summaries:
+        if not isinstance(summary, dict):
+            continue
+        for key in ("shipping", "shipping_price", "shipping_fee", "delivery_price"):
+            if summary.get(key) is not None:
+                charge = summary[key]
+                if isinstance(charge, dict):
+                    charge = charge.get("price", charge)
+                amounts.append(vinted_budget.money(charge))
+        fees = summary.get("fees")
+        if isinstance(fees, list):
+            shipping_types = ("shipping", "delivery", "order-summary-shipping", "order-summary-shipping-fee")
+            shipping = [fee for fee in fees if isinstance(fee, dict) and fee.get("type") in shipping_types]
+            if shipping:
+                amounts.append(vinted_budget.money(shipping[0].get("price")) if len(shipping) == 1 else None)
+    price = selected_rate_price
+    if amounts:
+        price = amounts[0] if len(set(amounts)) == 1 else None
+    if price is None:
+        raise buyer.BuyerError(
+            "Vinted did not confirm the shipping price in GBP. No payment was sent.",
+            reason="shipping_unverified",
+        )
+    if price > maximum:
+        raise buyer.BuyerError(
+            f"Shipping is £{price/100:.2f}. Your maximum is £{maximum/100:.2f}. No payment was sent.",
+            reason="shipping_over_limit",
+        )
+
+
+def configure_checkout_choices(client, checkout, config, *, shipping_maximum=None):
     """Select only the owner's preferences through the current first-party API."""
     checkpoint()
     preferences = choice_preferences(config)
     if preferences == {"pickup_mode": "saved", "preferred_card_last4": ""}:
+        if shipping_maximum is not None:
+            check_shipping_charge(checkout.get("components") or {}, shipping_maximum)
         return checkout
     purchase_id = str(checkout.get("id", ""))
     components = checkout.get("components")
@@ -935,9 +988,13 @@ def configure_checkout_choices(client, checkout, config):
         raise buyer.BuyerError("Vinted did not confirm readable checkout choices.")
     changes = {}
     expected = None
+    selected_rate_price = None
     required = preferences.get("required_inpost_point")
     if required is not None or config["pickup_mode"] == "nearest":
-        address_id, pickup_type, point = nearest_pickup(client, components, required=required)
+        address_id, pickup_type, point = nearest_pickup(
+            client, components, required=required, shipping_maximum=shipping_maximum
+        )
+        quoted_order = str(components["shipping_pickup_details"].get("shipping_order_id"))
         expected = address_id, pickup_type, point
         details = (components.get("shipping_pickup_details") or {}).get(
             "pickup_details"
@@ -1014,6 +1071,13 @@ def configure_checkout_choices(client, checkout, config):
                 selected_carrier=point["finder_selected_carrier"], fallback=point["finder_fallback"],
             ):
                 raise buyer.BuyerError(pickup_policy.required_message(required))
+        if shipping_maximum is not None:
+            shipping_order = str(components["shipping_pickup_details"].get("shipping_order_id"))
+            address_order = components["shipping_address"].get("shipping_order_id")
+            if shipping_order != quoted_order or (address_order is not None and str(address_order) != quoted_order):
+                raise buyer.BuyerError("Vinted changed the shipping order before confirming the rate. No payment was sent.",
+                                       reason="shipping_unverified")
+            selected_rate_price = point["finder_rate_price"]
     if (
         last4
         and preferred_payment(components.get("payment_method") or {}, last4) is not None
@@ -1021,6 +1085,8 @@ def configure_checkout_choices(client, checkout, config):
         raise buyer.BuyerError(
             "Vinted did not confirm your preferred card or balance. No payment was sent."
         )
+    if shipping_maximum is not None:
+        check_shipping_charge(components, shipping_maximum, selected_rate_price=selected_rate_price)
     return checkout
 
 
@@ -1154,7 +1220,7 @@ def verified_listing(client, row, config, limits):
     if not isinstance(price, dict):
         price = {"amount": price, "currency_code": item.get("currency")}
     current_price = cents(price)
-    alert_price = cents({"amount": row["price"], "currency_code": row["currency"]})
+    alert_price = alert_item_price(row)
     if current_price > alert_price:
         raise buyer.BuyerError(
             f"Item price increased from £{alert_price/100:.2f} to £{current_price/100:.2f} after your alert. No payment was sent.",
@@ -1511,9 +1577,7 @@ def buy_checkout_quote(token, *, alert_row=None):
                     "The quote belongs to a different alert. No payment was sent."
                 )
             config, limits = ready(alert_row)
-            alert_price = cents(
-                {"amount": alert_row["price"], "currency_code": alert_row["currency"]}
-            )
+            alert_price = alert_item_price(alert_row)
             if quote["item_price"] > alert_price:
                 raise buyer.BuyerError(
                     "The item price increased after its alert. No payment was sent.",
@@ -1567,7 +1631,9 @@ def buy_checkout_quote(token, *, alert_row=None):
             phase = "confirming your delivery and payment preferences"
             report("selecting_delivery")
             checkpoint()
-            checkout = configure_checkout_choices(client, checkout, config)
+            checkout = configure_checkout_choices(
+                client, checkout, config, shipping_maximum=limits.shipping_maximum if limits else None
+            )
             if checkout_choice_details(checkout)["signature"] != quote.get("choices"):
                 raise buyer.BuyerError(
                     "The quoted delivery or payment choice changed. Prepare a fresh test before buying."
@@ -1691,6 +1757,11 @@ def check_listing(item_id):
             phase = "checking the listing"
             price, _ = verified_listing(client, row, config, limits)
             logger.info("Autobuy listing check: item=%s result=verified", item_id)
+            if limits.shipping_maximum is not None:
+                return (
+                    f"Listing check passed at £{price/100:.2f}. Your item limit is the alerted £{alert_item_price(row)/100:.2f}. "
+                    f"Autobuy checks for shipping up to £{limits.shipping_maximum/100:.2f} at checkout."
+                )
             if limits.total_maximum is not None:
                 limit_text = f"maximum total £{limits.total_maximum/100:.2f}"
             elif limits.item_maximum is not None:
@@ -1857,7 +1928,7 @@ def _buy(row):
                 raise buyer.BuyerError("Autobuy was disabled before payment.")
             report("selecting_delivery")
             checkpoint()
-            checkout = configure_checkout_choices(client, checkout, config)
+            checkout = configure_checkout_choices(client, checkout, config, shipping_maximum=limits.shipping_maximum)
             current = buyer.settings()
             if (
                 not current["enabled"]
@@ -1870,8 +1941,9 @@ def _buy(row):
                 )
             limits = limits.restrict(vinted_budget.purchase_limits(row))
             check_item_limits(current_price, limits, row["query_id"])
+            alert_ceiling = alert_item_price(row) if limits.shipping_maximum is not None else None
             total = checkout_prices(
-                checkout, current_price, limits.total_maximum, item_id=item_id
+                checkout, current_price, limits.total_maximum, item_id=item_id, alert_price_limit=alert_ceiling
             )
             info = saved_browser_info()
             guard_new_payment(item_id)
@@ -2138,7 +2210,10 @@ def check_payment(item_id, *, verify_paid=False):
 
 def feedback_buttons(row, feedback=None):
     if not feedback:
-        return [[InlineKeyboardButton("Autobuy", callback_data="buy:click")]]
+        label = "Autobuy"
+        if vinted_budget.tap_shipping_maximum() is not None:
+            label = "Autobuy · shipping under £5"
+        return [[InlineKeyboardButton(label, callback_data="buy:click")]]
     state = feedback.get("state")
     reason = feedback.get("reason")
     label = {
@@ -2171,6 +2246,8 @@ def feedback_buttons(row, feedback=None):
             "item_closed": "Listing closed · details",
             "item_unavailable": "Listing unavailable · details",
             "price_increased": "Item price increased · details",
+            "shipping_over_limit": "Shipping costs £5 or more · details",
+            "shipping_unverified": "Shipping price unconfirmed · details",
             "total_over_budget": "Over budget with fees & delivery · details",
             "item_over_budget": "Item exceeds total budget · details",
             "item_over_url_limit": "Item exceeds URL price limit · details",

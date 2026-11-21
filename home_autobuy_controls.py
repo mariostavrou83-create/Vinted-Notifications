@@ -47,9 +47,12 @@ async def open_alert(message, bot, item_id):
 async def refresh(bot, chat_id):
     if not str(chat_id).isdigit() or not bot.username:
         return
+    from vinted_budget import tap_shipping_maximum
+    refresh_key = ("home_buy_buttons_postage_under_5_v1" if tap_shipping_maximum() is not None
+                   else "home_buy_buttons_refreshed_v1")
     with closing(connection()) as conn, conn:
         conn.execute("INSERT OR REPLACE INTO parameters VALUES ('home_telegram_bot_username',?)",(bot.username,))
-        if conn.execute("SELECT 1 FROM parameters WHERE key='home_buy_buttons_refreshed_v1'").fetchone():
+        if conn.execute("SELECT 1 FROM parameters WHERE key=?", (refresh_key,)).fetchone():
             return
         ids = conn.execute("SELECT telegram_message_id FROM alert_outbox WHERE " + HOME_ALERT
                            + " AND status='sent' AND query_id IS NULL AND found_at>=? ORDER BY found_at DESC",
@@ -66,5 +69,5 @@ async def refresh(bot, chat_id):
             logger.warning("Home Autobuy controls deferred: %s", type(exc).__name__)
             return
     with closing(connection()) as conn, conn:
-        conn.execute("INSERT OR REPLACE INTO parameters VALUES ('home_buy_buttons_refreshed_v1','1')")
+        conn.execute("INSERT OR REPLACE INTO parameters VALUES (?,'1')", (refresh_key,))
     logger.info("Home Autobuy controls updated: existing_alerts=%d dashboard_link=True", count)

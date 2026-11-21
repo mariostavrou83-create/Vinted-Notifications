@@ -312,9 +312,9 @@ def markup(row, details, *, view="listing", note_page=None):
         [InlineKeyboardButton("Open " + marketplace + " listing ↗", url=row["url"])]
     ]
     unguided_home = not row.get("query_id") and (details.get("home_discovery") or {}).get("reason") == "recommendation"
-    from vinted_budget import home_cap
+    from vinted_budget import home_cap, tap_shipping_maximum
     cap = home_cap(details) if unguided_home else None
-    if marketplace == "Vinted" and cap and not details.get("buy_feedback"):
+    if marketplace == "Vinted" and cap and tap_shipping_maximum() is None and not details.get("buy_feedback"):
         buttons.append([InlineKeyboardButton(f"Autobuy · max £{cap / 100:.2f} all-in", callback_data="buy:click")])
     elif marketplace == "Vinted" and (not unguided_home or cap):
         from vinted_buying import feedback_buttons

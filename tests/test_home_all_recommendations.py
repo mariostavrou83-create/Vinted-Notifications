@@ -1,4 +1,5 @@
 import json
+import os
 import time
 import unittest
 from contextlib import closing
@@ -57,6 +58,22 @@ class HomeRecommendationsTests(DatabaseFixture, unittest.TestCase):
         self.assertTrue(vinted_alerts.prepare_listing(ready))
         controls.configure("0")
         self.assertFalse(vinted_alerts.prepare_listing(ready))
+
+    @patch.dict(os.environ, {"MSJ_AUTOBUY_PRICE_POLICY": "postage_under_5"})
+    def test_home_price_does_not_filter_alerts_and_tap_uses_postage_rule(self):
+        import vinted_budget
+
+        self.item["price"]["amount"] = "175.00"
+        self.new()
+        row = self.row()
+        details = vinted_alerts.get_details(row)
+        self.assertIsNone(row["query_id"])
+        self.assertTrue(vinted_alerts.prepare_listing(alert_delivery.claim(now=self.now + 1)))
+        limits = vinted_budget.purchase_limits(row)
+        self.assertIsNone(limits.total_maximum)
+        self.assertEqual(limits.shipping_maximum, 499)
+        buttons = photo_cards.markup(row, details).inline_keyboard
+        self.assertIn("Autobuy · shipping under £5", [button.text for group in buttons for button in group])
 
     def test_only_confirmed_womens_clothing_can_alert_regardless_of_the_title(self):
         for categories,labels in [(["2309","3037"],["Entertainment","Books"]),(["1904","19","156"],["Women","Bags"]),

@@ -515,8 +515,8 @@ class ReviewTests(DatabaseFixture, unittest.TestCase):
         self.approved()
         original = buying.configure_checkout_choices
 
-        def changed(*args):
-            checked = original(*args)
+        def changed(*args, **kwargs):
+            checked = original(*args, **kwargs)
             with closing(search_settings.connection()) as conn, conn:
                 conn.execute(
                     "UPDATE vinted_search_budgets SET max_total=1800 WHERE query_id=1"
@@ -532,8 +532,8 @@ class ReviewTests(DatabaseFixture, unittest.TestCase):
         original = buying.configure_checkout_choices
         clock = [time.time()]
 
-        def expires(*args):
-            checked = original(*args)
+        def expires(*args, **kwargs):
+            checked = original(*args, **kwargs)
             clock[0] += 1801
             return checked
 

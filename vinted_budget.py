@@ -1,5 +1,6 @@
 """Search price limits and optional all-in budgets for user-tapped purchases."""
 
+import os
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
@@ -150,6 +151,7 @@ def alert_lines(budget):
 class PurchaseLimits:
     item_maximum: int | None = None
     total_maximum: int | None = None
+    shipping_maximum: int | None = None
 
     def restrict(self, current):
         # Editing/removing a limit while checkout runs cannot expand this tap.
@@ -160,7 +162,15 @@ class PurchaseLimits:
         return PurchaseLimits(
             stricter(self.item_maximum, current.item_maximum),
             stricter(self.total_maximum, current.total_maximum),
+            stricter(self.shipping_maximum, current.shipping_maximum),
         )
+
+
+def tap_shipping_maximum():
+    """This owner's explicit tap permits up to £4.99 delivery on a GBP alert."""
+    if os.getenv("MSJ_AUTOBUY_PRICE_POLICY") == "postage_under_5":
+        return 499
+    return None
 
 
 def home_cap(details):
@@ -177,10 +187,13 @@ def purchase_limits(row):
     from search_settings import get_search
     from vinted_buyer import BuyerError
 
+    shipping_maximum = tap_shipping_maximum()
     if row.get("query_id") is None and row.get("item_id"):
         from vinted_alerts import get_details
         cap = home_cap(get_details(row))
         if cap is not None:
+            if shipping_maximum is not None:
+                return PurchaseLimits(shipping_maximum=shipping_maximum)
             return PurchaseLimits(total_maximum=cap)
     search = get_search(row.get("query_id"))
     if (
@@ -193,6 +206,10 @@ def purchase_limits(row):
             "Autobuy stopped: this Vinted search is no longer active.",
             reason="search_inactive",
         )
+    if shipping_maximum is not None:
+        # Search limits still filter alerts. This tap authorises the listed item
+        # plus the verified checkout fees and the selected delivery charge.
+        return PurchaseLimits(shipping_maximum=shipping_maximum)
     maximum = search.get("vinted_max_total")
     if maximum is not None:
         if not isinstance(maximum, int) or not 100 <= maximum <= 100000:

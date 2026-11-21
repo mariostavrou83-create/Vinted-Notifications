@@ -431,12 +431,16 @@ class LeRobot:
 
     async def start_delivery(self, application):
         from alert_delivery import VintedDeliveryWorker
+        from vinted_budget import tap_shipping_maximum
         from vinted_pickup_policy import required_point
 
         if self._delivery_task is not None and not self._delivery_task.done():
             return
         await self.set_commands(application)
         target = required_point() or {}
+        if tap_shipping_maximum() is not None:
+            logger.info("Autobuy tap pricing: item_limit=alert_price shipping_max_pence=%d search_budgets=alerts_only",
+                        tap_shipping_maximum())
         logger.info("Autobuy pickup policy: inpost_first=True same_shop_courier_fallback=True configured_shop_baba=%s complete=%s",
                     bool(re.search(r"\bbaba\b", target.get("name",""), re.I)), all(target.get(k) for k in ("name","postcode","code")))
         self._delivery_worker = VintedDeliveryWorker(

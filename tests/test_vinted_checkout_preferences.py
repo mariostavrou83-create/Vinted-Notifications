@@ -383,6 +383,106 @@ class CheckoutPreferencesTests(DatabaseFixture, unittest.TestCase):
                 self.configure()
         self.assertFalse(self.payments())
 
+    @patch.dict(os.environ, {"MSJ_AUTOBUY_PRICE_POLICY": "postage_under_5",
+                             "MSJ_INPOST_POINT_CODE": "TEST-SHOP-42",
+                             "MSJ_INPOST_POINT_NAME": "Example Shop",
+                             "MSJ_INPOST_POINT_POSTCODE": "AA1 1AA"})
+    def test_tap_can_exceed_search_estimate_and_use_499_courier_at_same_shop(self):
+        first, second, _ = [entry["point"] for entry in self.points["shipping_points"]]
+        first.update(code="TEST-SHOP-42", carrier_name="InPost", postcode="AA11AA")
+        second.update(name="Example Shop", carrier_name="DPD", postcode="AA1 1AA")
+        for rate in self.points["shipping_rates"]:
+            rate["price"]["amount"] = "4.99" if rate["rate_uuid"] == second["rate_uuid"] else "5.00"
+        self.checkout["components"]["pay_button_v2"]["total"]["price"]["amount"] = "21.49"
+        # The seller briefly lowered the price. The final item still costs
+        # the £15 displayed on the alert, and the search budget is only £19.
+        self.client.listing_page.return_value["item"]["price"]["amount"] = "14.00"
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("INSERT INTO vinted_search_budgets(query_id,max_total) VALUES(1,1900)")
+        update, context = self.telegram_alert()
+        with patch.object(buyer, "connected_client", return_value=self.client):
+            asyncio.run(buying.callback(update, context))
+            asyncio.run(buying.callback(update, context))
+        self.assertEqual(buying.result("123")["state"], "paid")
+        self.assertEqual(buying.result("123")["total"], 2149)
+        self.assertEqual(buying.checkout_choice_details(self.checkout)["signature"]["point_code"], second["code"])
+        self.assertEqual(len(self.payments()), 1)
+        self.assertEqual(search_settings.get_search(1)["vinted_max_total"], 1900)
+
+    @patch.dict(os.environ, {"MSJ_AUTOBUY_PRICE_POLICY": "postage_under_5"})
+    def test_shipping_of_exactly_five_or_more_blocks_even_without_a_search_budget(self):
+        for rate in self.points["shipping_rates"]:
+            rate["price"]["amount"] = "5.00"
+        self.checkout["components"]["pay_button_v2"]["total"]["price"]["amount"] = "22.00"
+        with patch.object(buyer, "connected_client", return_value=self.client):
+            outcome = buying.buy(self.row)
+        self.assertEqual(outcome["reason"], "shipping_over_limit")
+        self.assertIn("£5.00", outcome["message"])
+        self.assertFalse(self.payments())
+
+    @patch.dict(os.environ, {"MSJ_AUTOBUY_PRICE_POLICY": "postage_under_5"})
+    def test_home_tap_can_pass_its_old_all_in_estimate(self):
+        import vinted_home_monitor
+
+        now = time.time()
+        item = {
+            "id": "123", "title": "Fictional cardigan", "url": self.row["url"],
+            "category_ids": ["1904", "4", "13"], "price": {"amount": "15.00", "currency_code": "GBP"},
+        }
+        age = {"verified": True, "max_age_seconds": 20, "checked_at": now}
+        self.assertTrue(vinted_home_monitor._publish(item, None, None, age, "seller", now=now))
+        with closing(search_settings.connection()) as conn:
+            row = dict(conn.execute("SELECT * FROM alert_outbox WHERE item_id='123'").fetchone())
+        estimate = vinted_alerts.get_details(row)["budget"]["total"]
+        self.checkout["components"]["pay_button_v2"]["total"]["price"]["amount"] = "20.99"
+        with patch.object(buyer, "connected_client", return_value=self.client):
+            outcome = buying.buy(row)
+        self.assertEqual(outcome["state"], "paid")
+        self.assertGreater(outcome["total"], estimate)
+        self.assertEqual(len(self.payments()), 1)
+
+    @patch.dict(os.environ, {"MSJ_AUTOBUY_PRICE_POLICY": "postage_under_5"})
+    def test_changed_shipping_order_invalidates_the_rate_before_payment(self):
+        def replace_order(checkout):
+            shipping = checkout["components"]["shipping_pickup_details"]
+            if shipping["pickup_details"]["selected_rate_uuid"] == "near-rate":
+                shipping["shipping_order_id"] = 301
+
+        self.corrupt = replace_order
+        with patch.object(buyer, "connected_client", return_value=self.client):
+            outcome = buying.buy(self.row)
+        self.assertEqual(outcome["reason"], "shipping_unverified")
+        self.assertFalse(self.payments())
+
+    @patch.dict(os.environ, {"MSJ_AUTOBUY_PRICE_POLICY": "postage_under_5"})
+    def test_explicit_final_postage_rechecks_the_selected_rate_before_payment(self):
+        self.checkout["components"]["order_summary_v2"]["shipping"] = {
+            "price": {"amount": "5.01", "currency_code": "GBP"}}
+        with patch.object(buyer, "connected_client", return_value=self.client):
+            outcome = buying.buy(self.row)
+        self.assertEqual(outcome["reason"], "shipping_over_limit")
+        self.assertFalse(self.payments())
+
+    @patch.dict(os.environ, {"MSJ_AUTOBUY_PRICE_POLICY": "postage_under_5"})
+    def test_shipping_rule_preserves_alerted_item_maximum_at_checkout(self):
+        item = self.checkout["components"]["order_summary_v2"]["order_items"][0]
+        item["pricing"]["final_price"]["amount"] = "15.01"
+        with patch.object(buyer, "connected_client", return_value=self.client):
+            outcome = buying.buy(self.row)
+        self.assertEqual(outcome["reason"], "price_increased")
+        self.assertFalse(self.payments())
+
+    def test_shipping_verification_accepts_free_and_stops_on_missing_or_conflicting_amounts(self):
+        money = {"amount": "0.00", "currency_code": "GBP"}
+        summary = {"shipping": {"price": money}}
+        buying.check_shipping_charge({"order_summary_v2": summary}, 499)
+        for components in ({}, {"order_summary_v2": {"shipping_price": dict(money, currency_code="EUR")}},
+                           {"order_summary_v2": summary, "pay_button_v2": {
+                               "order_summary_v2": {"shipping_price": dict(money, amount="1.00")}}}):
+            with self.subTest(components=components), self.assertRaises(buyer.BuyerError) as raised:
+                buying.check_shipping_charge(components, 499)
+            self.assertEqual(raised.exception.reason, "shipping_unverified")
+
     def test_fallback_rechecks_selected_shop_and_courier_on_final_quote(self):
         policy = {"MSJ_INPOST_POINT_CODE":"old-inpost-code", "MSJ_INPOST_POINT_NAME":"Baba Food",
                   "MSJ_INPOST_POINT_POSTCODE":"AA1 1AA"}

@@ -28,6 +28,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 import dashboard_store as store
 import db
+from vinted_budget import tap_shipping_maximum
 import ebay_privacy
 import vinted_home_activity as home_activity
 import ebay_store
@@ -213,6 +214,7 @@ def create_app(test_config=None):
     def common():
         return {
             "csrf": session.get("csrf"),
+            "autobuy_shipping_maximum": tap_shipping_maximum(),
             "loads": json.loads,
             "money": lambda cents: "" if cents is None else f"{cents/100:.2f}",
             "supabase_enabled": hosted_auth is not None,
