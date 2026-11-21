@@ -9,6 +9,7 @@ not first-seen time, item ordering, photo timestamps or seller activity.
 import math
 import re
 from collections import deque
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from urllib.parse import parse_qs, urlsplit
 
@@ -216,7 +217,20 @@ def _sidebar(tree, identity):
     return side[0] if len(side) == 1 else None
 
 
-def listing_age(body, item_id, now):
+def _upload_time(value):
+    if type(value) is int or (isinstance(value, str) and re.fullmatch(r"\d{1,13}", value)):
+        stamp = int(value)
+        return stamp / 1000 if 10**12 <= stamp < 10**13 else stamp
+    if isinstance(value, str) and len(value) <= 50 and "T" in value:
+        try:
+            date = datetime.fromisoformat(value)
+            return date.timestamp() if date.tzinfo is not None else None
+        except (ValueError, OSError, OverflowError):
+            return None
+    return None
+
+
+def listing_age(body, item_id, now, *, side=None, attrs=None):
     """Age at request start; caller must add elapsed/cache age before alerting."""
     result = {
         "verified": False,
@@ -232,8 +246,9 @@ def listing_age(body, item_id, now):
         or now <= 0
     ):
         return result
-    tree = _tree(body)
-    side = _sidebar(tree, identity) if tree is not None else None
+    if side is None:
+        tree = _tree(body)
+        side = _sidebar(tree, identity) if tree is not None else None
     if side is None:
         return result
     ages = side.xpath('.//*[@itemprop="upload_date"]')
@@ -253,6 +268,20 @@ def listing_age(body, item_id, now):
         evidence="target_upload_date",
         fresh=bounds[1] <= MAX_AGE_SECONDS,
     )
+    if bounds[0] < MAX_AGE_SECONDS:
+        stamps = []
+        for v in ages[0].xpath('./@datetime | ./@content | .//time/@datetime'):
+            if (stamp := _upload_time(v)) is not None:
+                stamps.append(stamp)
+        if attrs is None and bounds[1] == MAX_AGE_SECONDS:
+            attrs = _native_attributes(body, identity)
+        if attrs and attrs.get("created_stamp") is not None:
+            stamps.append(attrs["created_stamp"])
+        if stamps and not (attrs or {}).get("conflicting_creation_time") and max(stamps) - min(stamps) <= 1:
+            elapsed = now - min(stamps)
+            if bounds[0] <= elapsed < bounds[1]:
+                result.update(max_age_seconds=math.ceil(elapsed), min_age_seconds=math.floor(elapsed),
+                              evidence="target_upload_timestamp")
     return result
 
 
@@ -263,6 +292,7 @@ def _native_attributes(body, identity):
     roots, rows = _records(scripts.scripts)
     pending = deque((root, 0) for root in roots)
     fields, conflicts, visited = {}, set(), 0
+    creation_times = set()
     keys = (
         "brand_id",
         "catalog_id",
@@ -288,6 +318,11 @@ def _native_attributes(body, identity):
             if same_item and "seller_id" in value:
                 if "item_id" in value and _identity(value["item_id"]) != identity:
                     return {}
+                if "catalog_id" in value or "price" in value:
+                    for key in ("created_at_ts", "created_at"):
+                        stamp = _upload_time(_resolve(value.get(key), rows))
+                        if stamp is not None:
+                            creation_times.add(stamp)
                 user = _resolve(value.get("user"), rows)
                 country = value.get("seller_country_code")
                 if isinstance(user, dict) and _identity(user.get("id")) == _identity(value.get("seller_id")):
@@ -319,6 +354,11 @@ def _native_attributes(body, identity):
         if len(children) + len(pending) + visited > MAX_NODES:
             return {}
         pending.extend((child, depth + 1) for child in children)
+    if creation_times:
+        if max(creation_times) - min(creation_times) <= 1:
+            fields["created_stamp"] = min(creation_times)
+        else:
+            fields["conflicting_creation_time"] = True
     return {**fields, "conflicting_fields": sorted(conflicts)} if not pending else {}
 
 
@@ -365,16 +405,16 @@ def _visible_stock(side):
 
 def parse_listing(body, item_id, now):
     """Return fresh target details; no credentials, writes, or purchase operations."""
-    age = listing_age(body, item_id, now)
+    identity = str(item_id)
+    tree = _tree(body)
+    side = _sidebar(tree, identity) if tree is not None else None
+    attrs = _native_attributes(body, identity) if side is not None else {}
+    age = listing_age(body, item_id, now, side=side, attrs=attrs)
     result = {"age": age, "item": None, "reason": "listing_unverified"}
     if not age["verified"]:
         return result
-    tree = _tree(body)
-    identity = str(item_id)
-    side = _sidebar(tree, identity)
     diagnostic = {}
     native = parse_purchase_item(body, identity, diagnostics=diagnostic)
-    attrs = _native_attributes(body, identity)
     public_stock = _visible_stock(side)
     if attrs.get("unavailable") or public_stock is False:
         result["reason"] = "unavailable"

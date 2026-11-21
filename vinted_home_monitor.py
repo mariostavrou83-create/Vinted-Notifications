@@ -22,12 +22,15 @@ import vinted_seller as seller
 from logger import get_logger
 from vinted_buyer_priority import yield_to_purchase
 from vinted_home_feed import parse_home, parse_listing
+from vinted_home_looks import card_priority
 from vinted_home_matching import match_candidate
 from vinted_home_transport import read_html
 
 logger = get_logger(__name__)
 INTERVAL = 60
 MAX_DETAILS = 6
+PAGE_BUDGET = 1 + MAX_DETAILS
+REPEAT_INTERVAL = 32
 CYCLE_SECONDS = 30
 MAX_AGE = 180
 ROLES = ("seller", "buyer")
@@ -51,6 +54,7 @@ COUNTERS = (
     "style_miss",
     "photo_checked",
     "photo_matches",
+    "card_screened",
 )
 ERROR_CODES = frozenset(
     {
@@ -86,7 +90,7 @@ def active_searches():
     with db.connection_scope():
         return [
             search
-            for row in search_settings.active_queries()
+            for row in search_settings.active_queries(include_home=True)
             if (search := search_settings.get_search(row[0])) is not None
         ]
 
@@ -234,6 +238,7 @@ class Monitor:
         self.next_home = {role: 0 for role in ROLES}
         self.pending = {role: deque() for role in ROLES}
         self.deadline = {role: 0 for role in ROLES}
+        self.page_reads = {role: deque() for role in ROLES}
         self.counts = {role: dict.fromkeys(COUNTERS, 0) for role in ROLES}
         self.examined = OrderedDict()
         self.searches = []
@@ -277,7 +282,7 @@ class Monitor:
                 ),
             )
         logger.info(
-            "Vinted Home monitor: role=%s code=%s detail=%s stage=%s http=%s retry_at=%s candidates=%s checked=%s fresh=%s matched=%s alerts=%s rejected_age=%s rejected_match=%s duplicates=%s age_unverified=%s age_expired=%s skipped_redirect=%s listing_unavailable=%s details_unverified=%s global_blocked=%s scope_miss=%s budget_or_exclusions=%s style_miss=%s photo_checked=%s photo_matches=%s",
+            "Vinted Home monitor: role=%s code=%s detail=%s stage=%s http=%s retry_at=%s candidates=%s checked=%s fresh=%s matched=%s alerts=%s rejected_age=%s rejected_match=%s duplicates=%s age_unverified=%s age_expired=%s skipped_redirect=%s listing_unavailable=%s details_unverified=%s global_blocked=%s scope_miss=%s budget_or_exclusions=%s style_miss=%s photo_checked=%s photo_matches=%s card_screened=%s",
             role,
             code,
             data["detail_code"],
@@ -316,6 +321,11 @@ class Monitor:
             stage = "listing" if self.pending[role] else "home"
             if stage == "home" and now < self.next_home[role]:
                 continue
+            reads = self.page_reads[role]
+            while reads and reads[0] <= now - INTERVAL:
+                reads.popleft()
+            if len(reads) >= PAGE_BUDGET:
+                continue
             try:
                 reason = _account_ready(role)
                 if reason:
@@ -334,6 +344,7 @@ class Monitor:
                     self.status(role, "no_searches", "idle")
                     return
                 if stage == "home":
+                    reads.append(now)
                     self.home(role, now)
                 else:
                     self.listing(role, searches, now)
@@ -386,14 +397,33 @@ class Monitor:
         # ID ordering only determines which candidates get the bounded read;
         # it never establishes age. The target upload field must do that.
         fresh_ids = []
+        ranked = {}
         for item in sorted(
             candidates, key=lambda value: int(value["id"]), reverse=True
         ):
             if str(item["id"]) in seen or str(item["id"]) in self.examined:
                 self.counts[role]["duplicates"] += 1
                 continue
-            fresh_ids.append(item)
-        self.pending[role] = deque(fresh_ids[:MAX_DETAILS])
+            priority = card_priority(item)
+            if priority >= 0:
+                fresh_ids.append(item)
+                ranked[str(item["id"])] = priority
+            else:
+                self.counts[role]["card_screened"] += 1
+        repeat_heavy = len(candidates) >= 10 and self.counts[role]["duplicates"] >= len(candidates) // 2
+        # Some old reads will leave the rolling window before this queue expires.
+        # tick() still enforces the actual cap immediately before each request.
+        retained = sum(at > now + CYCLE_SECONDS - INTERVAL for at in self.page_reads[role])
+        limit = min(MAX_DETAILS, PAGE_BUDGET - retained)
+        if repeat_heavy and len(fresh_ids) <= 5 and len(self.page_reads[role]) <= 2:
+            self.next_home[role] = now + REPEAT_INTERVAL
+            limit = min(limit, 3)
+        # Reserve half the slots for the newest IDs even with vague listing titles.
+        # Among the next newest cards, use the owner's priority looks to spend the remaining reads.
+        newest = fresh_ids[:(limit + 1) // 2]
+        others = fresh_ids[len(newest):MAX_DETAILS * 2]
+        priority = sorted(others, key=lambda entry: ranked[str(entry["id"])], reverse=True)[:limit-len(newest)]
+        self.pending[role] = deque(newest + priority)
         self.deadline[role] = self.clock() + CYCLE_SECONDS
         self.status(role, "checked", "home", 200)
 
@@ -406,6 +436,7 @@ class Monitor:
             self.counts[role]["duplicates"] += 1
             return
         try:
+            self.page_reads[role].append(now)
             html, observed = self.fetch(role, candidate["url"])
         except buyer.BuyerError as exc:
             # The transport distinguishes a local listing redirect from login,

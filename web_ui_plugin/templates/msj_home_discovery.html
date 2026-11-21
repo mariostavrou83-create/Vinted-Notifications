@@ -6,7 +6,7 @@
 <form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="action" value="home_discovery">
 <input type="hidden" name="home_enabled" value="{{'0' if home_discovery.enabled else '1'}}">
 <button class="{{'secondary' if home_discovery.enabled else 'primary'}}">{{'Pause Home discovery' if home_discovery.enabled else 'Start Home discovery'}}</button>
-<span>{{'Running' if home_discovery.enabled else 'Paused'}} · target one feed check per account per minute, with cooldowns when needed</span></form>
-<div class="connection-grid">{% for account in home_discovery.accounts %}<div><h3>{{account.label}}</h3><p>{{account.state}} · {{account.time}}</p><p class="muted">Latest cycle: {{account.candidates}} candidates · {{account.checked}} age checks · {{account.fresh}} fresh · {{account.matched}} matches · {{account.alerts}} alerts queued</p>
+<span>{{'Running' if home_discovery.enabled else 'Paused'}} · available accounts refresh about every 32–60 seconds, with up to seven Home and listing page reads per account per minute</span></form>
+<div class="connection-grid">{% for account in home_discovery.accounts %}<div><h3>{{account.label}}</h3><p>{{account.state}} · {{account.time}}</p><p class="muted">Latest cycle: {{account.candidates}} candidates · {{account.checked}} age checks · {{account.card_screened}} screened by size or label · {{account.fresh}} fresh · {{account.matched}} matches · {{account.alerts}} alerts queued</p>
 {% if account.fresh %}<p class="muted">Fresh-item checks · {{account.listing_unavailable + account.details_unverified}} unavailable or missing details · {{account.global_blocked}} global filters · {{account.scope_miss}} outside search filters · {{account.budget_or_exclusions}} price or exclusions · {{account.style_miss}} outside target style · {{account.photo_checked}} photos compared</p>{% endif %}</div>{% endfor %}</div>
 </section>

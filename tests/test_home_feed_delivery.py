@@ -169,7 +169,7 @@ class HomeOutboxTests(DatabaseFixture, unittest.TestCase):
         row = outbox(110)
         details = vinted_alerts.get_details(row)
         parts = vinted_alerts.sections(row, details)
-        self.assertIn("Home feed find", parts[0])
+        self.assertIn("Vinted Home · feed find", parts[0])
         self.assertIn("within 3 minutes", parts[2])
         self.assertIn("Brand, category and style", parts[2])
         self.assertIn("Exact seller description &lt;unchanged&gt;", parts[3])

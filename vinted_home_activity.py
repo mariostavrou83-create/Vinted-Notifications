@@ -27,7 +27,11 @@ def migrate(conn):
         url TEXT NOT NULL, photo TEXT, price TEXT NOT NULL, brand TEXT NOT NULL,
         size TEXT NOT NULL, outcome TEXT NOT NULL)""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_home_activity_time ON vinted_home_activity(checked_at DESC)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_alert_home_time ON alert_outbox(found_at DESC,item_id DESC) WHERE " + HOME_ALERT)
+    old = conn.execute("SELECT sql FROM sqlite_master WHERE name='idx_alert_home_time'").fetchone()
+    if old and "platform=" in old[0]:
+        conn.execute("DROP INDEX idx_alert_home_time")
+    conn.execute("""CREATE INDEX IF NOT EXISTS idx_alert_home_time ON alert_outbox(found_at DESC,item_id DESC)
+        WHERE substr(content,1,1)='🏠'""")
 
 
 def record(item, observed, outcome):
@@ -61,6 +65,12 @@ def panel(detail=False):
             "SELECT item_id,title,url,price,photo_url AS photo,found_at AS checked_at,status,query_id "
             "FROM alert_outbox WHERE " + HOME_ALERT + " AND found_at>=? AND status IN ('pending','sent') "
             "ORDER BY found_at DESC,item_id DESC LIMIT ?", (since, 12 if detail else 4))]
+        guides = [dict(row) for row in conn.execute("""SELECT hg.query_id, q.query_name AS name, b.max_total
+            FROM vinted_home_guides hg JOIN queries q ON q.id=hg.query_id
+            JOIN vinted_search_budgets b ON b.query_id=q.id JOIN search_platforms s ON s.query_id=q.id
+            LEFT JOIN search_dashboard d ON d.query_id=q.id
+            WHERE COALESCE(d.paused,0)=0 AND COALESCE(d.archived,0)=0 AND s.vinted_enabled=1
+            ORDER BY hg.query_id""")] if detail else []
         checked = [dict(row) for row in conn.execute(
             "SELECT * FROM vinted_home_activity WHERE checked_at>=? ORDER BY checked_at DESC LIMIT 24",
             (since,))] if detail else []
@@ -70,4 +80,4 @@ def panel(detail=False):
         if "outcome" in row:
             row["reason"] = REASONS.get(row["outcome"], "")
     return {"sent": totals.get("sent", 0), "waiting": totals.get("pending", 0),
-            "deals": deals, "checked": checked, "detail": detail}
+            "deals": deals, "checked": checked, "guides": guides, "detail": detail}

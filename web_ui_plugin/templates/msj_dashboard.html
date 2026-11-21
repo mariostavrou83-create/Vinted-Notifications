@@ -1,6 +1,6 @@
 {% extends 'msj_base.html' %}
 {% block content %}
-{% if not archived %}{% include 'msj_home_panel.html' %}{% endif %}
+{% if not archived and home_panel is defined %}{% include 'msj_home_panel.html' %}{% endif %}
 <div class="page-heading workspace-heading"><div><span class="eyebrow">YOUR WORKSPACE</span><h1>{{'Archived searches' if archived else 'My searches'}}</h1><p class="muted">{{'Your saved history, ready to restore.' if archived else 'Keep your searches, budgets and alerts in one place.'}}</p></div><a class="primary" href="/search/new">+ Add a search</a></div>
 <div class="workspace-stats"><div><span>{{'Archived' if archived else 'Saved searches'}}</span><strong>{{rows|length}}</strong></div><div><span>Active searches</span><strong>{{active}}</strong></div><div><span>Example photos</span><strong>{{photos}}</strong></div><div><span>eBay searches</span><strong>{{ebay_connection.active}} <small>live</small></strong></div></div>
 {% if match_audit and not archived %}<details class="audit-details"><summary>Search comparison details</summary><p>Old/new comparison is logging matches. One notification per listing. {{match_audit.overlap}} listings matched both sets; {{match_audit.counts.suppressed or 0}} additional matches logged. {{match_audit.new_searches_ready}} of {{match_audit.new_searches_total}} new searches have completed their first checks. <a href="/search-match-audit.json">Download audit log</a> · <a href="/search-review.json">Download search review data</a></p></details>{% endif %}

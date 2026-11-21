@@ -238,11 +238,15 @@ def add_item_to_db(
 
 
 def get_queries():
+    """List saved catalogue searches for legacy bot views and pollers."""
     conn = None
     try:
         conn = _connect()
         cursor = conn.cursor()
-        cursor.execute("SELECT id, query, last_item, query_name FROM queries")
+        sql = "SELECT id, query, last_item, query_name FROM queries"
+        if cursor.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='vinted_home_guides'").fetchone():
+            sql += " WHERE NOT EXISTS (SELECT 1 FROM vinted_home_guides hg WHERE hg.query_id=queries.id)"
+        cursor.execute(sql)
         return cursor.fetchall()
     except (sqlite3.Error, OSError):
         print_exc()

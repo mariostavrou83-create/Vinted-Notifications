@@ -56,7 +56,7 @@ def summary():
         for key in (
             "candidates", "checked", "fresh", "matched", "alerts", "listing_unavailable",
             "details_unverified", "global_blocked", "scope_miss", "budget_or_exclusions",
-            "style_miss", "photo_checked", "photo_matches",
+            "style_miss", "photo_checked", "photo_matches", "card_screened",
         ):
             number = raw.get(key, 0)
             value[key] = number if type(number) is int and 0 <= number <= 1000000 else 0

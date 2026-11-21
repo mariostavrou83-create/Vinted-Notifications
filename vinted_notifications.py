@@ -271,6 +271,9 @@ if __name__ == "__main__":
 
     try:
         load_buying_guides()
+        from vinted_home_guides import install as install_home_guides
+
+        logger.info("Home-only buying guides installed this startup: %s", install_home_guides())
         logger.info(
             "Finder buying guides: active=%s with_guidance=%s with_reference=%s "
             "Home_sent_24h=%s Vinted_saved_sent_24h=%s recent_Home_receipts=%s",

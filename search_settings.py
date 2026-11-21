@@ -11,7 +11,7 @@ from pathlib import Path
 
 import db
 
-SCHEMA_VERSION = "35"
+SCHEMA_VERSION = "36"
 
 
 def connection():
@@ -209,6 +209,9 @@ def ensure_schema():
             from vinted_home_activity import migrate as migrate_home_activity
 
             migrate_home_activity(conn)
+            from vinted_home_guides import migrate as migrate_home_guides
+
+            migrate_home_guides(conn)
             from vinted_accounts import migrate as migrate_accounts
 
             migrate_accounts(conn)
@@ -247,7 +250,7 @@ def get_search(query_id):
             COALESCE(p.exclusions, '[]') AS exclusions,
             COALESCE(d.paused, 0) AS paused, COALESCE(d.archived, 0) AS archived,
             COALESCE(d.rebaseline, 0) AS rebaseline, COALESCE(d.reference_id,vg.reference_id) reference_id,
-            vg.guidance AS buying_advice, vg.display_name AS visual_guide_name, vg.style_alert_cap,
+            vg.guidance AS buying_advice, vg.display_name AS visual_guide_name, vg.style_alert_cap, hg.style_key AS home_style,
             COALESCE(d.revision, 0) AS revision,
             g.max_buy, g.resale_low, g.resale_high, COALESCE(g.must_have,'') AS must_have,
             g.folder_id, f.name AS folder_name, b.max_total AS vinted_max_total,
@@ -258,6 +261,7 @@ def get_search(query_id):
             LEFT JOIN search_folders f ON f.id=g.folder_id
             LEFT JOIN vinted_search_budgets b ON b.query_id=q.id
             LEFT JOIN finder_buy_guides vg ON vg.query_id=q.id
+            LEFT JOIN vinted_home_guides hg ON hg.query_id=q.id
             WHERE q.id=?""",
             (query_id,),
         ).fetchone()
@@ -275,13 +279,14 @@ def get_search(query_id):
     return result
 
 
-def active_queries():
+def active_queries(*, include_home=False):
     with closing(connection()) as conn:
         return [tuple(row) for row in conn.execute("""SELECT q.* FROM queries q
             LEFT JOIN search_dashboard d ON d.query_id=q.id
             LEFT JOIN search_platforms s ON s.query_id=q.id
             WHERE COALESCE(d.paused,0)=0 AND COALESCE(d.archived,0)=0
-            AND COALESCE(s.vinted_enabled,1)=1""")]
+            AND COALESCE(s.vinted_enabled,1)=1 AND (? OR NOT EXISTS
+                (SELECT 1 FROM vinted_home_guides hg WHERE hg.query_id=q.id))""", (include_home,))]
 
 
 def processing_states():

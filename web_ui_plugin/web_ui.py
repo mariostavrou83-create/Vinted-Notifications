@@ -1275,7 +1275,7 @@ def create_app(test_config=None):
         for row in rows:
             row["safe_photo"] = store.safe_photo_url(row["photo_url"])
             row["home_source"] = (
-                "Home · photo match" if row["content"].startswith("🏠 <b>Home photo match")
+                "Home · photo match" if row["content"].startswith(("🏠 <b>Home photo match", "🏠 <b>Vinted Home · photo match"))
                 else "Home feed" if row["content"].startswith("🏠") else "Saved search"
             )
             row["found_label"] = datetime.fromtimestamp(

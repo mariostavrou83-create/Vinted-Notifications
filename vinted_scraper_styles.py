@@ -164,8 +164,13 @@ def named_profile(search):
     return profile_for(words, parsed[1]) if parsed else None
 
 
-def garment_quality(profile, title, description, brand=""):
-    """Return a hard rejection or whether the seller supplied distinctive features."""
+def discount_label(brand):
+    label = " " + " ".join(words(brand or "")) + " "
+    return any(" " + name + " " in label for name in _DISCOUNT)
+
+
+def brand_quality(title, description, brand=""):
+    """Screen discount and modern high-street labels using the seller’s own period evidence."""
     name = " " + " ".join(words(brand or "") + words(title or "")) + " "
     if any(" " + x + " " in name for x in _DISCOUNT):
         return "blocked"
@@ -174,7 +179,16 @@ def garment_quality(profile, title, description, brand=""):
     fields = [re.split(r"#|\b(?:styled with|paired with|search tags|tags\s*:|keywords\s*:)", f, maxsplit=1, flags=re.I)[0] for f in fields]
     if high_street and not any(_period_evidence(f) for f in fields):
         return "weak_high_street"
+    return "period_high_street" if high_street else "ok"
+
+
+def garment_quality(profile, title, description, brand=""):
+    """Return a hard rejection or whether the seller supplied distinctive features."""
+    label = brand_quality(title, description, brand)
+    if label in {"blocked", "weak_high_street"}:
+        return label
+    fields = (title, description)
     detail = Style((), (), tuple((x,) for x in _CONSTRUCTION[profile]))
     if any(evidence(f, detail) for f in fields):
         return "distinctive"
-    return "weak_high_street" if high_street else "unconfirmed"
+    return "weak_high_street" if label == "period_high_street" else "unconfirmed"

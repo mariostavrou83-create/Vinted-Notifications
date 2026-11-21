@@ -1,9 +1,8 @@
 """Conservative, side-effect-free relevance checks for Home discovery.
 
-Home recommendations are candidate discovery, never relevance proof. A candidate
-must satisfy all saved structural filters and a finite price cap. Keyword
-alternatives may use the small, explicit spelling/synonym vocabulary below; an
-photo evidence is restricted to explicitly profiled open-label style searches.
+A candidate needs a buying guide, supported garment features and a finite price
+cap. Dedicated Home guides can recognise a garment across labels. Photo-only
+matching is restricted to open-label styles with visual references.
 The caller independently verifies listing age, availability, identity and dedup.
 """
 
@@ -14,6 +13,7 @@ from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import vinted_budget
+import vinted_home_looks as home_looks
 import vinted_scraper_styles as scraper_styles
 
 MAX_TEXT = 6000
@@ -211,6 +211,9 @@ _WOMEN_CRUMBS = {
     "jackets": "1037", "coats": "1037", "tops & t-shirts": "12", "tops": "12",
     "jumpers & sweaters": "13", "jumpers & knitwear": "13", "cardigans": "194",
     "hoodies & sweatshirts": "196", "skirts": "11", "trousers": "9", "dresses": "10",
+    "jackets & blazers": "1037", "shirts & blouses": "12", "knitwear": "13",
+    "jumpers & cardigans": "13", "cardigans & boleros": "194",
+    "skirts & skorts": "11", "trousers & leggings": "9",
 }
 
 
@@ -218,7 +221,7 @@ def _item_scope(item):
     observed = {field: _ids(item.get(field)) for _, field in _FILTERS.values()}
     categories = observed["category_ids"] or set()
     labels = set(item.get("category_labels", []))
-    if labels & {"women", "women's clothing", "women’s clothing"}:
+    if "1904" in categories or labels & {"women", "women's clothing", "women’s clothing"}:
         categories = categories | {_WOMEN_CRUMBS[n] for n in labels if n in _WOMEN_CRUMBS}
     observed["category_ids"] = categories
     if not categories.intersection(_WOMEN_CLOTHING) or "size_id" in item.get("conflicting_fields", ()):
@@ -227,7 +230,7 @@ def _item_scope(item):
     if not isinstance(size, str):
         return observed
     label = size.strip().casefold().replace("–", "-").replace(" / ", "/")
-    match = re.fullmatch(r"(extra small|small|medium|xs|s|m)(?:/(?:uk |eu )?\d+(?:\s*-\s*\d+)?)*", label)
+    match = re.fullmatch(r"(extra small|small|medium|xs|s|m)(?:\s*/\s*(?:uk |eu )?\d+(?:\s*-\s*\d+)?)*", label)
     if not match:
         return observed
     visible = _WOMEN_HALVES[match[1]]
@@ -238,7 +241,7 @@ def _item_scope(item):
     return observed
 
 
-def _match(item, search, fields, styles, observed, photo_styles, eligible, diag):
+def _match(item, search, fields, styles, observed, photo_styles, eligible, diag, looks):
     if (
         not isinstance(search, dict)
         or type(search.get("id")) is not int
@@ -255,8 +258,39 @@ def _match(item, search, fields, styles, observed, photo_styles, eligible, diag)
     if parsed is None:
         return None
     values, structural = parsed
+    configured_words = (search.get("shared_keywords") if search.get("shared_alert_version") == 1
+                        else search.get("vinted_keywords")) or values.get("search_text", [])
+    if not isinstance(configured_words, list) or len(configured_words) > 100 or any(
+        not isinstance(word, str) or len(word) > 400 for word in configured_words
+    ):
+        return None
+    words = [word.strip() for word in configured_words if word.strip()]
+    profile = scraper_styles.profile_for(words, structural)
+    ralph = home_looks.ralph_guide(words, structural)
+    if ralph == "ralph_zip" and home_looks.partial_zip(item["title"], item["description"]):
+        return None
+    home_style = search.get("home_style")
+    if home_style:
+        if home_style not in looks:
+            return None
+        condition = item.get("condition")
+        if not isinstance(condition, str) or condition.strip().casefold() not in {
+            "very good", "new with tags", "new without tags", "new with tags attached"
+        }:
+            return None
+        if any(_phrase_in(flag, fields, positive=True) for flag in (
+            "damaged", "stained", "broken zip", "missing beads", "holes", "replica"
+        )):
+            return None
+    look = next((key for key in (home_style, ralph, profile) if key and key in looks), None)
+    if structural.get("size_id") and structural["size_id"] <= {"2", "3", "4"} and home_looks.contradicts_small_size(item["title"]):
+        return None
     for field, allowed in structural.items():
         field_ids = observed[field]
+        if field == "category_ids" and look in home_looks.RALPH_CATEGORIES:
+            # A full-zip knit is often filed under jumpers rather than jackets.
+            # Only the positively identified garment can use an adjacent women's category.
+            allowed = allowed | home_looks.RALPH_CATEGORIES[look]
         if not field_ids or not field_ids & allowed:
             return None
     diag.add("scope")
@@ -273,29 +307,23 @@ def _match(item, search, fields, styles, observed, photo_styles, eligible, diag)
         return None
     if must_have and not (_phrase_in(must_have, fields, positive=True) or _phrase_in(must_have, styles, synonyms=True)):
         return None
-    words = (
-        search.get("shared_keywords")
-        if search.get("shared_alert_version") == 1
-        else search.get("vinted_keywords")
-    )
-    words = words or values.get("search_text", [])
-    if not isinstance(words, list) or len(words) > 100:
-        return None
-    if any(not isinstance(word, str) or len(word) > 400 for word in words):
-        return None
-    words = [word.strip() for word in words if word.strip()]
     budget = _price_limits(item, search, values)
     if budget is None or (search.get("style_alert_cap") and budget["total"] > search["style_alert_cap"]):
         return None
     diag.add("budget")
     literal = any(_phrase_in(word, fields, positive=True) for word in words)
     equivalent = bool(words and not literal and any(_phrase_in(word, styles, synonyms=True) for word in words))
-    profile = scraper_styles.profile_for(words, structural)
     style_evidence = "literal" if literal else "equivalent_words" if equivalent else "not_required"
-    quality = scraper_styles.garment_quality(profile, item["title"], item["description"], item.get("brand_title")) if profile else None
+    quality = None
+    if look:
+        quality = scraper_styles.brand_quality(item["title"], item["description"], item.get("brand_title"))
+    elif profile:
+        quality = scraper_styles.garment_quality(profile, item["title"], item["description"], item.get("brand_title"))
     if quality in {"blocked", "weak_high_street"}:
         return None
-    if words and (not (literal or equivalent) or quality == "unconfirmed"):
+    if look:
+        style_evidence = "scraper_look"
+    elif words and (not (literal or equivalent) or quality == "unconfirmed"):
         if not profile:
             return None
         guide = scraper_styles.STYLES[profile]
@@ -318,6 +346,7 @@ def _match(item, search, fields, styles, observed, photo_styles, eligible, diag)
         "reason": style_evidence if style_evidence.startswith("scraper_") else scope + "_style" if words or must_have else "saved_filters",
         "style_evidence": style_evidence,
         "budget": budget,
+        **({"home_style": home_style} if home_style else {}),
     }
 
 
@@ -339,10 +368,11 @@ def match_candidate(item, searches, *, photo_styles=(), eligible=None, diagnosti
         return None
     fields = tuple(_words(item[k]) for k in ("title", "description"))
     styles = tuple(_canonical_words(item[k]) for k in ("title", "description"))
+    looks = home_looks.matching_looks(item["title"], item["description"])
     observed = _item_scope(item)
     eligible = eligible if eligible is not None else set()
     diag = diagnostics if diagnostics is not None else set()
     matches = [result for search in searches if (result := _match(
-        item, search, fields, styles, observed, photo_styles, eligible, diag
+        item, search, fields, styles, observed, photo_styles, eligible, diag, looks
     ))]
-    return min(matches, key=lambda result: result["query_id"]) if matches else None
+    return min(matches, key=lambda r: (r["reason"] != "scraper_look", bool(r.get("home_style")), r["query_id"])) if matches else None

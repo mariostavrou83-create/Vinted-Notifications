@@ -17,6 +17,10 @@
 </div>
 {% else %}<p>No Home deals have qualified in the past 24 hours.</p>{% endif %}
 {% if home_panel.detail %}
+{% if home_panel.guides %}<details class="home-guide-links"><summary>Home-only styles and buying limits</summary>
+  <p class="muted">These guides look across labels. Open one for example photos and the maximum including fees and postage.</p>
+  <ul>{% for guide in home_panel.guides %}<li><a href="/buying-guides?q={{ guide.query_id }}">{{ guide.name.removeprefix('Home only · ') }}</a>{% if guide.max_total %} · £{{ '%g'|format(guide.max_total / 100) }} all-in{% endif %}</li>{% endfor %}</ul>
+</details>{% endif %}
 <h2 class="home-activity-title">Recently checked on your Home feed</h2>
 <p class="muted">These listings were under three minutes old when Finder checked them. Each row shows the decision.</p>
 {% if home_panel.checked %}
