@@ -201,7 +201,7 @@ class Requester:
                     retry_after = response.headers.get("Retry-After")
                     if response.status_code == 429 or retry_after:
                         seconds = retry_after_seconds(retry_after)
-                        budget.pause(seconds)
+                        budget.pause(seconds, rate_limited=response.status_code == 429)
                     else:
                         seconds = budget.pause_server_error()
                     logger.warning(
@@ -271,7 +271,10 @@ class Requester:
         try:
             response = self.session.head(self.VINTED_AUTH_URL, timeout=(5, 10))
             if response.status_code == 429 or response.status_code >= 500:
-                budget.pause(retry_after_seconds(response.headers.get("Retry-After")))
+                budget.pause(
+                    retry_after_seconds(response.headers.get("Retry-After")),
+                    rate_limited=response.status_code == 429,
+                )
                 response.raise_for_status()
             if not self.session.cookies.get("access_token_web"):
                 logger.warning(

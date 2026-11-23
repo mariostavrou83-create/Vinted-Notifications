@@ -230,6 +230,59 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         restarted_fetch.assert_not_called()
         self.assertEqual(restarted.retry_at["seller"], 2800)
 
+    def test_listing_limit_resumes_with_home_then_spaces_details_across_restart(self):
+        self.worker.tick()
+        self.now = 1001
+        self.fetch.side_effect = home.buyer.BuyerError("limited", status=429, reason="rate_limited", retry_after=85)
+        self.worker.tick()
+        self.assertEqual(self.status()["retry_at"], 1086)
+        self.assertEqual(self.status()["rate_limit_level"], 1)
+        self.worker = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
+        self.fetch.reset_mock(side_effect=True)
+        self.now = 1085
+        self.worker.tick()
+        self.fetch.assert_not_called()
+        self.now = 1086
+        self.worker.tick()
+        self.fetch.assert_called_once_with("seller", home.buyer.BASE + "/")
+        self.now = 1095
+        self.worker.tick()
+        self.assertEqual(self.fetch.call_count, 1)
+        self.now = 1096
+        self.fetch.side_effect = home.buyer.BuyerError("limited", status=429, reason="rate_limited")
+        self.worker.tick()
+        self.assertEqual(self.fetch.call_args.args, ("seller", self.item["url"]))
+        self.assertEqual(self.status()["retry_at"], 1216)
+        self.assertEqual(self.status()["rate_limit_level"], 2)
+        self.fetch.reset_mock(side_effect=True)
+        self.now = 1215
+        self.worker.tick()
+        self.fetch.assert_not_called()
+        self.now = 1216
+        self.worker.tick()
+        self.fetch.assert_called_once_with("seller", home.buyer.BASE + "/")
+        self.assertEqual(self.status()["rate_limit_level"], 2)
+        self.now = 1816
+        self.worker.tick()
+        self.assertEqual(self.status()["rate_limit_level"], 1)
+
+    def test_single_429_without_a_delay_and_verified_card_after_recovery(self):
+        self.fetch.side_effect = home.buyer.BuyerError("limited", status=429, reason="rate_limited")
+        self.worker.tick()
+        self.assertEqual(self.status()["retry_at"], 1060)
+        self.fetch.side_effect = None
+        self.now = 1060
+        self.fetch.return_value = ("home", self.now)
+        card = dict(self.item, home_available=True, home_created_at=1050)
+        unknown = dict(self.item, id="501", category_ids=[])
+        unavailable = dict(self.item, id="504", home_available=False)
+        known = dict(self.item, id="499")
+        with patch.object(home, "parse_home", return_value={"reason": "ok", "items": [unknown, unavailable, known, card]}):
+            self.worker.tick()
+        self.assertEqual([row["item_id"] for row in self.rows()], ["500"])
+        self.assertEqual([item["id"] for item in self.worker.pending["seller"]], ["499", "501"])
+        self.assertEqual(self.fetch.call_count, 2)
+
     def test_removed_listing_does_not_pause_remaining_home_items(self):
         self.worker.tick()
         self.worker.pending["seller"].append(dict(self.item,id="501"))
@@ -277,6 +330,9 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         )
         self.fetch.side_effect = None
         self.now += 1
+        self.worker.tick()
+        self.assertEqual(self.fetch.call_count, 2)
+        self.now += home.DETAIL_SPACING_SECONDS - 1
         self.worker.tick()
         self.assertEqual(self.fetch.call_count, 3)
         self.assertEqual(len(self.rows()), 1)

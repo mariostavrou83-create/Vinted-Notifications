@@ -1,5 +1,6 @@
 """Bounded polling with independent HTTP sessions and no overlapping query runs."""
 
+import math
 import os
 import sqlite3
 import threading
@@ -26,6 +27,7 @@ HEALTH_WRITE_SECONDS = 20
 HEALTH_FLUSH_SECONDS = 1
 HEALTH_BUSY_TIMEOUT_MS = 50
 SERVER_RECOVERY_SUCCESSES = 20
+RATE_RECOVERY_SECONDS = 600
 
 
 class CoolingDown(Exception):
@@ -42,6 +44,10 @@ class RequestBudget:
         self.server_delay = 0.0
         self.last_server_error = float("-inf")
         self.server_successes = 0
+        self.rate_percent = 100
+        self.rate_limit_until = 0.0
+        self.raise_rate_at = 0.0
+        self.last_valid_start = float("-inf")
 
     def remaining(self):
         with self.lock:
@@ -51,10 +57,33 @@ class RequestBudget:
         if self.remaining() > 0:
             raise CoolingDown("Vinted cooldown is active")
 
-    def pause(self, seconds):
+    def pause(self, seconds, *, rate_limited=False):
         with self.lock:
-            self.until = max(self.until, time.monotonic() + seconds)
+            now = time.monotonic()
+            deadline = now + seconds
+            self.until = max(self.until, deadline)
             self.restricted_until = max(self.restricted_until, self.until)
+            if rate_limited:
+                # Concurrent 429s can extend one wait, but halve capacity once.
+                if now >= self.rate_limit_until:
+                    self.rate_percent = max(10, self.rate_percent // 2)
+                self.rate_limit_until = max(self.rate_limit_until, deadline)
+                self.raise_rate_at = self.rate_limit_until + RATE_RECOVERY_SECONDS
+
+    def dispatch_rate(self, configured, now):
+        """Pace the actual starts across all searches, including overdue ones."""
+        with self.lock:
+            if (
+                self.rate_percent < 100
+                and now >= max(self.until, self.raise_rate_at)
+                and self.last_valid_start >= max(self.rate_limit_until, now - 60)
+            ):
+                self.rate_percent = min(100, self.rate_percent + 10)
+                self.raise_rate_at = now + RATE_RECOVERY_SECONDS
+            if self.rate_percent == 100:
+                return configured
+            ceiling = configured or resource_controls.DEFAULT_REQUESTS_PER_SECOND
+            return ceiling * self.rate_percent / 100
 
     def recovery_remaining(self):
         """Only explicit/rate/auth pauses require prolonged capacity recovery."""
@@ -85,6 +114,7 @@ class RequestBudget:
     def server_success(self, started):
         """Recover future 5xx delay without shortening any current deadline."""
         with self.lock:
+            self.last_valid_start = max(self.last_valid_start, started)
             # Earlier in-flight requests are not evidence that the failing
             # service recovered. Each newer 5xx invalidates partial evidence.
             if not started > self.last_server_error:
@@ -146,7 +176,8 @@ def _write_health(health_updates):
 
 def retry_after_seconds(value, default=60):
     try:
-        return max(float(default), float(value))
+        seconds = float(value)
+        return max(float(default), seconds) if math.isfinite(seconds) else float(default)
     except (TypeError, ValueError):
         try:
             return max(
@@ -294,6 +325,8 @@ class Poller:
                 )
                 self.shadow.close()
                 self.shadow = None
+        dispatch_rate = budget.dispatch_rate(self.request_rate, now)
+        target_at_rate = len(queries) / dispatch_rate if dispatch_rate else 0
         restricted = budget.recovery_remaining() > 0
         if restricted and not self.was_restricted:
             # Do not resume a refused request rate immediately after Retry-After.
@@ -301,7 +334,7 @@ class Poller:
             self.recover_at = now + budget.remaining() + 300
             logger.warning(
                 "Slowing checks after Vinted cooldown; effective target %.1fs",
-                max(target, self.backoff_target),
+                max(target, self.backoff_target, target_at_rate),
             )
         elif not restricted and self.backoff_target and now >= self.recover_at:
             self.backoff_target /= 2
@@ -312,7 +345,7 @@ class Poller:
         target = max(
             target,
             self.backoff_target,
-            len(queries) / self.request_rate if self.request_rate else 0,
+            target_at_rate,
         )
         urgent_health = False
         for query_id, (future, started, wall_start, actual_interval) in list(
@@ -488,7 +521,7 @@ class Poller:
             )
 
         if not budget.remaining() and (
-            not self.request_rate or now >= self.next_dispatch
+            not dispatch_rate or now >= self.next_dispatch
         ):
             # Eligible retries retain their original deadline priority. An
             # isolated slow response must not go behind a whole extra cycle.
@@ -502,7 +535,7 @@ class Poller:
             # request ceiling and Retry-After still apply to every worker.
             worker_limit = (
                 min(self.workers, RECOVERY_WORKERS)
-                if self.request_rate or self.backoff_target
+                if dispatch_rate or self.backoff_target
                 else self.workers
             )
             slots = max(0, worker_limit - len(self.pending))
@@ -522,8 +555,8 @@ class Poller:
                 )
                 self.pending[query_id][0].search_url = queries[query_id][1]
                 # One global slot, with no burst credits after idle time or errors.
-                if self.request_rate:
-                    self.next_dispatch = now + 1 / self.request_rate
+                if dispatch_rate:
+                    self.next_dispatch = now + 1 / dispatch_rate
                     break
         if now - self.last_report >= 30:
             intervals = sorted(self.intervals)
@@ -539,7 +572,7 @@ class Poller:
                 )
 
             logger.info(
-                "Poller: %s searches; target %.1fs; %s successes/%s errors in last %.1fs; cooldown %.1fs; interval median %.3fs p95 %.3fs; fetch p95 %.3fs; %s unchanged pages reused; workers %s; interval max %.3fs; over 5s %s/%s; worker p95 %.3fs; process lag p95 %.3fs; %s committed old items omitted from IPC; %s committed item objects not rebuilt",
+                "Poller: %s searches; target %.1fs; %s successes/%s errors in last %.1fs; cooldown %.1fs; interval median %.3fs p95 %.3fs; fetch p95 %.3fs; %s unchanged pages reused; workers %s; interval max %.3fs; over 5s %s/%s; worker p95 %.3fs; process lag p95 %.3fs; %s committed old items omitted from IPC; %s committed item objects not rebuilt; dispatch ceiling %s",
                 len(queries),
                 target,
                 self.successes,
@@ -558,6 +591,7 @@ class Poller:
                 percentile(processing_lags, 0.95),
                 self.trimmed_items,
                 self.skipped_item_objects,
+                f"{dispatch_rate:.2f}/s" if dispatch_rate else "uncapped",
             )
             self.successes = self.errors = 0
             self.reused_pages = 0

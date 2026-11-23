@@ -1,6 +1,8 @@
 """Healthy catalogue evidence resets future 5xx growth, never active pauses."""
 
 import unittest
+from concurrent.futures import Future
+from queue import Queue
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -81,6 +83,54 @@ class ServerRecoveryBudgetTests(unittest.TestCase):
                     self.budget.check()
                 self.clock[0] = until + 0.1
                 self.budget.check()
+
+    def test_concurrent_rate_limits_slow_once_and_recover_only_on_new_successes(self):
+        self.budget.pause(60, rate_limited=True)
+        self.clock[0] = 101
+        self.budget.pause(120, rate_limited=True)
+        self.assertEqual(self.budget.dispatch_rate(10, 101), 5)
+        self.assertEqual(self.budget.remaining(), 120)
+        self.assertEqual(self.budget.dispatch_rate(0, 101), 5)
+        self.clock[0] = 221
+        self.budget.pause(60, rate_limited=True)
+        self.assertEqual(self.budget.dispatch_rate(10, 221), 2.5)
+        self.clock[0] = 881
+        self.budget.server_success(220)
+        self.assertEqual(self.budget.dispatch_rate(10, 881), 2.5)
+        for percent in (35, 45, 55, 65, 75, 85, 95, 100):
+            self.budget.server_success(self.clock[0])
+            self.assertEqual(self.budget.dispatch_rate(10, self.clock[0]), percent / 10)
+            self.clock[0] += polling.RATE_RECOVERY_SECONDS
+        self.assertEqual(self.budget.dispatch_rate(0, self.clock[0]), 0)
+
+    def test_large_overdue_search_set_resumes_fairly_at_half_the_configured_rate(self):
+        starts = []
+
+        def submit(fetch, query, count):
+            starts.append((self.clock[0], query[0]))
+            result = Future()
+            result.set_result([])
+            return result
+
+        executor = SimpleNamespace(submit=submit)
+        with patch.object(polling, "ThreadPoolExecutor", return_value=executor), patch.object(
+            polling, "budget", self.budget
+        ), patch.object(polling, "_write_health"), patch.object(polling.logger, "info"):
+            poller = polling.Poller(Queue())
+            poller.config_checked = float("inf")
+            poller.target, poller.request_rate = 1, 10
+            poller.queries = {i: (i, "offline") for i in range(1, 532)}
+            poller.next_due = dict.fromkeys(poller.queries, 0)
+            self.budget.pause(60, rate_limited=True)
+            poller.tick()
+            self.clock[0] = 159.99
+            poller.tick()
+            self.assertFalse(starts)
+            for step in range(2200):
+                self.clock[0] = 160 + step * 0.051
+                poller.tick()
+            self.assertEqual([query for _, query in starts[:531]], list(poller.queries))
+            self.assertTrue(all(b[0] - a[0] >= 0.1999 for a, b in zip(starts, starts[1:])))
 
 
 class ValidatedFetchRecoveryTests(DatabaseFixture, unittest.TestCase):

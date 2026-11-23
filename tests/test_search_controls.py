@@ -363,6 +363,7 @@ class SchedulerTests(DatabaseFixture, unittest.TestCase):
                 client.get("https://api.vinted.co.uk/svc-catalogue/items")
             self.assertEqual(get.call_count, 1)
             self.assertGreater(budget.remaining(), 119)
+            self.assertEqual(budget.dispatch_rate(10, polling.time.monotonic()), 5)
 
     def test_server_error_backoff_grows_coalesces_and_resets_without_shortening_limits(
         self,

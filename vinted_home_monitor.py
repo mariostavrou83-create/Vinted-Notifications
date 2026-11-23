@@ -32,6 +32,9 @@ MAX_DETAILS = 6
 PAGE_BUDGET = 1 + MAX_DETAILS
 REPEAT_INTERVAL = 32
 CYCLE_SECONDS = 30
+DETAIL_SPACING_SECONDS = CYCLE_SECONDS / MAX_DETAILS
+RATE_RECOVERY_SECONDS = 600
+MAX_RATE_LIMIT_LEVEL = 4
 MAX_AGE = 180
 ROLES = ("seller",)
 COUNTERS = (
@@ -255,28 +258,55 @@ class Monitor:
         self.searches = []
         self.searches_until = 0
         self.retry_at = dict.fromkeys(ROLES, 0)
+        self.rate_limit_level = dict.fromkeys(ROLES, 0)
+        self.rate_recovery_at = dict.fromkeys(ROLES, 0)
+        self.next_detail_at = dict.fromkeys(ROLES, 0)
         for role in ROLES:
             try:
                 saved = json.loads(
                     db.get_parameter("home_monitor_status_" + role) or "{}"
                 )
-                retry = saved.get("retry_at", 0) if isinstance(saved, dict) else 0
+                if not isinstance(saved, dict):
+                    continue
+                retry = saved.get("retry_at", 0)
                 if (
                     type(retry) in (int, float)
                     and math.isfinite(retry)
                     and 0 <= retry < 4102444800
                 ):
                     self.retry_at[role] = retry
+                level = saved.get("rate_limit_level", 0)
+                recovery = saved.get("rate_recovery_at", 0)
+                if (
+                    type(level) is int and 0 < level <= MAX_RATE_LIMIT_LEVEL
+                    and type(recovery) in (int, float) and 0 < recovery < 4102444800
+                ):
+                    self.rate_limit_level[role] = level
+                    self.rate_recovery_at[role] = recovery
             except (ValueError, TypeError):
                 pass
 
+    def detail_spacing(self, role):
+        return min(INTERVAL, DETAIL_SPACING_SECONDS * 2 ** self.rate_limit_level[role])
+
     def status(self, role, code, stage, http_status=None, *, detail_code=""):
+        now = self.clock()
+        if (
+            code == "checked" and http_status == 200 and self.rate_limit_level[role]
+            and now >= self.rate_recovery_at[role]
+        ):
+            self.rate_limit_level[role] -= 1
+            self.rate_recovery_at[role] = (
+                now + RATE_RECOVERY_SECONDS if self.rate_limit_level[role] else 0
+            )
         data = {
             "code": code,
             "stage": stage,
-            "checked_at": self.clock(),
+            "checked_at": now,
             "detail_code": detail_code if detail_code in SOURCE_CODES else "",
             "retry_at": self.retry_at[role],
+            "rate_limit_level": self.rate_limit_level[role],
+            "rate_recovery_at": self.rate_recovery_at[role],
             "http_status": (
                 http_status
                 if type(http_status) is int and 100 <= http_status <= 599
@@ -293,7 +323,7 @@ class Monitor:
                 ),
             )
         logger.info(
-            "Vinted Home monitor: role=%s code=%s detail=%s stage=%s http=%s retry_at=%s candidates=%s checked=%s fresh=%s matched=%s alerts=%s rejected_age=%s rejected_match=%s duplicates=%s age_unverified=%s age_expired=%s skipped_redirect=%s listing_unavailable=%s details_unverified=%s global_blocked=%s scope_miss=%s budget_or_exclusions=%s style_miss=%s photo_checked=%s photo_matches=%s card_screened=%s feed_verified=%s",
+            "Vinted Home monitor: role=%s code=%s detail=%s stage=%s http=%s retry_at=%s candidates=%s checked=%s fresh=%s matched=%s alerts=%s rejected_age=%s rejected_match=%s duplicates=%s age_unverified=%s age_expired=%s skipped_redirect=%s listing_unavailable=%s details_unverified=%s global_blocked=%s scope_miss=%s budget_or_exclusions=%s style_miss=%s photo_checked=%s photo_matches=%s card_screened=%s feed_verified=%s rate_limit_level=%s detail_spacing_seconds=%s",
             role,
             code,
             data["detail_code"],
@@ -301,6 +331,8 @@ class Monitor:
             data["http_status"],
             data["retry_at"],
             *(data[key] for key in COUNTERS),
+            self.rate_limit_level[role],
+            self.detail_spacing(role),
         )
 
     def remember(self, item_id, now):
@@ -331,6 +363,8 @@ class Monitor:
                 self.pending[role].clear()
             stage = "listing" if self.pending[role] else "home"
             if stage == "home" and now < self.next_home[role]:
+                continue
+            if stage == "listing" and now < self.next_detail_at[role]:
                 continue
             reads = self.page_reads[role]
             while reads and reads[0] <= now - INTERVAL:
@@ -367,7 +401,14 @@ class Monitor:
                         and delay >= 0
                         else 0
                     )
-                    self.retry_at[role] = self.clock() + max(300, delay)
+                    if code == "rate_limited" and exc.status == 429:
+                        level = min(MAX_RATE_LIMIT_LEVEL, self.rate_limit_level[role] + 1)
+                        self.rate_limit_level[role] = level
+                        minimum = min(300, INTERVAL * 2 ** (level - 1))
+                        self.retry_at[role] = self.clock() + max(minimum, delay)
+                        self.rate_recovery_at[role] = self.retry_at[role] + RATE_RECOVERY_SECONDS
+                    else:
+                        self.retry_at[role] = self.clock() + max(300, delay)
                     self.next_home[role] = self.retry_at[role]
                 else:
                     # A local lock or purchase priority is checked before the
@@ -377,6 +418,8 @@ class Monitor:
                     self.retry_at[role] = self.clock() + 5
                     if stage == "home":
                         self.next_home[role] = self.retry_at[role]
+                    else:
+                        self.next_detail_at[role] = self.retry_at[role]
                 self.status(role, code, stage, exc.status)
             except Exception as exc:  # noqa: BLE001 -- isolate parsing/storage failures
                 self.pending[role].clear()
@@ -417,11 +460,14 @@ class Monitor:
             if identifier in seen or identifier in self.examined:
                 self.counts[role]["duplicates"] += 1
                 continue
+            if item.get("home_available") is False:
+                self.remember(identifier, self.clock())
+                continue
             stamp = item.get("home_created_at")
             if stamp is None or stamp > observed or stamp <= 0:
                 fresh_ids.append(item)
                 continue
-            if self.clock() >= stamp + MAX_AGE or item.get("home_available") is False:
+            if self.clock() >= stamp + MAX_AGE:
                 self.remember(identifier, self.clock())
                 continue
             if item.get("home_available") is not True or not womens_clothing(item):
@@ -438,8 +484,17 @@ class Monitor:
         if repeat_heavy and len(fresh_ids) <= 5 and len(self.page_reads[role]) <= 2:
             self.next_home[role] = now + REPEAT_INTERVAL
             limit = min(limit, 3)
+        # Spend the limited detail slots on known women's clothing first. Cards
+        # with incomplete category information remain eligible for verification.
+        fresh_ids.sort(key=womens_clothing, reverse=True)
         self.pending[role] = deque(fresh_ids[:limit])
         self.deadline[role] = self.clock() + CYCLE_SECONDS
+        if self.rate_limit_level[role]:
+            # On recovery, process this Home page before spacing out detail GETs.
+            self.next_detail_at[role] = max(
+                self.next_detail_at[role],
+                self.clock() + min(CYCLE_SECONDS / 2, self.detail_spacing(role)),
+            )
         self.status(role, "checked", "home", 200)
 
     def listing(self, role, searches, now):
@@ -452,6 +507,7 @@ class Monitor:
             return
         try:
             self.page_reads[role].append(now)
+            self.next_detail_at[role] = now + self.detail_spacing(role)
             html, observed = self.fetch(role, candidate["url"])
         except buyer.BuyerError as exc:
             # The transport distinguishes a local listing redirect from login,
