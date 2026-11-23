@@ -245,7 +245,7 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
                 self.now += 1
         self.worker.tick()
         self.assertEqual(self.status()["code"], "checked")
-        self.assertEqual(self.status()["empty_page_delay"], 0)
+        self.assertEqual(self.status()["read_delays"]["home"], 0)
         self.assertFalse(self.rows())
         self.now += home.INTERVAL
         with patch.object(home, "parse_home", return_value=empty):
@@ -256,7 +256,34 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         with patch.object(home, "parse_home", return_value={"reason": "home_cards_unavailable", "items": []}):
             self.worker.tick()
         self.assertEqual(self.status()["retry_at"], self.now + 300)
-        self.assertEqual(self.status()["empty_page_delay"], 0)
+        self.assertEqual(self.status()["read_delays"]["home"], 0)
+
+    def test_transient_read_failures_back_off_per_stage_and_honour_provider_delay(self):
+        self.fetch.side_effect = home.buyer.BuyerError("temporary", reason="network")
+        self.worker.tick()
+        self.assertEqual(self.status()["retry_at"], 1060)
+        self.now = 1060
+        self.fetch.side_effect = None
+        self.worker.tick()
+        self.assertEqual(self.status()["read_delays"]["home"], 0)
+        for expected_delay, requested in ((60, 0), (120, 0), (310, 310)):
+            self.now += 1
+            self.fetch.side_effect = home.buyer.BuyerError("unavailable", status=503, reason="unreadable", retry_after=requested)
+            self.worker.tick()
+            self.assertEqual(self.status()["retry_at"], self.now + expected_delay)
+            self.worker = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
+            self.now += expected_delay
+            self.fetch.side_effect = None
+            self.worker.tick()
+            self.assertEqual(self.status()["stage"], "home")
+        self.now += 1
+        self.worker.tick()
+        self.assertEqual(self.status()["read_delays"], {"home": 0, "listing": 0})
+
+    def test_identity_network_error_keeps_full_account_cooldown(self):
+        self.fetch.side_effect = home.buyer.BuyerError("temporary", reason="network", stage="identity")
+        self.worker.tick()
+        self.assertEqual(self.status()["retry_at"], 1300)
 
     def test_listing_limit_resumes_with_home_then_spaces_details_across_restart(self):
         self.worker.tick()
