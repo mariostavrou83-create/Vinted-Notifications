@@ -71,7 +71,10 @@ def response_time(headers, started):
             raise ValueError
         if not math.isfinite(generated) or generated > started + 5:
             raise ValueError
-        return min(started, generated) - int(age)
+        # RFC 9111 §4.2.3 takes the greater of apparent age and corrected
+        # Age. Expressed as an origin time, that is the earlier timestamp.
+        # Using request start here also accounts for time spent in transit.
+        return min(generated, started - int(age))
     except (ValueError, TypeError, OverflowError):
         raise buyer.BuyerError(
             "Home discovery could not verify response freshness.",

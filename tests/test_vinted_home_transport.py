@@ -145,9 +145,14 @@ class HomeTransportTests(unittest.TestCase):
         client.session.get.assert_called_once()
         client.solve_challenge.assert_not_called()
 
-    def test_cache_age_is_added_not_erased(self):
+    def test_cache_age_uses_the_older_of_the_two_independent_estimates(self):
         headers = {"Date": "Fri, 20 Nov 2026 22:00:00 GMT", "Age": "120"}
-        self.assertEqual(transport.response_time(headers, 1795212002), 1795211880)
+        origin = 1795212000
+        self.assertEqual(transport.response_time(headers, origin + 2), origin + 2 - 120)
+        self.assertEqual(transport.response_time(headers, origin + 120), origin)
+        self.assertEqual(transport.response_time(headers, origin + 240), origin)
+        self.assertEqual(transport.response_time({"Date": headers["Date"]}, origin + 240), origin)
+        self.assertEqual(transport.response_time({"Date": headers["Date"]}, origin - 2), origin - 2)
         for age in ("bad", "-1", "NaN"):
             with self.assertRaises(BuyerError):
                 transport.response_time({**headers, "Age": age}, 1795212002)

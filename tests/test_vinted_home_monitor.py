@@ -168,6 +168,22 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(details["photos"], self.item["photos"])
         self.assertEqual(self.status()["alerts"], 1)
 
+    def test_cached_listing_inside_three_minutes_keeps_its_true_delivery_deadline(self):
+        from vinted_alerts import get_details, home_discovery_fresh
+        from vinted_home_transport import response_time
+
+        origin = 1795212000
+        self.now = origin + 40
+        observed = response_time({"Date": "Fri, 20 Nov 2026 22:00:00 GMT", "Age": "40"}, self.now)
+        self.fetch.return_value = ("page", observed)
+        self.age = {"verified": True, "checked_at": observed, "max_age_seconds": 120}
+        self.discover()
+        row, = self.rows()
+        details = get_details(row)
+        self.assertEqual(details["home_discovery"]["expires_at"], origin + 60)
+        self.assertTrue(home_discovery_fresh(details, now=origin + 59))
+        self.assertFalse(home_discovery_fresh(details, now=origin + 60))
+
     def test_old_unknown_future_and_cached_age_cannot_alert(self):
         for age in (
             {"verified": False, "checked_at": 1000, "max_age_seconds": None},
@@ -685,6 +701,26 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         self.discover()
         self.assertEqual((self.status()["age_unverified"], self.status()["age_expired"]), (1, 0))
         self.assertFalse(self.rows())
+
+    def test_older_womens_listing_counts_only_include_verified_strict_age_bounds(self):
+        for upper, categories, expected in [
+            (220, ["4"], (1, 0, 1, 1)),
+            (299, ["4"], (1, 0, 0, 1)),
+            (599, ["4"], (1, 0, 0, 0)),
+            (220, ["2309"], (0, 0, 0, 0)),
+            (None, ["4"], (0, 0, 0, 0)),
+        ]:
+            with self.subTest(upper=upper, categories=categories):
+                self.now = 1000
+                self.item["category_ids"] = categories
+                self.age = {"verified": upper is not None, "checked_at": 1000, "max_age_seconds": upper}
+                self.worker = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
+                self.discover()
+                status = self.status()
+                self.assertEqual(tuple(status[key] for key in (
+                    "womens_listing_age_checked", "womens_listing_under_3m",
+                    "womens_listing_under_5m", "womens_listing_under_10m")), expected)
+                self.assertFalse(self.rows())
 
     def test_source_failure_preserves_only_fixed_detail_code(self):
         with patch.object(

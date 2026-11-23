@@ -62,6 +62,15 @@ COUNTERS = (
     "card_screened",
     "feed_verified",
     "previously_seen_expired",
+    "womens_listing_age_checked",
+    "womens_listing_under_3m",
+    "womens_listing_under_5m",
+    "womens_listing_under_10m",
+)
+STATUS_LOG = (
+    "Vinted Home monitor: role=%s code=%s detail=%s stage=%s http=%s retry_at=%s "
+    + " ".join(f"{name}=%s" for name in COUNTERS)
+    + " rate_limit_level=%s detail_spacing_seconds=%s detail_retry_at=%s"
 )
 ERROR_CODES = frozenset(
     {
@@ -363,7 +372,7 @@ class Monitor:
                 ),
             )
         logger.info(
-            "Vinted Home monitor: role=%s code=%s detail=%s stage=%s http=%s retry_at=%s candidates=%s checked=%s fresh=%s matched=%s alerts=%s rejected_age=%s rejected_match=%s duplicates=%s age_unverified=%s age_expired=%s skipped_redirect=%s listing_unavailable=%s details_unverified=%s global_blocked=%s scope_miss=%s budget_or_exclusions=%s style_miss=%s photo_checked=%s photo_matches=%s card_screened=%s feed_verified=%s previously_seen_expired=%s rate_limit_level=%s detail_spacing_seconds=%s detail_retry_at=%s",
+            STATUS_LOG,
             role,
             code,
             data["detail_code"],
@@ -629,8 +638,20 @@ class Monitor:
             or not math.isfinite(upper)
             or upper < 0
         )
+        measured_at = self.clock()
+        item = parsed.get("item")
+        # Measure the potential supply at each cutoff using evidence on the
+        # listing we already fetched. Counting a garment never queues it.
+        if (not unverified and 0 < observed <= measured_at and isinstance(item, dict)
+                and str(item.get("id")) == identifier and womens_clothing(item)):
+            oldest_possible_age = upper + (measured_at - observed)
+            counts = self.counts[role]
+            counts["womens_listing_age_checked"] += 1
+            counts["womens_listing_under_3m"] += int(oldest_possible_age < 180)
+            counts["womens_listing_under_5m"] += int(oldest_possible_age < 300)
+            counts["womens_listing_under_10m"] += int(oldest_possible_age < 600)
         expired = not unverified and (
-            upper > MAX_AGE or self.clock() >= observed + MAX_AGE - upper
+            upper > MAX_AGE or measured_at >= observed + MAX_AGE - upper
         )
         self.recheck_until.pop(identifier, None)
         missing_evidence = unverified or parsed.get("reason") in {"availability_unverified", "listing_unverified"}
@@ -638,13 +659,12 @@ class Monitor:
             self.recheck_until[identifier] = now + MAX_AGE
         if unverified or expired:
             lower = age.get("min_age_seconds")
-            could_still_be_fresh = type(lower) in (int, float) and self.clock() < observed + MAX_AGE - lower
+            could_still_be_fresh = type(lower) in (int, float) and measured_at < observed + MAX_AGE - lower
             self.counts[role]["rejected_age"] += 1
             self.counts[role]["age_unverified" if unverified or could_still_be_fresh else "age_expired"] += 1
             self.status(role, "checked", "listing", 200)
             return
         self.counts[role]["fresh"] += 1
-        item = parsed.get("item")
         if not isinstance(item, dict):
             key = "listing_unavailable" if parsed.get("reason") == "unavailable" else "details_unverified"
             self.counts[role][key] += 1
