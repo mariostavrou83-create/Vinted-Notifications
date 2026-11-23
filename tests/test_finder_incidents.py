@@ -112,6 +112,38 @@ class FinderIncidentsTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.events()), 2)
         self.assertTrue(any("recovered" in e["text"] for e in self.events()))
 
+    def test_listing_incident_needs_repeated_failures_and_a_real_listing_recovery(self):
+        vinted_home_controls.configure("1")
+        self.set_home("seller", "checked", self.now, page=self.now)
+        last_ok = self.now - 10
+
+        def observe(at, code, failed, retry, ok):
+            with closing(search_settings.connection()) as conn, conn:
+                incidents.write(conn, "home_monitor_status_seller", {
+                    "code": code,
+                    "checked_at": at,
+                    "last_detail_failure": failed,
+                    "detail_retry_at": retry,
+                    "last_detail_ok": ok,
+                })
+            incidents.check_health(at)
+
+        observe(self.now, "listing_deferred", self.now, self.now + 60, last_ok)
+        self.assertEqual(self.events(), [])
+        second = self.now + 61
+        observe(second, "listing_deferred", second, second + 120, last_ok)
+        observe(second + 1, "checked", second, second + 120, last_ok)
+        events = self.events()
+        self.assertEqual([e["kind"] for e in events], ["MSJ Home listing checks"])
+        self.assertIn(incidents.uk(second), events[0]["text"])
+        self.assertIn(incidents.uk(last_ok), events[0]["text"])
+
+        resumed = second + 121
+        observe(resumed, "checked", second, 0, resumed)
+        observe(resumed + 1, "checked", second, 0, resumed)
+        self.assertEqual(len(self.events()), 2)
+        self.assertEqual(sum("recovered" in e["text"] for e in self.events()), 1)
+
     def test_buying_account_is_checked_without_reading_its_home(self):
         vinted_home_controls.configure("1")
         self.set_home("buyer", "credentials", self.now)

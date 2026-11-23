@@ -7,6 +7,7 @@ No cookie copies, login, renewal, solver tasks or checkout writes originate here
 
 import json
 import math
+import signal
 import sqlite3
 import time
 from collections import OrderedDict, deque
@@ -35,6 +36,7 @@ CYCLE_SECONDS = 30
 DETAIL_SPACING_SECONDS = CYCLE_SECONDS / MAX_DETAILS
 RATE_RECOVERY_SECONDS = 600
 MAX_RATE_LIMIT_LEVEL = 4
+WORKER_STALL_SECONDS = 180
 MAX_AGE = 180
 ROLES = ("seller",)
 COUNTERS = (
@@ -88,6 +90,18 @@ SOURCE_CODES = frozenset(
 
 def enabled():
     return db.get_parameter("home_monitor_enabled") == "1"
+
+
+def temporary_read_error(exc):
+    return (exc.reason == "network" and exc.status is None) or (
+        exc.reason in {"unreadable", "http_error", "network"}
+        and type(exc.status) is int and 500 <= exc.status < 600
+    )
+
+
+def saved_time(status, key):
+    value = status.get(key)
+    return value if type(value) in (int, float) and 0 <= value < 4102444800 else 0
 
 
 def active_searches():
@@ -261,6 +275,9 @@ class Monitor:
         self.rate_limit_level = dict.fromkeys(ROLES, 0)
         self.rate_recovery_at = dict.fromkeys(ROLES, 0)
         self.next_detail_at = dict.fromkeys(ROLES, 0)
+        self.detail_retry_at = dict.fromkeys(ROLES, 0)
+        self.last_detail_failure = dict.fromkeys(ROLES, 0)
+        self.last_detail_ok = dict.fromkeys(ROLES, 0)
         self.read_delays = {role: {"home": 0, "listing": 0} for role in ROLES}
         for role in ROLES:
             try:
@@ -276,13 +293,10 @@ class Monitor:
                     delay = delays.get(stage)
                     if type(delay) is int and 0 <= delay <= 300:
                         self.read_delays[role][stage] = delay
-                retry = saved.get("retry_at", 0)
-                if (
-                    type(retry) in (int, float)
-                    and math.isfinite(retry)
-                    and 0 <= retry < 4102444800
-                ):
-                    self.retry_at[role] = retry
+                self.retry_at[role] = saved_time(saved, "retry_at")
+                self.detail_retry_at[role] = saved_time(saved, "detail_retry_at")
+                self.last_detail_failure[role] = saved_time(saved, "last_detail_failure")
+                self.last_detail_ok[role] = saved_time(saved, "last_detail_ok")
                 level = saved.get("rate_limit_level", 0)
                 recovery = saved.get("rate_recovery_at", 0)
                 if (
@@ -306,6 +320,9 @@ class Monitor:
         now = self.clock()
         if code == "checked" and http_status == 200:
             self.read_delays[role][stage] = 0
+            if stage == "listing":
+                self.detail_retry_at[role] = 0
+                self.last_detail_ok[role] = now
         if (
             code == "checked" and http_status == 200 and self.rate_limit_level[role]
             and now >= self.rate_recovery_at[role]
@@ -323,6 +340,9 @@ class Monitor:
             "rate_limit_level": self.rate_limit_level[role],
             "rate_recovery_at": self.rate_recovery_at[role],
             "read_delays": self.read_delays[role],
+            "detail_retry_at": self.detail_retry_at[role],
+            "last_detail_failure": self.last_detail_failure[role],
+            "last_detail_ok": self.last_detail_ok[role],
             "http_status": (
                 http_status
                 if type(http_status) is int and 100 <= http_status <= 599
@@ -339,7 +359,7 @@ class Monitor:
                 ),
             )
         logger.info(
-            "Vinted Home monitor: role=%s code=%s detail=%s stage=%s http=%s retry_at=%s candidates=%s checked=%s fresh=%s matched=%s alerts=%s rejected_age=%s rejected_match=%s duplicates=%s age_unverified=%s age_expired=%s skipped_redirect=%s listing_unavailable=%s details_unverified=%s global_blocked=%s scope_miss=%s budget_or_exclusions=%s style_miss=%s photo_checked=%s photo_matches=%s card_screened=%s feed_verified=%s rate_limit_level=%s detail_spacing_seconds=%s",
+            "Vinted Home monitor: role=%s code=%s detail=%s stage=%s http=%s retry_at=%s candidates=%s checked=%s fresh=%s matched=%s alerts=%s rejected_age=%s rejected_match=%s duplicates=%s age_unverified=%s age_expired=%s skipped_redirect=%s listing_unavailable=%s details_unverified=%s global_blocked=%s scope_miss=%s budget_or_exclusions=%s style_miss=%s photo_checked=%s photo_matches=%s card_screened=%s feed_verified=%s rate_limit_level=%s detail_spacing_seconds=%s detail_retry_at=%s",
             role,
             code,
             data["detail_code"],
@@ -349,6 +369,7 @@ class Monitor:
             *(data[key] for key in COUNTERS),
             self.rate_limit_level[role],
             self.detail_spacing(role),
+            self.detail_retry_at[role],
         )
 
     def remember(self, item_id, now):
@@ -375,12 +396,12 @@ class Monitor:
         for role in ROLES:
             if now < self.retry_at[role]:
                 continue
-            if now >= self.deadline[role]:
+            if now >= self.deadline[role] or now >= self.next_home[role]:
                 self.pending[role].clear()
             stage = "listing" if self.pending[role] else "home"
             if stage == "home" and now < self.next_home[role]:
                 continue
-            if stage == "listing" and now < self.next_detail_at[role]:
+            if stage == "listing" and now < max(self.next_detail_at[role], self.detail_retry_at[role]):
                 continue
             reads = self.page_reads[role]
             while reads and reads[0] <= now - INTERVAL:
@@ -423,11 +444,7 @@ class Monitor:
                         minimum = min(300, INTERVAL * 2 ** (level - 1))
                         self.retry_at[role] = self.clock() + max(minimum, delay)
                         self.rate_recovery_at[role] = self.retry_at[role] + RATE_RECOVERY_SECONDS
-                    elif exc.stage == "request" and (
-                        (exc.reason == "network" and exc.status is None)
-                        or (exc.reason in {"unreadable", "http_error", "network"}
-                            and type(exc.status) is int and 500 <= exc.status < 600)
-                    ):
+                    elif exc.stage in {"request", "listing_page"} and temporary_read_error(exc):
                         self.retry_at[role] = self.clock() + max(self.next_read_delay(role, stage), delay)
                     else:
                         self.retry_at[role] = self.clock() + max(300, delay)
@@ -537,6 +554,18 @@ class Monitor:
             self.next_detail_at[role] = now + self.detail_spacing(role)
             html, observed = self.fetch(role, candidate["url"])
         except buyer.BuyerError as exc:
+            if exc.retry_after:
+                raise  # Provider waits always apply to the whole seller source.
+            if exc.stage == "listing_page" and temporary_read_error(exc):
+                # Only the verified listing GET failed. Keep the scheduled Home
+                # page and its verified-card alerts running on the same account.
+                self.pending[role].clear()
+                previous_delay = self.detail_retry_at[role] - self.last_detail_failure[role]
+                delay = min(300, max(INTERVAL, previous_delay * 2))
+                self.last_detail_failure[role] = self.clock()
+                self.detail_retry_at[role] = self.last_detail_failure[role] + delay
+                self.status(role, "listing_deferred", "listing", exc.status)
+                return
             # The transport distinguishes a local listing redirect from login,
             # refresh and security refusals. Never follow it or retry this item.
             # One inaccessible listing must not pause both discovery sources.
@@ -637,19 +666,32 @@ class Monitor:
 
 
 def run():
-    monitor = Monitor()
-    logger.info(
-        "Vinted Home monitor ready: source=MSJ_Vinted role=seller category=womens_clothing maximum_age_seconds=180 enabled=%s",
-        enabled(),
-    )
-    while True:
-        try:
-            monitor.tick()
-        except (KeyboardInterrupt, SystemExit):
-            return
-        except Exception as exc:  # noqa: BLE001 -- isolated background worker
-            # Fixed class name only; no exception text may contain credentials.
-            logger.warning(
-                "Vinted Home monitor retry: error_type=%s", type(exc).__name__
-            )
-        time.sleep(1)
+    # This entry point runs in its own process. The existing parent replaces
+    # an exited child. A kernel timer also covers hangs inside native I/O.
+    alarm = getattr(signal, "alarm", None)
+    if alarm is not None:
+        previous = signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        alarm(WORKER_STALL_SECONDS)
+    try:
+        monitor = Monitor()
+        logger.info(
+            "Vinted Home monitor ready: source=MSJ_Vinted role=seller category=womens_clothing maximum_age_seconds=180 enabled=%s stall_timeout_seconds=%s",
+            enabled(), WORKER_STALL_SECONDS if alarm is not None else 0,
+        )
+        while True:
+            try:
+                monitor.tick()
+            except (KeyboardInterrupt, SystemExit):
+                return
+            except Exception as exc:  # noqa: BLE001 -- isolated background worker
+                logger.warning("Vinted Home monitor retry: error_type=%s", type(exc).__name__)
+            else:
+                # Scheduled waits, disabled monitoring and empty pages all count
+                # as responsive ticks. Alert volume never controls the timer.
+                if alarm is not None:
+                    alarm(WORKER_STALL_SECONDS)
+            time.sleep(1)
+    finally:
+        if alarm is not None:
+            alarm(0)
+            signal.signal(signal.SIGALRM, previous)

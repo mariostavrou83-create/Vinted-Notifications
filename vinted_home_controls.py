@@ -14,6 +14,7 @@ CODES = {
     "waiting": "Waiting for check",
     "checked": "Checked",
     "partial": "Checking candidates",
+    "listing_deferred": "Waiting to retry individual listing checks",
     "no_searches": "No eligible active searches",
     "account_unavailable": "Account unavailable",
     "not_separated": "Separate accounts required",

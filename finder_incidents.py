@@ -141,6 +141,22 @@ def observe(conn, now, started):
                 f" Last page at {uk(last_page)}." if last_page else ""
             )
             signals["MSJ Vinted Home"] = ("stalled", detail, "alerts")
+        # A readable Home feed can still produce verified-card alerts while
+        # individual listing pages are unavailable. Track their recovery separately.
+        retry = row.get("detail_retry_at")
+        last_ok = row.get("last_detail_ok")
+        failed_at = row.get("last_detail_failure")
+        known_ok = type(last_ok) in (int, float) and 0 < last_ok <= now
+        if (type(retry) in (int, float) and type(failed_at) in (int, float)
+                and 0 < failed_at <= now and 120 <= retry - failed_at <= 300):
+            detail = f"Individual listing checks repeatedly failed, most recently at {uk(failed_at)}."
+            if known_ok:
+                detail += f" Last successful listing check at {uk(last_ok)}."
+            signals["MSJ Home listing checks"] = ("unavailable", detail, "alerts")
+        elif retry == 0 and known_ok:
+            signals["MSJ Home listing checks"] = (
+                "", f"An individual listing check succeeded at {uk(last_ok)}.", "alerts",
+            )
     account = conn.execute("""SELECT b.enabled, b.user_id IS NOT NULL AND b.session IS NOT NULL AS connected,
         b.verified_at,a.checked,a.reason,a.stage,a.http_status,n.checked AS rejected_at,n.identity_rejected
         FROM vinted_buyer b LEFT JOIN vinted_buyer_access a ON a.id=b.id

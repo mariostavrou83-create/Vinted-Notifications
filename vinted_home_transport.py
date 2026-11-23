@@ -4,6 +4,7 @@ import math
 import re
 import time
 from email.utils import parsedate_to_datetime
+from types import SimpleNamespace
 from urllib.parse import urljoin, urlsplit
 
 import requests
@@ -14,6 +15,18 @@ from vinted_buyer_priority import yield_to_purchase
 from vinted_http import NAVIGATION_HEADERS
 
 MAX_HTML_BYTES = 4 * 1024 * 1024
+
+
+def _incomplete_read(response, stage):
+    # A broken stream can still carry a status and a mandatory Retry-After.
+    # Classify headers without attempting to read the failed body a second time.
+    if response is not None:
+        if response.status_code != 200 or "Retry-After" in response.headers:
+            headers_only = SimpleNamespace(status_code=response.status_code, headers=response.headers, text="")
+            return buyer.response_error(headers_only, None, "request")
+        # An incomplete response cannot establish whether the account was challenged.
+        stage = "request"
+    return buyer.BuyerError("Home discovery read did not complete.", reason="network", stage=stage)
 
 
 def same_item_redirect(response, requested_url):
@@ -88,8 +101,11 @@ def read_html(client, url):
     yield_to_purchase()
     started = time.time()
     response = None
+    page_stage = "listing_page" if parts.path.startswith("/items/") else "request"
+    reading_page = False
     try:
         with client.accepted_response_cookies("home_discovery"):
+            reading_page = True
             response = client.session.get(
                 url,
                 headers={
@@ -102,10 +118,16 @@ def read_html(client, url):
                 allow_redirects=False,
                 stream=True,
             )
+            if response.status_code == 429:
+                # The status and headers are sufficient. A stalled error body
+                # must never postpone recording the provider's cooldown.
+                raise _incomplete_read(response, "request")
             body = bytearray()
             for chunk in response.iter_content(65536):
                 body.extend(chunk)
                 if len(body) > MAX_HTML_BYTES:
+                    if response.status_code != 200 or "Retry-After" in response.headers:
+                        raise _incomplete_read(response, "request")
                     raise buyer.BuyerError(
                         "Home discovery page exceeded its bound.",
                         reason="response_too_large",
@@ -114,10 +136,13 @@ def read_html(client, url):
             # Use a bounded response for the existing error classifier only.
             response._content = bytes(body)
             response._content_consumed = True
+            reading_page = False
             data = buyer.homepage_data(response)
             if response.status_code != 200 or buyer.security_challenge(response, data):
-                error = buyer.response_error(response, data, "request")
-                if error.reason == "redirect" and same_item_redirect(response, url):
+                stage = "request" if "Retry-After" in response.headers else page_stage
+                error = buyer.response_error(response, data, stage)
+                if (error.reason == "redirect" and "Retry-After" not in response.headers
+                        and same_item_redirect(response, url)):
                     raise buyer.BuyerError(
                         "Home listing was redirected and skipped.",
                         response.status_code,
@@ -132,10 +157,10 @@ def read_html(client, url):
         client.persist_session()
         observed_at = response_time(response.headers, started)
         return html, observed_at
-    except (requests.RequestException, UnicodeError):
-        raise buyer.BuyerError(
-            "Home discovery read did not complete.", reason="network"
-        ) from None
+    except (requests.RequestException, UnicodeError) as exc:
+        failed_response = response if response is not None else getattr(exc, "response", None)
+        # Identity and session maintenance errors never acquire listing scope.
+        raise _incomplete_read(failed_response, page_stage if reading_page else "request") from None
     finally:
         if response is not None:
             response.close()

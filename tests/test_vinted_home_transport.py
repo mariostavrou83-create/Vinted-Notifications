@@ -77,6 +77,34 @@ class HomeTransportTests(unittest.TestCase):
         client.update_tokens.assert_called_once()
         client.persist_session.assert_called_once()
 
+    def test_only_a_plain_listing_get_failure_has_listing_scope(self):
+        item_url = "https://www.vinted.co.uk/items/500-top"
+        for url, expected in ((item_url, "listing_page"), ("https://www.vinted.co.uk/", "request")):
+            client = self.client()
+            client.session.get.side_effect = requests.ConnectTimeout()
+            with self.assertRaises(BuyerError) as caught:
+                self.read(client, url)
+            self.assertEqual((caught.exception.reason, caught.exception.stage), ("network", expected))
+            client.session.get.assert_called_once()
+        client = self.client(status=503)
+        with self.assertRaises(BuyerError) as caught:
+            self.read(client, item_url)
+        self.assertEqual((caught.exception.status, caught.exception.stage), (503, "listing_page"))
+
+    def test_provider_wait_survives_unreadable_error_bodies(self):
+        item_url = "https://www.vinted.co.uk/items/500-top"
+        for status, body in ((503, b"unavailable"), (503, b"\xff"), (429, b"\xff"), (307, b"redirect")):
+            client = self.client(body=body, status=status)
+            client.session.get.return_value.headers["Retry-After"] = "480"
+            client.session.get.return_value.headers["Location"] = "/items/500-new-title"
+            if status == 429:
+                client.session.get.return_value.iter_content = Mock(side_effect=AssertionError("must not wait for body"))
+            with self.assertRaises(BuyerError) as caught:
+                self.read(client, item_url)
+            self.assertEqual((caught.exception.status, caught.exception.retry_after, caught.exception.stage),
+                             (status, 480, "request"))
+            client.session.get.assert_called_once()
+
     def test_only_plain_same_item_redirect_can_be_skipped_without_cooldown(self):
         item_url = "https://www.vinted.co.uk/items/500-old-title"
         for location in (

@@ -1,6 +1,9 @@
 """Offline Home worker account, freshness and real outbox regression tests."""
 
 import json
+import multiprocessing
+import signal
+import time
 import unittest
 from contextlib import closing, nullcontext
 from types import SimpleNamespace
@@ -11,6 +14,53 @@ from test_search_controls import DatabaseFixture
 import db
 import search_settings
 import vinted_home_monitor as home
+
+
+def run_stalled_home(entered):
+    def stall():
+        entered.set()
+        time.sleep(30)
+
+    with patch.object(home, "Monitor") as factory, patch.object(home, "enabled", return_value=True), patch.object(
+        home, "WORKER_STALL_SECONDS", 1
+    ):
+        factory.return_value.tick.side_effect = stall
+        home.run()
+
+
+@unittest.skipUnless(hasattr(signal, "SIGALRM"), "requires a POSIX timer")
+class HomeWorkerTests(unittest.TestCase):
+    def test_real_stalled_child_exits_and_supervisor_starts_exactly_one_replacement(self):
+        from process_watchdog import ensure_running
+
+        entered = multiprocessing.Event()
+        stopped = multiprocessing.Process(target=run_stalled_home, args=(entered,))
+        stopped.start()
+        try:
+            self.assertTrue(entered.wait(5))
+            stopped.join(5)
+            self.assertEqual(stopped.exitcode, -signal.SIGALRM)
+            stop = multiprocessing.Event()
+            replacement = ensure_running(stopped, stop.wait, name="vinted-home-monitor")
+            try:
+                self.assertTrue(replacement.is_alive())
+                self.assertIs(ensure_running(replacement, stop.wait, name="vinted-home-monitor"), replacement)
+            finally:
+                stop.set()
+                replacement.join(5)
+            self.assertEqual(replacement.exitcode, 0)
+        finally:
+            if stopped.is_alive():
+                stopped.kill()
+                stopped.join(5)
+
+    def test_idle_ticks_renew_timer_and_exceptions_do_not(self):
+        with patch.object(home, "Monitor") as factory, patch.object(home, "enabled", return_value=False), patch.object(
+            home.signal, "alarm"
+        ) as alarm, patch.object(home.time, "sleep"):
+            factory.return_value.tick.side_effect = [None, None, OSError(), SystemExit()]
+            home.run()
+        self.assertEqual([call.args[0] for call in alarm.call_args_list], [180, 180, 180, 0])
 
 
 class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
@@ -284,6 +334,67 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         self.fetch.side_effect = home.buyer.BuyerError("temporary", reason="network", stage="identity")
         self.worker.tick()
         self.assertEqual(self.status()["retry_at"], 1300)
+
+    def test_optional_listing_failures_cannot_silence_verified_home_cards(self):
+        first = dict(self.item, id="700", home_available=True, home_created_at=1055)
+        second = dict(first, id="701", home_created_at=1115)
+        stale = dict(first, id="702", home_created_at=800)
+        book = dict(first, id="703", category_ids=["2309", "3037"])
+        cards = [self.item]
+        self.fetch.side_effect = lambda role, url: ("page", self.now)
+        with patch.object(home, "parse_home", return_value={"reason": "ok", "items": cards}):
+            self.worker.tick()
+            for at, delay in ((1001, 60), (1061, 120)):
+                self.now = at
+                with patch.object(self.worker, "fetch", side_effect=home.buyer.BuyerError(
+                    "temporary", reason="network", stage="listing_page"
+                )):
+                    self.worker.tick()
+                self.assertEqual(self.status()["code"], "listing_deferred")
+                self.assertEqual(self.status()["detail_retry_at"], at + delay)
+                self.assertEqual(self.status()["retry_at"], 0)
+                if at == 1001:
+                    cards.extend([first, stale, book])
+                    self.now = 1060
+                    self.worker.tick()
+                    self.assertEqual([r["item_id"] for r in self.rows()], ["700"])
+            self.worker = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
+            self.now = 1120
+            cards.append(second)
+            self.worker.tick()
+            self.now = 1121
+            self.worker.tick()
+            self.assertEqual({r["item_id"] for r in self.rows()}, {"700", "701"})
+            self.assertTrue(all(call.args == ("seller", home.buyer.BASE + "/") for call in self.fetch.call_args_list))
+            self.now = 1180
+            self.worker.tick()
+            self.now = 1181
+            self.worker.tick()
+            self.assertEqual(self.fetch.call_args.args, ("seller", self.item["url"]))
+            self.assertEqual(self.status()["detail_retry_at"], 0)
+            self.assertEqual(self.status()["last_detail_ok"], 1181)
+
+    def test_wait_or_account_denial_from_a_listing_still_stops_every_seller_read(self):
+        for reason, status, wait in (("rate_limited", 429, 420), ("unreadable", 503, 420),
+                                     ("security_challenge", 503, 0), ("credentials", 401, 0),
+                                     ("unreadable", 404, 420)):
+            with self.subTest(reason=reason, status=status):
+                with closing(search_settings.connection()) as conn, conn:
+                    conn.execute("DELETE FROM parameters WHERE key='home_monitor_status_seller'")
+                self.now += 1000
+                self.worker = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
+                self.fetch.side_effect = None
+                self.worker.tick()
+                self.now += 1
+                self.fetch.side_effect = home.buyer.BuyerError("refused", reason=reason, status=status,
+                                                              stage="listing_page", retry_after=wait)
+                self.worker.tick()
+                self.assertEqual(self.status()["retry_at"], self.now + (wait or 300))
+                restart = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
+                self.now += (wait or 300) - 1
+                count = self.fetch.call_count
+                restart.tick()
+                self.assertEqual(self.fetch.call_count, count)
 
     def test_listing_limit_resumes_with_home_then_spaces_details_across_restart(self):
         self.worker.tick()
