@@ -3,6 +3,7 @@
 import math
 import re
 import time
+from contextlib import closing
 from email.utils import parsedate_to_datetime
 from types import SimpleNamespace
 from urllib.parse import urljoin, urlsplit
@@ -10,11 +11,61 @@ from urllib.parse import urljoin, urlsplit
 import requests
 
 import vinted_buyer as buyer
-from vinted_accounts import client_account
+import vinted_seller as seller
+from search_settings import connection
+from vinted_accounts import client_account, current_role
 from vinted_buyer_priority import yield_to_purchase
 from vinted_http import NAVIGATION_HEADERS
 
 MAX_HTML_BYTES = 4 * 1024 * 1024
+VERIFY_SECONDS = 15
+
+
+class HomeReader:
+    """Reuse a recently verified seller connection while its saved session agrees."""
+
+    def __init__(self, clock=time.monotonic):
+        self.clock = clock
+        self.client = None
+        self.verify_at = 0
+
+    def close(self):
+        if self.client is not None:
+            self.client.session.close()
+            self.client = None
+
+    def current_session(self):
+        if self.client is None or self.client._verified_session is None:
+            return False
+        user_id, seal, _ = self.client._verified_session
+        with closing(connection()) as conn:
+            return conn.execute(
+                "SELECT 1 FROM vinted_seller WHERE id=1 AND user_id=? AND session=? AND verified_at>0",
+                (user_id, seal),
+            ).fetchone() is not None
+
+    def fetch(self, role, url):
+        with seller.exclusive():
+            if role != "seller" or current_role() != role:
+                self.close()
+                raise buyer.BuyerError("Home account did not match.", reason="account_changed")
+            yield_to_purchase()
+            try:
+                if self.clock() >= self.verify_at or not self.current_session():
+                    self.close()
+                    self.client = seller.connected_client(solve_challenges=False, allow_refresh=False)
+                    self.verify_at = self.clock() + VERIFY_SECONDS
+                    if self.client.account_role != role or not self.current_session():
+                        raise buyer.BuyerError("Home account did not match.", reason="account_changed")
+                result = read_html(self.client, url)
+                if not self.current_session():
+                    raise buyer.BuyerError("The saved MSJ connection changed.", reason="saved_session")
+                return result
+            except Exception:
+                # An auth rejection, replacement session or broken connection
+                # must pass a fresh seller identity read before it is reused.
+                self.close()
+                raise
 
 
 def _incomplete_read(response, stage):

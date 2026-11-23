@@ -549,9 +549,7 @@ def create_app(test_config=None):
             match_audit=__import__("search_match_audit").summary(),
             rows=rows,
             archived=archived,
-            active=sum(not r["paused"] for r in rows),
-            photos=sum(bool(r["reference_id"]) for r in rows),
-            interval=db.get_parameter("query_refresh_delay"),
+            resources=resource_controls.summary() if not archived else None,
             folders=store.list_folders(),
             folder=folder,
             ebay_connection=ebay_connection,
@@ -783,7 +781,12 @@ def create_app(test_config=None):
                     import vinted_home_controls
 
                     vinted_home_controls.configure(request.form.get("home_enabled", ""))
-                    flash("Home discovery setting saved. Existing searches and buying settings are unchanged.", "success")
+                    flash("Home discovery setting saved.", "success")
+                elif action == "home_rate":
+                    import vinted_home_controls
+
+                    vinted_home_controls.save_target(request.form.get("home_interval", ""))
+                    flash("Home refresh target saved.", "success")
                 elif action == "live_searches":
                     ebay_store.save_live_selection(request.form.getlist("live_search"))
                     flash(

@@ -1,7 +1,7 @@
 """Bounded Home discovery; only existing Telegram user taps can purchase.
 
-Only the original MSJ Vinted account supplies recommendations. A fresh current-account identity
-read precedes each bounded page read, under the existing shared account lock.
+Only the original MSJ Vinted account supplies recommendations. Every bounded page read
+uses the existing seller lock and a verified connection to the saved seller account.
 No cookie copies, login, renewal, solver tasks or checkout writes originate here.
 """
 
@@ -19,13 +19,14 @@ import db
 import search_settings
 import vinted_accounts
 import vinted_buyer as buyer
+import vinted_home_controls as controls
 import vinted_seller as seller
 from logger import get_logger
 from vinted_buyer_priority import yield_to_purchase
 from vinted_home_feed import parse_home, parse_listing
 import vinted_home_activity as activity
 from vinted_home_matching import match_candidate, womens_clothing
-from vinted_home_transport import read_html
+from vinted_home_transport import HomeReader, read_html
 
 logger = get_logger(__name__)
 INTERVAL = 60
@@ -34,6 +35,10 @@ PAGE_BUDGET = 1 + MAX_DETAILS
 REPEAT_INTERVAL = 32
 CYCLE_SECONDS = 30
 DETAIL_SPACING_SECONDS = CYCLE_SECONDS / MAX_DETAILS
+FAST_START_SECONDS = 8
+FAST_STEP_SECONDS = 90
+FAST_STEP_CHECKS = 6
+FAST_STATUS_SECONDS = 5
 RATE_RECOVERY_SECONDS = 600
 MAX_RATE_LIMIT_LEVEL = 4
 WORKER_STALL_SECONDS = 180
@@ -71,6 +76,7 @@ STATUS_LOG = (
     "Vinted Home monitor: role=%s code=%s detail=%s stage=%s http=%s retry_at=%s "
     + " ".join(f"{name}=%s" for name in COUNTERS)
     + " rate_limit_level=%s detail_spacing_seconds=%s detail_retry_at=%s"
+    + " target_seconds=%s scheduled_seconds=%s measured_seconds=%s"
 )
 ERROR_CODES = frozenset(
     {
@@ -270,13 +276,17 @@ def _record_decision(item, observed, outcome, role, query_id=None):
 
 
 class Monitor:
-    def __init__(self, *, clock=time.time, fetch=_page):
-        self.clock, self.fetch = clock, fetch
+    def __init__(self, *, clock=time.time, fetch=None):
+        self.clock = clock
+        self.reader = HomeReader()
+        self.fetch = fetch if fetch is not None else self.read_page
         self.started = False
         self.next_home = {role: 0 for role in ROLES}
         self.pending = {role: deque() for role in ROLES}
         self.deadline = {role: 0 for role in ROLES}
         self.page_reads = {role: deque() for role in ROLES}
+        self.detail_reads = {role: deque() for role in ROLES}
+        self.last_stage = dict.fromkeys(ROLES, None)
         self.counts = {role: dict.fromkeys(COUNTERS, 0) for role in ROLES}
         self.examined = OrderedDict()
         # One later recommendation may complete missing listing data. New cards
@@ -291,6 +301,14 @@ class Monitor:
         self.detail_retry_at = dict.fromkeys(ROLES, 0)
         self.last_detail_failure = dict.fromkeys(ROLES, 0)
         self.last_detail_ok = dict.fromkeys(ROLES, 0)
+        self.last_home_at = dict.fromkeys(ROLES, 0)
+        self.measured_seconds = dict.fromkeys(ROLES, None)
+        self.target = controls.target_seconds()
+        self.check_target_at = 0
+        self.scheduled_seconds = max(self.target, FAST_START_SECONDS)
+        self.speedup_at = self.clock() + FAST_STEP_SECONDS
+        self.fast_checks = 0
+        self.last_status = dict.fromkeys(ROLES, None)
         self.read_delays = {role: {"home": 0, "listing": 0} for role in ROLES}
         for role in ROLES:
             try:
@@ -310,6 +328,16 @@ class Monitor:
                 self.detail_retry_at[role] = saved_time(saved, "detail_retry_at")
                 self.last_detail_failure[role] = saved_time(saved, "last_detail_failure")
                 self.last_detail_ok[role] = saved_time(saved, "last_detail_ok")
+                self.last_home_at[role] = saved_time(saved, "last_home_at")
+                scheduled = saved.get("scheduled_seconds")
+                speedup_at = saved_time(saved, "speedup_at")
+                if (
+                    self.target and saved.get("target_seconds") == self.target
+                    and type(scheduled) in (int, float) and self.target <= scheduled <= INTERVAL
+                    and (self.clock() - self.last_home_at[role] < 900 or speedup_at > self.clock())
+                ):
+                    self.scheduled_seconds = scheduled
+                    self.speedup_at = max(self.speedup_at, speedup_at)
                 level = saved.get("rate_limit_level", 0)
                 recovery = saved.get("rate_recovery_at", 0)
                 if (
@@ -320,6 +348,9 @@ class Monitor:
                     self.rate_recovery_at[role] = recovery
             except (ValueError, TypeError):
                 pass
+
+    def read_page(self, role, url):
+        return self.reader.fetch(role, url) if self.target else _page(role, url)
 
     def detail_spacing(self, role):
         return min(INTERVAL, DETAIL_SPACING_SECONDS * 2 ** self.rate_limit_level[role])
@@ -344,6 +375,14 @@ class Monitor:
             self.rate_recovery_at[role] = (
                 now + RATE_RECOVERY_SECONDS if self.rate_limit_level[role] else 0
             )
+        state = (code, stage, http_status, self.target, self.scheduled_seconds, self.rate_limit_level[role])
+        previous = self.last_status[role]
+        if (
+            self.target and state[:3] == ("checked", "home", 200)
+            and not self.counts[role]["alerts"] and previous
+            and previous[0] == state and now - previous[1] < FAST_STATUS_SECONDS
+        ):
+            return
         data = {
             "code": code,
             "stage": stage,
@@ -356,6 +395,11 @@ class Monitor:
             "detail_retry_at": self.detail_retry_at[role],
             "last_detail_failure": self.last_detail_failure[role],
             "last_detail_ok": self.last_detail_ok[role],
+            "last_home_at": self.last_home_at[role],
+            "target_seconds": self.target,
+            "scheduled_seconds": self.scheduled_seconds if self.target else None,
+            "measured_seconds": self.measured_seconds[role],
+            "speedup_at": self.speedup_at,
             "http_status": (
                 http_status
                 if type(http_status) is int and 100 <= http_status <= 599
@@ -371,6 +415,7 @@ class Monitor:
                     json.dumps(data, separators=(",", ":")),
                 ),
             )
+        self.last_status[role] = (state, now)
         logger.info(
             STATUS_LOG,
             role,
@@ -383,6 +428,9 @@ class Monitor:
             self.rate_limit_level[role],
             self.detail_spacing(role),
             self.detail_retry_at[role],
+            data["target_seconds"],
+            data["scheduled_seconds"],
+            data["measured_seconds"],
         )
 
     def remember(self, item_id, now):
@@ -397,6 +445,7 @@ class Monitor:
         now = self.clock()
         if not enabled():
             if self.started:
+                self.reader.close()
                 for role in ROLES:
                     self.pending[role].clear()
                     self.status(role, "disabled", "idle")
@@ -406,24 +455,46 @@ class Monitor:
         if not self.started:
             self.next_home = {"seller": now}
             self.started = True
+        if now >= self.check_target_at:
+            target = controls.target_seconds()
+            self.check_target_at = now + 5
+            if target != self.target:
+                self.target = target
+                self.reader.close()
+                self.scheduled_seconds = max(target, FAST_START_SECONDS)
+                self.speedup_at = now + FAST_STEP_SECONDS
+                self.fast_checks = 0
+                for role in ROLES:
+                    self.pending[role].clear()
+                    self.measured_seconds[role] = None
+                    self.next_home[role] = max(now, self.retry_at[role])
         for role in ROLES:
             if now < self.retry_at[role]:
-                continue
-            if now >= self.deadline[role] or now >= self.next_home[role]:
-                self.pending[role].clear()
-            stage = "listing" if self.pending[role] else "home"
-            if stage == "home" and now < self.next_home[role]:
-                continue
-            if stage == "listing" and now < max(self.next_detail_at[role], self.detail_retry_at[role]):
                 continue
             reads = self.page_reads[role]
             while reads and reads[0] <= now - INTERVAL:
                 reads.popleft()
-            if len(reads) >= PAGE_BUDGET:
-                continue
+            detail_reads = self.detail_reads[role]
+            while detail_reads and detail_reads[0] <= now - INTERVAL:
+                detail_reads.popleft()
+            if self.target:
+                stage = self.fast_stage(role, now)
+                if stage is None:
+                    continue
+            else:
+                if now >= self.deadline[role] or now >= self.next_home[role]:
+                    self.pending[role].clear()
+                stage = "listing" if self.pending[role] else "home"
+                if stage == "home" and now < self.next_home[role]:
+                    continue
+                if stage == "listing" and now < max(self.next_detail_at[role], self.detail_retry_at[role]):
+                    continue
+                if len(reads) >= PAGE_BUDGET:
+                    continue
             try:
                 reason = _account_ready(role)
                 if reason:
+                    self.reader.close()
                     self.pending[role].clear()
                     self.retry_at[role] = now + 300
                     self.next_home[role] = self.retry_at[role]
@@ -439,6 +510,7 @@ class Monitor:
                         logger.warning("Home buying-guide read deferred: error_type=%s", type(exc).__name__)
                     self.searches_until = now + 30
                 searches = self.searches
+                self.last_stage[role] = stage
                 if stage == "home":
                     reads.append(now)
                     self.home(role, now)
@@ -463,6 +535,11 @@ class Monitor:
                         minimum = min(300, INTERVAL * 2 ** (level - 1))
                         self.retry_at[role] = self.clock() + max(minimum, delay)
                         self.rate_recovery_at[role] = self.retry_at[role] + RATE_RECOVERY_SECONDS
+                        if self.target:
+                            self.scheduled_seconds = min(INTERVAL, max(FAST_START_SECONDS, self.scheduled_seconds * 2))
+                            self.speedup_at = self.rate_recovery_at[role]
+                            self.fast_checks = 0
+                            self.next_detail_at[role] = self.retry_at[role] + min(15, self.detail_spacing(role))
                     elif exc.stage in {"request", "listing_page"} and temporary_read_error(exc):
                         self.retry_at[role] = self.clock() + max(self.next_read_delay(role, stage), delay)
                     else:
@@ -473,7 +550,9 @@ class Monitor:
                     # Home/listing GET. Keep the slot and retry after yielding.
                     if reads and reads[-1] == now:
                         reads.pop()
-                    self.retry_at[role] = self.clock() + 5
+                    if stage == "listing" and detail_reads and detail_reads[-1] == now:
+                        detail_reads.pop()
+                    self.retry_at[role] = self.clock() + (1 if self.target else 5)
                     if stage == "home":
                         self.next_home[role] = self.retry_at[role]
                     else:
@@ -489,12 +568,52 @@ class Monitor:
                 )
             return  # At most one account page per tick; release before any wait.
 
+    def fast_stage(self, role, now):
+        pending = self.pending[role]
+        while pending and pending[0]["_home_verify_until"] <= now:
+            pending.popleft()
+        home_due = now >= self.next_home[role]
+        listing_due = (
+            pending and len(self.detail_reads[role]) < MAX_DETAILS
+            and now >= max(self.next_detail_at[role], self.detail_retry_at[role])
+        )
+        if listing_due and (not home_due or self.last_stage[role] == "home"):
+            return "listing"
+        return "home" if home_due else None
+
+    def wait_seconds(self):
+        if not self.target or not self.started:
+            return 1
+        role = ROLES[0]
+        next_read = self.next_home[role]
+        if self.pending[role] and len(self.detail_reads[role]) < MAX_DETAILS:
+            next_detail = max(self.next_detail_at[role], self.detail_retry_at[role])
+            next_read = min(next_read, next_detail)
+        due = max(next_read, self.retry_at[role])
+        return min(1, max(0.05, due - self.clock()))
+
+    def home_succeeded(self, role, started, http_status):
+        now = self.clock()
+        previous = self.last_home_at[role]
+        self.measured_seconds[role] = round(now - previous, 3) if 0 < previous < now <= previous + 300 else None
+        self.last_home_at[role] = now
+        if self.target:
+            self.fast_checks += 1
+            if self.fast_checks >= FAST_STEP_CHECKS and now >= self.speedup_at:
+                self.scheduled_seconds = max(self.target, self.scheduled_seconds / 2)
+                self.speedup_at = now + FAST_STEP_SECONDS
+                self.fast_checks = 0
+            self.next_home[role] = started + self.scheduled_seconds
+        self.status(role, "checked", "home", http_status)
+
     def home(self, role, now):
-        self.next_home[role] = now + INTERVAL
+        self.next_home[role] = now + (self.scheduled_seconds if self.target else INTERVAL)
         self.counts[role] = dict.fromkeys(COUNTERS, 0)
         html, observed = self.fetch(role, buyer.BASE + "/")
         result = parse_home(html)
         if result.get("reason") != "ok":
+            self.reader.close()
+            self.pending[role].clear()
             delay = 300
             if result.get("reason") == "home_cards_unavailable" and result.get("authenticated") is True:
                 # A signed-in but empty/unreadable feed may last only one poll.
@@ -524,8 +643,10 @@ class Monitor:
         # IDs order the checks when Vinted supplies no reliable upload timestamp.
         fresh_ids = []
         rechecks = []
+        previous_pending = {str(item["id"]): item for item in self.pending[role]} if self.target else {}
         for item in sorted(candidates, key=lambda card: int(card["id"]), reverse=True):
             identifier = str(item["id"])
+            previous = previous_pending.pop(identifier, None)
             recheck = identifier in self.recheck_until
             if identifier in seen or (identifier in self.examined and not recheck):
                 self.counts[role]["duplicates"] += 1
@@ -552,6 +673,13 @@ class Monitor:
                 self.remember(identifier, self.clock())
                 continue
             if stamp is None or item.get("home_available") is not True or not womens_clothing(item):
+                if self.target:
+                    deadline = first_seen.get(identifier, received_at) + MAX_AGE
+                    if stamp is not None:
+                        deadline = min(deadline, stamp + MAX_AGE)
+                    if previous:
+                        deadline = min(deadline, previous["_home_verify_until"])
+                    item = dict(item, _home_verify_until=deadline)
                 candidates_for_detail.append(item)
                 continue
             age = {"verified": True, "checked_at": observed, "max_age_seconds": math.ceil(observed - stamp)}
@@ -562,9 +690,11 @@ class Monitor:
             self.remember(identifier, self.clock())
         repeated = self.counts[role]["duplicates"] + self.counts[role]["previously_seen_expired"]
         repeat_heavy = len(candidates) >= 10 and repeated >= len(candidates) // 2
-        retained = sum(at > now + CYCLE_SECONDS - INTERVAL for at in self.page_reads[role])
-        limit = min(MAX_DETAILS, PAGE_BUDGET - retained)
-        if repeat_heavy and not self.rate_limit_level[role] and len(fresh_ids) <= limit:
+        limit = MAX_DETAILS
+        if not self.target:
+            retained = sum(at > now + CYCLE_SECONDS - INTERVAL for at in self.page_reads[role])
+            limit = min(MAX_DETAILS, PAGE_BUDGET - retained)
+        if not self.target and repeat_heavy and not self.rate_limit_level[role] and len(fresh_ids) <= limit:
             # Some reads still in the rolling minute will expire before the
             # next refresh. Count those that will remain and the details we
             # have actually scheduled. Keep every available new-card slot.
@@ -576,15 +706,16 @@ class Monitor:
         # with incomplete category information remain eligible for verification.
         fresh_ids.sort(key=womens_clothing, reverse=True)
         rechecks.sort(key=womens_clothing, reverse=True)
+        fresh_ids.extend(item for item in previous_pending.values() if item["_home_verify_until"] > received_at)
         self.pending[role] = deque((fresh_ids + rechecks)[:limit])
         self.deadline[role] = self.clock() + CYCLE_SECONDS
-        if self.rate_limit_level[role]:
+        if self.rate_limit_level[role] and not self.target:
             # On recovery, process this Home page before spacing out detail GETs.
             self.next_detail_at[role] = max(
                 self.next_detail_at[role],
                 self.clock() + min(CYCLE_SECONDS / 2, self.detail_spacing(role)),
             )
-        self.status(role, "checked", "home", 200)
+        self.home_succeeded(role, now, 200)
 
     def listing(self, role, searches, now):
         candidate = self.pending[role][0]
@@ -597,6 +728,7 @@ class Monitor:
             return
         try:
             self.page_reads[role].append(now)
+            self.detail_reads[role].append(now)
             self.next_detail_at[role] = now + self.detail_spacing(role)
             html, observed = self.fetch(role, candidate["url"])
         except buyer.BuyerError as exc:
@@ -736,11 +868,12 @@ def run():
     if alarm is not None:
         previous = signal.signal(signal.SIGALRM, signal.SIG_DFL)
         alarm(WORKER_STALL_SECONDS)
+    monitor = None
     try:
         monitor = Monitor()
         logger.info(
-            "Vinted Home monitor ready: source=MSJ_Vinted role=seller category=womens_clothing maximum_age_seconds=180 enabled=%s stall_timeout_seconds=%s",
-            enabled(), WORKER_STALL_SECONDS if alarm is not None else 0,
+            "Vinted Home monitor ready: source=MSJ_Vinted role=seller category=womens_clothing maximum_age_seconds=180 enabled=%s stall_timeout_seconds=%s target_seconds=%s",
+            enabled(), WORKER_STALL_SECONDS if alarm is not None else 0, monitor.target,
         )
         while True:
             try:
@@ -754,8 +887,10 @@ def run():
                 # as responsive ticks. Alert volume never controls the timer.
                 if alarm is not None:
                     alarm(WORKER_STALL_SECONDS)
-            time.sleep(1)
+            time.sleep(monitor.wait_seconds())
     finally:
+        if monitor is not None:
+            monitor.reader.close()
         if alarm is not None:
             alarm(0)
             signal.signal(signal.SIGALRM, previous)

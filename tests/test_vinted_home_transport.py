@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch
 import requests
 
 import vinted_home_transport as transport
+from vinted_accounts import account_scope
 from vinted_buyer import BuyerError
 
 
@@ -39,6 +40,33 @@ class HomeTransportTests(unittest.TestCase):
         client.persist_session.assert_called_once()
         client.solve_challenge.assert_not_called()
         client.request.assert_not_called()
+
+    def test_home_reader_reuses_only_recent_verified_seller_connections(self):
+        clock = Mock(return_value=1000)
+        first = self.client()
+        first.account_role = "seller"
+        replacement = self.client()
+        replacement.account_role = "seller"
+        reader = transport.HomeReader(clock)
+        url = "https://www.vinted.co.uk/"
+        with patch.object(transport.seller, "exclusive", side_effect=lambda: account_scope("seller")), patch.object(
+            transport.seller, "connected_client", side_effect=[first, replacement]
+        ) as connect, patch.object(reader, "current_session", return_value=True) as saved, patch.object(
+            transport, "yield_to_purchase"
+        ), patch.object(transport, "read_html", return_value=("page", 1000)):
+            self.assertEqual(reader.fetch("seller", url), ("page", 1000))
+            clock.return_value += 1
+            reader.fetch("seller", url)
+            connect.assert_called_once_with(solve_challenges=False, allow_refresh=False)
+            clock.return_value += transport.VERIFY_SECONDS
+            reader.fetch("seller", url)
+            self.assertEqual(connect.call_count, 2)
+            first.session.close.assert_called_once()
+            saved.side_effect = [True, False]
+            with self.assertRaisesRegex(BuyerError, "connection changed"):
+                reader.fetch("seller", url)
+            replacement.session.close.assert_called_once()
+            self.assertIsNone(reader.client)
 
     def test_foreign_urls_and_unverified_sessions_cannot_read(self):
         for url in (

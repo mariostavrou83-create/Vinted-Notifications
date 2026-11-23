@@ -78,7 +78,9 @@ def save_feed(role, items, observed, *, seen_at=None):
             card["first_seen_at"] = first_seen.get(card["id"], seen_at)
         conn.execute("""INSERT INTO vinted_home_pages VALUES (?,?,?) ON CONFLICT(role)
             DO UPDATE SET fetched_at=excluded.fetched_at,cards=excluded.cards
-            WHERE excluded.fetched_at >= vinted_home_pages.fetched_at""",
+            WHERE excluded.fetched_at >= vinted_home_pages.fetched_at
+            AND (excluded.cards <> vinted_home_pages.cards
+                OR excluded.fetched_at >= vinted_home_pages.fetched_at + 300)""",
             (role, observed, json.dumps(cards, ensure_ascii=False, separators=(",", ":"))))
     return {card["id"]: card["first_seen_at"] for card in cards}
 

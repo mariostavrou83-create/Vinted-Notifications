@@ -1,12 +1,24 @@
 <section class="form-card guide-section" id="home-discovery">
-<h2>Fresh Home finds</h2>
-<p>Recommendations come from your MSJ Vinted Home feed. Only listings confirmed to be under three minutes old qualify. Unknown ages and expired alerts are skipped.</p>
-<p class="muted">Alerts cover women’s clothing across all styles, prices, brands and sizes. Finder checks Vinted’s category on the listing. Matching buying guides add reference photos and a spending limit.</p>
+<h2>MSJ Vinted Home</h2>
+<p>Alerts for women’s clothing confirmed under three minutes old. Matching guides add reference photos and a buying limit.</p>
 <p><b>{{home_discovery.sent_24h}}</b> Home alerts sent in the last 24 hours · {{home_discovery.pending_24h}} waiting for delivery. <a href="/finds?source=home">View Home finds</a></p>
 <form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="action" value="home_discovery">
 <input type="hidden" name="home_enabled" value="{{'0' if home_discovery.enabled else '1'}}">
 <button class="{{'secondary' if home_discovery.enabled else 'primary'}}">{{'Pause Home discovery' if home_discovery.enabled else 'Start Home discovery'}}</button>
-<span>{{'Running' if home_discovery.enabled else 'Paused'}} · MSJ Vinted refreshes about every 32–60 seconds, with up to seven Home and listing page reads per minute</span></form>
-<div class="connection-grid">{% for account in home_discovery.accounts %}<div><h3>{{account.label}}</h3><p>{{account.state}} · {{account.time}}</p><p class="muted">Latest cycle: {{account.candidates}} candidates · {{account.checked}} age checks · {{account.fresh}} fresh · {{account.matched}} matches · {{account.alerts}} alerts queued</p>
-{% if account.fresh %}<p class="muted">Fresh-item checks · {{account.listing_unavailable + account.details_unverified}} unavailable or missing details · {{account.matched}} buying-guide matches</p>{% endif %}</div>{% endfor %}</div>
+<span>{{ 'Running' if home_discovery.enabled else 'Paused' }}</span></form>
+{% for account in home_discovery.accounts %}
+<form method="post">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label for="home_interval">Home refresh target (seconds)</label>
+  <input type="number" id="home_interval" name="home_interval" min="0" max="60" step="1" value="{{ account.target_seconds }}" required>
+  <small>0 uses the adaptive 32–60 second schedule. Faster settings increase gradually and slow down during Vinted cooldowns.</small>
+  <button class="secondary" name="action" value="home_rate">Save Home speed</button>
+</form>
+<p>{{ account.state }}{% if account.last_home %} · last completed Home refresh {{ account.last_home }}{% endif %}
+{% if account.scheduled_seconds %} · scheduled {{ account.scheduled_seconds }}s{% endif %}
+{% if account.measured_seconds %} · last interval {{ account.measured_seconds }}s{% endif %}</p>
+<details><summary>Latest Home check</summary>
+  <p class="muted">{{ account.candidates }} recommendations · {{ account.checked }} listing checks · {{ account.fresh }} fresh · {{ account.alerts }} alerts queued</p>
+</details>
+{% endfor %}
 </section>

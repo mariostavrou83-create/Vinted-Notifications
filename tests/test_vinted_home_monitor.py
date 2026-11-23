@@ -143,6 +143,55 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(self.fetch.call_count, 2)
         self.assertTrue(all(call.args[0] == "seller" for call in self.fetch.call_args_list))
 
+    def test_fast_home_only_accelerates_after_successful_checks(self):
+        home.controls.save_target("1")
+        self.worker = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
+        home.parse_home.return_value["items"] = []
+        speeds = {self.worker.scheduled_seconds}
+        for self.now in range(1000, 1301):
+            self.fetch.return_value = ("page", self.now)
+            self.worker.tick()
+            speeds.add(self.worker.scheduled_seconds)
+
+        self.assertEqual(speeds, {8, 4, 2, 1})
+        self.assertEqual(self.status()["target_seconds"], 1)
+        self.assertEqual(self.status()["measured_seconds"], 1)
+        self.assertTrue(all(call.args[0] == "seller" for call in self.fetch.call_args_list))
+
+    def test_fast_home_runs_listing_checks_and_restarts_into_provider_cooldown(self):
+        home.controls.save_target("1")
+        calls = []
+
+        def fetch(role, url):
+            calls.append((role, url, self.now))
+            return "page", self.now
+
+        self.fetch.side_effect = fetch
+        self.worker = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
+        self.worker.scheduled_seconds = 1
+        for quarter_second in range(240):
+            self.now = 1000 + quarter_second / 4
+            item_id = str(500 + quarter_second // 20)
+            home.parse_home.return_value["items"] = [
+                dict(self.item, id=item_id, url=f"{home.buyer.BASE}/items/{item_id}-top")
+            ]
+            self.worker.tick()
+        listings = [at for _, url, at in calls if "/items/" in url]
+        self.assertEqual(len(listings), home.MAX_DETAILS)
+        self.assertLess(listings[0] - 1000, 1)
+        self.assertGreater(sum(url == home.buyer.BASE + "/" for _, url, _ in calls), 50)
+
+        self.now = 1061
+        self.fetch.side_effect = home.buyer.BuyerError("Test cooldown", 429, reason="rate_limited", retry_after=950)
+        self.worker.tick()
+        self.assertEqual(self.status()["retry_at"], 2011)
+        self.now = 2000
+        self.worker = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
+        self.fetch.reset_mock()
+        self.worker.tick()
+        self.fetch.assert_not_called()
+        self.assertEqual(self.worker.speedup_at, 2611)
+
     def test_fresh_alert_preserves_watermark_search_and_description(self):
         self.discover()
         row = self.rows()[0]

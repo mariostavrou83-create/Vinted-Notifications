@@ -4,6 +4,7 @@ import itertools
 import time
 import unittest
 from contextlib import closing
+from unittest.mock import patch
 
 import test_ebay_dashboard
 import test_search_controls
@@ -101,6 +102,19 @@ class ControlsDashboardTests(EbayFixture, unittest.TestCase):
 
 class ScalingTests(test_search_controls.DatabaseFixture, unittest.TestCase):
     simulate = test_search_controls.SchedulerTests.simulate
+
+    def test_deployment_persists_requested_targets_once_without_editing_searches(self):
+        before = db.get_queries()
+        with patch.dict(resource_controls.os.environ, {"FINDER_ALERT_TARGETS": "1:5"}):
+            self.assertEqual(resource_controls.apply_deployment_targets(), (1, 5))
+            self.assertEqual(db.get_parameter("home_poll_seconds"), "1")
+            self.assertEqual(db.get_parameter("home_monitor_enabled"), "1")
+            self.assertEqual(resource_controls.summary()["cycle"], 5)
+            self.assertEqual(resource_controls.request_rate(), 0)
+            resource_controls.save_rate("5", "7")
+            self.assertIsNone(resource_controls.apply_deployment_targets())
+            self.assertEqual(db.get_parameter("query_refresh_delay"), "7")
+        self.assertEqual(db.get_queries(), before)
 
     def test_fractional_interval_persists_without_rate_limit_and_invalid_is_atomic(self):
         resource_controls.save_rate("0", "3.5")

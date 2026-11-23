@@ -1,6 +1,7 @@
 import multiprocessing
 import os
 import signal
+import sqlite3
 import threading
 import time
 
@@ -341,6 +342,16 @@ if __name__ == "__main__":
             current_version = db.get_parameter("version")
         else:
             break
+
+    from resource_controls import apply_deployment_targets
+
+    try:
+        targets = apply_deployment_targets()
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        logger.warning("Finder alert targets deferred: error_type=%s", type(exc).__name__)
+    else:
+        if targets is not None:
+            logger.info("Finder alert targets applied: home_seconds=%d saved_search_seconds=%d", *targets)
 
     # Plugin checker
     plugin_checker()

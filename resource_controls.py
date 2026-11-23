@@ -1,6 +1,7 @@
 """A shared Vinted polling ceiling: adding searches changes cycle length, not load."""
 
 import math
+import os
 import statistics
 import time
 from contextlib import closing
@@ -10,6 +11,41 @@ import search_settings
 
 DEFAULT_REQUESTS_PER_SECOND = 10
 MAX_REQUESTS_PER_SECOND = 60
+
+
+def apply_deployment_targets():
+    """Apply an explicitly configured pair once, preserving subsequent owner edits."""
+    value = os.environ.get("FINDER_ALERT_TARGETS")
+    if not value:
+        return None
+
+    import vinted_home_controls
+
+    home, separator, saved = value.partition(":")
+    if not separator or not saved.isascii() or not saved.isdecimal() or len(saved) > 3:
+        raise ValueError("FINDER_ALERT_TARGETS must contain Home and saved-search seconds.")
+    home = vinted_home_controls.parse_target(home)
+    saved = int(saved)
+    if not 1 <= saved <= 300:
+        raise ValueError("Saved-search target must be between 1 and 300 seconds.")
+
+    marker = "finder_applied_alert_targets"
+    encoded = f"{home}:{saved}"
+    with closing(search_settings.connection()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("SELECT 1 FROM parameters WHERE key=? AND value=?", (marker, encoded)).fetchone():
+            return None
+        conn.executemany(
+            "INSERT OR REPLACE INTO parameters(key,value) VALUES(?,?)",
+            (
+                ("query_refresh_delay", str(saved)),
+                ("vinted_requests_per_second", "0"),
+                ("home_monitor_enabled", "1"),
+                (vinted_home_controls.TARGET_KEY, str(home)),
+                (marker, encoded),
+            ),
+        )
+    return home, saved
 
 
 def request_rate():

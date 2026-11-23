@@ -29,6 +29,33 @@ CODES = {
     "error": "Check incomplete",
 }
 
+TARGET_KEY = "home_poll_seconds"
+
+
+def parse_target(value):
+    if isinstance(value, str) and value.isascii() and value.isdecimal() and len(value) <= 2:
+        seconds = int(value)
+        if 0 <= seconds <= 60:
+            return seconds
+    raise ValueError("Choose adaptive Home refresh (0) or an interval from 1 to 60 seconds.")
+
+
+def target_seconds(conn=None):
+    if conn is None:
+        with closing(connection()) as opened:
+            return target_seconds(opened)
+    row = conn.execute("SELECT value FROM parameters WHERE key=?", (TARGET_KEY,)).fetchone()
+    try:
+        return parse_target(row[0]) if row else 0
+    except ValueError:
+        return 0
+
+
+def save_target(value):
+    seconds = parse_target(value)
+    with closing(connection()) as conn, conn:
+        conn.execute("INSERT OR REPLACE INTO parameters(key,value) VALUES(?,?)", (TARGET_KEY, str(seconds)))
+
 
 def configure(value):
     if value not in ("0", "1"):
@@ -51,6 +78,22 @@ def seller_status(conn):
     code = raw.get("code", "waiting")
     value = {"role": "seller", "label": "MSJ Vinted",
              "state": CODES.get(code, "Check incomplete") if isinstance(code, str) else "Check incomplete"}
+    target = target_seconds(conn)
+    value["target_seconds"] = target
+    for key in ("scheduled_seconds", "measured_seconds"):
+        number = raw.get(key)
+        value[key] = (
+            round(number, 1)
+            if raw.get("target_seconds") == target and type(number) in (float, int)
+            and math.isfinite(number) and 0 < number <= 300
+            else None
+        )
+    last_home = raw.get("last_home_at")
+    value["last_home"] = (
+        datetime.fromtimestamp(last_home, ZoneInfo("Europe/London")).strftime("%d %b %H:%M:%S %Z")
+        if type(last_home) in (float, int) and math.isfinite(last_home) and 0 < last_home < 4102444800
+        else None
+    )
     for key in (
         "candidates", "checked", "fresh", "matched", "alerts", "listing_unavailable",
         "details_unverified", "global_blocked", "scope_miss", "budget_or_exclusions",

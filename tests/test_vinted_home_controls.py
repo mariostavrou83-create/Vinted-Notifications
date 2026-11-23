@@ -6,6 +6,7 @@ from test_search_controls import DatabaseFixture
 
 import db
 import search_settings
+import vinted_home_controls as controls
 from web_ui_plugin.web_ui import create_app
 
 
@@ -49,8 +50,6 @@ class HomeControlsTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(db.get_parameter("home_monitor_enabled"), "0")
 
     def test_summary_no_raw_status_error_leak(self):
-        import vinted_home_controls as controls
-
         with closing(search_settings.connection()) as conn, conn:
             conn.execute(
                 "INSERT OR REPLACE INTO parameters VALUES('home_monitor_status_seller',?)",
@@ -60,6 +59,15 @@ class HomeControlsTests(DatabaseFixture, unittest.TestCase):
             )
         result = str(controls.summary())
         self.assertNotIn("PRIVATE", result)
+
+    def test_owner_can_set_home_speed_without_starting_a_paused_monitor(self):
+        self.owner()
+        form = {"action": "home_rate", "home_interval": "1", "csrf": "offline-csrf"}
+        controls.configure("0")
+        self.assertEqual(self.client.post("/connections", data=form).status_code, 302)
+        self.assertEqual(db.get_parameter("home_poll_seconds"), "1")
+        self.assertEqual(db.get_parameter("home_monitor_enabled"), "0")
+        self.assertIn('value="1" required', self.client.get("/connections").get_data(as_text=True))
 
     def test_home_page_explains_quiet_cycle_from_only_seller_counters(self):
         self.owner()
