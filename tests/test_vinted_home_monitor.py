@@ -317,7 +317,7 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         self.fetch.side_effect = None
         self.worker.tick()
         self.assertEqual(self.status()["read_delays"]["home"], 0)
-        for expected_delay, requested in ((60, 0), (120, 0), (310, 310)):
+        for identity, (expected_delay, requested) in enumerate(((60, 0), (120, 0), (310, 310)), 501):
             self.now += 1
             self.fetch.side_effect = home.buyer.BuyerError("unavailable", status=503, reason="unreadable", retry_after=requested)
             self.worker.tick()
@@ -325,6 +325,8 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
             self.worker = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
             self.now += expected_delay
             self.fetch.side_effect = None
+            # A new recommendation still has to be checked after each wait.
+            self.item.update(id=str(identity), url=f"https://www.vinted.co.uk/items/{identity}")
             self.worker.tick()
             self.assertEqual(self.status()["stage"], "home")
         self.now += 1
@@ -368,10 +370,12 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
             self.assertEqual({r["item_id"] for r in self.rows()}, {"700", "701"})
             self.assertTrue(all(call.args == ("seller", home.buyer.BASE + "/") for call in self.fetch.call_args_list))
             self.now = 1180
+            newly_listed = dict(self.item, id="704", url="https://www.vinted.co.uk/items/704")
+            cards.append(newly_listed)
             self.worker.tick()
             self.now = 1181
             self.worker.tick()
-            self.assertEqual(self.fetch.call_args.args, ("seller", self.item["url"]))
+            self.assertEqual(self.fetch.call_args.args, ("seller", newly_listed["url"]))
             self.assertEqual(self.status()["detail_retry_at"], 0)
             self.assertEqual(self.status()["last_detail_ok"], 1181)
 
@@ -382,6 +386,7 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
             with self.subTest(reason=reason, status=status):
                 with closing(search_settings.connection()) as conn, conn:
                     conn.execute("DELETE FROM parameters WHERE key='home_monitor_status_seller'")
+                    conn.execute("DELETE FROM vinted_home_pages WHERE role='seller'")
                 self.now += 1000
                 self.worker = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
                 self.fetch.side_effect = None
@@ -486,6 +491,47 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual([r["item_id"] for r in self.rows()], ["625"])
         for instant in read_times:
             self.assertLessEqual(sum(instant - 60 < t <= instant for t in read_times), home.PAGE_BUDGET)
+
+    def test_restart_skips_proven_old_cards_and_checks_the_new_card_first(self):
+        old = [dict(self.item, id=str(i), url=f"https://www.vinted.co.uk/items/{i}")
+               for i in range(900, 924)]
+        home.activity.save_feed("seller", old, 998, seen_at=1000)
+        home.activity.save_feed("seller", old, 1177, seen_at=1179)
+        self.now = 1180
+        self.worker = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
+        self.fetch.side_effect = lambda *args: ("page", self.now)
+        self.age = {"verified": True, "checked_at": 1181, "max_age_seconds": 60}
+        with patch.object(home, "parse_home", return_value={"reason": "ok", "items": old + [self.item]}):
+            self.worker.tick()
+        self.assertEqual(self.status()["previously_seen_expired"], 24)
+        self.assertEqual([card["id"] for card in self.worker.pending["seller"]], ["500"])
+        self.assertEqual(self.rows(), [])
+        self.now += 1
+        self.worker.tick()
+        self.assertEqual(self.fetch.call_count, 2)
+        self.assertEqual(self.fetch.call_args.args, ("seller", self.item["url"]))
+        self.assertEqual([r["item_id"] for r in self.rows()], ["500"])
+
+    def test_prior_page_time_or_recent_first_sighting_never_establishes_age(self):
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("INSERT INTO vinted_home_pages VALUES ('seller', 600, ?)",
+                         (json.dumps([{"id": "500"}]),))
+        seen = home.activity.save_feed("seller", [self.item], 800, seen_at=1000)
+        self.assertEqual(seen, {"500": 1000})
+        self.now = 1179
+        self.fetch.side_effect = lambda *args: ("page", self.now)
+        self.age = {"verified": False}
+        self.worker.tick()
+        self.assertEqual(self.status()["previously_seen_expired"], 0)
+        self.assertEqual([card["id"] for card in self.worker.pending["seller"]], ["500"])
+        self.worker.tick()
+        self.assertEqual(self.status()["age_unverified"], 1)
+        self.assertEqual(self.rows(), [])
+
+    def test_failed_snapshot_does_not_block_current_home_checks(self):
+        with patch.object(home.activity, "save_feed", side_effect=sqlite3.OperationalError("busy")):
+            self.discover()
+        self.assertEqual([row["item_id"] for row in self.rows()], ["500"])
 
     def test_fourth_new_card_on_a_repeat_heavy_page_reaches_the_outbox(self):
         cards = [dict(self.item, id=str(i), url=f"https://www.vinted.co.uk/items/{i}")

@@ -61,6 +61,7 @@ COUNTERS = (
     "photo_matches",
     "card_screened",
     "feed_verified",
+    "previously_seen_expired",
 )
 ERROR_CODES = frozenset(
     {
@@ -362,7 +363,7 @@ class Monitor:
                 ),
             )
         logger.info(
-            "Vinted Home monitor: role=%s code=%s detail=%s stage=%s http=%s retry_at=%s candidates=%s checked=%s fresh=%s matched=%s alerts=%s rejected_age=%s rejected_match=%s duplicates=%s age_unverified=%s age_expired=%s skipped_redirect=%s listing_unavailable=%s details_unverified=%s global_blocked=%s scope_miss=%s budget_or_exclusions=%s style_miss=%s photo_checked=%s photo_matches=%s card_screened=%s feed_verified=%s rate_limit_level=%s detail_spacing_seconds=%s detail_retry_at=%s",
+            "Vinted Home monitor: role=%s code=%s detail=%s stage=%s http=%s retry_at=%s candidates=%s checked=%s fresh=%s matched=%s alerts=%s rejected_age=%s rejected_match=%s duplicates=%s age_unverified=%s age_expired=%s skipped_redirect=%s listing_unavailable=%s details_unverified=%s global_blocked=%s scope_miss=%s budget_or_exclusions=%s style_miss=%s photo_checked=%s photo_matches=%s card_screened=%s feed_verified=%s previously_seen_expired=%s rate_limit_level=%s detail_spacing_seconds=%s detail_retry_at=%s",
             role,
             code,
             data["detail_code"],
@@ -501,9 +502,11 @@ class Monitor:
             return
         candidates = result["items"]
         self.counts[role]["candidates"] = len(candidates)
+        received_at = self.clock()
         try:
-            activity.save_feed(role, candidates, observed)
+            first_seen = activity.save_feed(role, candidates, observed, seen_at=received_at)
         except sqlite3.Error as exc:
+            first_seen = {}
             logger.warning("Home page snapshot deferred: %s", type(exc).__name__)
         seen = activity.alerted_ids([item["id"] for item in candidates])
         self.recheck_until = {
@@ -524,19 +527,22 @@ class Monitor:
                 continue
             stamp = item.get("home_created_at")
             candidates_for_detail = rechecks if recheck else fresh_ids
-            if stamp is None or stamp > observed or stamp <= 0:
+            if stamp is not None and not 0 < stamp <= observed:
                 # A timestamp ahead of the Home observation cannot corroborate
                 # the listing later, even if the clock has since passed it.
                 item.pop("home_created_at", None)
-                candidates_for_detail.append(item)
-                continue
-            if self.clock() >= stamp + MAX_AGE:
+                stamp = None
+            # Prior visibility proves a minimum age only. A first appearance
+            # can never establish that a listing is recent enough to alert.
+            already_old = received_at - first_seen.get(identifier, received_at) >= MAX_AGE
+            if already_old or (stamp is not None and self.clock() >= stamp + MAX_AGE):
                 self.recheck_until.pop(identifier, None)
                 self.counts[role]["rejected_age"] += 1
                 self.counts[role]["age_expired"] += 1
+                self.counts[role]["previously_seen_expired"] += int(already_old)
                 self.remember(identifier, self.clock())
                 continue
-            if item.get("home_available") is not True or not womens_clothing(item):
+            if stamp is None or item.get("home_available") is not True or not womens_clothing(item):
                 candidates_for_detail.append(item)
                 continue
             age = {"verified": True, "checked_at": observed, "max_age_seconds": math.ceil(observed - stamp)}
@@ -545,7 +551,8 @@ class Monitor:
             self.notify_item(item, age, role, self.searches)
             self.recheck_until.pop(identifier, None)
             self.remember(identifier, self.clock())
-        repeat_heavy = len(candidates) >= 10 and self.counts[role]["duplicates"] >= len(candidates) // 2
+        repeated = self.counts[role]["duplicates"] + self.counts[role]["previously_seen_expired"]
+        repeat_heavy = len(candidates) >= 10 and repeated >= len(candidates) // 2
         retained = sum(at > now + CYCLE_SECONDS - INTERVAL for at in self.page_reads[role])
         limit = min(MAX_DETAILS, PAGE_BUDGET - retained)
         if repeat_heavy and not self.rate_limit_level[role] and len(fresh_ids) <= limit:

@@ -45,11 +45,12 @@ def migrate(conn):
         WHERE substr(content,1,1)='🏠'""")
 
 
-def save_feed(role, items, observed):
-    """Keep the latest MSJ Vinted page in its original order."""
+def save_feed(role, items, observed, *, seen_at=None):
+    """Keep page order and return when each visible item was first seen locally."""
     from vinted_home_feed import item_url
     if role != "seller":
-        return
+        return {}
+    seen_at = time.time() if seen_at is None else seen_at
     cards = []
     for item in items:
         url = item_url(item.get("url"), item["id"])
@@ -60,10 +61,26 @@ def save_feed(role, items, observed):
                       "size": (item.get("size_title") or "")[:80],
                       "photo": safe_listing_photo((item.get("photo") or {}).get("url"))})
     with closing(connection()) as conn, conn:
+        previous = conn.execute("SELECT cards FROM vinted_home_pages WHERE role=?", (role,)).fetchone()
+        try:
+            previous_cards = json.loads(previous[0]) if previous else []
+        except (TypeError, ValueError):
+            previous_cards = []
+        first_seen = {}
+        if isinstance(previous_cards, list):
+            for card in previous_cards:
+                if not isinstance(card, dict) or not isinstance(card.get("id"), str):
+                    continue
+                start = card.get("first_seen_at")
+                if type(start) in (int, float) and 0 < start <= seen_at:
+                    first_seen[card["id"]] = start
+        for card in cards:
+            card["first_seen_at"] = first_seen.get(card["id"], seen_at)
         conn.execute("""INSERT INTO vinted_home_pages VALUES (?,?,?) ON CONFLICT(role)
             DO UPDATE SET fetched_at=excluded.fetched_at,cards=excluded.cards
             WHERE excluded.fetched_at >= vinted_home_pages.fetched_at""",
             (role, observed, json.dumps(cards, ensure_ascii=False, separators=(",", ":"))))
+    return {card["id"]: card["first_seen_at"] for card in cards}
 
 
 def alerted_ids(item_ids):
