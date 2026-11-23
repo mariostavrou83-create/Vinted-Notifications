@@ -158,6 +158,22 @@ class HomeFeedTests(unittest.TestCase):
             self.assertEqual(age["max_age_seconds"], maximum)
             self.assertEqual(age["fresh"], accepted)
 
+    def test_home_creation_time_requires_matching_listing_and_consistent_age_evidence(self):
+        now = 1795443600
+        target = {"id": "123", "home_created_at": now - 151}
+        for body, home_card, upper in [
+            (listing("2 min ago"), target, 151),
+            (listing("2 min ago"), dict(target, id="124"), 180),
+            (listing("2 min ago"), {"id": "123", "first_seen": now - 151}, 180),
+            (listing("2 min ago"), dict(target, home_created_at=now + 2), 180),
+            (listing("2 min ago"), dict(target, home_created_at=now - 180), 180),
+            (listing("2 min ago", created_at_ts=now-123), target, 180),
+            (listing("3 min ago"), target, 240),
+        ]:
+            with self.subTest(card=home_card, upper=upper):
+                result = feed.parse_listing(body, "123", now, home_card=home_card)
+                self.assertEqual(result["age"]["max_age_seconds"], upper)
+
     def test_wrong_item_conflicting_missing_or_duplicate_age_is_unverified(self):
         for body in [
             listing(identity="999"),

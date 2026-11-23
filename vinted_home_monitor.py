@@ -525,6 +525,9 @@ class Monitor:
             stamp = item.get("home_created_at")
             candidates_for_detail = rechecks if recheck else fresh_ids
             if stamp is None or stamp > observed or stamp <= 0:
+                # A timestamp ahead of the Home observation cannot corroborate
+                # the listing later, even if the clock has since passed it.
+                item.pop("home_created_at", None)
                 candidates_for_detail.append(item)
                 continue
             if self.clock() >= stamp + MAX_AGE:
@@ -545,11 +548,14 @@ class Monitor:
         repeat_heavy = len(candidates) >= 10 and self.counts[role]["duplicates"] >= len(candidates) // 2
         retained = sum(at > now + CYCLE_SECONDS - INTERVAL for at in self.page_reads[role])
         limit = min(MAX_DETAILS, PAGE_BUDGET - retained)
-        if repeat_heavy and len(fresh_ids) <= 5 and len(self.page_reads[role]) <= 2:
-            self.next_home[role] = now + REPEAT_INTERVAL
-            # Reserve the next Home read. Use any other available slots for
-            # visible candidates, including the fourth or fifth new card.
-            limit = min(limit, PAGE_BUDGET - retained - 1)
+        if repeat_heavy and not self.rate_limit_level[role] and len(fresh_ids) <= limit:
+            # Some reads still in the rolling minute will expire before the
+            # next refresh. Count those that will remain and the details we
+            # have actually scheduled. Keep every available new-card slot.
+            retained_at_refresh = sum(at > now + REPEAT_INTERVAL - INTERVAL for at in self.page_reads[role])
+            planned = min(limit, len(fresh_ids) + len(rechecks))
+            if retained_at_refresh + planned < PAGE_BUDGET:
+                self.next_home[role] = now + REPEAT_INTERVAL
         # Spend the limited detail slots on known women's clothing first. Cards
         # with incomplete category information remain eligible for verification.
         fresh_ids.sort(key=womens_clothing, reverse=True)
@@ -607,7 +613,7 @@ class Monitor:
         self.pending[role].popleft()
         self.remember(candidate["id"], self.clock())
         self.counts[role]["checked"] += 1
-        parsed = parse_listing(html, candidate["id"], observed)
+        parsed = parse_listing(html, candidate["id"], observed, home_card=candidate)
         age = parsed.get("age") or {}
         upper = age.get("max_age_seconds")
         unverified = (
@@ -624,8 +630,10 @@ class Monitor:
         if not recheck_until and not expired and missing_evidence:
             self.recheck_until[identifier] = now + MAX_AGE
         if unverified or expired:
+            lower = age.get("min_age_seconds")
+            could_still_be_fresh = type(lower) in (int, float) and self.clock() < observed + MAX_AGE - lower
             self.counts[role]["rejected_age"] += 1
-            self.counts[role]["age_unverified" if unverified else "age_expired"] += 1
+            self.counts[role]["age_unverified" if unverified or could_still_be_fresh else "age_expired"] += 1
             self.status(role, "checked", "listing", 200)
             return
         self.counts[role]["fresh"] += 1

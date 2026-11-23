@@ -181,13 +181,13 @@ def _home_uploads(body, cards):
     for identity, values in category_ids.items():
         if len(values) == 1:
             listed[identity]["category_ids"] = list(values)
+    for identity in unavailable:
+        listed[identity]["home_available"] = False
     for identity, values in stamps.items():
         if max(values) - min(values) <= 1:
             card = listed[identity]
             card["home_created_at"] = min(values)
-            if identity in unavailable:
-                card["home_available"] = False
-            elif identity in available:
+            if identity in available and identity not in unavailable:
                 card["home_available"] = True
 
 
@@ -288,7 +288,7 @@ def _upload_time(value):
     return None
 
 
-def listing_age(body, item_id, now, *, side=None, attrs=None):
+def listing_age(body, item_id, now, *, side=None, attrs=None, home_card=None):
     """Age at request start; caller must add elapsed/cache age before alerting."""
     result = {
         "verified": False,
@@ -335,6 +335,13 @@ def listing_age(body, item_id, now, *, side=None, attrs=None):
             attrs = _native_attributes(body, identity)
         if attrs and attrs.get("created_stamp") is not None:
             stamps.append(attrs["created_stamp"])
+        # Home can expose the creation time where the same listing only shows
+        # rounded minutes. Require agreement with the target's displayed age
+        # and any exact listing evidence before narrowing the upper bound.
+        if isinstance(home_card, dict) and _identity(home_card.get("id")) == identity:
+            stamp = home_card.get("home_created_at")
+            if type(stamp) in (int, float) and 0 < stamp <= now:
+                stamps.append(stamp)
         if stamps and not (attrs or {}).get("conflicting_creation_time") and max(stamps) - min(stamps) <= 1:
             elapsed = now - min(stamps)
             if bounds[0] <= elapsed < bounds[1]:
@@ -461,13 +468,13 @@ def _visible_stock(side):
     return True if any(_text(button).casefold() == "buy now" for button in controls) else None
 
 
-def parse_listing(body, item_id, now):
+def parse_listing(body, item_id, now, *, home_card=None):
     """Return fresh target details; no credentials, writes, or purchase operations."""
     identity = str(item_id)
     tree = _tree(body)
     side = _sidebar(tree, identity) if tree is not None else None
     attrs = _native_attributes(body, identity) if side is not None else {}
-    age = listing_age(body, item_id, now, side=side, attrs=attrs)
+    age = listing_age(body, item_id, now, side=side, attrs=attrs, home_card=home_card)
     result = {"age": age, "item": None, "reason": "listing_unverified"}
     if not age["verified"]:
         return result

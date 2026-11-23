@@ -16,7 +16,7 @@ import vinted_home_controls as controls
 import vinted_home_feed as feed
 import vinted_home_monitor as monitor
 from test_search_controls import DatabaseFixture
-from test_vinted_home_feed import home, card, native
+from test_vinted_home_feed import home, card, listing, native
 
 
 class HomeRecommendationsTests(DatabaseFixture, unittest.TestCase):
@@ -121,12 +121,31 @@ class HomeRecommendationsTests(DatabaseFixture, unittest.TestCase):
     def test_native_old_unavailable_or_unconfirmed_stock_never_sends_on_card_alone(self):
         for identity, changes in (("192", {"created_at_ts":int(self.now)-300}),
                                   ("193", {"created_at_ts":int(self.now)-20, "is_reserved": True}),
+                                  ("195", {"is_reserved": True}),
                                   ("194", {"created_at_ts":int(self.now)-20, "can_buy": None})):
             body=home(card(identity)+native(id=identity,**changes))
             self.worker.fetch=lambda role,url: (body,self.now)
             self.worker.home("seller",self.now)
             self.assertFalse(activity.alerted_ids([identity]))
             self.assertEqual(bool(self.worker.pending["seller"]),identity=="194")
+
+    def test_exact_home_time_and_confirmed_listing_can_queue_until_real_expiry(self):
+        self.now = int(self.now)
+        created = self.now - 145
+        page = home(card() + native(created_at_ts=created, can_buy=None, catalog_id=13))
+        self.worker.fetch = lambda role, url: (page, self.now)
+        self.worker.home("seller", self.now)
+        self.assertFalse(activity.alerted_ids(["123"]))
+        self.assertEqual([c["id"] for c in self.worker.pending["seller"]], ["123"])
+        self.now += 2
+        self.worker.fetch = lambda role, url: (listing("2 min ago"), self.now)
+        self.worker.listing("seller", [], self.now)
+        with closing(search_settings.connection()) as conn:
+            row = dict(conn.execute("SELECT * FROM alert_outbox WHERE item_id='123'").fetchone())
+        details = vinted_alerts.get_details(row)
+        self.assertEqual(details["home_discovery"]["expires_at"], created + 180)
+        self.assertTrue(vinted_alerts.home_discovery_fresh(details, now=created + 179))
+        self.assertFalse(vinted_alerts.home_discovery_fresh(details, now=created + 180))
 
     def test_later_real_saved_match_enriches_sent_home_item_once(self):
         self.new()

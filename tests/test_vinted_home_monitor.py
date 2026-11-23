@@ -104,7 +104,7 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
             patch.object(
                 home,
                 "parse_listing",
-                side_effect=lambda *args: {
+                side_effect=lambda *args, **kwargs: {
                     "item": self.item,
                     "age": self.age,
                     "reason": "ok",
@@ -460,12 +460,40 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(self.worker.retry_at["seller"], 0)
         self.assertEqual(self.status()["code"], "checked")
 
+    def test_expiring_reads_allow_a_second_home_page_to_find_a_new_listing(self):
+        cards = [dict(self.item, id=str(i), url=f"https://www.vinted.co.uk/items/{i}")
+                 for i in range(500, 525)]
+        self.worker.examined.update({c["id"]: 980 for c in cards[:23]})
+        previous_reads = [946, 951, 956, 961]
+        self.worker.page_reads["seller"].extend(previous_reads)
+        read_times = list(previous_reads)
+        def fetch(role, url):
+            self.assertEqual(role, "seller")
+            read_times.append(self.now)
+            return "page", self.now
+
+        fresh = dict(self.item, id="625", url="https://www.vinted.co.uk/items/625",
+                     home_available=True, home_created_at=1030)
+        self.age["max_age_seconds"] = 600
+        self.fetch.side_effect = fetch
+        with patch.object(home, "parse_home", side_effect=[
+            {"reason": "ok", "items": cards}, {"reason": "ok", "items": cards[1:] + [fresh]}
+        ]) as pages:
+            for instant in range(1000, 1033):
+                self.now = instant
+                self.worker.tick()
+        self.assertEqual(pages.call_count, 2)
+        self.assertEqual([r["item_id"] for r in self.rows()], ["625"])
+        for instant in read_times:
+            self.assertLessEqual(sum(instant - 60 < t <= instant for t in read_times), home.PAGE_BUDGET)
+
     def test_fourth_new_card_on_a_repeat_heavy_page_reaches_the_outbox(self):
         cards = [dict(self.item, id=str(i), url=f"https://www.vinted.co.uk/items/{i}")
                  for i in range(500, 525)]
         self.worker.examined.update({card["id"]: 990 for card in cards[:20]})
 
-        def listing(_html, identity, observed):
+        def listing(_html, identity, observed, *, home_card):
+            self.assertEqual(home_card["id"], identity)
             age = {"verified": True, "checked_at": observed,
                    "max_age_seconds": 60 if identity == "521" else 600}
             item = dict(self.item, id=identity, url=f"https://www.vinted.co.uk/items/{identity}")
@@ -605,6 +633,12 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(
             (self.status()["age_unverified"], self.status()["age_expired"]), (0, 1)
         )
+
+    def test_rounded_age_at_the_cutoff_is_unconfirmed_and_never_queued(self):
+        self.age = {"verified": True, "checked_at": 1000, "min_age_seconds": 120, "max_age_seconds": 180}
+        self.discover()
+        self.assertEqual((self.status()["age_unverified"], self.status()["age_expired"]), (1, 0))
+        self.assertFalse(self.rows())
 
     def test_source_failure_preserves_only_fixed_detail_code(self):
         with patch.object(

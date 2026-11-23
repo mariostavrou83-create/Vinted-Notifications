@@ -105,7 +105,13 @@ class HomeGuideTests(DatabaseFixture, unittest.TestCase):
         worker.page_reads["seller"].appendleft(995)
         with patch.object(vinted_home_monitor,"parse_home",return_value={"reason":"ok","items":cards}):
             worker.home("seller",1000)
-        self.assertEqual(len(worker.pending["seller"]),4)
+        self.assertEqual(len(worker.pending["seller"]),5)
+        self.assertEqual(worker.next_home["seller"],1060)
+        worker.page_reads["seller"].popleft()
+        worker.rate_limit_level["seller"] = 1
+        with patch.object(vinted_home_monitor,"parse_home",return_value={"reason":"ok","items":cards}):
+            worker.home("seller",1000)
+        self.assertEqual(worker.next_home["seller"],1060)
 
     def test_budget_is_enforced_across_overlapping_cycles(self):
         now=[1000]
