@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 # Start early enough for the longest normal cooldown and next 60-second tick
 # to leave additional headroom for account requests before access expires.
 ACCESS_MARGIN = 20 * 60
+# The dedicated buyer has room for two 15-minute renewal deferrals before
+# access expires. The selling account keeps its existing refresh schedule.
+BUYER_ACCESS_MARGIN = 35 * 60
 REFRESH_MARGIN = 2 * 86400
 RETRY_DELAY = 300
 AMBIGUOUS_RENEWAL_DELAY = 900
@@ -124,8 +127,9 @@ async def run(notifier=None):
     """Owned by Telegram's lifecycle; no buyer lock in the forking parent."""
     logger.info(
         "Vinted session maintenance: worker started; interval=60s "
-        "access_margin_seconds=%s network_retry_seconds=%s renewal_retry_seconds=%s role_scoped_locks=True",
+        "access_margin_seconds=%s buyer_access_margin_seconds=%s network_retry_seconds=%s renewal_retry_seconds=%s role_scoped_locks=True",
         ACCESS_MARGIN,
+        BUYER_ACCESS_MARGIN,
         RETRY_DELAY,
         AMBIGUOUS_RENEWAL_DELAY,
     )
@@ -239,11 +243,11 @@ def check_account_health():
             client.session.close()
 
 
-def due(saved, now):
+def due(saved, now, *, access_margin=ACCESS_MARGIN):
     if not _session_cookie_records(saved, "refresh_token_web"):
         return False
     for name, margin in (
-        ("access_token_web", ACCESS_MARGIN),
+        ("access_token_web", access_margin),
         ("refresh_token_web", REFRESH_MARGIN),
     ):
         expiry = session_cookie_expiry(saved, name)
@@ -275,6 +279,8 @@ def renewal_failure_policy(error):
         if error.reason == "rate_limited" or _ambiguous_renewal_failure(error)
         else RETRY_DELAY
     )
+    if type(error.retry_after) in (float, int) and math.isfinite(error.retry_after):
+        delay = max(delay, error.retry_after)
     return not transient, delay
 
 
@@ -426,6 +432,11 @@ def maintain_connection():
                 state = conn.execute(
                     f"SELECT * FROM {account_table('vinted_buyer_maintenance')} WHERE id=1"
                 ).fetchone()
+                margin = (
+                    BUYER_ACCESS_MARGIN
+                    if current_role() == "buyer" and separated(conn)
+                    else ACCESS_MARGIN
+                )
             if not row[0] or not row[1]:
                 return "idle"
             fingerprint = hashlib.sha256(row[0]).hexdigest()
@@ -441,7 +452,7 @@ def maintain_connection():
 
                 record_failure(exc, fingerprint)
                 raise
-            if not due(saved, now):
+            if not due(saved, now, access_margin=margin):
                 return "fresh"
             access_expiry = session_cookie_expiry(saved, "access_token_web")
             refresh_expiry = session_cookie_expiry(saved, "refresh_token_web")
@@ -454,7 +465,7 @@ def maintain_connection():
                     else "null"
                 ),
                 refresh_expiry is not None and refresh_expiry <= now + REFRESH_MARGIN,
-                ACCESS_MARGIN,
+                margin,
                 current_role(),
             )
             # Reserve before contacting Vinted so a restart cannot repeat a
@@ -472,9 +483,18 @@ def maintain_connection():
             local_gate = False
             try:
                 client = buyer.connected_client(
-                    renew_before=ACCESS_MARGIN,
+                    renew_before=margin,
                     _renewal_reservation=(fingerprint, now + RETRY_DELAY),
                 )
+                deferred = getattr(client, "deferred_renewal", None)
+                if isinstance(deferred, buyer.BuyerError):
+                    blocked, delay = renewal_failure_policy(deferred)
+                    outcome = "cooldown"
+                    logger.info(
+                        "Vinted session maintenance: proactive renewal deferred; "
+                        "identity_verified=True http=%s retry_seconds=%s role=%s",
+                        deferred.status, delay, current_role(),
+                    )
                 # A successful connection can advance the saved seal more than
                 # once. Attribute maintenance only to its final verified seal.
                 reference = client._verified_session

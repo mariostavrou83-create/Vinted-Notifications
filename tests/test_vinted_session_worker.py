@@ -365,6 +365,61 @@ class MaintenanceTests(buying_tests.SessionRotationFixture, unittest.TestCase):
             self.assertEqual(worker.check_account_health(), "cooldown")
         connect.assert_not_called()
 
+    def seed_separate_buyer(self):
+        from vinted_accounts import MARKER
+
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("INSERT INTO parameters(key,value) VALUES (?, '1')", (MARKER,))
+
+    def test_separate_buyer_renews_earlier_and_keeps_verified_identity_on_generic_refusal(self):
+        self.seed_separate_buyer()
+        saved = self.saved()[1]
+        self.old_access = token(self.now + 1800, "buyers-earlier-renewal")
+        saved["cookies"]["access_token_web"] = self.old_access
+        for cookie in saved["cookie_records"]:
+            if cookie["name"] == "access_token_web":
+                cookie.update(value=self.old_access, expires=self.now + 1800)
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_buyer SET session=?", (buyer.encrypt(saved),))
+        self.assertFalse(worker.due(saved, self.now))
+        self.renew_status = 400
+        self.assertEqual(self.run_cycle(), "cooldown")
+        self.assertEqual(self.calls, [
+            ("GET", "/api/v2/users/current"),
+            ("GET", "/"),
+            ("POST", "/web/api/auth/refresh"),
+        ])
+        self.assertEqual(self.saved()[0]["verified_at"], self.now)
+        with closing(search_settings.connection()) as conn:
+            access = conn.execute("SELECT stage,reason,http_status FROM vinted_buyer_access").fetchone()
+            self.assertEqual(tuple(access), ("identity", "connected", 200))
+        self.assertEqual(self.maintenance()["retry_at"], self.now + 900)
+        self.assertEqual(self.run_cycle(self.now + 899), "cooldown")
+        self.renew_status = 200
+        self.assertEqual(self.run_cycle(self.now + 900), "verified")
+
+    def test_separate_buyer_keeps_true_identity_rejection_and_provider_wait(self):
+        self.seed_separate_buyer()
+        self.expire_original_identity()
+        self.renew_status = 400
+        native = self.native
+
+        def with_provider_wait(adapter, prepared, **kwargs):
+            response = native(adapter, prepared, **kwargs)
+            if prepared.url.endswith("/web/api/auth/refresh"):
+                response.headers["Retry-After"] = "1200"
+            return response
+
+        self.native = with_provider_wait
+        self.assertEqual(self.run_cycle(), "cooldown")
+        self.assertEqual(self.saved()[0]["verified_at"], 1)
+        self.assertEqual(self.maintenance()["retry_at"], self.now + 1200)
+        self.assertEqual(self.run_cycle(self.now + 1199), "cooldown")
+        with closing(search_settings.connection()) as conn:
+            notice = conn.execute("SELECT identity_rejected FROM vinted_connection_notice").fetchone()
+            self.assertEqual(notice[0], 1)
+        self.assertEqual(self.calls.count(("POST", "/web/api/auth/refresh")), 1)
+
     def test_idle_health_check_detects_revocation_with_fresh_expiry_metadata(self):
         with closing(search_settings.connection()) as conn, conn:
             saved = self.saved()[1]

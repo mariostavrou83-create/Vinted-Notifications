@@ -591,7 +591,8 @@ def _clear_item_queue(items_queue, new_items_queue):
 def format_alert(item, search, message_template, details=None):
     from html import escape
 
-    from vinted_alerts import enabled, fast_text
+    import vinted_budget
+    from vinted_alerts import enabled, fast_text, recap
 
     if (details["single_message"] if details is not None else enabled()) or search.get(
         "vinted_max_total"
@@ -626,7 +627,14 @@ def format_alert(item, search, message_template, details=None):
         brand=escape((item.brand_title or "")[:120]),
         image=None if item.photo is None else escape(item.photo, quote=True),
     )
-    content = prefix + body + reminder
+    footer = recap(
+        {"title": item.title},
+        details or {
+            "brand": item.brand_title,
+            "budget": vinted_budget.estimate(item, search, display=True),
+        },
+    )
+    content = prefix + body + reminder + "\n\n" + footer
     if len(content) > 4000:
         # Keep valid HTML and all of the personal reminder if a custom template
         # or image URL would otherwise push an alert over Telegram's limit.
@@ -635,7 +643,7 @@ def format_alert(item, search, message_template, details=None):
             + escape(item.title[:500])
             + "\n"
             + escape(str(item.price) + " " + item.currency)
-            + reminder
+            + reminder + "\n\n" + footer
         )
     return content
 

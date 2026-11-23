@@ -175,6 +175,13 @@ class HomeOutboxTests(DatabaseFixture, unittest.TestCase):
         self.assertIn("within 3 minutes", parts[2])
         self.assertIn("Brand, category and style", parts[2])
         self.assertIn("Exact seller description &lt;unchanged&gt;", parts[3])
+        from photo_cards import captions
+        from vinted_native import caption
+
+        footer = "<b>Fresh vintage item</b>\nBrand: Brand\nEst. total incl. shipping: <b>£11.30</b>"
+        self.assertTrue(vinted_alerts.text_message(row, details).endswith(footer))
+        self.assertTrue(captions(row, details)[0].endswith(footer))
+        self.assertTrue(caption(row, details).endswith(footer))
         original = json.loads(json.dumps(details))
         vinted_alerts.sections(row, details)
         self.assertEqual(details, original)

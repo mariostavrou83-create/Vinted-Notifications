@@ -50,7 +50,8 @@ def short(text, units):
 
 
 def caption(row, details):
-    from vinted_alerts import sections
+    from photo_cards import plain, units
+    from vinted_alerts import recap, sections
 
     row = dict(row, title=short(row["title"], 450), price=short(row["price"], 30))
     details = dict(
@@ -58,17 +59,23 @@ def caption(row, details):
         name=short(details.get("name") or row["search_name"], 100),
         brand=short(details.get("brand") or "Not specified", 120),
     )
-    heading, link, listing, *_ = sections(row, details)
-    if details.get("buying_advice"):
-        from photo_cards import plain, units
 
-        length = units(plain(f"{heading}\n\n{link}\n\n{listing}"))
-        if length > 1024:
-            advice = details["buying_advice"]
-            allowance = max(0, units(advice) - (length - 1024))
+    def render():
+        heading, link, listing, *_ = sections(row, details)
+        return "\n\n".join(part for part in (heading, link, listing, recap(row, details)) if part)
+
+    value = render()
+    if units(plain(value)) > 1024:
+        row["title"] = short(row["title"], 120)
+        details["brand"] = short(details["brand"], 40)
+        value = render()
+        excess = units(plain(value)) - 1024
+        if excess > 0 and details.get("buying_advice"):
+            advice = details["buying_advice"][:720]
+            allowance = units(advice) - excess
             details["buying_advice"] = short(advice, allowance) if allowance > 1 else ""
-            heading, link, listing, *_ = sections(row, details)
-    return f"{heading}\n\n{link}\n\n{listing}"
+            value = render()
+    return value
 
 
 def font(size):
@@ -197,7 +204,7 @@ async def send_initial(bot, chat_id, row, details, before_send, *, require_photo
         )
         return result
     # An unavailable image must never prevent the deal link reaching the buyer.
-    from vinted_alerts import sections
+    from vinted_alerts import text_message
 
     logger.warning(
         "Native listing photo unavailable for item %s; sending one text fallback",
@@ -205,7 +212,7 @@ async def send_initial(bot, chat_id, row, details, before_send, *, require_photo
     )
     return await bot.send_message(
         **common,
-        text="\n\n".join(part for part in sections(row, details) if part),
+        text=text_message(row, details),
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
 

@@ -230,8 +230,8 @@ def buy_status_text(details):
 def captions(row, details):
     status = buy_status_text(details)
     reserved = units(plain(status)) + 2 if status else 0
-    text, note_pages = _captions(row, details, 1024 - reserved)
-    return text + ("\n\n" + status if status else ""), note_pages
+    text, note_pages, recap = _captions(row, details, 1024 - reserved)
+    return "\n\n".join(part for part in (text, status, recap) if part), note_pages
 
 
 def notes_caption(details, index, note_pages):
@@ -244,14 +244,16 @@ def notes_caption(details, index, note_pages):
 
 
 def _captions(row, details, limit):
-    from vinted_alerts import sections
+    from vinted_alerts import recap as alert_recap, sections
     from vinted_native import short
 
     parts = sections(row, details)
+    recap = alert_recap(row, details)
     full = "\n\n".join(p for p in parts if p)
+    if units(plain(full)) + (units(plain(recap)) + 2 if recap else 0) <= limit:
+        return full, [], recap
     notes = "\n\n".join(plain(p) for p in parts[3:] if p)
-    if units(plain(full)) <= limit:
-        return full, []
+    note_page_limit = min(850, limit - 80)
     # Preserve all notes via the Full notes pages if the normal caption is too long.
     row = dict(row, title=short(row["title"], 120), price=short(row["price"], 30))
     details = dict(
@@ -260,13 +262,31 @@ def _captions(row, details, limit):
         brand=short(details.get("brand") or "Not specified", 40),
     )
     base = "\n\n".join(sections(row, details)[:3])
-    if units(plain(base)) + units(notes) + 2 <= limit:
-        return base + ("\n\n" + escape(notes) if notes else ""), []
+    recap = alert_recap(row, details)
+    if recap:
+        limit -= units(plain(recap)) + 2
     suffix = "\n\nTap Full notes for the description, guide and reminder."
+    if recap and details.get("buying_advice") and units(plain(base + suffix)) > limit:
+        # Keep long advice accessible alongside the other notes when a photo,
+        # recap and Autobuy status use most of Telegram's caption allowance.
+        notes = "Buying guide\n" + details["buying_advice"][:720] + "\n\n" + notes
+        details["buying_advice"] = ""
+        base = "\n\n".join(sections(row, details)[:3])
+    if recap and units(plain(base + suffix)) > limit:
+        limit += units(plain(recap))
+        row["title"] = short(row["title"], 80)
+        details["name"] = short(details["name"], 40)
+        details["brand"] = short(details["brand"], 28)
+        base = "\n\n".join(sections(row, details)[:3])
+        recap = alert_recap(row, details)
+        limit -= units(plain(recap))
+    if units(plain(base)) + units(notes) + 2 <= limit:
+        return base + ("\n\n" + escape(notes) if notes else ""), [], recap
     available = max(0, limit - units(plain(base)) - units(suffix) - 2)
     return (
         base + "\n\n" + (escape(short(notes, available)) if available else "") + suffix,
-        pages(notes, limit=min(850, limit - 80)),
+        pages(notes, limit=note_page_limit),
+        recap,
     )
 
 

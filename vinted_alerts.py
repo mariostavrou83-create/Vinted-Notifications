@@ -171,7 +171,7 @@ def prepare_listing(row, details=None):
             if isinstance(saved_details.get("budget"), dict):
                 saved_details["budget"].update(max_total=None, within_budget=True)
             plain = dict(current, query_id=None, reference_id=None, search_name=saved_details["name"])
-            plain["content"] = "\n\n".join(part for part in sections(plain, saved_details) if part)
+            plain["content"] = text_message(plain, saved_details)
             conn.execute("""UPDATE alert_outbox SET query_id=NULL,reference_id=NULL,search_name=?,content=?
                 WHERE item_id=?""", (plain["search_name"], plain["content"], row["item_id"]))
             conn.execute("UPDATE vinted_alert_details SET payload=? WHERE item_id=?",
@@ -230,6 +230,21 @@ def snapshot(item, search):
             description_complete=description_complete,
         )
     return result
+
+
+def recap(row, details):
+    if details.get("platform") == "ebay":
+        return ""
+    title = escape(row["title"][:500])
+    brand = escape((details.get("brand") or "Not specified")[:120])
+    budget = details.get("budget")
+    if budget is None and row.get("currency") == "GBP":
+        budget = vinted_budget.estimate(
+            SimpleNamespace(price=row["price"], currency=row["currency"]), {}, display=True
+        )
+    total = (budget or {}).get("total")
+    estimate = f"£{total / 100:.2f}" if type(total) is int else "Unavailable"
+    return f"<b>{title}</b>\nBrand: {brand}\nEst. total incl. shipping: <b>{estimate}</b>"
 
 
 def sections(row, details):
@@ -310,6 +325,11 @@ def sections(row, details):
     return heading, link, listing, seller_text, guide, reminder
 
 
+def text_message(row, details):
+    parts = (*sections(row, details), recap(row, details))
+    return "\n\n".join(part for part in parts if part)
+
+
 def fast_text(item, search, details=None):
     row = {
         "query_id": search["id"],
@@ -319,11 +339,7 @@ def fast_text(item, search, details=None):
         "price": item.price,
         "currency": item.currency,
     }
-    return "\n\n".join(
-        section
-        for section in sections(row, details or snapshot(item, search))
-        if section
-    )
+    return text_message(row, details or snapshot(item, search))
 
 
 def get_details(row):
@@ -366,7 +382,7 @@ def rich_request(row, details, listing_image, reference_image):
             files[key] = InputFile(raw, filename=key + ".jpg")
     parts.extend(
         "<p>" + section.replace("\n", "<br>") + "</p>"
-        for section in (description, guide, reminder)
+        for section in (description, guide, reminder, recap(row, details))
         if section
     )
     return {
@@ -385,7 +401,7 @@ def rich_request(row, details, listing_image, reference_image):
 async def send_text(bot, chat_id, row, details):
     return await bot.send_message(
         chat_id=chat_id,
-        text="\n\n".join(part for part in sections(row, details) if part),
+        text=text_message(row, details),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
         read_timeout=8,
@@ -479,7 +495,7 @@ async def phone_layout_test(bot, chat_id, row, details, *, mode, after_send=None
 
         # One grouped album with separate native photos and an ordinary caption.
         # Never silently drop the owner's notes to fit Telegram's caption limit.
-        text = "\n\n".join(part for part in sections(row, details) if part)
+        text = text_message(row, details)
         plain = unescape(re.sub(r"<[^>]+>", "", text))
         if len(plain.encode("utf-16-le")) // 2 > 1024:
             raise ValueError(

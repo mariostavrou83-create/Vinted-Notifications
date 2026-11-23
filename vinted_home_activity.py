@@ -97,7 +97,7 @@ def alerted_ids(item_ids):
 
 def attach_guide(conn, item_id, query_id, alert, details):
     """A real saved match may enrich one Home recommendation without a second ping."""
-    from vinted_alerts import home_discovery_fresh, sections
+    from vinted_alerts import home_discovery_fresh, text_message
 
     raw = conn.execute("""SELECT o.status,o.telegram_message_id,o.url,o.title,o.price,o.currency,d.payload
         FROM alert_outbox o JOIN vinted_alert_details d ON d.item_id=o.item_id
@@ -123,7 +123,7 @@ def attach_guide(conn, item_id, query_id, alert, details):
         merged.pop("home_discovery", None)
     row = dict(query_id=query_id, search_name=alert["search_name"], url=raw[2], title=raw[3],
                price=raw[4], currency=raw[5])
-    content = "\n\n".join(part for part in sections(row, merged) if part)
+    content = text_message(row, merged)
     reference = alert.get("reference_id")
     conn.execute("""UPDATE alert_outbox SET query_id=?,search_name=?,content=?,reference_id=?,
         status=CASE WHEN telegram_message_id IS NULL AND status IN ('failed','cancelled') THEN 'pending' ELSE status END,

@@ -2787,6 +2787,7 @@ def renew_saved_client(client):
                 renewal.status,
                 reason="refresh_rejected",
                 stage="renewal",
+                retry_after=renewal.retry_after,
             ) from None
         if renewal.status in (400, 401, 422) and renewal.reason == "http_error":
             raise BuyerError(
@@ -2794,6 +2795,7 @@ def renew_saved_client(client):
                 renewal.status,
                 reason="renewal_failed",
                 stage="renewal",
+                retry_after=renewal.retry_after,
             ) from None
         raise
     if client._verified_session is not None:
@@ -2843,6 +2845,7 @@ def connected_client(
         ).fetchone()
     client = None
     renewal_started = False
+    deferred_renewal = None
     identity_rejected = False
     try:
         saved = decrypt(row[0])
@@ -2910,12 +2913,27 @@ def connected_client(
                     )
                 )
             ):
-                from vinted_session_worker import reserve_renewal
+                from vinted_session_worker import _ambiguous_renewal_failure, reserve_renewal
 
                 reserve_renewal(client, reservation=_renewal_reservation)
                 renewal_started = True
-                renew_saved_client(client)
-                user_id, _ = client.identity()
+                try:
+                    renew_saved_client(client)
+                except BuyerError as exc:
+                    # The separate buyer already supplied a verified identity
+                    # in this maintenance cycle. A generic refresh refusal can
+                    # wait without replacing that proof with a disconnect.
+                    if (
+                        _renewal_reservation is None
+                        or current_role() != "buyer"
+                        or not separated()
+                        or not _ambiguous_renewal_failure(exc)
+                        or (expiry is not None and expiry <= time.time())
+                    ):
+                        raise
+                    deferred_renewal = exc
+                else:
+                    user_id, _ = client.identity()
         if user_id != row[1]:
             raise BuyerError(
                 AUTH_REASONS["account_changed"],
@@ -2951,8 +2969,11 @@ def connected_client(
             from vinted_session_worker import record_renewal_result
 
             record_renewal_result(
-                None, session_fingerprint=hashlib.sha256(sealed).hexdigest()
+                deferred_renewal, session_fingerprint=hashlib.sha256(sealed).hexdigest()
             )
+            if deferred_renewal is not None:
+                record_auth(deferred_renewal.reason, deferred_renewal.stage, deferred_renewal.status)
+                client.deferred_renewal = deferred_renewal
         record_auth("connected", "identity", 200)
         from vinted_buyer_events import record_connected
 
