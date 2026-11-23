@@ -150,10 +150,17 @@ def marker(conn, detail=False):
 
 
 def panel(detail=False):
+    from vinted_home_controls import seller_status
+
     since = time.time() - 86400
     with closing(connection()) as conn:
-        totals = dict(conn.execute("SELECT status,count(*) FROM alert_outbox WHERE " + HOME_ALERT +
-                                   " AND found_at>=? GROUP BY status", (since,)))
+        account = seller_status(conn)
+        deliveries = conn.execute("SELECT status,count(*),MAX(sent_at) FROM alert_outbox WHERE " + HOME_ALERT +
+                                  " AND found_at>=? GROUP BY status", (since,)).fetchall()
+        totals = {status: count for status, count, _ in deliveries}
+        sent_at = next((stamp for status, _, stamp in deliveries if status == "sent"), None)
+        last_sent = (datetime.fromtimestamp(sent_at, ZoneInfo("Europe/London")).strftime("%H:%M:%S %Z")
+                     if type(sent_at) in (int, float) and 0 < sent_at < 4102444800 else None)
         deals = [dict(row) for row in conn.execute(
             "SELECT item_id,title,url,price,photo_url AS photo,found_at AS checked_at,status,query_id "
             "FROM alert_outbox WHERE " + HOME_ALERT + " AND found_at>=? AND status IN ('pending','sent') "
@@ -192,4 +199,5 @@ def panel(detail=False):
         if "outcome" in row:
             row["reason"] = REASONS.get(row["outcome"], "")
     return {"sent": totals.get("sent", 0), "waiting": totals.get("pending", 0),
+            "account": account, "last_sent": last_sent,
             "deals": deals, "checked": checked, "guides": guides, "pages": pages, "incidents": incidents, "detail": detail}

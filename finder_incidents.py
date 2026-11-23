@@ -113,7 +113,7 @@ async def queue_buy_failure(row, outcome, callback_id):
             _wake.set()
 
 
-def observe(conn, now, started):
+def observe(conn, now, started, previous_poll=0):
     """None means there is not enough evidence to open or resolve that incident."""
     signals = {}
     home = conn.execute(
@@ -196,11 +196,27 @@ def observe(conn, now, started):
                 f"Buying account identity verified at {uk(verified)}.",
                 "buyer",
             )
-    active = conn.execute("""SELECT q.id,h.last_success,h.failures,h.last_attempt FROM queries q
+    active = conn.execute("""SELECT q.id,h.last_success,h.failures,h.last_attempt,f.last_check FROM queries q
         LEFT JOIN search_dashboard d ON d.query_id=q.id LEFT JOIN search_platforms p ON p.query_id=q.id
-        LEFT JOIN search_health h ON h.query_id=q.id WHERE COALESCE(d.paused,0)=0 AND COALESCE(d.archived,0)=0
+        LEFT JOIN search_health h ON h.query_id=q.id LEFT JOIN listing_frontiers f ON f.query_id=q.id
+        WHERE COALESCE(d.paused,0)=0 AND COALESCE(d.archived,0)=0
         AND COALESCE(p.vinted_enabled,1)=1 AND NOT EXISTS(SELECT 1 FROM vinted_home_guides g WHERE g.query_id=q.id)""").fetchall()
     latest = max((r[1] or 0 for r in active), default=0)
+    processed = max((r[4] or 0 for r in active), default=0)
+    # A completed batch advances this timestamp even when every item is old.
+    # Two distinct successful poll observations guard against flagging the
+    # brief interval between a response arriving and the extractor committing it.
+    if processed and 0 <= now - processed < 300:
+        signals["Saved-search processing"] = (
+            "", f"Finder processed a catalogue page at {uk(processed)}.", "alerts",
+        )
+    elif processed and 0 <= now - latest < 300 and latest > previous_poll >= processed + 300:
+        signals["Saved-search processing"] = (
+            "stalled",
+            f"Catalogue polls are succeeding. Finder last processed a page at {uk(processed)}. "
+            f"The latest successful poll was at {uk(latest)}.",
+            "alerts",
+        )
     if active:
         if latest and now - latest < 300:
             signals["Saved searches"] = (
@@ -305,13 +321,15 @@ def observe(conn, now, started):
             + detail,
             "alerts",
         )
-    return signals
+    return signals, latest, processed
 
 
 def check_health(now):
     with closing(connection()) as conn:
         initial = read(conn, STATE, {})
-        signals = observe(conn, now, initial.get("started", now))
+        signals, polled, processed = observe(conn, now, initial.get("started", now), initial.get("sampled_poll", 0))
+        if "sampled_poll" not in initial or int(now // 300) != int(initial.get("checked", 0) // 300):
+            logger.info("Saved-search progress: last_poll=%s last_processed=%s", int(polled), int(processed))
         with conn:
             conn.execute("BEGIN IMMEDIATE")
             state = read(conn, STATE, {"started": now, "signals": {}})
@@ -341,6 +359,7 @@ def check_health(now):
                     target=target,
                 )
             state["checked"] = now
+            state["sampled_poll"] = polled
             write(conn, STATE, state)
 
 

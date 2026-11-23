@@ -1,8 +1,12 @@
 <div class="home-results-heading">
   {% if home_panel.detail %}<h2>Fresh Home alerts · women’s clothing</h2>{% else %}<h2><a href="/vinted-home">Vinted Home</a></h2>{% endif %}
-  <p><strong>{{ home_panel.sent }}</strong> sent to Telegram in 24h{% if home_panel.waiting %} · {{ home_panel.waiting }} waiting{% endif %}</p>
+  <p><strong>{{ home_panel.sent }}</strong> sent to Telegram in 24h{% if home_panel.last_sent %} · last accepted at {{ home_panel.last_sent }}{% endif %}{% if home_panel.waiting %} · {{ home_panel.waiting }} waiting{% endif %}</p>
   <a href="{{ '/finds?source=home' if home_panel.detail else '/vinted-home' }}">{{ 'All Home alerts' if home_panel.detail else 'Open Home feed' }} →</a>
 </div>
+{% if home_panel.account and home_panel.account.time != 'Not checked' %}
+<p class="muted">MSJ Home · {{ home_panel.account.state }} · {{ home_panel.account.time }}.
+  Latest cycle of {{ home_panel.account.candidates }} recommendations · {{ home_panel.account.duplicates }} repeats · {{ home_panel.account.age_expired }} outside the freshness limit · {{ home_panel.account.age_unverified }} age unconfirmed · {{ home_panel.account.scope_miss }} without a confirmed women’s clothing category · {{ home_panel.account.alerts }} alerts queued.</p>
+{% endif %}
 {% if home_panel.deals %}
 <div class="home-deals">
   {% for row in home_panel.deals %}<article class="home-deal">

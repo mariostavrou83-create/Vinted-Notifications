@@ -269,6 +269,9 @@ class Monitor:
         self.page_reads = {role: deque() for role in ROLES}
         self.counts = {role: dict.fromkeys(COUNTERS, 0) for role in ROLES}
         self.examined = OrderedDict()
+        # One later recommendation may complete missing listing data. New cards
+        # always get the available read slots first.
+        self.recheck_until = {}
         self.searches = []
         self.searches_until = 0
         self.retry_at = dict.fromkeys(ROLES, 0)
@@ -417,7 +420,13 @@ class Monitor:
                     self.status(role, reason, "identity")
                     return
                 if now >= self.searches_until:
-                    self.searches = active_searches()
+                    try:
+                        self.searches = active_searches()
+                    except sqlite3.OperationalError as exc:
+                        # Guides only enrich a Home alert. A busy guide read
+                        # must not put the seller feed into a five-minute wait.
+                        self.searches = []
+                        logger.warning("Home buying-guide read deferred: error_type=%s", type(exc).__name__)
                     self.searches_until = now + 30
                 searches = self.searches
                 if stage == "home":
@@ -497,41 +506,55 @@ class Monitor:
         except sqlite3.Error as exc:
             logger.warning("Home page snapshot deferred: %s", type(exc).__name__)
         seen = activity.alerted_ids([item["id"] for item in candidates])
+        self.recheck_until = {
+            item_id: until for item_id, until in self.recheck_until.items() if until > now
+        }
         # IDs order the checks when Vinted supplies no reliable upload timestamp.
         fresh_ids = []
+        rechecks = []
         for item in sorted(candidates, key=lambda card: int(card["id"]), reverse=True):
             identifier = str(item["id"])
-            if identifier in seen or identifier in self.examined:
+            recheck = identifier in self.recheck_until
+            if identifier in seen or (identifier in self.examined and not recheck):
                 self.counts[role]["duplicates"] += 1
                 continue
             if item.get("home_available") is False:
+                self.recheck_until.pop(identifier, None)
                 self.remember(identifier, self.clock())
                 continue
             stamp = item.get("home_created_at")
+            candidates_for_detail = rechecks if recheck else fresh_ids
             if stamp is None or stamp > observed or stamp <= 0:
-                fresh_ids.append(item)
+                candidates_for_detail.append(item)
                 continue
             if self.clock() >= stamp + MAX_AGE:
+                self.recheck_until.pop(identifier, None)
+                self.counts[role]["rejected_age"] += 1
+                self.counts[role]["age_expired"] += 1
                 self.remember(identifier, self.clock())
                 continue
             if item.get("home_available") is not True or not womens_clothing(item):
-                fresh_ids.append(item)
+                candidates_for_detail.append(item)
                 continue
             age = {"verified": True, "checked_at": observed, "max_age_seconds": math.ceil(observed - stamp)}
             self.counts[role]["fresh"] += 1
             self.counts[role]["feed_verified"] += 1
             self.notify_item(item, age, role, self.searches)
+            self.recheck_until.pop(identifier, None)
             self.remember(identifier, self.clock())
         repeat_heavy = len(candidates) >= 10 and self.counts[role]["duplicates"] >= len(candidates) // 2
         retained = sum(at > now + CYCLE_SECONDS - INTERVAL for at in self.page_reads[role])
         limit = min(MAX_DETAILS, PAGE_BUDGET - retained)
         if repeat_heavy and len(fresh_ids) <= 5 and len(self.page_reads[role]) <= 2:
             self.next_home[role] = now + REPEAT_INTERVAL
-            limit = min(limit, 3)
+            # Reserve the next Home read. Use any other available slots for
+            # visible candidates, including the fourth or fifth new card.
+            limit = min(limit, PAGE_BUDGET - retained - 1)
         # Spend the limited detail slots on known women's clothing first. Cards
         # with incomplete category information remain eligible for verification.
         fresh_ids.sort(key=womens_clothing, reverse=True)
-        self.pending[role] = deque(fresh_ids[:limit])
+        rechecks.sort(key=womens_clothing, reverse=True)
+        self.pending[role] = deque((fresh_ids + rechecks)[:limit])
         self.deadline[role] = self.clock() + CYCLE_SECONDS
         if self.rate_limit_level[role]:
             # On recovery, process this Home page before spacing out detail GETs.
@@ -543,9 +566,10 @@ class Monitor:
 
     def listing(self, role, searches, now):
         candidate = self.pending[role][0]
-        if str(candidate["id"]) in self.examined or str(
-            candidate["id"]
-        ) in activity.alerted_ids([candidate["id"]]):
+        identifier = str(candidate["id"])
+        recheck_until = self.recheck_until.get(identifier, 0)
+        if (identifier in self.examined and now >= recheck_until
+                or identifier in activity.alerted_ids([identifier])):
             self.pending[role].popleft()
             self.counts[role]["duplicates"] += 1
             return
@@ -574,6 +598,7 @@ class Monitor:
             if not (redirected or removed):
                 raise
             self.pending[role].popleft()
+            self.recheck_until.pop(identifier, None)
             self.remember(candidate["id"], self.clock())
             self.counts[role]["checked"] += 1
             self.counts[role]["listing_unavailable" if removed else "skipped_redirect"] += 1
@@ -594,6 +619,10 @@ class Monitor:
         expired = not unverified and (
             upper > MAX_AGE or self.clock() >= observed + MAX_AGE - upper
         )
+        self.recheck_until.pop(identifier, None)
+        missing_evidence = unverified or parsed.get("reason") in {"availability_unverified", "listing_unverified"}
+        if not recheck_until and not expired and missing_evidence:
+            self.recheck_until[identifier] = now + MAX_AGE
         if unverified or expired:
             self.counts[role]["rejected_age"] += 1
             self.counts[role]["age_unverified" if unverified else "age_expired"] += 1

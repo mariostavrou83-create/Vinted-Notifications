@@ -172,6 +172,28 @@ class FinderIncidentsTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             sum(e["kind"] == "30-minute listing update" for e in self.events()), 1
         )
 
+    def test_poll_success_cannot_hide_stopped_extraction_or_clear_its_warning(self):
+        def poll(at):
+            search_settings.record_health(1, at - 1, 0.1, 1, "")
+            incidents.check_health(at)
+
+        def process(at):
+            search_settings.remember_listing_frontier(1, [], at)
+
+        process(self.now - 330)
+        poll(self.now)
+        self.assertFalse(self.events())
+        poll(self.now + 45)
+        poll(self.now + 90)
+        events = self.events()
+        self.assertEqual([e["kind"] for e in events], ["Saved-search processing"])
+        self.assertIn(incidents.uk(self.now - 330), events[0]["text"])
+        process(self.now + 120)
+        poll(self.now + 135)
+        poll(self.now + 180)
+        self.assertEqual(len(self.events()), 2)
+        self.assertTrue(any("processing · recovered" in e["text"] for e in self.events()))
+
     def test_search_stall_and_heartbeat_gap(self):
         incidents.check_health(self.now)
         search_settings.record_health(1, self.now + 1, 0.1, 1, "")

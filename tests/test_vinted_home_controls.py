@@ -60,3 +60,16 @@ class HomeControlsTests(DatabaseFixture, unittest.TestCase):
             )
         result = str(controls.summary())
         self.assertNotIn("PRIVATE", result)
+
+    def test_home_page_explains_quiet_cycle_from_only_seller_counters(self):
+        self.owner()
+        with closing(search_settings.connection()) as conn, conn:
+            conn.executemany("INSERT OR REPLACE INTO parameters(key,value) VALUES(?,?)", [
+                ("home_monitor_status_seller", '{"code":"checked","checked_at":1795438800,"candidates":25,"duplicates":20,"age_expired":4,"scope_miss":1}'),
+                ("home_monitor_status_buyer", '{"code":"credentials","checked_at":1795438801,"candidates":89}'),
+            ])
+        page = self.client.get("/vinted-home")
+        self.assertEqual(page.status_code, 200)
+        for part in ("25 recommendations", "20 repeats", "4 outside the freshness limit", "1 without a confirmed"):
+            self.assertIn(part, page.get_data(as_text=True))
+        self.assertNotIn("89 recommendations", page.get_data(as_text=True))

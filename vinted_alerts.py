@@ -49,7 +49,7 @@ def home_discovery_fresh(details, *, now=None):
         and evidence.get("womens_clothing") is True
         and all(type(value) in (int, float) and math.isfinite(value)
                 for value in (observed, expires, now))
-        and 0 < observed <= now <= expires <= observed + 180 - age
+        and 0 < observed <= now < expires <= observed + 180 - age
         and expires > observed
     )
 

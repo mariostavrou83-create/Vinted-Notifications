@@ -32,7 +32,8 @@ class FreshnessTests(unittest.TestCase):
     def test_three_minute_bound_is_listing_age_not_first_seen(self):
         evidence = {"home_discovery": discovery()}
         self.assertTrue(vinted_alerts.home_discovery_fresh(evidence, now=1000))
-        self.assertTrue(vinted_alerts.home_discovery_fresh(evidence, now=1060))
+        self.assertTrue(vinted_alerts.home_discovery_fresh(evidence, now=1059.99))
+        self.assertFalse(vinted_alerts.home_discovery_fresh(evidence, now=1060))
         self.assertFalse(vinted_alerts.home_discovery_fresh(evidence, now=1060.01))
         self.assertFalse(vinted_alerts.home_discovery_fresh(evidence, now=999.9))
 

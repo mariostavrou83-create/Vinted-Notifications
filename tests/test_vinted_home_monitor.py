@@ -3,6 +3,7 @@
 import json
 import multiprocessing
 import signal
+import sqlite3
 import time
 import unittest
 from contextlib import closing, nullcontext
@@ -448,6 +449,73 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual([row["item_id"] for row in self.rows()], ["500"])
         self.assertEqual([item["id"] for item in self.worker.pending["seller"]], ["499", "501"])
         self.assertEqual(self.fetch.call_count, 2)
+
+    def test_busy_optional_guide_read_still_queues_a_verified_home_recommendation(self):
+        with patch.object(home, "active_searches", side_effect=sqlite3.OperationalError("busy")) as guides:
+            self.discover()
+        guides.assert_called_once()
+        row, = self.rows()
+        self.assertEqual(row["item_id"], "500")
+        self.assertIsNone(row["query_id"])
+        self.assertEqual(self.worker.retry_at["seller"], 0)
+        self.assertEqual(self.status()["code"], "checked")
+
+    def test_fourth_new_card_on_a_repeat_heavy_page_reaches_the_outbox(self):
+        cards = [dict(self.item, id=str(i), url=f"https://www.vinted.co.uk/items/{i}")
+                 for i in range(500, 525)]
+        self.worker.examined.update({card["id"]: 990 for card in cards[:20]})
+
+        def listing(_html, identity, observed):
+            age = {"verified": True, "checked_at": observed,
+                   "max_age_seconds": 60 if identity == "521" else 600}
+            item = dict(self.item, id=identity, url=f"https://www.vinted.co.uk/items/{identity}")
+            return {"reason": "ok", "item": item, "age": age}
+
+        self.fetch.side_effect = lambda *args: ("page", self.now)
+        with patch.object(home, "parse_home", return_value={"reason": "ok", "items": cards}), \
+             patch.object(home, "parse_listing", side_effect=listing):
+            for offset in (0, 1, 6, 11, 16, 21, 32):
+                self.now = 1000 + offset
+                self.worker.tick()
+        self.assertEqual([r["item_id"] for r in self.rows()], ["521"])
+        self.assertEqual(self.fetch.call_count, home.PAGE_BUDGET)
+        self.assertEqual(self.fetch.call_args.args, ("seller", home.buyer.BASE + "/"))
+
+    def test_recommended_incomplete_listing_can_qualify_on_one_later_check(self):
+        self.age = {"verified": False}
+        self.discover()
+        self.assertEqual(self.rows(), [])
+
+        self.now = 1060
+        self.age = {"verified": True, "checked_at": self.now, "max_age_seconds": 70}
+        self.fetch.return_value = ("page", self.now)
+        self.discover()
+        self.assertEqual([r["item_id"] for r in self.rows()], ["500"])
+        self.now = 1120
+        self.worker.tick()
+        self.assertFalse(self.worker.pending["seller"])
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_inconclusive_recheck_uses_only_spare_slots_and_expires(self):
+        self.age = {"verified": False}
+        self.discover()
+        other = dict(self.item, id="499")
+        with patch.object(home, "parse_home", return_value={"reason": "ok", "items": [self.item, other]}):
+            self.now = 1060
+            self.worker.tick()
+        self.assertEqual([c["id"] for c in self.worker.pending["seller"]], ["499", "500"])
+        self.worker.pending["seller"].popleft()
+        self.now += 1
+        self.worker.tick()
+        self.assertEqual(self.rows(), [])
+        self.now = 1120
+        self.worker.tick()
+        self.assertFalse(self.worker.pending["seller"])
+        self.worker.recheck_until["500"] = self.now + 20
+        self.now += 60
+        self.worker.tick()
+        self.assertFalse(self.worker.pending["seller"])
+        self.assertFalse(self.worker.recheck_until)
 
     def test_removed_listing_does_not_pause_remaining_home_items(self):
         self.worker.tick()

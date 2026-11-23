@@ -100,8 +100,12 @@ class HomeGuideTests(DatabaseFixture, unittest.TestCase):
         with patch.object(vinted_home_monitor,"parse_home",return_value={"reason":"ok","items":cards}):
             worker.home("seller",1000)
         self.assertEqual(worker.next_home["seller"],1032)
-        self.assertEqual([x["id"] for x in worker.pending["seller"]],["119","118","117"])
+        self.assertEqual([x["id"] for x in worker.pending["seller"]],["119","118","117","116","115"])
         self.assertEqual(worker.counts["seller"]["card_screened"],0)
+        worker.page_reads["seller"].appendleft(995)
+        with patch.object(vinted_home_monitor,"parse_home",return_value={"reason":"ok","items":cards}):
+            worker.home("seller",1000)
+        self.assertEqual(len(worker.pending["seller"]),4)
 
     def test_budget_is_enforced_across_overlapping_cycles(self):
         now=[1000]
