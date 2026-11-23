@@ -230,6 +230,34 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         restarted_fetch.assert_not_called()
         self.assertEqual(restarted.retry_at["seller"], 2800)
 
+    def test_signed_in_empty_feed_retries_at_normal_cadence_and_backs_off_if_repeated(self):
+        empty = {"reason": "home_cards_unavailable", "authenticated": True, "items": []}
+        with patch.object(home, "parse_home", return_value=empty):
+            for delay in (60, 120, 240, 300, 300):
+                self.worker.tick()
+                self.assertEqual(self.status()["retry_at"], self.now + delay)
+                self.assertEqual(self.status()["code"], "source_unavailable")
+                self.worker = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
+                before = self.fetch.call_count
+                self.now += delay - 1
+                self.worker.tick()
+                self.assertEqual(self.fetch.call_count, before)
+                self.now += 1
+        self.worker.tick()
+        self.assertEqual(self.status()["code"], "checked")
+        self.assertEqual(self.status()["empty_page_delay"], 0)
+        self.assertFalse(self.rows())
+        self.now += home.INTERVAL
+        with patch.object(home, "parse_home", return_value=empty):
+            self.worker.tick()
+        self.assertEqual(self.status()["retry_at"], self.now + 60)
+
+    def test_empty_feed_without_confirmed_signin_keeps_full_pause(self):
+        with patch.object(home, "parse_home", return_value={"reason": "home_cards_unavailable", "items": []}):
+            self.worker.tick()
+        self.assertEqual(self.status()["retry_at"], self.now + 300)
+        self.assertEqual(self.status()["empty_page_delay"], 0)
+
     def test_listing_limit_resumes_with_home_then_spaces_details_across_restart(self):
         self.worker.tick()
         self.now = 1001

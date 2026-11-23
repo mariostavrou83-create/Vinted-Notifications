@@ -261,6 +261,7 @@ class Monitor:
         self.rate_limit_level = dict.fromkeys(ROLES, 0)
         self.rate_recovery_at = dict.fromkeys(ROLES, 0)
         self.next_detail_at = dict.fromkeys(ROLES, 0)
+        self.empty_page_delay = dict.fromkeys(ROLES, 0)
         for role in ROLES:
             try:
                 saved = json.loads(
@@ -268,6 +269,9 @@ class Monitor:
                 )
                 if not isinstance(saved, dict):
                     continue
+                empty_delay = saved.get("empty_page_delay", 0)
+                if type(empty_delay) is int and 0 <= empty_delay <= 300:
+                    self.empty_page_delay[role] = empty_delay
                 retry = saved.get("retry_at", 0)
                 if (
                     type(retry) in (int, float)
@@ -307,6 +311,7 @@ class Monitor:
             "retry_at": self.retry_at[role],
             "rate_limit_level": self.rate_limit_level[role],
             "rate_recovery_at": self.rate_recovery_at[role],
+            "empty_page_delay": self.empty_page_delay[role],
             "http_status": (
                 http_status
                 if type(http_status) is int and 100 <= http_status <= 599
@@ -437,7 +442,13 @@ class Monitor:
         html, observed = self.fetch(role, buyer.BASE + "/")
         result = parse_home(html)
         if result.get("reason") != "ok":
-            self.retry_at[role] = self.clock() + 300
+            delay = 300
+            if result.get("reason") == "home_cards_unavailable" and result.get("authenticated") is True:
+                # A signed-in but empty/unreadable feed may last only one poll.
+                # Retry at normal cadence first, then back off on repeated empties.
+                delay = min(300, max(INTERVAL, self.empty_page_delay[role] * 2))
+                self.empty_page_delay[role] = delay
+            self.retry_at[role] = self.clock() + delay
             self.status(
                 role,
                 "source_unavailable",
@@ -446,6 +457,7 @@ class Monitor:
                 detail_code=result.get("reason"),
             )
             return
+        self.empty_page_delay[role] = 0
         candidates = result["items"]
         self.counts[role]["candidates"] = len(candidates)
         try:
