@@ -37,6 +37,11 @@ class AlertTests(unittest.TestCase):
         settings_patch = patch("db.get_parameter", return_value=None)
         settings_patch.start()
         self.addCleanup(settings_patch.stop)
+        from alert_controls import SourceState
+
+        pause_patch = patch("alert_controls.state", return_value=SourceState(False, 0))
+        pause_patch.start()
+        self.addCleanup(pause_patch.stop)
         audit_patch = patch("search_match_audit.eligible_seen", return_value=set())
         audit_patch.start()
         self.addCleanup(audit_patch.stop)

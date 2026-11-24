@@ -99,7 +99,8 @@ class FinderIncidentsTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(incidents.claim(self.now + 86))
 
     def test_home_rejection_and_real_recovery_are_reported_once(self):
-        vinted_home_controls.configure("1")
+        with patch("alert_controls.time.time", return_value=self.now - 30):
+            vinted_home_controls.configure("1")
         self.set_home("seller", "credentials", self.now, page=self.now - 20)
         incidents.check_health(self.now)
         incidents.check_health(self.now + 1)

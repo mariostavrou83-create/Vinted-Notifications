@@ -154,7 +154,7 @@ def update_last_timestamp(query_id, timestamp):
 
 def add_item_to_db(
     id, title, query_id, price, timestamp, photo_url, currency="EUR", alert=None,
-    *, update_search_timestamp=True,
+    *, update_search_timestamp=True, alert_observed_at=None,
 ):
     conn = None
     try:
@@ -162,6 +162,14 @@ def add_item_to_db(
         conn.execute("BEGIN IMMEDIATE")
         cursor = conn.cursor()
         discovery = ((alert or {}).get("vinted_details") or {}).get("home_discovery") or {}
+        if alert is not None:
+            from alert_controls import state
+
+            source = "home" if discovery else "search"
+            evidence_at = discovery.get("observed_at") if discovery else alert_observed_at
+            if not state(source, conn).allows(evidence_at):
+                conn.rollback()
+                return False
         recommendation = query_id is None and discovery.get("reason") == "recommendation"
         if not recommendation and cursor.execute("SELECT 1 FROM items WHERE item=?", (id,)).fetchone():
             # A borrowed batch connection stays open after this helper returns.

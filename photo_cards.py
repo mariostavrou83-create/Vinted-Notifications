@@ -331,6 +331,10 @@ def markup(row, details, *, view="listing", note_page=None):
     buttons = [
         [InlineKeyboardButton("Open " + marketplace + " listing ↗", url=row["url"])]
     ]
+    if details.get("payment_reminder") and not (details.get("buy_feedback") or {}).get("owner_resolution"):
+        from vinted_owner_controls import reminder_rows
+
+        buttons.extend(reminder_rows(details["payment_reminder"], details.get("platform", "vinted")))
     unguided_home = not row.get("query_id") and (details.get("home_discovery") or {}).get("reason") == "recommendation"
     from vinted_budget import home_cap, tap_shipping_maximum
     cap = home_cap(details) if unguided_home else None
@@ -412,6 +416,11 @@ def load(platform, message_id):
         if row is None:
             return None
         details = json.loads(card["details"])
+        if details.get("payment_reminder"):
+            from vinted_owner_controls import current_reminder
+
+            if not current_reminder(details["payment_reminder"], conn):
+                details.pop("payment_reminder", None)
         reference = card["reference_id"]
         # The original notification can reach Telegram while a saved search is
         # attaching its guide. Always present the committed guide on later edits.
@@ -572,6 +581,12 @@ async def send_initial(bot, chat_id, row, details, before_send, *, require_photo
     if raw is None and require_photo:
         raise ValueError("The listing photo is unavailable. Try a newer find.")
     await before_send()
+    if row.get("kind") == "listing":
+        from vinted_owner_controls import pending_reminder
+
+        offer = pending_reminder(chat_id)
+        if offer:
+            details["payment_reminder"] = offer
     # Recheck after the download: an eBay deletion may have raced it.
     if details.get("platform") == "ebay":
         with closing(connection()) as conn:

@@ -467,6 +467,10 @@ def record_snapshot(
     received_at = now if received_at is None else received_at
     with closing(connection()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
+        from alert_controls import state as listing_alert_state
+
+        if not listing_alert_state("search", conn).allows(attempted):
+            return 0
         current = conn.execute(
             """SELECT s.*,d.paused,d.archived FROM search_platforms s
             LEFT JOIN search_dashboard d ON d.query_id=s.query_id WHERE s.query_id=?""",
@@ -778,8 +782,13 @@ class Poller:
                         "eBay request worker recovered after %s", type(exc).__name__
                     )
         if now - self.last_reload >= 1:
+            from alert_controls import state as listing_alert_state
+
             self.cached_config = store.configuration()
-            self.cached_groups = grouped_searches(store.active_searches())
+            self.cached_groups = (
+                [] if listing_alert_state("search").paused
+                else grouped_searches(store.active_searches())
+            )
             active_keys = {
                 json.dumps(search_params(group[0]["ebay"]), sort_keys=True)
                 for group in self.cached_groups
@@ -883,7 +892,12 @@ async def run_delivery():
                                     latest[k] != config[k]
                                     for k in ("telegram_token", "chat_id")
                                 ) or store.missing_configuration(latest)
-                                has_active_searches = bool(store.active_searches())
+                                from alert_controls import state as listing_alert_state
+
+                                has_active_searches = (
+                                    not listing_alert_state("search").paused
+                                    and bool(store.active_searches())
+                                )
                             next_configuration_check = time.monotonic() + 1
                             if changed:
                                 break

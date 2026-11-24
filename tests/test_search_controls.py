@@ -86,6 +86,34 @@ class DatabaseFixture:
 
 
 class DataTests(DatabaseFixture, unittest.TestCase):
+    def test_paused_searches_skip_vinted_and_ebay_dispatch_then_resume(self):
+        from alert_controls import set_paused
+        from ebay_monitor import Poller as EbayPoller
+
+        set_paused("search", True)
+        queue = Queue()
+        fetch = MagicMock(return_value=[])
+        vinted = polling.Poller(queue, fetch=fetch)
+        ebay = EbayPoller()
+        try:
+            vinted.tick()
+            with patch("ebay_store.active_searches") as active_ebay:
+                ebay.tick()
+            active_ebay.assert_not_called()
+            self.assertFalse(vinted.queries)
+            fetch.assert_not_called()
+            self.assertFalse(self.batch(1, [800]))
+
+            set_paused("search", False)
+            vinted.config_checked = 0
+            vinted.tick()
+            self.assertTrue(vinted.queries)
+            self.assertTrue(vinted.pending)
+            self.assertEqual(len(self.batch(1, [801])), 1)
+        finally:
+            vinted.executor.shutdown(wait=True)
+            ebay.close()
+
     def test_verified_backup_and_idempotent_migration_preserve_existing_data(self):
         with closing(sqlite3.connect(self.backup)) as before, closing(
             sqlite3.connect(db.DB_PATH)

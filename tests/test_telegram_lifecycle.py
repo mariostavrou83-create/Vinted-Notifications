@@ -156,6 +156,29 @@ class TelegramLifecycleTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(worker.photo_cancelled)
         self.assertEqual(worker.close_calls, 1)
 
+    async def test_real_ptb_routes_alert_controls_only_for_private_owner(self):
+        from alert_controls import state
+
+        for command, sender in (("/resume_all", 123), ("/pause_home", 123), ("/pause_searches", 321)):
+            update = Update.de_json(
+                {
+                    "update_id": 1,
+                    "message": {
+                        "message_id": 901,
+                        "date": 1,
+                        "chat": {"id": 123, "type": "private"},
+                        "from": {"id": sender, "is_bot": False, "first_name": "Owner"},
+                        "text": command,
+                        "entities": [{"type": "bot_command", "offset": 0, "length": len(command)}],
+                    },
+                },
+                self.app.bot,
+            )
+            with patch.object(Message, "reply_text", new_callable=AsyncMock):
+                await self.app.process_update(update)
+        self.assertTrue(state("home").paused)
+        self.assertFalse(state("search").paused)
+
     async def test_real_ptb_routes_plain_buy_replies_to_buyer_controls(self):
         import photo_cards
         import vinted_buyer as buyer

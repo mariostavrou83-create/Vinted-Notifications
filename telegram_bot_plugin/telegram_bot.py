@@ -2,10 +2,11 @@ import asyncio
 import os
 import re
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommandScopeChat, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
-from telegram.ext import ApplicationHandlerStop, ContextTypes, TypeHandler
+from telegram.ext import ApplicationHandlerStop, CommandHandler, ContextTypes, TypeHandler
 
+import alert_controls
 import core
 import db
 from logger import get_logger
@@ -64,6 +65,9 @@ class LeRobot:
             self.app.add_handler(
                 CallbackQueryHandler(vinted_callback, pattern=r"^card:")
             )
+            from vinted_owner_controls import REMINDER_PATTERN, confirm_reminder
+
+            self.app.add_handler(CallbackQueryHandler(confirm_reminder, pattern=REMINDER_PATTERN))
             from vinted_buying import callback as buy_callback
 
             self.app.add_handler(
@@ -89,6 +93,7 @@ class LeRobot:
             )
 
             # Old editing commands no longer mutate search data.
+            self.app.add_handler(CommandHandler(tuple(alert_controls.COMMANDS), self.control_alerts))
             self.app.add_handler(MessageHandler(filters.COMMAND, self.open_dashboard))
             logger.info(
                 "Telegram BUY reply shortcut ready; exact alert and saved purchase limits required"
@@ -106,6 +111,18 @@ class LeRobot:
         expected = str(db.get_parameter("telegram_chat_id") or "").strip()
         if not update.effective_chat or str(update.effective_chat.id) != expected:
             raise ApplicationHandlerStop
+
+    async def control_alerts(self, update, context):
+        chat = update.effective_chat
+        user = update.effective_user
+        if chat is None or chat.type != "private" or user is None or chat.id != user.id:
+            return
+        command = update.effective_message.text.split(maxsplit=1)[0][1:].split("@")[0].lower()
+        source, paused, _ = alert_controls.COMMANDS[command]
+        states = await asyncio.to_thread(alert_controls.set_paused, source, paused)
+        home = "paused" if states["home"].paused else "active"
+        searches = "paused" if states["search"].paused else "active"
+        await update.effective_message.reply_text(f"MSJ Home is {home}. Saved-search alerts are {searches}.")
 
     async def open_dashboard(self, update, context):
         match = re.fullmatch(r"/start(?:@\w+)? home_([0-9]{1,24})", update.message.text or "")
@@ -504,9 +521,13 @@ class LeRobot:
 
     async def set_commands(self, context: ContextTypes.DEFAULT_TYPE):
         try:
-            await context.bot.set_my_commands(
-                [("dashboard", "Open your search dashboard")]
-            )
-            logger.info("Bot commands set successfully")
+            chat_id = str(db.get_parameter("telegram_chat_id") or "").strip()
+            commands = [("dashboard", "Open your search dashboard")]
+            if chat_id.isdigit() and int(chat_id) > 0:
+                commands.extend((command, label) for command, (_, _, label) in alert_controls.COMMANDS.items())
+                await context.bot.set_my_commands(commands, scope=BotCommandScopeChat(int(chat_id)))
+            else:
+                await context.bot.set_my_commands(commands)
+            logger.info("Bot commands set successfully; alert_controls=%s", len(commands) - 1)
         except Exception:
             logger.exception("Error setting bot commands")

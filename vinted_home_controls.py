@@ -7,6 +7,7 @@ from contextlib import closing
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import alert_controls
 from search_settings import connection
 
 CODES = {
@@ -60,11 +61,7 @@ def save_target(value):
 def configure(value):
     if value not in ("0", "1"):
         raise ValueError("Choose whether Home discovery is running or paused.")
-    with closing(connection()) as conn, conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO parameters(key,value) VALUES('home_monitor_enabled',?)",
-            (value,),
-        )
+    alert_controls.set_paused("home", value == "0")
 
 
 def seller_status(conn):
@@ -96,7 +93,7 @@ def seller_status(conn):
     )
     for key in (
         "candidates", "checked", "fresh", "matched", "alerts", "listing_unavailable",
-        "details_unverified", "global_blocked", "scope_miss", "budget_or_exclusions",
+        "details_unverified", "global_blocked", "scope_miss", "size_miss", "budget_or_exclusions",
         "style_miss", "photo_checked", "photo_matches", "card_screened",
         "duplicates", "age_expired", "age_unverified",
     ):

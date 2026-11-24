@@ -13,6 +13,7 @@ from functools import partial
 from requests.exceptions import ConnectionError, Timeout
 
 import db
+import alert_controls
 import resource_controls
 import search_settings
 import vinted_keywords
@@ -265,6 +266,7 @@ class Poller:
         self.successes = 0
         self.errors = 0
         self.config_checked = 0
+        self.search_alerts_paused = False
         self.queries = {}
         self.target = 15
         self.count = 96
@@ -300,8 +302,15 @@ class Poller:
     def tick(self):
         now = time.monotonic()
         if now >= self.config_checked:
-            self.queries = vinted_keywords.expand(search_settings.active_queries())
-            self.processing_states = search_settings.processing_states()
+            self.search_alerts_paused = alert_controls.state("search").paused
+            if self.search_alerts_paused:
+                self.queries = {}
+                self.processing_states = {}
+                for future, *_ in self.pending.values():
+                    future.cancel()
+            else:
+                self.queries = vinted_keywords.expand(search_settings.active_queries())
+                self.processing_states = search_settings.processing_states()
             self.processed_pages = {
                 key: value
                 for key, value in self.processed_pages.items()
@@ -405,6 +414,7 @@ class Poller:
                             parent_id,
                             search_url,
                             variant_id,
+                            wall_start,
                         )
                     )
                 self.failures[query_id] = 0
@@ -664,7 +674,7 @@ class Poller:
         try:
             while True:
                 self.tick()
-                time.sleep(0.025)
+                time.sleep(0.25 if self.search_alerts_paused else 0.025)
         finally:
             if self.shadow:
                 self.shadow.close()

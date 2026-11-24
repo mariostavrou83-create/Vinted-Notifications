@@ -26,6 +26,7 @@ from vinted_buyer_priority import yield_to_purchase
 from vinted_home_feed import parse_home, parse_listing
 import vinted_home_activity as activity
 from vinted_home_matching import match_candidate, womens_clothing
+from vinted_home_sizes import over_limit
 from vinted_home_transport import HomeReader, read_html
 
 logger = get_logger(__name__)
@@ -60,6 +61,7 @@ COUNTERS = (
     "details_unverified",
     "global_blocked",
     "scope_miss",
+    "size_miss",
     "budget_or_exclusions",
     "style_miss",
     "photo_checked",
@@ -231,6 +233,7 @@ def _publish(item, search, match, age, role, *, now):
             "source_role": role,
             "all_recommendations": True,
             "womens_clothing": True,
+            "size_title": item.get("size_title", ""),
             "reason": match["reason"] if match else "recommendation",
             "observed_at": observed,
             "max_age_seconds": upper,
@@ -655,6 +658,11 @@ class Monitor:
                 self.recheck_until.pop(identifier, None)
                 self.remember(identifier, self.clock())
                 continue
+            if womens_clothing(item) and over_limit(item.get("size_title"), item.get("title")):
+                self.recheck_until.pop(identifier, None)
+                self.counts[role]["size_miss"] += 1
+                self.remember(identifier, self.clock())
+                continue
             stamp = item.get("home_created_at")
             candidates_for_detail = rechecks if recheck else fresh_ids
             if stamp is not None and not 0 < stamp <= observed:
@@ -819,6 +827,9 @@ class Monitor:
             return
         if not womens_clothing(item):
             self.counts[role]["scope_miss"] += 1
+            return
+        if over_limit(item.get("size_title"), item.get("title")):
+            self.counts[role]["size_miss"] += 1
             return
         # A guide adds the owner's reference photos and buying limit. It is
         # optional and can never delay a Home alert for another photo request.

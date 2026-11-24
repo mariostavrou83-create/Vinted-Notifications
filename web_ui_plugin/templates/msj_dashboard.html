@@ -4,6 +4,20 @@
   <div><h1>{{ 'Archived searches' if archived else 'My searches' }}</h1></div>
   <a class="primary" href="/search/new">+ Add a search</a>
 </div>
+{% if listing_alerts %}
+<section class="form-card" id="telegram-alerts">
+  <h2>Telegram alerts</h2>
+  <p>MSJ Home is <strong>{{ 'paused' if listing_alerts.home.paused else 'active' }}</strong>.
+    Saved-search alerts are <strong>{{ 'paused' if listing_alerts.search.paused else 'active' }}</strong>.</p>
+  <form class="listing-alert-actions" action="{{ url_for('control_listing_alerts') }}" method="post">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="secondary" name="command" value="{{ 'resume_home' if listing_alerts.home.paused else 'pause_home' }}">{{ 'Resume Home' if listing_alerts.home.paused else 'Pause Home' }}</button>
+    <button class="secondary" name="command" value="{{ 'resume_searches' if listing_alerts.search.paused else 'pause_searches' }}">{{ 'Resume saved searches' if listing_alerts.search.paused else 'Pause saved searches' }}</button>
+    {% if not listing_alerts.home.paused or not listing_alerts.search.paused %}<button class="secondary" name="command" value="pause_all">Pause all alerts</button>{% endif %}
+    {% if listing_alerts.home.paused or listing_alerts.search.paused %}<button class="secondary" name="command" value="resume_all">Resume all alerts</button>{% endif %}
+  </form>
+</section>
+{% endif %}
 {% if resources %}
 <div class="workspace-stats">
   <div><span>Active Vinted searches</span><strong>{{ resources.active }}</strong><small>{{ resources.checks }} checks including keyword variants</small></div>

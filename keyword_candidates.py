@@ -93,9 +93,14 @@ def stage(platform, item, search, alert, *, conn=None, timing=None, now=None):
     payload = json.dumps({"item": item, "alert": alert, "timing": timing})
     if conn is None:
         with closing(connection()) as owned, owned:
+            owned.execute("BEGIN IMMEDIATE")
             return stage(
                 platform, item, search, alert, conn=owned, timing=timing, now=now
             )
+    from alert_controls import state
+
+    if not state("search", conn).allows(item.get("observed_at") or now):
+        return False
     conn.execute(
         """INSERT INTO keyword_candidates VALUES (?,?,?,?,?,?,?,?, 'pending','')
         ON CONFLICT(platform,item_id,query_id) DO NOTHING""",
@@ -273,6 +278,10 @@ def _claim(platform, now):
         if not due:
             return None
         conn.execute("BEGIN IMMEDIATE")
+        from alert_controls import state
+
+        if state("search", conn).paused:
+            return None
         conn.execute(
             "DELETE FROM keyword_candidates WHERE status!='pending' AND found_at<?",
             (now - 7 * 86400,),

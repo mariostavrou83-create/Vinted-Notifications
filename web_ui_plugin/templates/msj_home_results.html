@@ -1,12 +1,12 @@
 <div class="home-results-heading">
-  {% if home_panel.detail %}<h2>Fresh Home alerts · women’s clothing</h2>{% else %}<h2><a href="/vinted-home">Vinted Home</a></h2>{% endif %}
+  {% if home_panel.detail %}<h2>Fresh Home alerts · women’s clothing up to UK 14</h2>{% else %}<h2><a href="/vinted-home">Vinted Home</a></h2>{% endif %}
   <p><strong>{{ home_panel.sent }}</strong> sent to Telegram in 24h{% if home_panel.last_sent %} · last accepted at {{ home_panel.last_sent }}{% endif %}{% if home_panel.waiting %} · {{ home_panel.waiting }} waiting{% endif %}</p>
   <a href="{{ '/finds?source=home' if home_panel.detail else '/vinted-home' }}">{{ 'All Home alerts' if home_panel.detail else 'Open Home feed' }} →</a>
 </div>
 {% if home_panel.account and home_panel.account.time != 'Not checked' %}
 <p class="muted">MSJ Home · {{ home_panel.account.state }}{% if home_panel.account.last_home %} · last refresh {{ home_panel.account.last_home }}{% endif %}</p>
 {% if home_panel.detail %}<details class="home-guide-links" data-home-section="check-status"><summary>Latest Home check</summary>
-  <p class="muted">{{ home_panel.account.candidates }} recommendations · {{ home_panel.account.duplicates }} repeats · {{ home_panel.account.age_expired }} outside the freshness limit · {{ home_panel.account.age_unverified }} age unconfirmed · {{ home_panel.account.scope_miss }} without a confirmed women’s clothing category · {{ home_panel.account.alerts }} alerts queued</p>
+  <p class="muted">{{ home_panel.account.candidates }} recommendations · {{ home_panel.account.duplicates }} repeats · {{ home_panel.account.age_expired }} outside the freshness limit · {{ home_panel.account.age_unverified }} age unconfirmed · {{ home_panel.account.scope_miss }} without a confirmed women’s clothing category · {{ home_panel.account.size_miss }} outside the size limit · {{ home_panel.account.alerts }} alerts queued</p>
 </details>{% endif %}
 {% endif %}
 {% if home_panel.deals %}

@@ -422,8 +422,10 @@ class CheckoutPreferencesTests(DatabaseFixture, unittest.TestCase):
 
     @patch.dict(os.environ, {"MSJ_AUTOBUY_PRICE_POLICY": "postage_under_5"})
     def test_home_tap_can_pass_its_old_all_in_estimate(self):
+        import vinted_home_controls
         import vinted_home_monitor
 
+        vinted_home_controls.configure("1")
         now = time.time()
         item = {
             "id": "123", "title": "Fictional cardigan", "url": self.row["url"],

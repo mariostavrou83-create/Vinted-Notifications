@@ -27,6 +27,7 @@ from telegram.error import (
 )
 
 import dashboard_store
+import alert_controls
 from logger import get_logger
 from search_settings import connection
 
@@ -35,6 +36,21 @@ logger = get_logger(__name__)
 
 class ListingCancelled(Exception):
     """The current owner rules cancelled this exact unsent delivery lease."""
+
+
+def photo_allowed(row):
+    """Recheck an automatic edit, without disabling buttons on sent alerts."""
+    with closing(connection()) as conn:
+        if alert_controls.state(alert_controls.row_source(row), conn).allows(row["found_at"]):
+            return True
+        with conn:
+            conn.execute(
+                """UPDATE alert_outbox SET photo_status='cancelled',photo_error=?,
+                lease_token=NULL,leased_until=0
+                WHERE item_id=? AND platform=? AND photo_status='pending' AND lease_token=?""",
+                (alert_controls.PAUSED_MESSAGE, row["item_id"], row["platform"], row["lease_token"]),
+            )
+        return False
 
 
 def acknowledge_listing(conn, row, message_id, *, now=None):
@@ -234,6 +250,8 @@ class DeliveryWorker:
                 ).fetchone():
                     return True
         photo = row["kind"] == "photo"
+        if photo and not photo_allowed(row):
+            return True
         if not photo and not self.prepare_listing(row):
             return True
         media = None
@@ -341,27 +359,24 @@ class DeliveryWorker:
         return True
 
     async def send_listing(self, row):
+        from vinted_owner_controls import pending_reminder, reminder_rows
+
         self.require_listing(row)
         extra = {}
         if self.platform == "ebay" or self.disable_previews:
             # The clickable listing must not depend on an external image fetch.
             extra["link_preview_options"] = LinkPreviewOptions(is_disabled=True)
         self.last_send_started = time.monotonic()
+        buttons = [[InlineKeyboardButton(
+            "Open eBay" if self.platform == "ebay" else "Open Vinted", url=row["url"]
+        )]]
+        buttons.extend(reminder_rows(pending_reminder(self.chat_id), self.platform))
         return await self.bot.send_message(
             **extra,
             chat_id=self.chat_id,
             text=row["content"],
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            ("Open eBay" if self.platform == "ebay" else "Open Vinted"),
-                            url=row["url"],
-                        )
-                    ]
-                ]
-            ),
+            reply_markup=InlineKeyboardMarkup(buttons),
             read_timeout=10,
             write_timeout=10,
             connect_timeout=5,
@@ -565,6 +580,8 @@ class VintedDeliveryWorker(EbayDeliveryWorker):
             return await DeliveryWorker.deliver(self, row, now)
         if row["kind"] != "photo":
             return await DeliveryWorker.deliver(self, row, now)
+        if not photo_allowed(row):
+            return True
         details = self.alert_module.get_details(row)
         if details is None:
             # Historical in-flight alerts have no structured snapshot. Preserve
@@ -581,6 +598,8 @@ class VintedDeliveryWorker(EbayDeliveryWorker):
             # cannot hold up the next listing's link.
             async def edit_slot():
                 await self.photo_slot()
+                if not photo_allowed(row):
+                    raise ListingCancelled
                 if self.platform == "ebay":
                     with closing(connection()) as conn:
                         if not conn.execute(
@@ -645,6 +664,8 @@ class VintedDeliveryWorker(EbayDeliveryWorker):
                 permanent=permanent,
                 now=now,
             )
+        except ListingCancelled:
+            return True
         except RetryAfter as exc:
             delay = (
                 exc.retry_after.total_seconds()

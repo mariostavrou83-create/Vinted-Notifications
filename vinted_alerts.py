@@ -63,7 +63,9 @@ def prepare_listing(row, details=None):
     """
     if row.get("platform", "vinted") != "vinted" or row.get("kind") != "listing":
         return True
+    import alert_controls
     from search_settings import excluded_by
+    from vinted_home_sizes import over_limit
 
     with closing(connection()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -97,20 +99,19 @@ def prepare_listing(row, details=None):
         ).fetchone()
         saved_details = json.loads(saved[0]) if saved else {}
         reason, estimate = "", None
-        home_enabled = True
-        if "home_discovery" in saved_details:
-            setting = conn.execute(
-                "SELECT value FROM parameters WHERE key='home_monitor_enabled'"
-            ).fetchone()
-            home_enabled = bool(setting and setting[0] == "1")
-        if not home_enabled:
-            reason = "Home discovery is paused"
+        home_detail = saved_details.get("home_discovery")
+        source = "home" if "home_discovery" in saved_details else alert_controls.row_source(current)
+        source_state = alert_controls.state(source, conn)
+        if not source_state.allows(current["found_at"]):
+            reason = "Home discovery is paused" if source == "home" else alert_controls.PAUSED_MESSAGE
         elif "home_discovery" in saved_details and isinstance(saved_details["home_discovery"], dict) and saved_details["home_discovery"].get("source_role") != "seller":
             reason = "Home recommendation is outside the selected MSJ Vinted account"
         elif "home_discovery" in saved_details and isinstance(saved_details["home_discovery"],dict) and saved_details["home_discovery"].get("womens_clothing") is not True:
             reason = "Home listing has no verified women's clothing category"
         elif not home_discovery_fresh(saved_details):
             reason = "Home discovery no longer has verified listing age within three minutes"
+        elif isinstance(home_detail, dict) and over_limit(home_detail.get("size_title"), current["title"]):
+            reason = "Home garment size is above UK 14"
         elif current["query_id"] is None and (saved_details.get("home_discovery") or {}).get("reason") == "recommendation":
             # The live Home switch and verified upload deadline above govern an
             # unguided notification. It has no search budget or purchase authority.
@@ -162,7 +163,7 @@ def prepare_listing(row, details=None):
                 if details is not None:
                     details["budget"] = estimate
         if (reason in {"Search no longer active for Vinted", "Blocked by current exclusions",
-                       "Outside current estimated total budget"} and home_enabled
+                       "Outside current estimated total budget"}
                 and home_discovery_fresh(saved_details) and (saved_details.get("home_discovery") or {}).get("all_recommendations")):
             # A changed buying guide removes its spending permission. The same
             # fresh recommendation can still reach the owner in view-only mode.
@@ -399,7 +400,11 @@ def rich_request(row, details, listing_image, reference_image):
 
 
 async def send_text(bot, chat_id, row, details):
+    from vinted_owner_controls import reminder_markup
+
+    reminder = reminder_markup(chat_id) if row.get("kind") == "listing" else {}
     return await bot.send_message(
+        **reminder,
         chat_id=chat_id,
         text=text_message(row, details),
         parse_mode="HTML",
@@ -439,6 +444,12 @@ async def enrich(bot, chat_id, row, details, before_edit, *, persist=True):
     data = rich_request(row, details, listing, reference_image)
     data["chat_id"] = chat_id
     await before_edit()
+    if row.get("kind") == "photo":
+        from vinted_owner_controls import reminder_markup
+
+        reminder = reminder_markup(chat_id, details.get("platform", "vinted"))
+        if reminder:
+            data["reply_markup"] = reminder["reply_markup"].to_dict()
     try:
         result = await bot.do_api_request(
             "editMessageText",

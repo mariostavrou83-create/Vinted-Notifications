@@ -116,27 +116,28 @@ async def queue_buy_failure(row, outcome, callback_id):
 def observe(conn, now, started, previous_poll=0):
     """None means there is not enough evidence to open or resolve that incident."""
     signals = {}
-    home = conn.execute(
-        "SELECT value FROM parameters WHERE key='home_monitor_enabled'"
-    ).fetchone()
-    if home and home[0] == "1":
+    from alert_controls import state as alert_state
+
+    home = alert_state("home", conn)
+    searches = alert_state("search", conn)
+    if not home.paused:
         page = conn.execute(
             "SELECT fetched_at FROM vinted_home_pages WHERE role='seller'"
         ).fetchone()
         last_page = page[0] if page else None
         row = read(conn, "home_monitor_status_seller", {})
         code, checked = row.get("code"), row.get("checked_at") or 0
-        if code in HOME_ERRORS and checked > 0 and checked >= (last_page or 0):
+        if code in HOME_ERRORS and checked > 0 and checked >= max(last_page or 0, home.changed_at):
             status = row.get("http_status")
             detail = HOME_ERRORS[code] + (f" (HTTP {status})" if status else "")
             signals["MSJ Vinted Home"] = (code, f"{detail} at {uk(checked)}.", "alerts")
-        elif last_page and now - last_page < 300 and code == "checked":
+        elif last_page and last_page >= home.changed_at and now - last_page < 300 and code == "checked":
             signals["MSJ Vinted Home"] = (
                 "",
                 f"Vinted returned the personalised page at {uk(last_page)}.",
                 "alerts",
             )
-        elif now - (last_page or started) >= 300 and now - started >= 60:
+        elif now - max(last_page or started, home.changed_at) >= 300 and now - started >= 60:
             detail = "No successful page refresh for five minutes." + (
                 f" Last page at {uk(last_page)}." if last_page else ""
             )
@@ -148,12 +149,13 @@ def observe(conn, now, started, previous_poll=0):
         failed_at = row.get("last_detail_failure")
         known_ok = type(last_ok) in (int, float) and 0 < last_ok <= now
         if (type(retry) in (int, float) and type(failed_at) in (int, float)
-                and 0 < failed_at <= now and 120 <= retry - failed_at <= 300):
+                and 0 < failed_at <= now and failed_at >= home.changed_at
+                and 120 <= retry - failed_at <= 300):
             detail = f"Individual listing checks repeatedly failed, most recently at {uk(failed_at)}."
             if known_ok:
                 detail += f" Last successful listing check at {uk(last_ok)}."
             signals["MSJ Home listing checks"] = ("unavailable", detail, "alerts")
-        elif retry == 0 and known_ok:
+        elif retry == 0 and known_ok and last_ok >= home.changed_at:
             signals["MSJ Home listing checks"] = (
                 "", f"An individual listing check succeeded at {uk(last_ok)}.", "alerts",
             )
@@ -206,19 +208,22 @@ def observe(conn, now, started, previous_poll=0):
     # A completed batch advances this timestamp even when every item is old.
     # Two distinct successful poll observations guard against flagging the
     # brief interval between a response arriving and the extractor committing it.
-    if processed and 0 <= now - processed < 300:
+    if not searches.paused and processed and processed >= searches.changed_at and 0 <= now - processed < 300:
         signals["Saved-search processing"] = (
             "", f"Finder processed a catalogue page at {uk(processed)}.", "alerts",
         )
-    elif processed and 0 <= now - latest < 300 and latest > previous_poll >= processed + 300:
+    elif (
+        not searches.paused and processed and 0 <= now - latest < 300
+        and latest > previous_poll >= max(processed, searches.changed_at) + 300
+    ):
         signals["Saved-search processing"] = (
             "stalled",
             f"Catalogue polls are succeeding. Finder last processed a page at {uk(processed)}. "
             f"The latest successful poll was at {uk(latest)}.",
             "alerts",
         )
-    if active:
-        if latest and now - latest < 300:
+    if active and not searches.paused:
+        if latest and latest >= searches.changed_at and now - latest < 300:
             signals["Saved searches"] = (
                 "",
                 f"Successful search check at {uk(latest)}.",
@@ -229,8 +234,9 @@ def observe(conn, now, started, previous_poll=0):
                 for r in active
                 if (r[2] or 0) >= 3
                 and r[3]
+                and r[3] >= searches.changed_at
                 and now - r[3] < 600
-                and now - (r[1] or started) >= 300
+                and now - max(r[1] or started, searches.changed_at) >= 300
             ]
             signals["Individual saved searches"] = (
                 (
@@ -247,7 +253,7 @@ def observe(conn, now, started, previous_poll=0):
                     "alerts",
                 )
             )
-        elif now - started >= 300:
+        elif now - max(started, searches.changed_at) >= 300:
             signals["Saved searches"] = (
                 "stalled",
                 "No successful search check for five minutes."
@@ -329,7 +335,12 @@ def check_health(now):
         initial = read(conn, STATE, {})
         signals, polled, processed = observe(conn, now, initial.get("started", now), initial.get("sampled_poll", 0))
         if "sampled_poll" not in initial or int(now // 300) != int(initial.get("checked", 0) // 300):
-            logger.info("Saved-search progress: last_poll=%s last_processed=%s", int(polled), int(processed))
+            from alert_controls import state as alert_state
+
+            logger.info(
+                "Saved-search progress: last_poll=%s last_processed=%s paused_by_owner=%s home_paused_by_owner=%s",
+                int(polled), int(processed), alert_state("search", conn).paused, alert_state("home", conn).paused,
+            )
         with conn:
             conn.execute("BEGIN IMMEDIATE")
             state = read(conn, STATE, {"started": now, "signals": {}})

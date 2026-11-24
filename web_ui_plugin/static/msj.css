@@ -11,6 +11,7 @@ select{font:inherit;font-size:13px;width:100%;padding:12px;background:white;colo
 .platform-editor [role=tabpanel][hidden]{display:none}
 .shared-note,.platform-disabled{font-size:13px;line-height:1.6;background:#f1f4ed;padding:13px;border-radius:8px}
 .platform-disabled{background:#f6f0e7}
+.listing-alert-actions{display:flex;flex-wrap:wrap;gap:8px}
 .platform-card-status{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:15px 0;border-top:1px solid #e3e5db}
 .platform-card-status>div{display:flex;flex-direction:column;gap:4px;font-size:13px}
 .platform-card-status a{font-weight:700;text-decoration:none}.platform-card-status small{font-size:11px;color:#6b7167}

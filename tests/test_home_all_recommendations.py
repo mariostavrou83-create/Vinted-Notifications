@@ -94,6 +94,29 @@ class HomeRecommendationsTests(DatabaseFixture, unittest.TestCase):
             self.worker.notify_item(self.item, self.age, "seller", [self.search])
         self.assertIsNone(self.row()["query_id"])
 
+    def test_home_excludes_sizes_over_uk_14_from_either_size_label_or_title(self):
+        for label in ("UK 14-16", "L / UK 16–18", "EU 44", "18", "XL", "XXL", "2XL", "L"):
+            with self.subTest(label=label):
+                self.worker.notify_item(dict(self.item, size_title=label), self.age, "seller", [])
+                self.assertEqual(activity.alerted_ids([self.item["id"]]), set())
+        self.worker.notify_item(dict(self.item, size_title="M", title="Vintage top size UK 16"), self.age, "seller", [])
+        self.assertEqual(activity.alerted_ids([self.item["id"]]), set())
+        self.worker.notify_item(dict(self.item, size_title="M / UK 12-14"), self.age, "seller", [])
+        self.assertEqual(self.row()["status"], "pending")
+        self.assertEqual(len(self.batch(1, [8124], title="Vintage top size XL")), 1)
+
+    def test_paused_home_uses_no_requests_and_rejects_a_stale_delivery_lease_after_resume(self):
+        from unittest.mock import Mock
+
+        self.new()
+        leased = alert_delivery.claim()
+        self.worker.fetch = Mock()
+        controls.configure("0")
+        self.worker.tick()
+        self.worker.fetch.assert_not_called()
+        controls.configure("1")
+        self.assertFalse(vinted_alerts.prepare_listing(leased))
+
     def test_buying_account_cannot_supply_a_page_or_send_a_pending_home_alert(self):
         self.worker.notify_item(self.item, self.age, "buyer", [])
         with closing(search_settings.connection()) as conn:

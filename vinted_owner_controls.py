@@ -4,11 +4,14 @@ import asyncio
 import hashlib
 import math
 import re
+import sqlite3
 from contextlib import closing
 from types import SimpleNamespace
 
-from telegram import InlineKeyboardButton
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import TelegramError
 
+import db
 import photo_cards
 import vinted_buyer as buyer
 from logger import get_logger
@@ -16,6 +19,112 @@ from search_settings import connection
 
 logger = get_logger(__name__)
 CALLBACK_PATTERN = r"^buy:resolve:(got|miss):([0-9]{1,24}):([0-9a-f]{16})$"
+REMINDER_PATTERN = r"^review:purchase:(got|miss):([0-9]{1,24}):([0-9a-f]{16})$"
+REMINDER_LABEL = "⚠️ Confirm earlier purchase"
+
+
+def private_owner(chat_id):
+    identity = str(chat_id)
+    return identity.isdigit() and int(identity) > 0 and identity == str(
+        db.get_parameter("telegram_chat_id") or ""
+    ).strip()
+
+
+def pending_reminder(chat_id):
+    """Read only the oldest attempt requiring an owner decision."""
+    try:
+        with db.connection_scope():
+            if not private_owner(chat_id):
+                return None
+            with closing(connection()) as conn:
+                saved = conn.execute(
+                    """SELECT item_id,state,updated FROM vinted_buy_attempts
+                    WHERE state IN ('unknown','needs_action') ORDER BY updated,item_id LIMIT 1"""
+                ).fetchone()
+                return descriptor(dict(saved)) if saved else None
+    except sqlite3.Error as exc:
+        logger.warning("Purchase reminder temporarily unavailable: %s", type(exc).__name__)
+        return None
+
+
+def reminder_rows(offer, platform="vinted"):
+    if not offer:
+        return []
+    label = f"{REMINDER_LABEL} #{offer['item_id']}"
+    if platform == "ebay":
+        # The separate eBay bot does not handle Vinted payment decisions.
+        from vinted_connection_notices import dashboard_url
+
+        url = dashboard_url()
+        return [[InlineKeyboardButton(label + " ↗", url=url)]] if url else []
+    url = f"{buyer.BASE}/items/{offer['item_id']}"
+    return [[InlineKeyboardButton(label + " ↗", url=url)]] + buttons(
+        {"owner_resolution": offer}, prefix="review:purchase"
+    )
+
+
+def reminder_markup(chat_id, platform="vinted"):
+    rows = reminder_rows(pending_reminder(chat_id), platform)
+    return {"reply_markup": InlineKeyboardMarkup(rows)} if rows else {}
+
+
+def current_reminder(offer, conn):
+    saved = conn.execute(
+        "SELECT item_id,state,updated FROM vinted_buy_attempts WHERE item_id=?",
+        (offer["item_id"],),
+    ).fetchone()
+    return saved is not None and descriptor(dict(saved)) == offer
+
+
+async def confirm_reminder(update, context):
+    """Confirm only the earlier attempt, leaving the new alert actionable."""
+    from vinted_buying import resolve_owned, result
+
+    query = update.callback_query
+    message = query.message
+    match = re.fullmatch(REMINDER_PATTERN, query.data or "")
+    if (
+        not match or not message or message.chat.type != "private"
+        or query.from_user.id != message.chat.id or not private_owner(message.chat.id)
+    ):
+        await photo_cards.answer(query, "Only your private Telegram chat can confirm purchases.", alert=True)
+        return
+    decision, item_id, token = match.groups()
+    offer = descriptor(result(item_id))
+    if not offer or offer["token"] != token:
+        await photo_cards.answer(
+            query, "This purchase reminder is out of date. Check Finder or your latest alert.", alert=True
+        )
+    else:
+        try:
+            await asyncio.to_thread(resolve_owned, item_id, offer["updated"], decision)
+        except buyer.BuyerError as exc:
+            await photo_cards.answer(query, str(exc), alert=True)
+            return
+        await photo_cards.answer(query, "Purchase confirmation saved.")
+    markup = getattr(message, "reply_markup", None)
+    if not markup:
+        return
+    async with photo_cards.lock("vinted", message.message_id):
+        rows = [
+            row for row in markup.inline_keyboard
+            if not any(button.text.startswith(REMINDER_LABEL) or
+                       (button.callback_data or "").startswith("review:purchase:") for button in row)
+        ]
+        if len(rows) == len(markup.inline_keyboard):
+            return
+        saved = photo_cards.load("vinted", message.message_id)
+        if saved:
+            row, details, card = saved
+            view = card["view"]
+            note_page = int(view.split(":")[1]) if view.startswith("notes:") else None
+            updated_markup = photo_cards.markup(row, details, view=view, note_page=note_page)
+        else:
+            updated_markup = InlineKeyboardMarkup(rows) if rows else None
+        try:
+            await query.edit_message_reply_markup(reply_markup=updated_markup)
+        except TelegramError as exc:
+            logger.info("Purchase reminder edit unavailable: %s", type(exc).__name__)
 
 
 def pending_other(item_id):
@@ -81,7 +190,7 @@ def with_offer(row, outcome):
     return result
 
 
-def buttons(feedback):
+def buttons(feedback, *, prefix="buy:resolve"):
     offer = feedback.get("owner_resolution")
     if not isinstance(offer, dict):
         return []
@@ -96,10 +205,10 @@ def buttons(feedback):
     return [
         [
             InlineKeyboardButton(
-                "I got it", callback_data=f"buy:resolve:got:{identity}:{token}"
+                "I got it", callback_data=f"{prefix}:got:{identity}:{token}"
             ),
             InlineKeyboardButton(
-                "I didn't get it", callback_data=f"buy:resolve:miss:{identity}:{token}"
+                "I didn't get it", callback_data=f"{prefix}:miss:{identity}:{token}"
             ),
         ]
     ]

@@ -1,6 +1,6 @@
 <section class="form-card guide-section" id="home-discovery">
 <h2>MSJ Vinted Home</h2>
-<p>Alerts for women’s clothing confirmed under three minutes old. Matching guides add reference photos and a buying limit.</p>
+<p>Alerts for women’s clothing confirmed under three minutes old. Sizes above UK 14 and XL or larger are skipped. Matching guides add reference photos and a buying limit.</p>
 <p><b>{{home_discovery.sent_24h}}</b> Home alerts sent in the last 24 hours · {{home_discovery.pending_24h}} waiting for delivery. <a href="/finds?source=home">View Home finds</a></p>
 <form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="action" value="home_discovery">
 <input type="hidden" name="home_enabled" value="{{'0' if home_discovery.enabled else '1'}}">

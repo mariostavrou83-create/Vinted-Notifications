@@ -472,6 +472,8 @@ def create_app(test_config=None):
 
     @app.get("/")
     def dashboard():
+        import alert_controls
+
         archived = request.args.get("view") == "archive"
         rows = store.list_searches(archived)
         folder = request.args.get("folder", "")
@@ -550,10 +552,22 @@ def create_app(test_config=None):
             rows=rows,
             archived=archived,
             resources=resource_controls.summary() if not archived else None,
+            listing_alerts={scope: alert_controls.state(scope) for scope in ("home", "search")} if not archived else None,
             folders=store.list_folders(),
             folder=folder,
             ebay_connection=ebay_connection,
         )
+
+    @app.post("/alerts")
+    def control_listing_alerts():
+        from alert_controls import COMMANDS, set_paused
+
+        command = COMMANDS.get(request.form.get("command"))
+        if command is None:
+            abort(400, "Choose an alert control.")
+        scope, paused, _ = command
+        set_paused(scope, paused)
+        return redirect(url_for("dashboard", _anchor="telegram-alerts"), code=303)
 
     @app.route("/search/new", methods=["GET", "POST"])
     @app.route("/search/<int:query_id>", methods=["GET", "POST"])

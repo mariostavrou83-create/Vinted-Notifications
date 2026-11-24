@@ -323,6 +323,11 @@ def _clear_item_queue(items_queue, new_items_queue):
     if not items_queue.empty():
         batch = items_queue.get()
         data, query_id = batch[:2]
+        from alert_controls import state
+
+        observed_at = batch[4] if len(batch) > 4 else None
+        if not state("search").allows(observed_at):
+            return True
         import frontier_heartbeats
 
         variant_id = batch[3] if len(batch) > 3 else None
@@ -505,6 +510,7 @@ def _clear_item_queue(items_queue, new_items_queue):
                         "photo_url": item.photo,
                         "url": item.url,
                         "timestamp": item.raw_timestamp,
+                        "observed_at": observed_at,
                         "raw_data": {
                             "total_item_price": (
                                 getattr(item, "raw_data", None) or {}
@@ -528,6 +534,7 @@ def _clear_item_queue(items_queue, new_items_queue):
                 query_id=query_id,
                 currency=item.currency,
                 alert=alert,
+                alert_observed_at=observed_at,
             )
             if recorded is not False:
                 to_notify.append(item)

@@ -94,6 +94,47 @@ class OwnerControlsTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             )
         return buying.result(identity)
 
+    async def test_new_alert_reminder_resolves_only_the_previous_item(self):
+        self.pending()
+        offer = controls.pending_reminder(123)
+        self.assertEqual(offer["item_id"], self.pending_id)
+        self.assertIsNone(controls.pending_reminder(987))
+        row, details, _ = photo_cards.load("vinted", self.source.message_id)
+        self.source.reply_markup = photo_cards.markup(row, dict(details, payment_reminder=offer))
+        self.query.data = f"review:purchase:got:{self.pending_id}:{offer['token']}"
+        self.query.edit_message_reply_markup = AsyncMock()
+        update = SimpleNamespace(callback_query=self.query)
+
+        await controls.confirm_reminder(update, self.context)
+        self.assertEqual(buying.result(self.pending_id)["state"], "paid")
+        self.assertIsNone(buying.result(self.item_id))
+        self.assertIsNone(controls.pending_reminder(123))
+        buying.guard_new_payment(self.item_id)
+        markup = self.query.edit_message_reply_markup.await_args.kwargs["reply_markup"]
+        callbacks = [button.callback_data for line in markup.inline_keyboard for button in line]
+        self.assertIn("buy:click", callbacks)
+        self.assertFalse(any(value and value.startswith("review:purchase:") for value in callbacks))
+
+        await controls.confirm_reminder(update, self.context)
+        self.assertIn("out of date", self.query.answer.await_args.args[0])
+
+    async def test_home_and_search_cards_include_the_same_pending_purchase_reminder(self):
+        self.pending()
+        bot = SimpleNamespace(send_message=AsyncMock())
+        offline_ready = AsyncMock()
+        details = vinted_alerts.get_details(self.row)
+        for message_id, source in ((55, {}), (56, {"home_discovery": {"source_role": "seller"}})):
+            bot.send_message.return_value = SimpleNamespace(message_id=message_id)
+            with patch.object(photo_cards, "listing_photo", new_callable=AsyncMock, return_value=None):
+                await photo_cards.send_initial(
+                    bot, 123, dict(self.row, kind="listing"), dict(details, **source), offline_ready
+                )
+            markup = bot.send_message.await_args.kwargs["reply_markup"]
+            callbacks = [button.callback_data or "" for row in markup.inline_keyboard for button in row]
+            self.assertTrue(any(value.startswith("review:purchase:got:" + self.pending_id) for value in callbacks))
+            self.assertIn("buy:click", callbacks)
+        self.assertEqual(bot.send_message.await_count, 2)
+
     async def offer(self, outcome=None):
         await buying.show_purchase_feedback(
             self.bot,

@@ -77,6 +77,20 @@ class DashboardTests(DatabaseFixture, unittest.TestCase):
             self.assertEqual(self.client.get(path).status_code, 404)
         self.assertEqual(self.client.get("/healthz").json, {"status": "ok"})
 
+    def test_dashboard_can_pause_and_resume_alert_sources_independently(self):
+        from alert_controls import state
+
+        self.owner()
+        self.assertEqual(self.client.post("/alerts", data={"command": "pause_all"}).status_code, 400)
+        existing = db.get_queries()
+        for command in ("resume_all", "pause_searches"):
+            response = self.client.post("/alerts", data={"csrf": "offline-csrf", "command": command})
+            self.assertEqual(response.status_code, 303)
+        self.assertTrue(state("search").paused)
+        self.assertFalse(state("home").paused)
+        self.assertIn(b"Resume saved searches", self.client.get("/").data)
+        self.assertEqual(db.get_queries(), existing)
+
     def test_live_finds_wakes_on_insert_and_reuses_unchanged_filtered_cards(self):
         self.owner()
 

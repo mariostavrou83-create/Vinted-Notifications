@@ -6,6 +6,7 @@ from contextlib import closing
 from types import SimpleNamespace
 
 import alert_images
+import alert_controls
 import photo_cards
 import vinted_alerts
 import vinted_native
@@ -66,7 +67,9 @@ def prepare_listing(row):
             (current["query_id"],),
         ).fetchone()
         reason = ""
-        if not rules or current["query_id"] not in live_ids(conn):
+        if not alert_controls.state("search", conn).allows(current["found_at"]):
+            reason = alert_controls.PAUSED_MESSAGE
+        elif not rules or current["query_id"] not in live_ids(conn):
             reason = "Search no longer active for eBay"
         elif excluded_by(current["title"], json.loads(rules["exclusions"])):
             reason = "Blocked by current exclusions"

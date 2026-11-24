@@ -187,6 +187,10 @@ async def send_initial(bot, chat_id, row, details, before_send, *, require_photo
         "connect_timeout": 3,
         "pool_timeout": 3,
     }
+    if row.get("kind") == "listing":
+        from vinted_owner_controls import reminder_markup
+
+        common.update(reminder_markup(chat_id, details.get("platform", "vinted")))
     if listing:
         result = await bot.send_photo(
             **common,
@@ -238,8 +242,12 @@ async def enrich(bot, chat_id, row, details, before_edit, *, persist=True):
     )
     image = await asyncio.to_thread(comparison_image, listing, reference_image, details)
     await before_edit()
+    from vinted_owner_controls import reminder_markup
+
+    reminder = reminder_markup(chat_id, details.get("platform", "vinted")) if row.get("kind") == "photo" else {}
     try:
         result = await bot.edit_message_media(
+            **reminder,
             chat_id=chat_id,
             message_id=row["telegram_message_id"],
             media=InputMediaPhoto(
