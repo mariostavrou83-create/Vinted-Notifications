@@ -154,6 +154,7 @@ def finish(
     permanent=False,
     cooldown=False,
     now=None,
+    listing_message=None,
 ):
     now = time.time() if now is None else now
     photo = row["kind"] == "photo"
@@ -193,12 +194,16 @@ def finish(
                 else "AND (status='pending' OR (status='sent' AND telegram_message_id=?))"
             )
             guard_args = [] if photo else [message_id]
-            conn.execute(
+            changed = conn.execute(
                 f"""UPDATE alert_outbox SET {prefix}status='sent', {prefix}error='',
                 {prefix}attempts={prefix}attempts+1, lease_token=NULL,leased_until=0 {extra}
                 WHERE item_id=? AND lease_token=? {guard}""",
                 (*args, row["item_id"], row["lease_token"], *guard_args),
             )
+            if changed.rowcount and not photo and listing_message is not None and row.get("platform", "vinted") == "vinted":
+                from telegram_shared_alerts import enqueue
+
+                enqueue(conn, row, listing_message, now)
         else:
             guard = (
                 "AND status='sent' AND photo_status='pending'"
@@ -300,7 +305,7 @@ class DeliveryWorker:
             else:
                 send_started = time.monotonic()
                 result = await self.send_listing(row)
-                finish(row, message_id=result.message_id, now=now)
+                finish(row, message_id=result.message_id, now=now, listing_message=result)
                 self.preferred_photo = row["item_id"]
                 logger.info(
                     "Telegram accepted item %s; message_id=%s; outbox-to-accepted %.3fs; send %.3fs; source=%s",

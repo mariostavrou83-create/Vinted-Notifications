@@ -11,7 +11,7 @@ _control = ContextVar("vinted_purchase_control", default=None)
 
 
 class PurchaseControl:
-    def __init__(self, item_id):
+    def __init__(self, item_id, *, authorise=None):
         self.item_id = str(item_id)
         self.token = uuid.uuid4().hex[:16]
         self.started = time.time()
@@ -20,6 +20,7 @@ class PurchaseControl:
         self._lock = threading.Lock()
         self.paying = False
         self.finished = False
+        self.authorise = authorise
 
     def stop(self):
         # The same gate protects the durable payment marker. An accepted stop
@@ -60,6 +61,13 @@ def checkpoint():
         raise BuyerError(STOPPED, reason="cancelled")
 
 
+def check_authorisation(control):
+    if control.authorise is not None and not control.authorise():
+        from vinted_buyer import BuyerError
+
+        raise BuyerError("Shared Autobuy permission ended before payment.", reason="cancelled")
+
+
 @contextmanager
 def payment_gate():
     """Claim submission once, after all checks and before the payment POST."""
@@ -69,5 +77,6 @@ def payment_gate():
         return
     with control._lock:
         checkpoint()
+        check_authorisation(control)
         yield  # The durable 'paying' write must succeed before closing Stop.
         control.paying = True

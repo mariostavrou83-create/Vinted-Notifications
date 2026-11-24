@@ -108,12 +108,12 @@ def active_status(message_id, item_id, durable):
 class TelegramProgress:
     """One coalesced UI worker; publishing never waits for I/O or Telegram."""
 
-    def __init__(self, bot, message, item_id, *, interval=1.0):
+    def __init__(self, bot, message, item_id, *, interval=1.0, display=None, authorise=None):
         self.bot = bot
         self.message = message
         self.item_id = str(item_id)
         self.loop = asyncio.get_running_loop()
-        self.key = (self.loop, message.message_id)
+        self.key = (self.loop, (message.chat.id, message.message_id) if display else message.message_id)
         self.interval = interval
         self.latest = None
         self._closed = threading.Event()
@@ -124,7 +124,8 @@ class TelegramProgress:
         self._last_edit = None
         self._purchase_task = None
         self.cancelled = False
-        self.control = PurchaseControl(item_id)
+        self.display = display
+        self.control = PurchaseControl(item_id, authorise=authorise)
         _active[self.key] = self
         self._task = asyncio.create_task(self._run())
 
@@ -140,7 +141,10 @@ class TelegramProgress:
         """Keep the one authorised invocation independent of UI cancellation."""
 
         def run():
+            from vinted_purchase_control import check_authorisation
+
             with bind_control(self.control):
+                check_authorisation(self.control)
                 return purchase(row, progress=self.publish)
 
         self._purchase_task = asyncio.create_task(asyncio.to_thread(run))
@@ -246,6 +250,11 @@ class TelegramProgress:
         import photo_cards
         import vinted_buying as buying
 
+        if self.display:
+            if self.closed or self._last_edit is not None or self.control.requested.is_set():
+                return False
+            await self.display("in_progress", None if self.control.paying else self.control.token)
+            return True
         async with photo_cards.lock("vinted", self.message.message_id):
             if self.closed or _active.get(self.key) is not self:
                 return False

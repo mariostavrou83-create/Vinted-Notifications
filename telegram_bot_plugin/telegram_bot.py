@@ -9,6 +9,7 @@ from telegram.ext import ApplicationHandlerStop, CommandHandler, ContextTypes, T
 import alert_controls
 import core
 import db
+import telegram_shared_alerts as shared
 from logger import get_logger
 
 # Get logger for this module
@@ -83,6 +84,15 @@ class LeRobot:
             # BUY replies use the same private alert and purchase controls.
             from telegram.ext import MessageHandler, filters
 
+            from telegram_shared_buy import callback as shared_buy
+
+            self.app.add_handler(CommandHandler("share_alerts", shared.share_command))
+            self.app.add_handler(CommandHandler("stop_sharing", shared.stop_command))
+            self.app.add_handler(CallbackQueryHandler(shared_buy, pattern=shared.BUY_PATTERN))
+            self.app.add_handler(MessageHandler(
+                filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.StatusUpdate.LEFT_CHAT_MEMBER
+                | filters.StatusUpdate.MIGRATE, shared.members_changed,
+            ))
             from vinted_buy_reply import BUY_REPLY, reply_buy
 
             self.app.add_handler(
@@ -109,7 +119,9 @@ class LeRobot:
 
     async def restrict_access(self, update, context):
         expected = str(db.get_parameter("telegram_chat_id") or "").strip()
-        if not update.effective_chat or str(update.effective_chat.id) != expected:
+        if update.effective_chat and str(update.effective_chat.id) == expected:
+            return
+        if not shared.allowed_update(update, expected):
             raise ApplicationHandlerStop
 
     async def control_alerts(self, update, context):
@@ -125,6 +137,8 @@ class LeRobot:
         await update.effective_message.reply_text(f"MSJ Home is {home}. Saved-search alerts are {searches}.")
 
     async def open_dashboard(self, update, context):
+        if getattr(update.effective_chat, "type", None) != "private":
+            return
         match = re.fullmatch(r"/start(?:@\w+)? home_([0-9]{1,24})", update.message.text or "")
         if match:
             from home_autobuy_controls import open_alert
@@ -469,6 +483,9 @@ class LeRobot:
         self._delivery_task = asyncio.create_task(
             self._delivery_worker.run(), name="vinted-telegram-delivery"
         )
+        self._shared_task = asyncio.create_task(
+            shared.run(application.bot), name="vinted-shared-telegram-delivery"
+        )
         from vinted_connection_notices import ConnectionNotifier
         from vinted_session_worker import run as maintain_buyer_session
 
@@ -507,7 +524,8 @@ class LeRobot:
         self._owner_controls_task = None
         tasks = [
             running
-            for running in (task, maintenance, owner_controls, incidents, getattr(self, "_home_buy_task", None))
+            for running in (task, maintenance, owner_controls, incidents,
+                            getattr(self, "_home_buy_task", None), getattr(self, "_shared_task", None))
             if running is not None
         ]
         for running in tasks:
@@ -525,9 +543,11 @@ class LeRobot:
             commands = [("dashboard", "Open your search dashboard")]
             if chat_id.isdigit() and int(chat_id) > 0:
                 commands.extend((command, label) for command, (_, _, label) in alert_controls.COMMANDS.items())
+                commands.extend([("share_alerts", "Set up shared alerts and Autobuy"), ("stop_sharing", "Stop shared alerts and Autobuy")])
                 await context.bot.set_my_commands(commands, scope=BotCommandScopeChat(int(chat_id)))
             else:
                 await context.bot.set_my_commands(commands)
-            logger.info("Bot commands set successfully; alert_controls=%s", len(commands) - 1)
+            logger.info("Bot commands set successfully; alert_controls=%s shared_controls=%s",
+                        len(alert_controls.COMMANDS) if len(commands) > 1 else 0, len(commands) > 1)
         except Exception:
             logger.exception("Error setting bot commands")
