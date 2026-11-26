@@ -61,7 +61,7 @@ def card(identity="123", **changes):
 
 
 def home(body, navigation='<a href="/inbox">Inbox</a>'):
-    return f"<html><header>{navigation}</header><main>{body}</main></html>"
+    return f"<html><body><header>{navigation}</header><main>{body}</main></body></html>"
 
 
 class HomeFeedTests(unittest.TestCase):
@@ -91,7 +91,56 @@ class HomeFeedTests(unittest.TestCase):
                         '<template>{}</template>', '<noscript>{}</noscript>'):
             self.assertEqual(feed.parse_home(home(wrapper.format(markup) + native()))["items"], [])
         outside_main = home("").replace("</body>", markup + native() + "</body>")
-        self.assertEqual(feed.parse_home(outside_main)["items"], [])
+        self.assertEqual(feed.parse_home(outside_main)["items"][0]["id"], "123")
+
+    def test_native_home_card_with_accessibility_hidden_click_layer_outside_main(self):
+        markup = card(title="").replace(
+            '<a data-testid="feed-item--overlay-link"', '<a aria-hidden="true" data-testid="feed-item--overlay-link"'
+        )
+        for rendered in (markup, markup.replace('<div>\n    <img', '<div aria-hidden="true">\n    <img')):
+            page = home("").replace("</body>", rendered + native() + "</body>")
+            self.assertEqual(feed.parse_home(page)["items"][0]["title"], "Fitted top")
+        for blocked in ('<header>{}</header>', '<footer>{}</footer>', '<nav>{}</nav>', '<aside>{}</aside>',
+                        '<div role="navigation">{}</div>', '<div style="display: none">{}</div>'):
+            with self.subTest(blocked=blocked):
+                self.assertEqual(feed.parse_home(home(blocked.format(markup)))["items"], [])
+        for attr in ("hidden", "inert"):
+            self.assertEqual(feed.parse_home(home(markup.replace('<a aria-hidden=', f'<a {attr} aria-hidden=')))["items"], [])
+
+    def test_blank_native_home_attribution_requires_main_or_visible_selected_all_tab(self):
+        markup = card(title="", href="/items/123-fitted-top?homepage_session_id=")
+        tab = '<button role="tab" aria-selected="true" aria-controls="products">All items</button>'
+        panel = '<div role="tabpanel" id="products">' + markup + '</div>'
+        self.assertEqual(feed.parse_home(home(markup))["items"][0]["id"], "123")
+        page = home("").replace("</body>", tab + panel + "</body>")
+        self.assertEqual(feed.parse_home(page)["items"][0]["id"], "123")
+        for rejected in (page.replace(tab, ""), page.replace("All items", "Menswear"),
+                         page.replace('aria-selected="true"', 'aria-selected="false"'),
+                         page.replace("homepage_session_id=", "")):
+            self.assertEqual(feed.parse_home(rejected)["items"], [])
+
+    def test_react_pending_boundary_must_explicitly_reveal_exact_native_card_segment(self):
+        anchor = '<!--$?--><template id="B:1"></template><!--/$-->'
+        markup = '<div hidden id="S:1">' + card(title="") + '</div>'
+        instruction = '<script>$RC("B:1","S:1")</script>'
+        def rendered(boundary, content, call):
+            return home(boundary).replace("</body>", content + call + "</body>")
+        for call in (instruction, '<script>$RC=function(a,b){f(a,b)};$RC("B:1","S:1");</script>'):
+            self.assertEqual(feed.parse_home(rendered(anchor, markup, call))["items"][0]["id"], "123")
+        for page in (
+            rendered(anchor, markup, ""),
+            rendered(anchor + anchor, markup, instruction),
+            rendered(anchor, markup + markup, instruction),
+            rendered(anchor, markup, instruction.replace("S:1", "S:2")),
+            rendered(anchor.replace("<!--$?-->", ""), markup, instruction),
+            rendered("<nav>" + anchor + "</nav>", markup, instruction),
+            rendered(anchor, markup.replace('<div data-testid="feed-item"', '<div hidden data-testid="feed-item"'), instruction),
+            rendered(anchor, markup, instruction.replace("<script>", '<script type="application/json">')),
+            rendered(anchor, markup, '<script>if(false) $RC("B:1","S:1")</script>'),
+            rendered(anchor, markup, '<script>//};$RC("B:1","S:1")</script>'),
+        ):
+            with self.subTest(page=page[-80:]):
+                self.assertEqual(feed.parse_home(page)["items"], [])
 
     def test_titleless_card_gets_only_unambiguous_same_item_same_price_native_title(self):
         stamp = 1795443600

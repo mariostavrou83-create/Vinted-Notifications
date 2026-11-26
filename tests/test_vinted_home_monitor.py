@@ -369,10 +369,41 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(self.status()["retry_at"], self.now + 60)
 
     def test_empty_feed_without_confirmed_signin_keeps_full_pause(self):
-        with patch.object(home, "parse_home", return_value={"reason": "home_cards_unavailable", "items": []}):
+        empty = {"reason": "home_cards_unavailable", "items": [],
+                 "shape": {"home_cards_with_uk_link_and_price": 25}}
+        with patch.object(home, "parse_home", return_value=empty):
             self.worker.tick()
         self.assertEqual(self.status()["retry_at"], self.now + 300)
         self.assertEqual(self.status()["read_delays"]["home"], 0)
+
+    def test_parse_empty_with_attributed_priced_home_cards_retries_each_minute(self):
+        home.controls.save_target("1")
+        self.worker = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
+        empty = {"reason": "home_cards_unavailable", "authenticated": True, "items": [],
+                 "shape": {"home_cards_with_uk_link_and_price": 25}}
+        with patch.object(home, "parse_home", return_value=empty):
+            for attempt in range(4):
+                self.worker.tick()
+                self.assertEqual(self.status()["retry_at"], self.now + 60)
+                self.assertEqual(self.status()["code"], "source_unavailable")
+                self.worker = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
+                self.now += 59
+                self.worker.tick()
+                self.assertEqual(self.fetch.call_count, attempt + 1)
+                self.now += 1
+            # Independent counts on the same page do not establish same-card provenance.
+            empty["shape"] = {"home_links": 25, "cards_with_uk_link_and_price": 25}
+            self.worker.tick()
+            self.assertEqual(self.status()["retry_at"], self.now + 300)
+            self.worker = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
+            self.now += 60
+            self.worker.tick()
+            self.assertEqual(self.fetch.call_count, 5)
+        self.now += 240
+        self.fetch.side_effect = home.buyer.BuyerError("Provider wait", status=429, reason="rate_limited", retry_after=900)
+        self.worker.tick()
+        self.assertEqual(self.status()["retry_at"], self.now + 900)
+        self.assertFalse(self.rows())
 
     def test_fast_authenticated_empty_home_keeps_fresh_pending_listing_and_home_failure(self):
         home.controls.save_target("1")

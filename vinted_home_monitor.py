@@ -648,9 +648,12 @@ class Monitor:
                 result.get("reason") == "home_cards_unavailable" and result.get("authenticated") is True
             )
             if authenticated_empty:
-                # A signed-in but empty/unreadable feed may last only one poll.
-                # Retry at normal cadence first, then back off on repeated empties.
                 delay = self.next_read_delay(role, "home")
+                # A valid price and attributed MSJ recommendation on the same
+                # card means the feed responded. Cap this parse retry only.
+                attributed = (result.get("shape") or {}).get("home_cards_with_uk_link_and_price")
+                if type(attributed) is int and attributed > 0:
+                    delay = min(delay, INTERVAL)
             checked_at = self.clock()
             if self.target and authenticated_empty and self.pending[role]:
                 # Existing MSJ cards can still be verified within their original

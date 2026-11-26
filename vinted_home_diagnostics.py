@@ -1,6 +1,7 @@
 """Count known Home page features without logging URLs, text or account data."""
 
 import logging
+from urllib.parse import parse_qs, urlsplit
 
 
 def empty_page_shape(tree):
@@ -20,14 +21,33 @@ def empty_page_shape(tree):
     }
     counts = {key: len(tree.xpath(selector)) for key, selector in selectors.items()}
     native = tree.xpath(selectors["card"])[:MAX_ITEMS]
-    eligible = 0
+    counts.update(dict.fromkeys((
+        "cards_with_uk_link_and_price", "home_cards_with_uk_link_and_price", "native_in_main",
+        "native_in_body", "native_in_secondary_region", "native_aria_hidden", "overlay_aria_hidden",
+        "native_html_hidden", "native_inert", "native_in_template", "native_stream_segment",
+    ), 0))
     for card in native:
         overlays = card.xpath('.//a[@data-testid="feed-item--overlay-link"]/@href')
         prices = card.xpath('.//*[@data-testid="feed-item--price-text"]')
         if len(overlays) == len(prices) == 1 and item_url(overlays[0]) and _money(_text(prices[0])):
-            eligible += 1
+            counts["cards_with_uk_link_and_price"] += 1
+            if parse_qs(urlsplit(overlays[0]).query).get("homepage_session_id"):
+                counts["home_cards_with_uk_link_and_price"] += 1
+        for key, predicate in (
+            ("native_in_main", 'ancestor::*[self::main or @role="main"]'),
+            ("native_in_body", 'ancestor::body'),
+            ("native_in_secondary_region", 'ancestor::*[self::aside or self::nav or self::footer or self::header]'),
+            ("native_aria_hidden", 'ancestor-or-self::*[@aria-hidden="true"]'),
+            ("overlay_aria_hidden", './/a[@data-testid="feed-item--overlay-link"]/ancestor-or-self::*[@aria-hidden="true"]'),
+            ("native_html_hidden", 'ancestor-or-self::*[@hidden]'),
+            ("native_inert", 'ancestor-or-self::*[@inert]'),
+            ("native_in_template", 'ancestor::*[self::template or self::noscript]'),
+            ("native_stream_segment", 'ancestor::*[@hidden and starts-with(@id,"S:")]'),
+        ):
+            counts[key] += int(card.xpath(f"boolean({predicate})"))
     counts.update(
-        cards_with_uk_link_and_price=eligible,
+        stream_placeholders=len(tree.xpath('//template[starts-with(@id,"B:")]')),
+        completion_scripts=sum("$RC(" in script for script in scripts),
         item_links=len(item_links),
         home_links=len(home_links),
         home_captions=sum(bool(a.get("aria-label") or a.get("title")) for a in home_links),

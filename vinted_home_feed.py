@@ -219,12 +219,108 @@ def _caption_price(text):
     return _money("£" + text.strip("£ ").strip())
 
 
+_NON_FEED_TAGS = {"header", "nav", "footer", "aside", "template", "noscript"}
+_NON_FEED_ROLES = {"banner", "navigation", "contentinfo", "complementary"}
+_HIDDEN_STYLE = re.compile(r"(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\s*(?:!important\s*)?(?:;|$)", re.I)
+_REACT_COMPLETE = re.compile(r'\$RC\(\s*"(B:[a-fA-F0-9]+)"\s*,\s*"(S:[a-fA-F0-9]+)"\s*\)')
+
+
+def _visible_body(node, streamed=(), card=None):
+    # An image click overlay can be aria-hidden while its containing card is
+    # displayed. Respect aria-hidden on the card and every ancestor above it.
+    card_reached = card is None
+    while node is not None:
+        if node is card:
+            card_reached = True
+        if (node.tag in _NON_FEED_TAGS or node.get("role") in _NON_FEED_ROLES
+                or "inert" in node.attrib or _HIDDEN_STYLE.search(node.get("style", ""))
+                or (card_reached and node.get("aria-hidden", "").lower() == "true")
+                or ("hidden" in node.attrib and node not in streamed)):
+            return False
+        if node.tag == "body":
+            return True
+        node = node.getparent()
+    return False
+
+
+def _streamed_home_segments(tree):
+    # React sends completed Suspense contents in a hidden S: element. Only its
+    # exact completion call and a visible pending placeholder prove placement.
+    scripts = tree.xpath('//script[not(@src) and contains(text(),"$RC(")]')
+    if not scripts:
+        return {}
+    nodes = {}
+    for node in tree.xpath('//*[starts-with(@id,"B:") or starts-with(@id,"S:")]'):
+        key = node.get("id")
+        nodes[key] = None if key in nodes else node
+    segments = {}
+    for script in scripts:
+        if script.get("type", "").strip().lower() not in ("", "text/javascript", "application/javascript"):
+            continue
+        # The instruction is emitted as an executable top-level statement,
+        # either alone or immediately following React's inline helper definition.
+        # Reject quoted references, JSON data and conditional calls.
+        program = (script.text or "").strip().rstrip(";").strip()
+        definition, divider, statements = program.rpartition("};")
+        if divider and not re.search(r'(?:^|;)\s*\$RC\s*=\s*(?:function\s*\(|\([^()]*\)\s*=>)', definition):
+            continue
+        statements = statements.strip()
+        calls = [part.strip() for part in statements.split(";")]
+        matches = [_REACT_COMPLETE.fullmatch(part) for part in calls]
+        if not matches or not all(matches):
+            continue
+        for match in matches:
+            boundary, segment = (nodes.get(key) for key in match.groups())
+            if (boundary is None or segment is None or boundary.tag != "template"
+                    or segment.tag != "div" or "hidden" not in segment.attrib):
+                continue
+            marker = boundary.getprevious()
+            if (marker is None or marker.tag is not lhtml.etree.Comment or marker.text != "$?"
+                    or not _visible_body(boundary.getparent())):
+                continue
+            segments[segment] = boundary
+    return segments
+
+
+def _attributed_native_link(link, streamed, all_panels):
+    query = parse_qs(urlsplit(link.get("href")).query, keep_blank_values=True)
+    if "homepage_session_id" not in query:
+        return False
+    if any(query["homepage_session_id"]):
+        return True
+    # A blank attribution is sufficient within the main Home listing surface.
+    # For streamed cards evaluate the position after their placeholder resolves.
+    for node in link.iterancestors():
+        if node in streamed:
+            return any(a.tag == "main" or a.get("role") == "main" or a in all_panels
+                       for a in streamed[node].iterancestors())
+        if node.tag == "main" or node.get("role") == "main" or node in all_panels:
+            return True
+    return False
+
+
+def _selected_all_panels(tree):
+    panels = {}
+    for panel in tree.xpath('//*[@role="tabpanel" and @id]'):
+        identity = panel.get("id")
+        panels[identity] = None if identity in panels else panel
+    selected = set()
+    for tab in tree.xpath('//*[@role="tab" and @aria-selected="true" and @aria-controls]'):
+        label = (tab.get("aria-label") or _text(tab)).strip().casefold()
+        panel = panels.get(tab.get("aria-controls"))
+        if panel is not None and label in {"all", "all items"} and _visible_body(tab):
+            selected.add(panel)
+    return selected
+
+
 def _visible_home_links(tree, seen):
     links = tree.xpath(
         '//*[self::main or @role="main"]//a[contains(@href,"homepage_session_id=")]'
         '[not(ancestor-or-self::*[@hidden or @inert or @aria-hidden="true" or self::template or self::noscript])]'
     )
     for link in links[:MAX_ITEMS * 3]:
+        if not _visible_body(link):
+            continue
         href = link.get("href")
         url = item_url(href)
         if not url or not parse_qs(urlsplit(href).query).get("homepage_session_id"):
@@ -276,10 +372,14 @@ def parse_home(body):
     if len(cards) > MAX_ITEMS:
         cards = cards[:MAX_ITEMS]
     items, seen = [], set()
+    streamed = _streamed_home_segments(tree) if cards else {}
+    all_panels = _selected_all_panels(tree) if cards else set()
     for card in cards:
         links = card.xpath('.//a[@data-testid="feed-item--overlay-link"]')
         prices = card.xpath('.//*[@data-testid="feed-item--price-text"]')
         if len(links) != 1 or len(prices) != 1:
+            continue
+        if not _visible_body(links[0], streamed, card) or not _visible_body(prices[0], streamed, card):
             continue
         url = item_url(links[0].get("href"))
         price = _money(_text(prices[0]))
@@ -291,11 +391,7 @@ def parse_home(body):
         caption = links[0].get("title") or links[0].get("aria-label") or ""
         title = re.split(r", (?:brand|condition): ", caption, maxsplit=1)[0].strip()
         if not title or len(title) > 500:
-            visible_in_main = links[0].xpath(
-                'boolean(ancestor::*[self::main or @role="main"]) and '
-                'not(ancestor-or-self::*[@hidden or @inert or @aria-hidden="true" or self::template or self::noscript])'
-            )
-            if not visible_in_main or not parse_qs(urlsplit(links[0].get("href")).query).get("homepage_session_id"):
+            if not _attributed_native_link(links[0], streamed, all_panels):
                 continue
             title = ""
             # The card's description title is the brand. A dedicated item-title
