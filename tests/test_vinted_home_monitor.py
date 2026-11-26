@@ -374,6 +374,85 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(self.status()["retry_at"], self.now + 300)
         self.assertEqual(self.status()["read_delays"]["home"], 0)
 
+    def test_fast_authenticated_empty_home_keeps_fresh_pending_listing_and_home_failure(self):
+        home.controls.save_target("1")
+        self.worker = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
+        self.worker.scheduled_seconds = 1
+        self.worker.tick()
+        self.worker.next_detail_at["seller"] = 1003
+        self.now = 1001
+        empty = {"reason": "home_cards_unavailable", "authenticated": True, "items": []}
+        with patch.object(home, "parse_home", return_value=empty):
+            self.worker.tick()
+            self.now = 1003
+            with self.assertLogs(home.logger, level="INFO") as logs:
+                self.worker.tick()
+            self.assertTrue(any("code=checked" in entry and "stage=listing" in entry for entry in logs.output))
+            self.assertEqual(len(self.rows()), 1)
+            self.assertEqual(self.fetch.call_args.args, ("seller", self.item["url"]))
+            for key, value in {"code": "source_unavailable", "stage": "home", "checked_at": 1001,
+                               "last_detail_ok": 1003, "retry_at": 1061}.items():
+                self.assertEqual(self.status()[key], value)
+            self.now = 1060
+            self.worker.tick()
+            self.assertEqual(self.fetch.call_count, 3)
+            restarted = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
+            restarted.tick()
+            self.assertEqual(self.fetch.call_count, 3)
+        self.now = 1061
+        self.worker.tick()
+        self.assertEqual(self.fetch.call_count, 4)
+        self.assertEqual(self.status()["code"], "checked")
+        self.assertEqual(self.status()["stage"], "home")
+
+    def test_fast_empty_home_keeps_age_limit_and_discards_queue_if_signin_unconfirmed(self):
+        home.controls.save_target("1")
+        self.worker = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
+        self.worker.scheduled_seconds = 1
+        self.worker.tick()
+        self.worker.next_detail_at["seller"] = 1003
+        self.now = 1001
+        empty = {"reason": "home_cards_unavailable", "authenticated": True, "items": []}
+        with patch.object(home, "parse_home", return_value=empty):
+            self.worker.tick()
+        self.age["max_age_seconds"] = 180
+        self.now = 1003
+        self.worker.tick()
+        self.assertFalse(self.rows())
+        self.assertEqual(self.status()["age_expired"], 1)
+        self.now = 1061
+        home.parse_home.return_value["items"] = [dict(self.item, id="501")]
+        self.worker.tick()
+        self.assertEqual(len(self.worker.pending["seller"]), 1)
+        self.worker.next_detail_at["seller"] = 1065
+        self.now = 1062
+        with patch.object(home, "parse_home", return_value=dict(empty, authenticated=False)):
+            self.worker.tick()
+        self.assertFalse(self.worker.pending["seller"])
+        self.assertEqual(self.status()["retry_at"], 1362)
+        self.now = 1070
+        self.worker.tick()
+        self.assertEqual(self.fetch.call_count, 5)
+        self.assertFalse(self.rows())
+
+    def test_fast_authenticated_empty_home_skips_pending_card_past_its_deadline(self):
+        home.controls.save_target("1")
+        self.worker = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
+        self.worker.scheduled_seconds = 1
+        home.parse_home.return_value["items"] = [dict(self.item, home_created_at=825)]
+        self.worker.tick()
+        self.worker.next_detail_at["seller"] = 1006
+        self.now = 1001
+        empty = {"reason": "home_cards_unavailable", "authenticated": True, "items": []}
+        with patch.object(home, "parse_home", return_value=empty):
+            self.worker.tick()
+            self.now = 1006
+            self.worker.tick()
+        self.assertFalse(self.worker.pending["seller"])
+        self.assertEqual(self.fetch.call_count, 2)
+        self.assertFalse(self.rows())
+        self.assertEqual(self.status()["retry_at"], 1061)
+
     def test_transient_read_failures_back_off_per_stage_and_honour_provider_delay(self):
         self.fetch.side_effect = home.buyer.BuyerError("temporary", reason="network")
         self.worker.tick()

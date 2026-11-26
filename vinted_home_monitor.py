@@ -285,6 +285,7 @@ class Monitor:
         self.fetch = fetch if fetch is not None else self.read_page
         self.started = False
         self.next_home = {role: 0 for role in ROLES}
+        self.empty_home_at = dict.fromkeys(ROLES, None)
         self.pending = {role: deque() for role in ROLES}
         self.deadline = {role: 0 for role in ROLES}
         self.page_reads = {role: deque() for role in ROLES}
@@ -363,6 +364,11 @@ class Monitor:
         self.read_delays[role][stage] = delay
         return delay
 
+    def finish_empty_home_window(self, role):
+        if self.empty_home_at[role] is not None:
+            self.retry_at[role] = max(self.retry_at[role], self.next_home[role])
+            self.empty_home_at[role] = None
+
     def status(self, role, code, stage, http_status=None, *, detail_code=""):
         now = self.clock()
         if code == "checked" and http_status == 200:
@@ -410,12 +416,22 @@ class Monitor:
             ),
             **self.counts[role],
         }
+        snapshot = data
+        if self.empty_home_at[role] is not None:
+            data["retry_at"] = max(self.retry_at[role], self.next_home[role])
+            if stage == "listing" or code == "busy":
+                # A listing can finish while Home remains unreadable. Preserve the
+                # Home incident and separately log the actual listing outcome.
+                snapshot = dict(
+                    data, code="source_unavailable", stage="home", http_status=200,
+                    detail_code="home_cards_unavailable", checked_at=self.empty_home_at[role],
+                )
         with closing(search_settings.connection()) as conn, conn:
             conn.execute(
                 "INSERT INTO parameters(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (
                     "home_monitor_status_" + role,
-                    json.dumps(data, separators=(",", ":")),
+                    json.dumps(snapshot, separators=(",", ":")),
                 ),
             )
         self.last_status[role] = (state, now)
@@ -451,6 +467,7 @@ class Monitor:
                 self.reader.close()
                 for role in ROLES:
                     self.pending[role].clear()
+                    self.finish_empty_home_window(role)
                     self.status(role, "disabled", "idle")
             self.started = False
             self.searches_until = 0
@@ -470,6 +487,7 @@ class Monitor:
                 for role in ROLES:
                     self.pending[role].clear()
                     self.measured_seconds[role] = None
+                    self.finish_empty_home_window(role)
                     self.next_home[role] = max(now, self.retry_at[role])
         for role in ROLES:
             if now < self.retry_at[role]:
@@ -499,6 +517,7 @@ class Monitor:
                 if reason:
                     self.reader.close()
                     self.pending[role].clear()
+                    self.empty_home_at[role] = None
                     self.retry_at[role] = now + 300
                     self.next_home[role] = self.retry_at[role]
                     self.status(role, reason, "identity")
@@ -547,6 +566,7 @@ class Monitor:
                         self.retry_at[role] = self.clock() + max(self.next_read_delay(role, stage), delay)
                     else:
                         self.retry_at[role] = self.clock() + max(300, delay)
+                    self.finish_empty_home_window(role)
                     self.next_home[role] = self.retry_at[role]
                 else:
                     # A local lock or purchase priority is checked before the
@@ -563,6 +583,7 @@ class Monitor:
                 self.status(role, code, stage, exc.status)
             except Exception as exc:  # noqa: BLE001 -- isolate parsing/storage failures
                 self.pending[role].clear()
+                self.empty_home_at[role] = None
                 self.retry_at[role] = self.clock() + 300
                 self.next_home[role] = self.retry_at[role]
                 self.status(role, "error", stage)
@@ -596,6 +617,7 @@ class Monitor:
         return min(1, max(0.05, due - self.clock()))
 
     def home_succeeded(self, role, started, http_status):
+        self.empty_home_at[role] = None
         now = self.clock()
         previous = self.last_home_at[role]
         self.measured_seconds[role] = round(now - previous, 3) if 0 < previous < now <= previous + 300 else None
@@ -616,13 +638,24 @@ class Monitor:
         result = parse_home(html)
         if result.get("reason") != "ok":
             self.reader.close()
-            self.pending[role].clear()
             delay = 300
-            if result.get("reason") == "home_cards_unavailable" and result.get("authenticated") is True:
+            authenticated_empty = (
+                result.get("reason") == "home_cards_unavailable" and result.get("authenticated") is True
+            )
+            if authenticated_empty:
                 # A signed-in but empty/unreadable feed may last only one poll.
                 # Retry at normal cadence first, then back off on repeated empties.
                 delay = self.next_read_delay(role, "home")
-            self.retry_at[role] = self.clock() + delay
+            checked_at = self.clock()
+            if self.target and authenticated_empty and self.pending[role]:
+                # Existing MSJ cards can still be verified within their original
+                # age deadlines. Only the next Home read needs this backoff.
+                self.empty_home_at[role] = checked_at
+                self.next_home[role] = checked_at + delay
+            else:
+                self.empty_home_at[role] = None
+                self.pending[role].clear()
+                self.retry_at[role] = checked_at + delay
             self.status(
                 role,
                 "source_unavailable",
