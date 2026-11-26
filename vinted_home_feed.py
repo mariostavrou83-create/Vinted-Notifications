@@ -222,7 +222,7 @@ def _caption_price(text):
 _NON_FEED_TAGS = {"header", "nav", "footer", "aside", "template", "noscript"}
 _NON_FEED_ROLES = {"banner", "navigation", "contentinfo", "complementary"}
 _HIDDEN_STYLE = re.compile(r"(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\s*(?:!important\s*)?(?:;|$)", re.I)
-_REACT_COMPLETE = re.compile(r"""\$(RC|RS)\(\s*(["'])([BPS]:[a-fA-F0-9]+)\2\s*,\s*(["'])([BPS]:[a-fA-F0-9]+)\4\s*\)""")
+_REACT_COMPLETE = re.compile(r"""\$(RC|RS)\(\s*(["'])([BPS]:[A-Za-z0-9_:-]{1,80})\2\s*,\s*(["'])([BPS]:[A-Za-z0-9_:-]{1,80})\4\s*\)""")
 _JS_FENCES = re.compile(r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|//[^\n\r]*|/\*[\s\S]*?\*/|[()\[\]{};])""")
 _FRAME_CALLBACK = re.compile(r"""requestAnimationFrame\(\s*(?:function\s*\(\s*\)|\(\s*\)\s*=>)\s*\{([\s\S]*)\}\s*\)""")
 _FRAME_ARROW = re.compile(r"""requestAnimationFrame\(\s*\(\s*\)\s*=>\s*([\s\S]*)\)""")
@@ -292,6 +292,74 @@ def _react_moves(program, level=0):
             if not comma:
                 break
             pos += comma.end()
+
+
+def _concrete_stream_moves(program):
+    """Read literal React move statements without depending on its bootstrap syntax."""
+    if len(program) > 131072:
+        return
+    fences = iter(_JS_FENCES.finditer(program))
+    fence = next(fences, None)
+    for match in _REACT_COMPLETE.finditer(program):
+        while fence is not None and fence.end() <= match.start():
+            fence = next(fences, None)
+        if fence is not None and fence.start() <= match.start():
+            continue  # A string, template literal or comment contains this spelling.
+        prefix = program[max(0, match.start() - 128):match.start()].rstrip()
+        if prefix and prefix[-1] not in ";},":
+            continue
+        cmd, first, second = match[1], match[3], match[5]
+        if cmd == "RS" and first.startswith("S:") and second.startswith("P:"):
+            yield second, first
+        elif cmd == "RC" and first.startswith("B:") and second.startswith("S:"):
+            yield first, second
+
+
+def _verified_slot_segments(tree):
+    """Target-detail candidates from a concrete S-to-P move in the signed-in Home."""
+    scripts = tree.xpath('//script[not(@src) and (contains(text(),"$RS(") or contains(text(),"$RC("))]')
+    if not scripts:
+        return set()
+    nodes = {}
+    for node in tree.xpath('//*[starts-with(@id,"B:") or starts-with(@id,"S:") or starts-with(@id,"P:")]'):
+        identity = node.get("id")
+        nodes[identity] = None if identity in nodes else node
+    targets = {}
+    slots = set()
+    for script in scripts:
+        if script.get("type", "").strip().lower() not in ("", "text/javascript", "application/javascript"):
+            continue
+        for dest, source in _concrete_stream_moves(script.text or ""):
+            placeholder, segment = nodes.get(dest), nodes.get(source)
+            if (placeholder is None or segment is None or placeholder.tag != "template"
+                    or segment.tag != "div" or "hidden" not in segment.attrib):
+                continue
+            if segment in targets and targets[segment] is not placeholder:
+                targets[segment] = None
+                continue
+            targets[segment] = placeholder
+            if dest.startswith("P:"):
+                slots.add(segment)
+    # A still-pending parent can contain a genuine completed child slot. Its
+    # matching React boundary ties that parent to the page even before reveal.
+    for identity, segment in nodes.items():
+        if not identity.startswith("S:") or segment is None or segment in targets:
+            continue
+        boundary = nodes.get("B:" + identity[2:])
+        if boundary is None or boundary.tag != "template" or segment.tag != "div" or "hidden" not in segment.attrib:
+            continue
+        marker = boundary.getprevious()
+        if marker is not None and marker.tag is lhtml.etree.Comment and marker.text in ("$?", "$~"):
+            targets[segment] = boundary
+    placed = set()
+    for _ in range(MAX_DEPTH):
+        before = len(placed)
+        for segment, target in targets.items():
+            if target is not None and segment not in placed and _visible_body(target.getparent(), placed):
+                placed.add(segment)
+        if len(placed) == before:
+            break
+    return slots & placed
 
 
 def _streamed_home_segments(tree):
@@ -427,12 +495,11 @@ def parse_home(body):
     items, seen = [], set()
     streamed = _streamed_home_segments(tree) if cards else {}
     all_panels = _selected_all_panels(tree) if cards else set()
+    slot_segments, detail_only = None, set()
     for card in cards:
         links = card.xpath('.//a[@data-testid="feed-item--overlay-link"]')
         prices = card.xpath('.//*[@data-testid="feed-item--price-text"]')
         if len(links) != 1 or len(prices) != 1:
-            continue
-        if not _visible_body(links[0], streamed, card) or not _visible_body(prices[0], streamed, card):
             continue
         url = item_url(links[0].get("href"))
         price = _money(_text(prices[0]))
@@ -441,6 +508,18 @@ def parse_home(body):
         identity = re.search(r"/items/([0-9]+)", url)[1]
         if identity in seen:
             continue
+        if not _visible_body(links[0], streamed, card) or not _visible_body(prices[0], streamed, card):
+            if not any(parse_qs(urlsplit(links[0].get("href")).query).get("homepage_session_id", ())):
+                continue
+            if slot_segments is None:
+                slot_segments = _verified_slot_segments(tree)
+            # Only a specific native S-to-P slot can provide a candidate. The
+            # card, price and click target themselves must remain unobstructed.
+            if (not any(node in slot_segments for node in card.iterancestors())
+                    or not _visible_body(links[0], slot_segments, card)
+                    or not _visible_body(prices[0], slot_segments, card)):
+                continue
+            detail_only.add(identity)
         caption = links[0].get("title") or links[0].get("aria-label") or ""
         title = re.split(r", (?:brand|condition): ", caption, maxsplit=1)[0].strip()
         if not title or len(title) > 500:
@@ -485,7 +564,9 @@ def parse_home(body):
             if len(items) == MAX_ITEMS:
                 break
     if items:
-        _home_uploads(body, items)
+        visible = [item for item in items if item["id"] not in detail_only]
+        if visible:
+            _home_uploads(body, visible)
         return {"items": items, "reason": "ok", "authenticated": True}
     from vinted_home_diagnostics import empty_page_shape
 

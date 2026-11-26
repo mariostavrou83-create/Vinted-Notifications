@@ -162,6 +162,32 @@ class HomeFeedTests(unittest.TestCase):
         ):
             self.assertEqual(feed.parse_home(page)["items"], [])
 
+    def test_personalised_slot_in_pending_parent_is_detail_only(self):
+        parent = '<!--$?--><template id="B:shell"></template><!--/$-->'
+        slot = '<div hidden id="S:shell"><template id="P:rec_8"></template></div>'
+        native_card = card(title="")
+        segment = '<div hidden id="S:list_9">' + native_card + '</div>'
+        call = '<script>window.start();$RS("S:list_9","P:rec_8");after()</script>'
+        data = native(created_at_ts=1795443600)
+        def render(anchor=parent, target=slot, source=segment, script=call):
+            return home(anchor).replace("</body>", target + source + script + data + "</body>")
+        item = feed.parse_home(render())["items"][0]
+        self.assertEqual((item["id"], item["title"]), ("123", ""))
+        for key in ("home_created_at", "home_available", "category_ids"):
+            self.assertNotIn(key, item)
+        for bad in (
+            render(target=slot.replace("S:shell", "S:orphan")),
+            render(anchor=parent + parent),
+            render(source=segment + segment),
+            render(target=slot.replace('<template id="P:rec_8"', '<nav><template id="P:rec_8"')),
+            render(source=segment.replace('homepage_session_id=', 'other=')),
+            render(source=segment.replace('data-testid="feed-item"', 'hidden data-testid="feed-item"')),
+            render(script=call.replace("window.start();", "/*").replace(";after()", "*/")),
+            render(script="""<script>let x='$RS("S:list_9","P:rec_8")'</script>"""),
+            render(script=call.replace("S:list_9", "S:other")),
+        ):
+            self.assertEqual(feed.parse_home(bad)["items"], [])
+
     def test_react_19_runtime_and_direct_and_frame_completions(self):
         strings = [
             'var $RB=[],$RV=function(q){work(q)},$RC=function(a,b){if(b){next(a,b)}};$RC("B:0","S:0")',

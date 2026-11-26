@@ -6,7 +6,7 @@ from urllib.parse import parse_qs, urlsplit
 
 
 def empty_page_shape(tree):
-    from vinted_home_feed import MAX_ITEMS, _money, _text, item_url
+    from vinted_home_feed import MAX_ITEMS, _money, _react_moves, _streamed_home_segments, _text, item_url
 
     anchors = tree.xpath('//a[@href]')
     item_links = [a for a in anchors if "/items/" in a.get("href")]
@@ -74,6 +74,31 @@ def empty_page_shape(tree):
         nested_boundaries=sum(bool(node.xpath('ancestor::*[@hidden]')) for node in boundaries),
         pending_boundaries=sum(getattr(node.getprevious(), "text", "") in pending_markers for node in boundaries),
     )
+    parsed_moves = {pair for script in scripts for pair in _react_moves(script)}
+    resolved = _streamed_home_segments(tree)
+    known_targets = {src: dest for dest, src in calls}
+    known_targets.update(inserts)
+    counts.update(parsed_moves=len(parsed_moves),
+                  parsed_card_moves=sum(src in card_segments for _, src in parsed_moves),
+                  resolved_segments=len(resolved),
+                  resolved_card_segments=sum(node.get("id") in card_segments for node in resolved))
+    for segment_id in card_segments:
+        visited = set()
+        while segment_id in known_targets and segment_id not in visited:
+            visited.add(segment_id)
+            dest = known_targets[segment_id]
+            matches = tree.xpath('//*[@id=$target]', target=dest)
+            if len(matches) != 1:
+                break
+            slot = matches[0]
+            counts["card_target_is_template"] = int(slot.tag == "template")
+            hosts = [ancestor for ancestor in slot.iterancestors() if "hidden" in ancestor.attrib]
+            if not hosts:
+                counts["card_chain_to_body"] = int(bool(slot.xpath("ancestor::body")))
+                counts["card_chain_to_main"] = int(bool(slot.xpath('ancestor::*[self::main or @role="main"]')))
+                break
+            segment_id = hosts[0].get("id")
+        counts["card_chain_hops"] = len(visited)
     # Fixed schema names only. Values, paths and script contents stay private.
     for key in ("recommendedItems", "recommended_items", "homepageItems",
                 "homepage_items", "feedItems", "feed_items", "homepageFeed",
