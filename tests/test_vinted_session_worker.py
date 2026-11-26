@@ -406,12 +406,46 @@ class MaintenanceTests(buying_tests.SessionRotationFixture, unittest.TestCase):
         self.renew_status = 400
         with self.assertRaises(buyer.BuyerError):
             self.foreground_connection()
-        self.assertEqual(self.maintenance()["retry_at"], self.now + 300)
-        self.assertEqual(self.run_cycle(self.now + 299), "cooldown")
-        self.assertEqual(self.run_cycle(self.now + 300), "cooldown")
-        self.assertEqual(self.maintenance()["retry_at"], self.now + 1200)
+        self.assertEqual(self.maintenance()["retry_at"], self.now + 60)
+        self.assertEqual(buyer.settings()["connection_health"]["state"], "recovering")
+        with closing(search_settings.connection()) as conn:
+            import vinted_connection_notices as notices
+            notice = dict(conn.execute("SELECT * FROM vinted_connection_notice").fetchone())
+            self.assertEqual(notices.warning_level(notice, self.now), 1)
+            self.assertIn("wait for the result", notices.warning_text(notice))
+        self.assertEqual(self.run_cycle(self.now + 59), "cooldown")
+        with patch.object(worker, "due", return_value=False):
+            self.assertEqual(self.run_cycle(self.now + 60), "cooldown")
+        self.assertEqual(buyer.settings()["connection_health"]["state"], "reconnect_required")
+        self.assertEqual(self.maintenance()["retry_at"], self.now + 960)
         self.renew_status = 200
-        self.assertEqual(self.run_cycle(self.now + 1200), "verified")
+        self.assertEqual(self.run_cycle(self.now + 960), "verified")
+
+    def test_pending_buyer_recovers_when_expiry_would_otherwise_skip_renewal(self):
+        self.seed_separate_buyer()
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_buyer SET verified_at=?", (self.now - 60,))
+        self.expire_original_identity()
+        self.renew_status = 400
+        with self.assertRaises(buyer.BuyerError):
+            self.foreground_connection()
+        self.renew_status = 200
+        with patch.object(worker, "due", return_value=False):
+            self.assertEqual(self.run_cycle(self.now + 60), "verified")
+        self.assertEqual(self.saved()[0]["verified_at"], self.now + 60)
+        self.assertEqual(buyer.settings()["connection_health"]["state"], "verified")
+
+    def test_v38_upgrade_adds_pending_recovery_to_both_existing_roles(self):
+        tables = ("vinted_connection_notice", "vinted_seller_connection_notice")
+        with closing(search_settings.connection()) as conn, conn:
+            for table in tables:
+                conn.execute(f"ALTER TABLE {table} DROP COLUMN recovery_pending")
+            conn.execute("UPDATE parameters SET value='38' WHERE key='msj_search_schema'")
+        self.assertTrue(search_settings.ensure_schema())
+        self.assertIsNone(search_settings.ensure_schema())
+        with closing(search_settings.connection()) as conn:
+            for table in tables:
+                self.assertEqual(conn.execute(f"SELECT recovery_pending FROM {table} WHERE id=1").fetchone()[0], 0)
 
     def idle_probe(self, at):
         with (

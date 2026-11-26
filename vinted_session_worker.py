@@ -28,6 +28,7 @@ BUYER_ACCESS_MARGIN = 35 * 60
 REFRESH_MARGIN = 2 * 86400
 RETRY_DELAY = 300
 AMBIGUOUS_RENEWAL_DELAY = 900
+FIRST_RECOVERY_DELAY = 60
 HEALTH_INTERVAL = 300
 PROBE_RESERVATION_KEY = "dedicated_buyer_identity_probe"
 COOKIE_REQUEST_PATHS = {
@@ -327,7 +328,7 @@ def renewal_failure_policy(error):
         else RETRY_DELAY
     )
     if getattr(error, "first_recovery_retry", False):
-        delay = RETRY_DELAY
+        delay = FIRST_RECOVERY_DELAY
     if type(error.retry_after) in (float, int) and math.isfinite(error.retry_after):
         delay = max(delay, error.retry_after)
     return not transient, delay
@@ -482,6 +483,11 @@ def maintain_connection():
                 state = conn.execute(
                     f"SELECT * FROM {account_table('vinted_buyer_maintenance')} WHERE id=1"
                 ).fetchone()
+                pending = conn.execute(
+                    f"SELECT session_fingerprint FROM {account_table('vinted_connection_notice')} "
+                    "WHERE id=1 AND buyer_id=? AND checked>=? AND recovery_pending=1",
+                    (row[2], row[1]),
+                ).fetchone() if row and row[0] else None
                 margin = (
                     BUYER_ACCESS_MARGIN
                     if current_role() == "buyer" and separated(conn)
@@ -502,7 +508,8 @@ def maintain_connection():
 
                 record_failure(exc, fingerprint)
                 raise
-            if not due(saved, now, access_margin=margin):
+            recovering = bool(pending and pending[0] == fingerprint)
+            if not recovering and not due(saved, now, access_margin=margin):
                 return "fresh"
             access_expiry = session_cookie_expiry(saved, "access_token_web")
             refresh_expiry = session_cookie_expiry(saved, "refresh_token_web")
@@ -534,7 +541,8 @@ def maintain_connection():
             schedule_identity_check = False
             try:
                 client = buyer.connected_client(
-                    renew_before=margin,
+                    renew_before=0 if recovering else margin,
+                    solve_challenges=not recovering,
                     _renewal_reservation=(fingerprint, now + RETRY_DELAY),
                 )
                 deferred = getattr(client, "deferred_renewal", None)
@@ -567,12 +575,13 @@ def maintain_connection():
                         "blocked" if exc.reason == "renewal_blocked" else "cooldown"
                     )
                 logger.info(
-                    "Vinted session maintenance: result=%s stage=%s reason=%s http=%s role=%s",
+                    "Vinted session maintenance: result=%s stage=%s reason=%s http=%s role=%s retry_seconds=%s",
                     outcome,
                     exc.stage if exc.stage in buyer.AUTH_STAGES else "request",
                     exc.reason if exc.reason in buyer.AUTH_REASONS else "not_confirmed",
                     exc.status if isinstance(exc.status, int) else None,
                     current_role(),
+                    None if blocked or local_gate else delay,
                 )
                 from vinted_connection_notices import record_failure
 

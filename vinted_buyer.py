@@ -903,7 +903,7 @@ def settings():
         )
         renewal = _stored_auth_event(conn, "buyer_auth_result_renewal")
         rejected_identity = conn.execute(
-            f"SELECT session_fingerprint,checked,stage,reason,http_status FROM {account_table('vinted_connection_notice')} "
+            f"SELECT session_fingerprint,checked,stage,reason,http_status,recovery_pending FROM {account_table('vinted_connection_notice')} "
             "WHERE id=1 AND identity_rejected=1 AND buyer_id=? AND checked>=?",
             (row["user_id"], row["verified_at"]),
         ).fetchone()
@@ -1043,7 +1043,9 @@ def connection_health(sealed, verified_at, access, renewal, maintenance, rejecte
                 result.update(
                     state="cooldown", retry_at=retry_at, retry_time=retry_time
                 )
-    if identity_rejected:
+    if identity_rejected and dict(rejected_identity).get("recovery_pending"):
+        result.update(state="recovering", message="Autobuy is temporarily unavailable. Finder is retrying your buying account sign-in automatically.")
+    elif identity_rejected:
         result.update(
             state="reconnect_required",
             message="Vinted rejected this account's sign-in. Reconnect the same account in Finder.",

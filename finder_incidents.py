@@ -163,7 +163,7 @@ def observe(conn, now, started, previous_poll=0):
                 "", f"An individual listing check succeeded at {uk(last_ok)}.", "alerts",
             )
     account = conn.execute("""SELECT b.enabled, b.user_id IS NOT NULL AND b.session IS NOT NULL AS connected,
-        b.verified_at,a.checked,a.reason,a.stage,a.http_status,n.checked AS rejected_at,n.identity_rejected
+        b.verified_at,a.checked,a.reason,a.stage,a.http_status,n.checked AS rejected_at,n.identity_rejected,n.recovery_pending
         FROM vinted_buyer b LEFT JOIN vinted_buyer_access a ON a.id=b.id
         LEFT JOIN vinted_connection_notice n ON n.id=b.id AND n.buyer_id=b.user_id WHERE b.id=1""").fetchone()
     if account and account["enabled"]:
@@ -173,6 +173,10 @@ def observe(conn, now, started, previous_poll=0):
                 "disconnected",
                 "Reconnect the buying account to use Autobuy.",
                 "reconnect",
+            )
+        elif account["recovery_pending"] and (account["rejected_at"] or 0) >= verified and account["rejected_at"] is not None:
+            signals["Autobuy account"] = (
+                "recovering", "Autobuy is temporarily unavailable. Finder is retrying the buying account sign-in automatically.", "buyer"
             )
         elif (
             account["identity_rejected"] and (account["rejected_at"] or 0) >= verified

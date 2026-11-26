@@ -50,6 +50,10 @@ def migrate(conn):
         conn.execute(
             f"ALTER TABLE {account_table('vinted_connection_notice')} ADD COLUMN identity_rejected INTEGER NOT NULL DEFAULT 0"
         )
+    if "recovery_pending" not in columns:
+        conn.execute(
+            f"ALTER TABLE {account_table('vinted_connection_notice')} ADD COLUMN recovery_pending INTEGER NOT NULL DEFAULT 0"
+        )
     from vinted_buyer_events import migrate as migrate_events
 
     migrate_events(conn)
@@ -107,7 +111,7 @@ def record_failure(error, session_fingerprint, *, checked_at=None):
             conn.execute(
                 f"""UPDATE {account_table('vinted_connection_notice')} SET session_fingerprint=?,buyer_id=?,
                 reason=?,stage=?,http_status=?,checked=?,incident_started=?,sent_level=?,
-                lease_id=?,lease_until=?,retry_at=?,telegram_message_id=?,identity_rejected=? WHERE id=1""",
+                lease_id=?,lease_until=?,retry_at=?,telegram_message_id=?,recovery_pending=?,identity_rejected=? WHERE id=1""",
                 (
                     session_fingerprint,
                     current[1],
@@ -121,6 +125,7 @@ def record_failure(error, session_fingerprint, *, checked_at=None):
                     previous["lease_until"] if same_incident else 0,
                     previous["retry_at"] if same_incident else 0,
                     previous["telegram_message_id"] if same_incident else None,
+                    int(getattr(error, "first_recovery_retry", False) is True),
                     int(getattr(error, "identity_rejected", False) is True or (
                         same_incident and previous["session_fingerprint"] == session_fingerprint
                         and previous["identity_rejected"]
@@ -162,6 +167,8 @@ def dashboard_url(*, reconnect=False):
 
 def warning_level(row, now):
     reason, stage, status = row["reason"], row["stage"], row["http_status"]
+    if row.get("recovery_pending"):
+        return 1
     if row.get("identity_rejected"):
         return 2
     if reason in RECONNECT_REASONS:
@@ -184,7 +191,10 @@ def warning_text(row):
             + "\n\nOpen Connections → Selling account to check or reconnect the same account used for offers and messages."
         )
     reason, stage, status = row["reason"], row["stage"], row["http_status"]
-    if row.get("identity_rejected"):
+    if row.get("recovery_pending"):
+        detail = "Vinted rejected the buying account check. Autobuy is temporarily unavailable."
+        action = "Finder will try to restore your sign-in on its next maintenance check. You can wait for the result."
+    elif row.get("identity_rejected"):
         detail = "Vinted rejected the saved account check (HTTP 401), and the connection could not be restored. Autobuy cannot proceed with this connection."
         action = (
             "Open Connections → Vinted & buying and reconnect the same buyer account."
