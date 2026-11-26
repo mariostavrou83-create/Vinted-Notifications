@@ -191,6 +191,56 @@ def _home_uploads(body, cards):
                 card["home_available"] = True
 
 
+# Home's accessible listing caption carries separate item and fee-inclusive prices.
+# This representation also exists when the surrounding visual card test IDs change.
+_CAPTION_AMOUNT = r"(?:£\s*[0-9][0-9,.]*|[0-9][0-9,.]*\s*£)"
+_HOME_CAPTION = re.compile(
+    r"(?P<title>.{1,500}?), (?:brand: (?P<brand>[^,]{1,120}), )?"
+    r"condition: (?P<condition>[^,]{1,80}), (?:size: (?P<size>[^,]{1,80}), )?"
+    rf"(?P<item>{_CAPTION_AMOUNT}), (?P<total>{_CAPTION_AMOUNT}) Includes Vinted fee",
+    re.IGNORECASE,
+)
+
+
+def _caption_price(text):
+    return _money("£" + text.strip("£ ").strip())
+
+
+def _visible_home_links(tree, seen):
+    links = tree.xpath(
+        '//*[self::main or @role="main"]//a[contains(@href,"homepage_session_id=")]'
+        '[not(ancestor-or-self::*[@hidden or @inert or @aria-hidden="true" or self::template or self::noscript])]'
+    )
+    for link in links[:MAX_ITEMS * 3]:
+        href = link.get("href")
+        url = item_url(href)
+        if not url or not parse_qs(urlsplit(href).query).get("homepage_session_id"):
+            continue
+        identity = re.search(r"/items/([0-9]+)", url)[1]
+        if identity in seen:
+            continue
+        caption = link.get("title") or link.get("aria-label") or ""
+        if len(caption) > 1024:
+            continue
+        match = _HOME_CAPTION.fullmatch(" ".join(caption.split()))
+        if not match:
+            continue
+        price, total = _caption_price(match["item"]), _caption_price(match["total"])
+        if not price or not total or Decimal(total["amount"]) < Decimal(price["amount"]):
+            continue
+        # A renamed link or missing price test ID is fine. An invalid or
+        # conflicting price still displayed by the known card must fail closed.
+        prices = link.xpath('ancestor::*[@data-testid="feed-item"][1]//*[@data-testid="feed-item--price-text"]')
+        if prices and (len(prices) != 1 or _money(_text(prices[0])) != price):
+            continue
+        yield {
+            "id": identity, "url": url, "title": match["title"].strip(),
+            "brand_title": match["brand"] or "", "size_title": match["size"] or "",
+            "condition": match["condition"], "price": price, "total_item_price": total,
+            "photo": {}, "description_complete": False,
+        }
+
+
 def parse_home(body):
     """Return only visible Home feed cards with a valid UK item URL and GBP price."""
     tree = _tree(body)
@@ -253,13 +303,19 @@ def parse_home(body):
             item["total_item_price"] = total
         seen.add(identity)
         items.append(item)
+    if len(items) < MAX_ITEMS:
+        for candidate in _visible_home_links(tree, seen):
+            seen.add(candidate["id"])
+            items.append(candidate)
+            if len(items) == MAX_ITEMS:
+                break
     if items:
         _home_uploads(body, items)
-    return {
-        "items": items,
-        "reason": "ok" if items else "home_cards_unavailable",
-        "authenticated": True,
-    }
+        return {"items": items, "reason": "ok", "authenticated": True}
+    from vinted_home_diagnostics import empty_page_shape
+
+    return {"items": [], "reason": "home_cards_unavailable", "authenticated": True,
+            "shape": empty_page_shape(tree)}
 
 
 def _sidebar(tree, identity):

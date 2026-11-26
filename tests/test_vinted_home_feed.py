@@ -78,6 +78,39 @@ class HomeFeedTests(unittest.TestCase):
         self.assertNotIn("private-telemetry", json.dumps(result))
         self.assertFalse(item["description_complete"])
 
+    def test_marked_home_link_survives_card_selector_changes(self):
+        markup = card().replace("feed-item", "different-card")
+        result = feed.parse_home(home(markup + native(id="999")).replace("<main>", '<div role="main">').replace("</main>", "</div>"))
+        self.assertEqual(result["reason"], "ok")
+        self.assertEqual(len(result["items"]), 1)
+        item = result["items"][0]
+        self.assertEqual((item["id"], item["title"], item["brand_title"], item["size_title"]),
+                         ("123", "Fitted top", "Ralph Lauren", "S / UK 8-10"))
+        self.assertEqual((item["price"]["amount"], item["total_item_price"]["amount"]),
+                         ("5.00", "5.95"))
+        self.assertNotIn("private-telemetry", json.dumps(result))
+        self.assertNotIn("home_created_at", item)
+        self.assertNotIn("category_ids", item)
+        # Matching native metadata can still corroborate freshness for this visible ID.
+        enriched = feed.parse_home(home(markup + native(created_at_ts=1795443600)))["items"][0]
+        self.assertEqual(enriched["home_created_at"], 1795443600)
+
+    def test_caption_fallback_needs_authenticated_visible_attributed_home_link(self):
+        markup = card().replace("feed-item", "different-card")
+        for body in (
+            home(markup, '<a href="/member/login">Login</a>'),
+            home(markup.replace("homepage_session_id", "other")),
+            home(markup.replace("/items/123", "https://evil.invalid/items/123")),
+            home(markup.replace('£ Includes Vinted fee', 'EUR Includes Vinted fee')),
+            home(markup.replace("5.95 £", "4.95 £")),
+            home("<template>" + markup + "</template>"),
+            home('<div aria-hidden="true">' + markup + "</div>"),
+            home("").replace("</body>", markup + "</body>"),
+            home(card(price="£17.50").replace("feed-item--overlay-link", "other")),
+        ):
+            with self.subTest(body=body[:80]):
+                self.assertEqual(feed.parse_home(body)["items"], [])
+
     def test_anonymous_or_unknown_home_cannot_supply_recommendations(self):
         for links, reason in [
             (
