@@ -1030,10 +1030,12 @@ def connection_health(sealed, verified_at, access, renewal, maintenance, rejecte
             )
     if maintenance.get("session_fingerprint") == fingerprint:
         if maintenance.get("blocked"):
-            result.update(
-                state="reconnect_required",
-                message="Vinted rejected this saved connection. Reconnect the same buyer account.",
-            )
+            if result["reason"] == "refresh_rejected" or (
+                renewal and renewal["checked"] >= verified_at and renewal["reason"] == "refresh_rejected"
+            ):
+                result.update(state="reconnect_required", message=AUTH_REASONS["refresh_rejected"])
+            else:
+                result.update(state="attention", message="Automatic renewal is paused. Check the latest connection result.")
         else:
             retry_at = maintenance.get("retry_at")
             retry_time = _display_auth_time(retry_at)
@@ -1438,6 +1440,14 @@ class Client:
                     f"UPDATE {account_table('vinted_buyer')} SET session=? WHERE id=1 AND user_id=? AND session=?",
                     (sealed, user_id, previous_sealed),
                 ).rowcount
+                if updated and getattr(self, "_identity_only_probe", False):
+                    # An identity-only GET may rotate the accepted session. Keep
+                    # its existing renewal deadline in the same commit as the seal.
+                    conn.execute(
+                        f"UPDATE {account_table('vinted_buyer_maintenance')} SET session_fingerprint=? "
+                        "WHERE id=1 AND session_fingerprint=? AND blocked=0 AND retry_at>?",
+                        (hashlib.sha256(sealed).hexdigest(), hashlib.sha256(previous_sealed).hexdigest(), time.time()),
+                    )
                 written_at = _session_storage_clock()
             committed_at = _session_storage_clock()
         if updated != 1:
@@ -2860,6 +2870,7 @@ def connected_client(
         if not saved:
             raise BuyerError("Connect your Vinted buyer account in Connections first.")
         client = Client(saved)
+        client._identity_only_probe = not allow_refresh and not solve_challenges
         # The restored in-memory view is canonical even for legacy flat-cookie
         # saves. Compare response rotations against it, so a refused renewal
         # does not rewrite a session merely to add restoration metadata.
@@ -3006,14 +3017,12 @@ def connected_client(
                     current = conn.execute(
                         f"SELECT session,user_id FROM {account_table('vinted_buyer')} WHERE id=1"
                     ).fetchone()
-                if (
-                    current
-                    and current[0] == expected_sealed
-                    and current[1] == expected_user
-                ):
-                    exc.session_fingerprint = hashlib.sha256(
-                        expected_sealed
-                    ).hexdigest()
+                    if (current and current[0] == expected_sealed and current[1] == expected_user):
+                        from vinted_session_worker import first_recovery_retry
+                        exc.session_fingerprint = hashlib.sha256(expected_sealed).hexdigest()
+                        exc.first_recovery_retry = first_recovery_retry(
+                            conn, exc, exc.session_fingerprint, failure_checked_at
+                        )
             except (sqlite3.Error, OSError):
                 # Optional recovery metadata must not obscure the auth failure.
                 pass

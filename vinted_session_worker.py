@@ -29,6 +29,7 @@ REFRESH_MARGIN = 2 * 86400
 RETRY_DELAY = 300
 AMBIGUOUS_RENEWAL_DELAY = 900
 HEALTH_INTERVAL = 300
+PROBE_RESERVATION_KEY = "dedicated_buyer_identity_probe"
 COOKIE_REQUEST_PATHS = {
     "access_token_web": "/api/v2/users/current",
     "refresh_token_web": "/web/api/auth/refresh",
@@ -197,6 +198,7 @@ def check_account_health():
         with buyer.exclusive():
             yield_to_purchase()
             now = time.time()
+            identity_only = False
             with closing(connection()) as conn, conn:
                 conn.execute("BEGIN IMMEDIATE")
                 row = conn.execute(
@@ -205,21 +207,47 @@ def check_account_health():
                 state = conn.execute(
                     f"SELECT * FROM {account_table('vinted_buyer_maintenance')} WHERE id=1"
                 ).fetchone()
-                last = conn.execute(
-                    f"SELECT last_probe FROM {account_table('vinted_buyer_access')} WHERE id=1"
-                ).fetchone()[0]
+                access = conn.execute(
+                    f"SELECT last_probe,reason,stage,http_status FROM {account_table('vinted_buyer_access')} WHERE id=1"
+                ).fetchone()
                 if not row or not row[0] or not row[2]:
                     return "idle"
-                if now - max(row[2], last) < HEALTH_INTERVAL:
+                if now - max(row[2], access["last_probe"]) < HEALTH_INTERVAL:
                     return "fresh"
                 if state["session_fingerprint"] == hashlib.sha256(
                     row[0]
                 ).hexdigest() and (state["blocked"] or state["retry_at"] > now):
-                    return "cooldown"
+                    if (
+                        state["blocked"] or current_role() != "buyer" or not separated(conn)
+                        or (access["reason"], access["stage"], access["http_status"]) != ("connected", "identity", 200)
+                    ):
+                        return "cooldown"
+                    # One identity-only read after a verified identity and a generic
+                    # proactive renewal refusal. Bind it to this exact cooldown.
+                    reservation = f"{state['session_fingerprint']}:{state['retry_at']}"
+                    identity_only = conn.execute(
+                        "DELETE FROM parameters WHERE key=? AND value=?",
+                        (PROBE_RESERVATION_KEY, reservation),
+                    ).rowcount == 1
+                    if not identity_only:
+                        return "cooldown"
                 conn.execute(
                     f"UPDATE {account_table('vinted_buyer_access')} SET last_probe=? WHERE id=1", (now,)
                 )
-            client = buyer.connected_client()
+            if identity_only:
+                try:
+                    client = buyer.connected_client(allow_refresh=False, solve_challenges=False)
+                except buyer.BuyerError as exc:
+                    if exc.reason == "rate_limited" or exc.retry_after:
+                        _, delay = renewal_failure_policy(exc)
+                        with closing(connection()) as conn, conn:
+                            conn.execute(
+                                "UPDATE vinted_buyer_maintenance SET retry_at=MAX(retry_at,?) WHERE id=1 AND session_fingerprint=?",
+                                (time.time() + delay, state["session_fingerprint"]),
+                            )
+                    raise
+            else:
+                client = buyer.connected_client()
             logger.info(
                 "Vinted account health: verified; interval=300s; no checkout or payment; role=%s", current_role()
             )
@@ -267,6 +295,25 @@ def _ambiguous_renewal_failure(error):
     )
 
 
+def first_recovery_retry(conn, error, fingerprint, now):
+    """Give a recently verified buyer one earlier normal renewal after a lost login."""
+    if (
+        current_role() != "buyer"
+        or not getattr(error, "identity_rejected", False)
+        or not _ambiguous_renewal_failure(error)
+        or error.retry_after
+        or not separated(conn)
+    ):
+        return False
+    return bool(conn.execute(
+        """SELECT 1 FROM vinted_buyer b WHERE b.id=1 AND b.verified_at BETWEEN ? AND ?
+           AND NOT EXISTS (SELECT 1 FROM vinted_connection_notice n
+               WHERE n.buyer_id=b.user_id AND n.session_fingerprint=?
+               AND n.checked>=b.verified_at AND n.identity_rejected=1)""",
+        (now - 2 * HEALTH_INTERVAL, now, fingerprint),
+    ).fetchone())
+
+
 def renewal_failure_policy(error):
     """Keep foreground and maintenance renewal failures on the same backoff."""
     transient = (
@@ -279,6 +326,8 @@ def renewal_failure_policy(error):
         if error.reason == "rate_limited" or _ambiguous_renewal_failure(error)
         else RETRY_DELAY
     )
+    if getattr(error, "first_recovery_retry", False):
+        delay = RETRY_DELAY
     if type(error.retry_after) in (float, int) and math.isfinite(error.retry_after):
         delay = max(delay, error.retry_after)
     return not transient, delay
@@ -408,9 +457,10 @@ def note_ambiguous_failure(error, *, session_fingerprint):
                 or hashlib.sha256(row[0]).hexdigest() != session_fingerprint
             ):
                 return False
+            _, delay = renewal_failure_policy(error)
             conn.execute(
                 f"UPDATE {account_table('vinted_buyer_maintenance')} SET session_fingerprint=?,retry_at=?,blocked=0 WHERE id=1",
-                (session_fingerprint, time.time() + AMBIGUOUS_RENEWAL_DELAY),
+                (session_fingerprint, time.time() + delay),
             )
         return True
     except buyer.BuyerError as exc:
@@ -481,6 +531,7 @@ def maintain_connection():
             delay = RETRY_DELAY
             result_fingerprint = None
             local_gate = False
+            schedule_identity_check = False
             try:
                 client = buyer.connected_client(
                     renew_before=margin,
@@ -490,6 +541,10 @@ def maintain_connection():
                 if isinstance(deferred, buyer.BuyerError):
                     blocked, delay = renewal_failure_policy(deferred)
                     outcome = "cooldown"
+                    schedule_identity_check = (
+                        current_role() == "buyer" and _ambiguous_renewal_failure(deferred)
+                        and not deferred.retry_after
+                    )
                     logger.info(
                         "Vinted session maintenance: proactive renewal deferred; "
                         "identity_verified=True http=%s retry_seconds=%s role=%s",
@@ -538,10 +593,16 @@ def maintain_connection():
                         and hashlib.sha256(current[0]).hexdigest() == result_fingerprint
                     ):
                         if not local_gate:
+                            retry_at = time.time() + delay
                             conn.execute(
                                 f"UPDATE {account_table('vinted_buyer_maintenance')} SET session_fingerprint=?,retry_at=?,blocked=? WHERE id=1",
-                                (result_fingerprint, time.time() + delay, int(blocked)),
+                                (result_fingerprint, retry_at, int(blocked)),
                             )
+                            if schedule_identity_check:
+                                conn.execute(
+                                    "INSERT OR REPLACE INTO parameters(key,value) VALUES(?,?)",
+                                    (PROBE_RESERVATION_KEY, f"{result_fingerprint}:{float(retry_at)}"),
+                                )
                     else:
                         # Keep the original reservation on its original seal.
                         # Its failure must not block a replacement connection.

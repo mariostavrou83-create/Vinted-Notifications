@@ -2278,7 +2278,7 @@ def feedback_buttons(row, feedback=None):
         }.get(reason, label)
     buttons = [[InlineKeyboardButton(label, callback_data="buy:status")]]
     if state in {"setup_required", "failed_before_payment"} and reason in {
-        "credentials", "renewal_cooldown", "renewal_blocked", "refresh_rejected"
+        "credentials", "refresh_rejected"
     }:
         from vinted_connection_notices import dashboard_url
         reconnect = dashboard_url(reconnect=True)

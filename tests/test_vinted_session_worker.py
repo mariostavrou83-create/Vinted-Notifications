@@ -398,6 +398,70 @@ class MaintenanceTests(buying_tests.SessionRotationFixture, unittest.TestCase):
         self.renew_status = 200
         self.assertEqual(self.run_cycle(self.now + 900), "verified")
 
+    def test_recent_verified_buyer_gets_one_earlier_retry_after_actual_identity_rejection(self):
+        self.seed_separate_buyer()
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("UPDATE vinted_buyer SET verified_at=?", (self.now - 60,))
+        self.expire_original_identity()
+        self.renew_status = 400
+        with self.assertRaises(buyer.BuyerError):
+            self.foreground_connection()
+        self.assertEqual(self.maintenance()["retry_at"], self.now + 300)
+        self.assertEqual(self.run_cycle(self.now + 299), "cooldown")
+        self.assertEqual(self.run_cycle(self.now + 300), "cooldown")
+        self.assertEqual(self.maintenance()["retry_at"], self.now + 1200)
+        self.renew_status = 200
+        self.assertEqual(self.run_cycle(self.now + 1200), "verified")
+
+    def idle_probe(self, at):
+        with (
+            patch.object(worker.time, "time", return_value=at),
+            patch.object(requests.adapters.HTTPAdapter, "send", autospec=True, side_effect=self.native),
+        ):
+            return worker.check_account_health()
+
+    def test_one_identity_only_check_during_generic_proactive_renewal_cooldown(self):
+        self.seed_separate_buyer()
+        self.renew_status = 400
+        self.assertEqual(self.run_cycle(), "cooldown")
+        cooldown = self.maintenance()
+        self.calls.clear()
+
+        def rotate(adapter, prepared, **kwargs):
+            self.calls.append((prepared.method, prepared.url.removeprefix(buyer.BASE)))
+            return self.transport_response(
+                prepared, {"user": {"id": 99}},
+                cookies=self.token_headers(self.new_access, self.new_refresh),
+            )
+
+        self.native = rotate
+        self.assertEqual(self.idle_probe(self.now + 301), "verified")
+        self.assertEqual(self.maintenance()["retry_at"], cooldown["retry_at"])
+        current_seal = self.saved()[0]["session"]
+        self.assertEqual(self.maintenance()["session_fingerprint"], hashlib.sha256(current_seal).hexdigest())
+        self.assertNotEqual(self.maintenance()["session_fingerprint"], cooldown["session_fingerprint"])
+        self.assertEqual(self.idle_probe(self.now + 602), "cooldown")
+        self.assertEqual(self.run_cycle(self.now + 603), "cooldown")
+        self.assertEqual(self.calls, [("GET", "/api/v2/users/current")])
+
+    def test_provider_retry_after_prevents_identity_probe(self):
+        self.seed_separate_buyer()
+        self.renew_status = 400
+        native = self.native
+
+        def delayed(adapter, prepared, **kwargs):
+            response = native(adapter, prepared, **kwargs)
+            if prepared.url.endswith("/web/api/auth/refresh"):
+                response.headers["Retry-After"] = "1200"
+            return response
+
+        self.native = delayed
+        self.assertEqual(self.run_cycle(), "cooldown")
+        self.calls.clear()
+        self.assertEqual(self.idle_probe(self.now + 301), "cooldown")
+        self.assertEqual(self.maintenance()["retry_at"], self.now + 1200)
+        self.assertEqual(self.calls, [])
+
     def test_separate_buyer_keeps_true_identity_rejection_and_provider_wait(self):
         self.seed_separate_buyer()
         self.expire_original_identity()

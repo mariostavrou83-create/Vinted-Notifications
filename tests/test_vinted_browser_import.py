@@ -736,6 +736,12 @@ class ConnectionHealthTests(buying_tests.SessionRotationFixture, unittest.TestCa
         self.assertEqual(health["state"], "awaiting_verification")
         self.assertIn("Account verification is reported separately", health["message"])
 
+    def test_renewal_pause_without_rejected_identity_does_not_require_reconnect(self):
+        self.metadata("security_challenge", "renewal", self.now - 10, blocked=True)
+        health = buyer.settings()["connection_health"]
+        self.assertEqual(health["state"], "attention")
+        self.assertIn("renewal is paused", health["message"])
+
     def test_terminal_rejection_is_bound_to_exact_saved_session(self):
         self.metadata("refresh_rejected", "renewal", self.now - 10, blocked=True)
         self.assertEqual(

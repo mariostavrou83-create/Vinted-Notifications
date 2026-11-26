@@ -141,7 +141,7 @@ def run_once():
         # ambiguous renewal refusal may replace a legacy permanent block with
         # the normal bounded cooldown, only for the exact session just checked.
         # Definite credential/account refusals and replacement sessions stay put.
-        from vinted_session_worker import note_ambiguous_failure
+        from vinted_session_worker import note_ambiguous_failure, renewal_failure_policy
 
         try:
             deferred = note_ambiguous_failure(
@@ -156,7 +156,7 @@ def run_once():
         if deferred:
             logger.info(
                 "Startup buyer diagnosis: renewal recovery deferred; "
-                "retry_after_seconds=900; no checkout or payment"
+                "retry_after_seconds=%s; no checkout or payment", renewal_failure_policy(exc)[1]
             )
         if (
             os.environ.get("MSJ_BUYER_BOOTSTRAP_CHECK_ON_START") == "1"

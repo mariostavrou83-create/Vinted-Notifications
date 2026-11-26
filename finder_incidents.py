@@ -93,8 +93,6 @@ def buy_failure(row, outcome, callback_id):
         in {
             "credentials",
             "not_connected",
-            "renewal_blocked",
-            "renewal_cooldown",
             "refresh_rejected",
         }
         else "buyer"

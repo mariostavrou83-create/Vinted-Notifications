@@ -84,6 +84,17 @@ class FinderIncidentsTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         await incidents.queue_buy_failure(self.row, self.outcome, "real-second-tap")
         self.assertEqual(len(self.events()), 2)
 
+    async def test_renewal_delay_links_to_status_and_keeps_saved_login(self):
+        from vinted_buying import feedback_buttons
+
+        with patch.dict("os.environ", {"DASHBOARD_URL": "https://finder.example"}):
+            for reason in ("renewal_cooldown", "renewal_blocked", "renewal_failed"):
+                outcome = dict(self.outcome, reason=reason)
+                await incidents.queue_buy_failure(self.row, outcome, reason)
+                urls = [button.url for row in feedback_buttons(self.row, outcome) for button in row]
+                self.assertNotIn("https://finder.example/vinted/reconnect", urls)
+            self.assertEqual([event["target"] for event in self.events()], ["buyer"] * 3)
+
     async def test_telegram_failure_retains_notice_until_retry_and_never_retries_purchase(
         self,
     ):
