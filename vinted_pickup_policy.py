@@ -10,6 +10,10 @@ def required_point():
         field: os.getenv("MSJ_INPOST_POINT_" + field.upper(), "").strip()
         for field in ("code", "name", "postcode")
     }
+    for field in ("street_address", "street_context", "alternate_name"):
+        value = os.getenv("MSJ_PICKUP_" + field.upper(), "").strip()
+        if value:
+            target[field] = value
     return target if any(target.values()) else None
 
 
@@ -127,24 +131,101 @@ def _shop_name(value, operator):
     return name
 
 
-def _postcodes(point):
+_POSTCODE = re.compile(r"\b(?:GIR\s*0AA|[A-Z]{1,2}[0-9][A-Z0-9]?\s*[0-9][A-Z]{2})\b", re.I)
+_ADDRESS_LINES = (
+    "address", "address_line", "address_line1", "address_line2", "address_line_1",
+    "address_line_2", "address_line_3", "line1", "line2", "line_1", "line_2",
+    "full_address", "formatted_address", "street_address",
+)
+_ROAD_SUFFIXES = {
+    "rd": "road", "st": "street", "ave": "avenue", "ln": "lane", "dr": "drive",
+    "cl": "close", "cres": "crescent", "ct": "court", "pl": "place", "gdns": "gardens",
+    "pde": "parade", "ter": "terrace", "sq": "square", "wy": "way",
+}
+_SUBUNIT = re.compile(r"\b(?:unit|suite|flat|apartment|stall|room|floor|shop)\s*(?:no\.?\s*)?(?:[0-9]+[a-z]?\b|[a-z]\b)", re.I)
+
+
+def _address_records(point):
     address = point.get("address")
-    records = (point, address) if isinstance(address, dict) else (point,)
+    return (point, address) if isinstance(address, dict) else (point,)
+
+
+def _postcodes(point):
     values = []
-    for record in records:
+    for record in _address_records(point):
         for key in ("postcode", "postal_code", "post_code", "zip_code"):
             value = record.get(key)
             if isinstance(value, str) and value.strip():
                 values.append(value)
-        for key in ("address", "address_line", "full_address"):
+        for key in (*_ADDRESS_LINES, "street", "street_name", "name"):
             value = record.get(key)
             if isinstance(value, str):
-                values.extend(
-                    re.findall(
-                        r"\b[A-Z]{1,2}[0-9][A-Z0-9]?\s*[0-9][A-Z]{2}\b", value.upper()
-                    )
-                )
+                values.extend(_POSTCODE.findall(value))
     return {"".join(value.upper().split()) for value in values}
+
+
+def _street_words(value):
+    words = _words(value).split()
+    if words:
+        words[-1] = _ROAD_SUFFIXES.get(words[-1], words[-1])
+    return " ".join(words)
+
+
+def _street_status(target, point):
+    """True for an exact numbered street, False on conflict, None for insufficient detail."""
+    configured = target.get("street_address")
+    if not configured:
+        return None
+    expected = _street_words(configured)
+    house, _, street = expected.partition(" ")
+    context = _street_words(target.get("street_context"))
+    if not re.fullmatch(r"[0-9]+[a-z]?", house) or not street:
+        return False
+    numbers, streets, numbered_lines = set(), set(), set()
+    context_as_street = False
+    for record in _address_records(point):
+        for key in ("house_number", "street_number", "building_number"):
+            value = record.get(key)
+            if type(value) in (str, int) and str(value).strip():
+                numbers.add(str(value).strip().lower())
+        if any(record.get(key) for key in ("unit", "unit_number", "flat", "flat_number", "suite",
+                                         "apartment_number", "sub_building")):
+            return False
+        for key in (*_ADDRESS_LINES, "street", "street_name", "name"):
+            value = record.get(key)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            for part in re.split(r"[,;\n]|\s+[-–—]\s+", _POSTCODE.sub("", value)):
+                if _SUBUNIT.search(part):
+                    return False
+                line = _street_words(part)
+                if context and line == context:
+                    if key in ("street", "street_name"):
+                        context_as_street = True
+                    continue
+                if context and line.endswith(" " + context):
+                    line = _street_words(line[:-(len(context) + 1)])
+                if key == "name" and line and not (line.endswith(" " + street) or
+                                                   line.split()[-1] in _ROAD_SUFFIXES.values()):
+                    continue  # A service label such as "24/7 Locker" is not a street.
+                if re.match(r"^\d", line):
+                    numbered_lines.add(line)
+                elif line and (key in ("street", "street_name") or
+                               (key != "name" and line.split()[-1] in _ROAD_SUFFIXES.values())):
+                    streets.add(line)
+    if numbers - {house} or streets - {street} or numbered_lines - {expected}:
+        return False
+    if context_as_street and numbers and not (street in streets or expected in numbered_lines):
+        return False
+    return True if expected in numbered_lines or (house in numbers and street in streets) else None
+
+
+def _target_name(target, point, operator):
+    name = _shop_name(point.get("name"), operator)
+    return bool(name) and name in {
+        _shop_name(target.get("name"), "inpost"),
+        _shop_name(target.get("alternate_name"), operator),
+    }
 
 
 def unavailable(*records):
@@ -158,23 +239,30 @@ def unavailable(*records):
     return False
 
 
-def conflicts_with_target(target, point, *details, selected_carrier="", fallback=False):
+def conflicts_with_target(target, point, *details, selected_carrier="", fallback=False, selected_point=None):
     postcodes = _postcodes(point)
     expected = "".join(target["postcode"].upper().split())
     current = carrier(point, *details)
+    street = _street_status(target, point)
     if (
         unavailable(point, *details)
         or current is None
         or (current and selected_carrier and current != selected_carrier)
         or (postcodes and postcodes != {expected})
+        or street is False
     ):
         return True
-    return bool(
-        fallback
-        and point.get("name")
-        and _shop_name(point["name"], current or selected_carrier)
-        != _shop_name(target["name"], "inpost")
-    )
+    operator = current or selected_carrier
+    if not fallback or not point.get("name") or _target_name(target, point, operator):
+        return False
+    if street is True and postcodes == {expected}:
+        return False
+    # Checkout sometimes echoes the service's alias but omits its full address.
+    # Only carry forward the evidence for exactly the point, code and rate selected.
+    if selected_point and all(point.get(k) and point[k] == selected_point.get(k) for k in ("uuid", "code", "rate_uuid")):
+        if _shop_name(point["name"], operator) == _shop_name(selected_point.get("name"), operator):
+            return not (_street_status(target, selected_point) is True and _postcodes(selected_point) == {expected})
+    return True
 
 
 def choice(point, rate, target, *, entry=None):
@@ -194,9 +282,10 @@ def choice(point, rate, target, *, entry=None):
     )
     if code_matches and operator in ("", "inpost"):
         return 0, "inpost"
-    location = _shop_name(point.get("name"), operator) == _shop_name(
-        target["name"], "inpost"
-    ) and bool(_postcodes(point))
+    postcode = "".join(target["postcode"].upper().split())
+    location = bool(_POSTCODE.fullmatch(postcode)) and _postcodes(point) == {postcode} and (
+        _target_name(target, point, operator) or _street_status(target, point) is True
+    )
     if not location or (not operator and not rate.get("rate_uuid")):
         return None
     return (1 if operator == "inpost" else 2), operator

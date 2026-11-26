@@ -790,7 +790,8 @@ def nearest_pickup(client, components, *, required=None, shipping_maximum=None):
         f"/shipping-estimation/external/shipping_orders/{order_id}/nearby_pickup_points",
         params={"country_code": "GB", "latitude": latitude, "longitude": longitude},
     )
-    points, rates = data.get("shipping_points"), data.get("shipping_rates")
+    points = data.get("shipping_points") if isinstance(data, dict) else None
+    rates = data.get("shipping_rates") if isinstance(data, dict) else None
     if (
         not isinstance(points, list)
         or not isinstance(rates, list)
@@ -798,36 +799,54 @@ def nearest_pickup(client, components, *, required=None, shipping_maximum=None):
         or len(rates) > 100
     ):
         raise buyer.BuyerError(
-            "Vinted did not return readable available pickup points."
+            "Vinted did not return readable pickup points and rates.", reason="pickup_options_unreadable"
         )
     eligible = {}
+    known_rates = set()
     for rate in rates:
-        if (
-            not isinstance(rate, dict)
-            or rate.get("restriction")
-            or rate.get("verification_service_type")
-            or not choice_id(rate.get("rate_uuid"))
-        ):
+        if not isinstance(rate, dict) or not choice_id(rate.get("rate_uuid")):
+            continue
+        rate_id = rate["rate_uuid"]
+        if rate_id in known_rates:
+            raise buyer.BuyerError("Vinted returned conflicting pickup rates.", reason="pickup_rate_ambiguous")
+        known_rates.add(rate_id)
+        if pickup_policy.unavailable(rate) or rate.get("verification_service_type"):
             continue
         try:
             price = cents(rate.get("price"))
         except buyer.BuyerError:
             continue
-        if rate["rate_uuid"] in eligible:
-            raise buyer.BuyerError("Vinted returned conflicting pickup rates.")
-        eligible[rate["rate_uuid"]] = (price, rate)
+        eligible[rate_id] = (price, rate)
     candidates = []
+    unreadable = 0
+    bound = 0
     lat = math.radians(latitude)
     for entry in points:
         point = entry.get("point") if isinstance(entry, dict) else None
         if (
             not isinstance(point, dict)
-            or point.get("rate_uuid") not in eligible
             or not choice_id(point.get("uuid"))
             or not choice_id(point.get("code"))
         ):
+            unreadable += 1
             continue
-        price, rate = eligible[point["rate_uuid"]]
+        # Vinted can bind a rate to the shipping-point entry or to its nested
+        # point. Never infer a rate from the courier name or nearby points.
+        rate_id = point.get("rate_uuid")
+        entry_rate = entry.get("rate_uuid")
+        if rate_id is None:
+            rate_id = entry_rate
+        if not choice_id(rate_id) or (entry_rate is not None and entry_rate != rate_id):
+            unreadable += 1
+            continue
+        if rate_id not in eligible:
+            unreadable += int(rate_id not in known_rates)
+            continue
+        price, rate = eligible[rate_id]
+        if pickup_policy.unavailable(entry, point) or pickup_policy.carrier(point, entry, rate) is None:
+            continue
+        point = dict(point, rate_uuid=rate_id)
+        bound += 1
         if required is not None:
             choice = pickup_policy.choice(point, rate, required, entry=entry)
             if choice is None:
@@ -865,10 +884,30 @@ def nearest_pickup(client, components, *, required=None, shipping_maximum=None):
         for rank, _, code, point_id, _, point in candidates:
             group = (rank, point["finder_selected_carrier"])
             locations.setdefault(group, set()).add((code, point_id))
+        matches = len(candidates)
         candidates = [candidate for candidate in candidates
                       if len(locations[(candidate[0], candidate[-1]["finder_selected_carrier"])]) == 1]
+        logger.info(
+            "Autobuy pickup lookup: points=%d rates=%d eligible_rates=%d bound_points=%d "
+            "unreadable_points=%d shop_matches=%d unambiguous_choices=%d",
+            len(points), len(rates), len(eligible), bound, unreadable, matches, len(candidates),
+        )
         if not candidates:
-            raise buyer.BuyerError(pickup_policy.required_message(required))
+            shop = required.get("name") or "your selected shop"
+            if matches:
+                raise buyer.BuyerError(
+                    f"Vinted returned multiple collection points for the same courier at {shop}. "
+                    "Finder could not verify which one to use.", reason="pickup_point_ambiguous",
+                )
+            if unreadable:
+                raise buyer.BuyerError(
+                    f"Finder could not confirm a courier at {shop}. Some pickup points had "
+                    "missing or inconsistent identifiers or rates.", reason="pickup_options_unreadable",
+                )
+            raise buyer.BuyerError(
+                f"Finder could not match an available pickup rate to {shop} in Vinted’s options for this item.",
+                reason="pickup_shop_unmatched",
+            )
     if not candidates:
         raise buyer.BuyerError(
             "Vinted did not return an available pickup point for your saved address."
@@ -1053,11 +1092,14 @@ def configure_checkout_choices(client, checkout, config, *, shipping_maximum=Non
             "pickup_details"
         ) or {}
         current_point = details.get("shipping_point") or {}
-        if address.get("id") != address_id or (
+        # The selected rate on pickup_details is mandatory. Its duplicate on
+        # the point is optional; a conflicting value must still block payment.
+        repeated_rate = current_point.get("rate_uuid")
+        rate_conflict = repeated_rate is not None and repeated_rate != point["rate_uuid"]
+        if address.get("id") != address_id or rate_conflict or (
             details.get("selected_rate_uuid"),
             current_point.get("uuid"),
             current_point.get("code"),
-            current_point.get("rate_uuid"),
             (components.get("shipping_pickup_options") or {}).get(
                 "selected_pickup_option"
             ),
@@ -1065,27 +1107,36 @@ def configure_checkout_choices(client, checkout, config, *, shipping_maximum=Non
             point["rate_uuid"],
             point["uuid"],
             point["code"],
-            point["rate_uuid"],
             pickup_type,
         ):
             if required is not None:
-                raise buyer.BuyerError(pickup_policy.required_message(required))
+                shop = required.get("name") or "your selected shop"
+                raise buyer.BuyerError(
+                    f"Vinted did not confirm the selected point and rate for {shop} on the final checkout.",
+                    reason="pickup_selection_changed",
+                )
             raise buyer.BuyerError(
                 "Vinted did not confirm the nearest available pickup point. No payment was sent."
             )
         if required is not None:
             shipping = components.get("shipping_pickup_details") or {}
+            confirmed_point = dict(current_point, rate_uuid=details["selected_rate_uuid"])
             if pickup_policy.conflicts_with_target(
-                required, current_point, details, shipping,
+                required, confirmed_point, details, shipping,
                 selected_carrier=point["finder_selected_carrier"], fallback=point["finder_fallback"],
+                selected_point=point,
             ):
-                raise buyer.BuyerError(pickup_policy.required_message(required))
+                shop = required.get("name") or "your selected shop"
+                raise buyer.BuyerError(
+                    f"Vinted returned conflicting collection details for {shop} on the final checkout.",
+                    reason="pickup_location_changed",
+                )
+        shipping_order = str(components["shipping_pickup_details"].get("shipping_order_id"))
+        address_order = components["shipping_address"].get("shipping_order_id")
+        if shipping_order != quoted_order or (address_order is not None and str(address_order) != quoted_order):
+            raise buyer.BuyerError("Vinted changed the shipping order before confirming the rate. No payment was sent.",
+                                   reason="shipping_unverified")
         if shipping_maximum is not None:
-            shipping_order = str(components["shipping_pickup_details"].get("shipping_order_id"))
-            address_order = components["shipping_address"].get("shipping_order_id")
-            if shipping_order != quoted_order or (address_order is not None and str(address_order) != quoted_order):
-                raise buyer.BuyerError("Vinted changed the shipping order before confirming the rate. No payment was sent.",
-                                       reason="shipping_unverified")
             selected_rate_price = point["finder_rate_price"]
     if (
         last4
@@ -1096,6 +1147,8 @@ def configure_checkout_choices(client, checkout, config, *, shipping_maximum=Non
         )
     if shipping_maximum is not None:
         check_shipping_charge(components, shipping_maximum, selected_rate_price=selected_rate_price)
+    if expected and required is not None:
+        logger.info("Autobuy pickup confirmed: alternate_courier=%s", point["finder_fallback"])
     return checkout
 
 

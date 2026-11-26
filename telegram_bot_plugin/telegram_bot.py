@@ -472,8 +472,14 @@ class LeRobot:
         if tap_shipping_maximum() is not None:
             logger.info("Autobuy tap pricing: item_limit=alert_price shipping_max_pence=%d search_budgets=alerts_only",
                         tap_shipping_maximum())
-        logger.info("Autobuy pickup policy: inpost_first=True same_shop_courier_fallback=True configured_shop_baba=%s complete=%s",
-                    bool(re.search(r"\bbaba\b", target.get("name",""), re.I)), all(target.get(k) for k in ("name","postcode","code")))
+        logger.info(
+            "Autobuy pickup policy: inpost_first=True same_shop_courier_fallback=True "
+            "configured_shop_baba=%s complete=%s street_configured=%s alternate_name_configured=%s",
+            bool(re.search(r"\bbaba\b", target.get("name", ""), re.I)),
+            all(target.get(key) for key in ("name", "postcode", "code")),
+            bool(target.get("street_address")),
+            bool(target.get("alternate_name")),
+        )
         self._delivery_worker = VintedDeliveryWorker(
             application.bot, db.get_parameter("telegram_chat_id")
         )

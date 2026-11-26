@@ -510,7 +510,70 @@ class CheckoutPreferencesTests(DatabaseFixture, unittest.TestCase):
         with patch.dict(os.environ, policy), patch.object(buyer, "connected_client", return_value=self.client):
             result = buying.buy(self.row)
         self.assertEqual(result["state"], "failed_before_payment")
+        self.assertEqual(result["reason"], "pickup_shop_unmatched")
         self.assertIn("Example Shop", result["message"])
+        self.assertFalse(self.payments())
+
+    @patch.dict(os.environ, {"MSJ_INPOST_POINT_CODE": "original-code",
+                             "MSJ_INPOST_POINT_NAME": "Example Shop",
+                             "MSJ_INPOST_POINT_POSTCODE": "AA1 1AA",
+                             "MSJ_PICKUP_STREET_ADDRESS": "17 Example Parade"})
+    def test_courier_point_bound_to_entry_rate_with_sparse_final_echo(self):
+        entry = self.points["shipping_points"][1]
+        entry["rate_uuid"] = entry["point"].pop("rate_uuid")
+        entry["point"].update(name="Collection Counter", postcode="AA1 1AA",
+                              address="17 Example Parade", carrier_name="Evri")
+        def omit_address(value):
+            point = value["components"]["shipping_pickup_details"]["pickup_details"]["shipping_point"]
+            point.pop("postcode")
+            point.pop("address")
+        self.corrupt = omit_address
+        self.checkout["components"]["order_summary_v2"]["shipping"] = {
+            "price": {"amount": "4.99", "currency_code": "GBP"}}
+        confirmed = buying.configure_checkout_choices(
+            self.client, self.checkout, buyer.settings(), shipping_maximum=499)
+        details = confirmed["components"]["shipping_pickup_details"]["pickup_details"]
+        self.assertEqual(details["selected_rate_uuid"], "near-rate")
+        self.assertEqual(details["shipping_point"]["uuid"], "near-point")
+        self.assertNotIn("rate_uuid", details["shipping_point"])
+        self.checkout["components"]["order_summary_v2"]["shipping"]["price"]["amount"] = "5.00"
+        with self.assertRaises(buyer.BuyerError) as raised:
+            buying.configure_checkout_choices(self.client, self.checkout, buyer.settings(), shipping_maximum=499)
+        self.assertEqual(raised.exception.reason, "shipping_over_limit")
+        self.assertFalse(self.payments())
+
+    @patch.dict(os.environ, {"MSJ_INPOST_POINT_CODE": "original-code",
+                             "MSJ_INPOST_POINT_NAME": "Example Shop",
+                             "MSJ_INPOST_POINT_POSTCODE": "AA1 1AA"})
+    def test_conflicting_entry_and_point_rates_do_not_authorise_any_carrier(self):
+        entry = self.points["shipping_points"][1]
+        entry["point"].update(name="Example Shop", postcode="AA1 1AA", carrier_name="Evri")
+        for invalid in ("far-rate", [], ""):
+            entry["rate_uuid"] = invalid
+            with self.subTest(rate=invalid), self.assertRaises(buyer.BuyerError) as raised:
+                self.configure()
+            self.assertEqual(raised.exception.reason, "pickup_options_unreadable")
+        self.assertTrue(all(call.args[0] == "GET" for call in self.client.request.call_args_list))
+
+    @patch.dict(os.environ, {"MSJ_INPOST_POINT_CODE": "original-code",
+                             "MSJ_INPOST_POINT_NAME": "Example Shop",
+                             "MSJ_INPOST_POINT_POSTCODE": "AA1 1AA"})
+    def test_sparse_final_rate_echo_still_requires_exact_selected_quote(self):
+        entry = self.points["shipping_points"][1]
+        entry["rate_uuid"] = entry["point"].pop("rate_uuid")
+        entry["point"].update(name="Example Shop", postcode="AA1 1AA", carrier_name="DPD")
+        original = copy.deepcopy(self.checkout)
+        for mutation in (
+            lambda details: details.pop("selected_rate_uuid"),
+            lambda details: details.update(selected_rate_uuid="far-rate"),
+            lambda details: details["shipping_point"].update(rate_uuid="far-rate"),
+            lambda details: details["shipping_point"].update(uuid="far-point"),
+        ):
+            self.checkout = copy.deepcopy(original)
+            self.corrupt = lambda value: mutation(value["components"]["shipping_pickup_details"]["pickup_details"])
+            with self.subTest(mutation=mutation), self.assertRaises(buyer.BuyerError) as raised:
+                self.configure()
+            self.assertEqual(raised.exception.reason, "pickup_selection_changed")
         self.assertFalse(self.payments())
 
     def test_required_shop_stops_on_changed_carrier_and_ambiguous_locations(self):
