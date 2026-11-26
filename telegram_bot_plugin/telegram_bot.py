@@ -497,6 +497,8 @@ class LeRobot:
             ),
             name="vinted-buyer-session-maintenance",
         )
+        from vinted_payment_watch import run as watch_payments
+        self._payment_watch_task = asyncio.create_task(watch_payments(), name="vinted-payment-status")
         from finder_incidents import run as monitor_incidents
 
         self._incident_task = asyncio.create_task(
@@ -525,7 +527,8 @@ class LeRobot:
         tasks = [
             running
             for running in (task, maintenance, owner_controls, incidents,
-                            getattr(self, "_home_buy_task", None), getattr(self, "_shared_task", None))
+                            getattr(self, "_home_buy_task", None), getattr(self, "_shared_task", None),
+                            getattr(self, "_payment_watch_task", None))
             if running is not None
         ]
         for running in tasks:

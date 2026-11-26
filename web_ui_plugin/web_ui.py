@@ -756,6 +756,15 @@ def create_app(test_config=None):
             )
         return redirect(url_for("edit", query_id=query_id, platform="ebay"))
 
+    @app.get("/connections/payment-window")
+    def payment_window():
+        return render_template("msj_payment_window.html")
+
+    @app.get("/connections/payment-window/status")
+    def payment_window_status():
+        from vinted_payment_watch import browser_checkout
+        return {"checkout": browser_checkout(time.time())}
+
     @app.get("/connections/vinted-cookie-helper.zip")
     def vinted_cookie_helper_download():
         # Package only reviewed source files. Never read account state, cookie

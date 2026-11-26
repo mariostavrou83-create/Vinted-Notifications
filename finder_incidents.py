@@ -101,6 +101,11 @@ def buy_failure(row, outcome, callback_id):
     )
     try:
         with closing(connection()) as conn, conn:
+            if outcome["state"] == "needs_action" and outcome.get("checkout_id") and (
+                conn.execute("SELECT 1 FROM vinted_payment_watch WHERE checkout_id=?", (outcome["checkout_id"],)).fetchone()
+                or conn.execute("SELECT 1 FROM parameters WHERE key=?", (PREFIX + f"payment_{row['item_id']}_{outcome['checkout_id']}_action",)).fetchone()
+            ):
+                return
             enqueue(conn, key, "autobuy", message, time.time(), target=target)
     except (sqlite3.Error, OSError, ValueError) as exc:
         logger.warning("Autobuy warning could not be queued: %s", type(exc).__name__)
@@ -463,6 +468,13 @@ async def deliver(notifier):
                 "buyer": "Open buying account",
                 "alerts": "Open Finder",
             }[event["target"]]
+            if "payment_watch" in event:
+                from vinted_payment_watch import delivery_button
+                button = await asyncio.to_thread(delivery_button, *event["payment_watch"])
+                if button is None:
+                    await asyncio.to_thread(finish, key, event["lease"], time.time())
+                    continue
+                label, url = button
             markup = (
                 InlineKeyboardMarkup([[InlineKeyboardButton(label, url=url)]])
                 if url

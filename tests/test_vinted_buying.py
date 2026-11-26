@@ -277,8 +277,8 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
             )
 
         with patch.object(requests.Session, "request", side_effect=response) as wire:
-            self.assertEqual(buying.buy(self.row)["state"], "needs_action")
-            self.assertEqual(buying.buy(self.row)["state"], "needs_action")
+            self.assertEqual(buying.buy(self.row)["state"], "paying")
+            self.assertEqual(buying.buy(self.row)["state"], "paying")
             self.assertEqual(buying.check_payment("123")["state"], "paid")
             self.assertEqual(buying.buy(self.row)["state"], "paid")
         self.assertEqual(payment_posts, 1)
@@ -604,8 +604,8 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
     ):
         buying.claim(self.row)
         for status, state in (
-            ("pending", "needs_action"),
-            ("preparing", "needs_action"),
+            ("pending", "unknown"),
+            ("preparing", "unknown"),
             ("failure", "payment_failed"),
         ):
             buying.record(
@@ -1711,7 +1711,7 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
 
     def test_pending_bank_confirmation_is_never_reported_as_paid_or_repaid(self):
         self.payment = {"payment": {"status": "pending"}}
-        self.assertEqual(self.run_buy()["state"], "needs_action")
+        self.assertEqual(self.run_buy()["state"], "paying")
         self.run_buy()
         self.assertEqual(len(self.payments()), 1)
 
@@ -1789,9 +1789,9 @@ class BuyingTests(DatabaseFixture, unittest.TestCase):
             "action": {"parameters": {"url": action_url}},
         }
         outcome = self.run_buy()
-        self.assertEqual(outcome["state"], "needs_action")
+        self.assertEqual(outcome["state"], "paying")
         self.assertEqual(outcome["action_url"], action_url)
-        self.assertIn("confirmation button", outcome["message"])
+        self.assertIn("processing", outcome["message"])
         buttons = [b for row in buying.feedback_buttons(self.row, outcome) for b in row]
         self.assertEqual([b.url for b in buttons if b.url], [action_url])
         self.assertNotIn("buy:click", [b.callback_data for b in buttons])

@@ -68,6 +68,7 @@ def record(
     action_url=None,
     buyer_id=None,
     transaction_id=None,
+    watch=None,
 ):
     with closing(connection()) as conn, conn:
         conn.execute(
@@ -84,6 +85,14 @@ def record(
                 item_id,
             ),
         )
+        if watch is not None:
+            from vinted_payment_watch import register
+            register(conn, item_id, *watch)
+        elif state in ("needs_action", "paid", "payment_failed"):
+            conn.execute("UPDATE vinted_payment_watch SET next_check=? WHERE item_id=?", (time.time(), item_id))
+    if watch is not None or state in ("needs_action", "paid", "payment_failed"):
+        from vinted_payment_watch import wake
+        wake()
 
 
 def result(item_id):
@@ -1476,23 +1485,32 @@ def saved_browser_info():
     return info
 
 
+def pending_payment(item_id, paid, *, watch=None):
+    action_url = payment_action_url(paid)
+    if paid["payment"]["status"] == "requires_action":
+        state = "needs_action"
+        message = "Open the original checkout to finish its verification. Approve in your banking app if prompted."
+    else:
+        state = "paying"
+        if watch is None:
+            with closing(connection()) as conn:
+                if not conn.execute("SELECT 1 FROM vinted_payment_watch WHERE item_id=?", (item_id,)).fetchone():
+                    state = "unknown"
+        message = "Payment is processing. Check the status here without tapping Autobuy again."
+    if watch is None:
+        saved = result(item_id)
+        if saved and (saved["state"], saved["message"], saved["action_url"]) == (state, message, action_url):
+            return
+    record(item_id, state, message, action_url=action_url, watch=watch)
+
+
 @timed_operation("payment_result_save")
-def record_payment_result(item_id, paid, total):
+def record_payment_result(item_id, paid, total, *, watch):
     status = (paid.get("payment") or {}).get("status")
     if status in ("success", "completed"):
         record(item_id, "paid", f"Paid £{total/100:.2f}. Check your Vinted purchases.")
     elif status in ("pending", "preparing", "requires_action"):
-        action_url = payment_action_url(paid)
-        record(
-            item_id,
-            "needs_action",
-            (
-                "Vinted needs payment or bank confirmation. Use the confirmation button below; do not buy again."
-                if action_url
-                else "Vinted needs payment or bank confirmation. Open your Vinted checkout; do not buy again."
-            ),
-            action_url=action_url,
-        )
+        pending_payment(item_id, paid, watch=watch)
     elif status in ("failure", "failed"):
         record(
             item_id,
@@ -1691,7 +1709,7 @@ def buy_checkout_quote(token, *, alert_row=None):
                     "payment_options": {"browser_info": info},
                 },
             )
-            record_payment_result(item_id, paid, total)
+            record_payment_result(item_id, paid, total, watch=((alert_row or {}).get("title"), funding["payment_due"]))
             if result(item_id)["state"] == "paid":
                 from vinted_buyer_events import clear_checkout_failure
 
@@ -1945,6 +1963,7 @@ def _buy(row):
             total = checkout_prices(
                 checkout, current_price, limits.total_maximum, item_id=item_id, alert_price_limit=alert_ceiling
             )
+            payment_due = checkout_amounts(checkout)["payment_due"]
             info = saved_browser_info()
             guard_new_payment(item_id)
             with payment_gate():
@@ -1967,7 +1986,7 @@ def _buy(row):
                     "payment_options": {"browser_info": info},
                 },
             )
-            record_payment_result(item_id, paid, total)
+            record_payment_result(item_id, paid, total, watch=(row.get("title"), payment_due))
             if result(item_id)["state"] == "paid":
                 from vinted_buyer_events import clear_checkout_failure
 
@@ -2178,13 +2197,7 @@ def check_payment(item_id, *, verify_paid=False):
                     "Vinted reports that payment failed. Check your Vinted purchases before buying again.",
                 )
             elif status in ("pending", "preparing", "requires_action"):
-                action = payment_action_url(data) or saved.get("action_url")
-                record(
-                    item_id,
-                    "needs_action",
-                    "Payment is awaiting Vinted or bank confirmation. Check again after completing any confirmation; do not buy again.",
-                    action_url=action,
-                )
+                pending_payment(item_id, data)
             else:
                 return reconciliation_unverified(saved, "payment_status_unverified")
             logger.info(
@@ -2321,13 +2334,13 @@ def feedback_buttons(row, feedback=None):
                 )
             )
             buttons.append(setup)
-    elif state == "needs_action" and payment_action_url(
+    elif state in ("needs_action", "paying") and payment_action_url(
         {"action": {"parameters": {"url": feedback.get("action_url")}}}
     ):
         buttons.append(
             [
                 InlineKeyboardButton(
-                    "Confirm payment / bank ↗", url=feedback["action_url"]
+                    "Open payment check ↗", url=feedback["action_url"]
                 )
             ]
         )

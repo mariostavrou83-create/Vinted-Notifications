@@ -811,6 +811,10 @@ def migrate(conn):
     conn.execute("""CREATE TABLE IF NOT EXISTS vinted_buy_attempts (
         item_id TEXT PRIMARY KEY, state TEXT NOT NULL, checkout_id TEXT,
         total INTEGER, message TEXT NOT NULL, updated REAL NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS vinted_payment_watch (
+        item_id TEXT PRIMARY KEY, checkout_id TEXT NOT NULL, title TEXT NOT NULL,
+        payment_due INTEGER NOT NULL, started REAL NOT NULL, next_check REAL NOT NULL,
+        notice TEXT NOT NULL DEFAULT '')""")
     columns = {row[1] for row in conn.execute("PRAGMA table_info(vinted_buy_attempts)")}
     for column in ("action_url", "buyer_id", "transaction_id"):
         if column not in columns:

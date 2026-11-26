@@ -1,0 +1,10 @@
+{% extends 'msj_base.html' %}
+{% block content %}
+<section class="form-card">
+<h1>Payment standby</h1>
+<p>Keep this tab open in the browser signed into your Vinted buying account. When an Autobuy payment needs its checkout window, this tab opens the original Vinted checkout. Follow any verification prompt there.</p>
+<p id="payment-status" role="status">Waiting for a payment window…</p>
+<p>After checkout, use your browser’s Back button to return to standby. Close the tab to stop.</p>
+</section>
+<script src="{{ url_for('static', filename='msj_payment_window.js', v=asset_version) }}" defer></script>
+{% endblock %}

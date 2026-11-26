@@ -806,9 +806,9 @@ class CheckoutPreferencesTests(DatabaseFixture, unittest.TestCase):
             asyncio.run(buying.callback(update, context))
             asyncio.run(buying.callback(update, context))
         self.assertEqual(len(self.payments()), 1)
-        self.assertEqual(buying.result("123")["state"], "needs_action")
+        self.assertEqual(buying.result("123")["state"], "paying")
         self.assertEqual(
-            photo_cards.load("vinted", 42)[1]["buy_feedback"]["state"], "needs_action"
+            photo_cards.load("vinted", 42)[1]["buy_feedback"]["state"], "paying"
         )
 
     def test_expired_tampered_changed_account_or_changed_preferences_stop_before_network(

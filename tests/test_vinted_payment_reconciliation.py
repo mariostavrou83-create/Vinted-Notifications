@@ -204,8 +204,8 @@ class PaymentReconciliationTests(DatabaseFixture, unittest.TestCase):
     def test_pending_failed_unknown_and_refused_status_never_resubmit(self):
         self.pending()
         for status, expected in (
-            ("pending", "needs_action"),
-            ("preparing", "needs_action"),
+            ("pending", "unknown"),
+            ("preparing", "unknown"),
             ("requires_action", "needs_action"),
             ("failure", "payment_failed"),
             ("unexpected", "unknown"),
@@ -224,6 +224,57 @@ class PaymentReconciliationTests(DatabaseFixture, unittest.TestCase):
             buying.check_payment("123")
         self.assertEqual(buying.result("123"), original)
         self.client.session.close.assert_called()
+
+    def test_passive_payment_clears_without_a_prompt_or_second_submission(self):
+        import vinted_payment_watch as watch
+        import finder_incidents as incidents
+        self.enable()
+        self.payment = {"payment": {"status": "pending"}}
+        self.assertEqual(buying.buy(self.row)["state"], "paying")
+        self.client.request.reset_mock()
+        now = buying.time.time()
+        self.assertEqual(watch.advance(now), (0, "123"))
+        self.assertIsNone(watch.browser_checkout(now))
+        self.transaction["is_paid"] = True
+        buying.check_payment("123")
+        self.assert_only_gets()
+        self.assertEqual(watch.advance(now + 3), (0, None))
+        with closing(search_settings.connection()) as conn:
+            events = incidents.recent(conn)
+        self.assertEqual(len(events), 1)
+        self.assertIn("confirmed your order is paid", events[0]["text"])
+
+    def test_required_action_uses_original_checkout_and_actual_card_amount(self):
+        import vinted_payment_watch as watch
+        import finder_incidents as incidents
+        self.enable()
+        self.pending()
+        buying.record_payment_result("123", {"payment": {"status": "requires_action"}},
+                                     1884, watch=("Cable knit", 884))
+        now = buying.time.time()
+        watch.advance(now)
+        watch.advance(now + 3)
+        self.assertEqual(watch.browser_checkout(now), "checkout-123")
+        with closing(search_settings.connection()) as conn:
+            events = incidents.recent(conn)
+        self.assertEqual(len(events), 1)
+        self.assertIn("Cable knit", events[0]["text"])
+        self.assertIn("£8.84", events[0]["text"])
+        self.transaction["is_paid"] = True
+        buying.check_payment("123")
+        self.assertIsNone(watch.delivery_button("123", "checkout-123", "action"))
+        self.assertIsNone(watch.browser_checkout(now))
+        self.assert_only_gets()
+
+    def test_watch_timeout_keeps_duplicate_purchase_block(self):
+        import vinted_payment_watch as watch
+        self.enable()
+        self.payment = {"payment": {"status": "preparing"}}
+        self.assertEqual(buying.buy(self.row)["state"], "paying")
+        self.client.request.reset_mock()
+        watch.advance(buying.time.time() + watch.WINDOW + 1)
+        self.assertEqual(buying.buy(self.row)["state"], "unknown")
+        self.client.request.assert_not_called()
 
     def enable(self):
         with closing(search_settings.connection()) as conn, conn:

@@ -3,6 +3,7 @@
 <p>Tap <b>Autobuy</b>, or reply <b>BUY</b> to the original Vinted alert, to purchase using your saved delivery and payment choices. Finding a listing alone never purchases it.</p>
 {% if not accounts_separate %}<p>Buying is paused while you connect your different buying account below. Your current account continues to handle offers and messages.</p>{% endif %}
 <p>Saved buyer: <b>{{buyer.username if buyer.connected else 'Not connected'}}</b> · Autobuy permission <b>{{'on' if buyer.enabled else 'off'}}</b>.</p>
+<p><a href="{{ url_for('payment_window') }}" target="_blank" rel="noopener">Open payment standby tab</a> in the browser profile signed into your buying account.</p>
 <details class="guide-section" id="vinted-new-buyer">
 <summary><b>Connect a different account for buying</b></summary>
 <p>Your current selling account stays connected for offers and messages. The new account uses the same Autobuy flow, proxy, search budgets and collection shop.</p>
