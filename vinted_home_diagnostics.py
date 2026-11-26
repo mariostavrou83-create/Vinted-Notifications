@@ -1,6 +1,7 @@
 """Count known Home page features without logging URLs, text or account data."""
 
 import logging
+import re
 from urllib.parse import parse_qs, urlsplit
 
 
@@ -55,6 +56,23 @@ def empty_page_shape(tree):
         scripts_with_items=sum("/items/" in script for script in scripts),
         scripts_with_feed_cards=sum("feed-item" in script for script in scripts),
         scripts_with_recommendations=sum("recommend" in script.lower() for script in scripts),
+    )
+    # Count only structural React markers. Never log an identifier or statement.
+    boundaries = tree.xpath('//template[starts-with(@id,"B:")]')
+    pending_markers = {"$?", "$~", "$", "$!"}
+    segment_ids = {node.get("id") for node in tree.xpath('//div[@hidden and starts-with(@id,"S:")]')}
+    card_segments = {node.get("id") for card in native for node in card.iterancestors()
+                     if node.get("id") in segment_ids}
+    calls = re.findall(r"""\$RC\(\s*["'](B:[\w:-]+)["']\s*,\s*["'](S:[\w:-]+)["']""", "\n".join(scripts))
+    inserts = re.findall(r"""\$RS\(\s*["'](S:[\w:-]+)["']\s*,\s*["'](P:[\w:-]+)["']""", "\n".join(scripts))
+    counts.update(
+        stream_segments=len(segment_ids), card_segments=len(card_segments),
+        rc_pairs=len(calls), rc_card_pairs=sum(seg in card_segments for _, seg in calls),
+        rs_pairs=len(inserts), rs_card_pairs=sum(seg in card_segments for seg, _ in inserts),
+        insert_placeholders=len(tree.xpath('//template[starts-with(@id,"P:")]')),
+        rc_referenced_boundaries=sum(any(node.get("id") == bid for node in boundaries) for bid, _ in calls),
+        nested_boundaries=sum(bool(node.xpath('ancestor::*[@hidden]')) for node in boundaries),
+        pending_boundaries=sum(getattr(node.getprevious(), "text", "") in pending_markers for node in boundaries),
     )
     # Fixed schema names only. Values, paths and script contents stay private.
     for key in ("recommendedItems", "recommended_items", "homepageItems",

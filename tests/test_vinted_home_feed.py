@@ -142,6 +142,39 @@ class HomeFeedTests(unittest.TestCase):
             with self.subTest(page=page[-80:]):
                 self.assertEqual(feed.parse_home(page)["items"], [])
 
+    def test_nested_stream_segments_project_card_into_home_across_suspended_slots(self):
+        anchor = '<!--$?--><template id="B:0"></template><!--/$-->'
+        branch = '<div hidden id="S:0"><section><template id="P:1"></template></section></div>'
+        markup = card(title="", href="/items/123-fitted-top?homepage_session_id=")
+        cards = '<div hidden id="S:2">' + markup + '</div>'
+        calls = '<script>var $RB=[],$RC=function(a,b){f(a,b)};requestAnimationFrame(()=>{$RS("S:2","P:1")});$RC("B:0","S:0");after()</script>'
+        def render(boundary=anchor, wrapper=branch, script=calls):
+            return home(boundary).replace("</body>", wrapper + cards + script + "</body>")
+        item = feed.parse_home(render())["items"][0]
+        self.assertEqual((item["id"], item["title"]), ("123", ""))
+        for page in (
+            render(wrapper=branch.replace("P:1", "P:9")),
+            render(script=calls.replace('$RC("B:0","S:0");', "")),
+            render(boundary="<aside>" + anchor + "</aside>"),
+            render(wrapper=branch.replace("<section>", "<section hidden>")),
+            render(script=calls.replace('requestAnimationFrame(()=>{', 'registerCallback(()=>{')),
+            render(script=calls.replace('requestAnimationFrame(()=>{', 'if(false) requestAnimationFrame(()=>{')),
+        ):
+            self.assertEqual(feed.parse_home(page)["items"], [])
+
+    def test_react_19_runtime_and_direct_and_frame_completions(self):
+        strings = [
+            'var $RB=[],$RV=function(q){work(q)},$RC=function(a,b){if(b){next(a,b)}};$RC("B:0","S:0")',
+            'requestAnimationFrame(function(){$RC("B:0","S:0")})',
+            "requestAnimationFrame(()=>requestAnimationFrame(()=>$RC('B:0','S:0')))",
+            '$RC("B:0","S:0"),$RC("B:1","S:1")',
+        ]
+        for code in strings:
+            self.assertIn(("B:0", "S:0"), list(feed._react_moves(code)))
+        for code in ("""let s='$RC("B:0","S:0")'""", 'if(false){$RC("B:0","S:0")}',
+                     '/*$RC("B:0","S:0")*/', 'log($RC("B:0","S:0"))'):
+            self.assertEqual(list(feed._react_moves(code)), [])
+
     def test_titleless_card_gets_only_unambiguous_same_item_same_price_native_title(self):
         stamp = 1795443600
         markup = card(title="")

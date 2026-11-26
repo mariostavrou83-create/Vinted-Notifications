@@ -222,7 +222,10 @@ def _caption_price(text):
 _NON_FEED_TAGS = {"header", "nav", "footer", "aside", "template", "noscript"}
 _NON_FEED_ROLES = {"banner", "navigation", "contentinfo", "complementary"}
 _HIDDEN_STYLE = re.compile(r"(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\s*(?:!important\s*)?(?:;|$)", re.I)
-_REACT_COMPLETE = re.compile(r'\$RC\(\s*"(B:[a-fA-F0-9]+)"\s*,\s*"(S:[a-fA-F0-9]+)"\s*\)')
+_REACT_COMPLETE = re.compile(r"""\$(RC|RS)\(\s*(["'])([BPS]:[a-fA-F0-9]+)\2\s*,\s*(["'])([BPS]:[a-fA-F0-9]+)\4\s*\)""")
+_JS_FENCES = re.compile(r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|//[^\n\r]*|/\*[\s\S]*?\*/|[()\[\]{};])""")
+_FRAME_CALLBACK = re.compile(r"""requestAnimationFrame\(\s*(?:function\s*\(\s*\)|\(\s*\)\s*=>)\s*\{([\s\S]*)\}\s*\)""")
+_FRAME_ARROW = re.compile(r"""requestAnimationFrame\(\s*\(\s*\)\s*=>\s*([\s\S]*)\)""")
 
 
 def _visible_body(node, streamed=(), card=None):
@@ -243,43 +246,91 @@ def _visible_body(node, streamed=(), card=None):
     return False
 
 
+def _react_moves(program, level=0):
+    # Inspect only complete executable statements of a small inline script.
+    # Quotes, comments and bodies of unrelated callbacks cannot emit a move.
+    if len(program) > 65536 or level > 2:
+        return
+    start, depth = 0, 0
+    parts = []
+    for token in _JS_FENCES.finditer(program):
+        symbol = token.group()
+        if symbol in ("(", "[", "{"):
+            depth += 1
+        elif symbol in (")", "]", "}"):
+            depth -= 1
+            if depth < 0:
+                return
+        elif symbol == ";" and not depth:
+            parts.append(program[start:token.start()].strip())
+            start = token.end()
+    if depth:
+        return
+    parts.append(program[start:].strip())
+    for part in parts:
+        if not part:
+            continue
+        frame = _FRAME_CALLBACK.fullmatch(part) or _FRAME_ARROW.fullmatch(part)
+        if frame:
+            yield from _react_moves(frame[1], level + 1)
+            continue
+        # React may sequence several immediate completion calls with a comma.
+        pos = 0
+        moves = []
+        while match := _REACT_COMPLETE.match(part, pos):
+            command, first, second = match[1], match[3], match[5]
+            if command == "RC" and first.startswith("B:") and second.startswith("S:"):
+                moves.append((first, second))
+            elif command == "RS" and first.startswith("S:") and second.startswith("P:"):
+                moves.append((second, first))
+            pos = match.end()
+            remainder = part[pos:]
+            if not remainder.strip():
+                yield from moves
+                break
+            comma = re.match(r"\s*,\s*", remainder)
+            if not comma:
+                break
+            pos += comma.end()
+
+
 def _streamed_home_segments(tree):
-    # React sends completed Suspense contents in a hidden S: element. Only its
-    # exact completion call and a visible pending placeholder prove placement.
-    scripts = tree.xpath('//script[not(@src) and contains(text(),"$RC(")]')
+    # A React completion places S: contents at a B: boundary or a P: slot.
+    # Either destination can itself be waiting inside another streamed segment.
+    scripts = tree.xpath('//script[not(@src) and (contains(text(),"$RC(") or contains(text(),"$RS("))]')
     if not scripts:
         return {}
     nodes = {}
-    for node in tree.xpath('//*[starts-with(@id,"B:") or starts-with(@id,"S:")]'):
+    for node in tree.xpath('//*[starts-with(@id,"B:") or starts-with(@id,"S:") or starts-with(@id,"P:")]'):
         key = node.get("id")
         nodes[key] = None if key in nodes else node
-    segments = {}
+    targets = {}
     for script in scripts:
         if script.get("type", "").strip().lower() not in ("", "text/javascript", "application/javascript"):
             continue
-        # The instruction is emitted as an executable top-level statement,
-        # either alone or immediately following React's inline helper definition.
-        # Reject quoted references, JSON data and conditional calls.
-        program = (script.text or "").strip().rstrip(";").strip()
-        definition, divider, statements = program.rpartition("};")
-        if divider and not re.search(r'(?:^|;)\s*\$RC\s*=\s*(?:function\s*\(|\([^()]*\)\s*=>)', definition):
-            continue
-        statements = statements.strip()
-        calls = [part.strip() for part in statements.split(";")]
-        matches = [_REACT_COMPLETE.fullmatch(part) for part in calls]
-        if not matches or not all(matches):
-            continue
-        for match in matches:
-            boundary, segment = (nodes.get(key) for key in match.groups())
+        for dest, source in _react_moves(script.text or ""):
+            boundary, segment = nodes.get(dest), nodes.get(source)
             if (boundary is None or segment is None or boundary.tag != "template"
                     or segment.tag != "div" or "hidden" not in segment.attrib):
                 continue
-            marker = boundary.getprevious()
-            if (marker is None or marker.tag is not lhtml.etree.Comment or marker.text != "$?"
-                    or not _visible_body(boundary.getparent())):
-                continue
-            segments[segment] = boundary
-    return segments
+            if dest.startswith("B:"):
+                marker = boundary.getprevious()
+                if marker is None or marker.tag is not lhtml.etree.Comment or marker.text != "$?":
+                    continue
+            if segment not in targets or targets[segment] is boundary:
+                targets[segment] = boundary
+            else:
+                targets[segment] = None
+    revealed = {}
+    for _ in range(MAX_DEPTH):
+        before = len(revealed)
+        for segment, boundary in targets.items():
+            if (segment not in revealed and boundary is not None
+                    and _visible_body(boundary.getparent(), revealed)):
+                revealed[segment] = boundary
+        if len(revealed) == before:
+            break
+    return revealed
 
 
 def _attributed_native_link(link, streamed, all_panels):
@@ -290,12 +341,14 @@ def _attributed_native_link(link, streamed, all_panels):
         return True
     # A blank attribution is sufficient within the main Home listing surface.
     # For streamed cards evaluate the position after their placeholder resolves.
-    for node in link.iterancestors():
+    node = link.getparent()
+    while node is not None:
         if node in streamed:
-            return any(a.tag == "main" or a.get("role") == "main" or a in all_panels
-                       for a in streamed[node].iterancestors())
-        if node.tag == "main" or node.get("role") == "main" or node in all_panels:
+            node = streamed[node].getparent()
+        elif node.tag == "main" or node.get("role") == "main" or node in all_panels:
             return True
+        else:
+            node = node.getparent()
     return False
 
 
