@@ -78,6 +78,47 @@ class HomeFeedTests(unittest.TestCase):
         self.assertNotIn("private-telemetry", json.dumps(result))
         self.assertFalse(item["description_complete"])
 
+    def test_titleless_personalised_card_preserves_id_for_exact_detail(self):
+        markup = card(title="").replace('title=""', "").replace("<img ", '<img alt="Product image" ')
+        items = feed.parse_home(home(markup + native(id="999")))["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual((items[0]["id"], items[0]["title"]), ("123", ""))
+        self.assertNotIn("home_available", items[0])
+        self.assertNotIn("home_created_at", items[0])
+        self.assertNotIn("category_ids", items[0])
+        self.assertEqual(feed.parse_home(home(markup.replace("homepage_session_id", "other")))["items"], [])
+        for wrapper in ('<div hidden>{}</div>', '<div inert>{}</div>', '<span aria-hidden="true">{}</span>',
+                        '<template>{}</template>', '<noscript>{}</noscript>'):
+            self.assertEqual(feed.parse_home(home(wrapper.format(markup) + native()))["items"], [])
+        outside_main = home("").replace("</body>", markup + native() + "</body>")
+        self.assertEqual(feed.parse_home(outside_main)["items"], [])
+
+    def test_titleless_card_gets_only_unambiguous_same_item_same_price_native_title(self):
+        stamp = 1795443600
+        markup = card(title="")
+        for payload, expected in (
+            (native(created_at_ts=stamp), "Fitted top"),
+            (native(title=" ") + native(id="999"), ""),
+            (native(created_at_ts=stamp, price={"amount":"9.00","currency_code":"GBP"}), ""),
+            (native(created_at_ts=stamp, item_id="999"), ""),
+            (native(created_at_ts=stamp) + native(title="Other top", created_at_ts=stamp), ""),
+        ):
+            with self.subTest(expected=expected, payload=payload[:100]):
+                result = feed.parse_home(home(markup + payload))["items"][0]
+                self.assertEqual(result["title"], expected)
+                if expected:
+                    self.assertEqual(result["home_created_at"], stamp)
+                    self.assertTrue(result["home_available"])
+                else:
+                    self.assertNotIn("home_created_at", result)
+                    self.assertNotIn("category_ids", result)
+
+    def test_exact_listing_requires_one_nonempty_title(self):
+        for heading in ("<h1></h1>", "<h1>  </h1>", "<h1>A</h1><h1>B</h1>", "<h1>" + "x" * 501 + "</h1>"):
+            result = feed.parse_listing(listing().replace("<h1>Fitted top</h1>", heading), "123", 1000)
+            self.assertIsNone(result["item"])
+            self.assertEqual(result["reason"], "title_unverified")
+
     def test_marked_home_link_survives_card_selector_changes(self):
         markup = card().replace("feed-item", "different-card")
         result = feed.parse_home(home(markup + native(id="999")).replace("<main>", '<div role="main">').replace("</main>", "</div>"))

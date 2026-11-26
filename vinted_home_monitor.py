@@ -185,11 +185,16 @@ def _page(role, url):
             client.session.close()
 
 
+def has_listing_title(item):
+    title = item.get("title")
+    return isinstance(title, str) and 0 < len(title.strip()) <= 500
+
+
 def _publish(item, search, match, age, role, *, now):
     """One atomic global seen/outbox insertion, without search watermark changes."""
     import vinted_alerts
 
-    if role != "seller" or not womens_clothing(item):
+    if role != "seller" or not womens_clothing(item) or not has_listing_title(item):
         return False
     observed = age.get("checked_at")
     upper = age.get("max_age_seconds")
@@ -713,7 +718,8 @@ class Monitor:
                 self.counts[role]["previously_seen_expired"] += int(already_old)
                 self.remember(identifier, self.clock())
                 continue
-            if stamp is None or item.get("home_available") is not True or not womens_clothing(item):
+            if (stamp is None or item.get("home_available") is not True
+                    or not womens_clothing(item) or not has_listing_title(item)):
                 if self.target:
                     deadline = first_seen.get(identifier, received_at) + MAX_AGE
                     if stamp is not None:
@@ -827,9 +833,20 @@ class Monitor:
             upper > MAX_AGE or measured_at >= observed + MAX_AGE - upper
         )
         self.recheck_until.pop(identifier, None)
-        missing_evidence = unverified or parsed.get("reason") in {"availability_unverified", "listing_unverified"}
+        missing_title = parsed.get("reason") == "title_unverified" or (
+            isinstance(item, dict) and str(item.get("id")) == identifier and not has_listing_title(item)
+        )
+        missing_evidence = unverified or missing_title or parsed.get("reason") in {"availability_unverified", "listing_unverified"}
         if not recheck_until and not expired and missing_evidence:
-            self.recheck_until[identifier] = now + MAX_AGE
+            until = min(now + MAX_AGE, candidate.get("_home_verify_until", now + MAX_AGE))
+            if not unverified:
+                until = min(until, observed + MAX_AGE - upper)
+            if until > measured_at:
+                self.recheck_until[identifier] = until
+                if self.target and missing_title:
+                    # The recommendation may rotate off Home before its title
+                    # loads. Allow one spare detail slot within the original age limit.
+                    self.pending[role].append(dict(candidate, _home_verify_until=until))
         if unverified or expired:
             lower = age.get("min_age_seconds")
             could_still_be_fresh = type(lower) in (int, float) and measured_at < observed + MAX_AGE - lower
@@ -838,7 +855,7 @@ class Monitor:
             self.status(role, "checked", "listing", 200)
             return
         self.counts[role]["fresh"] += 1
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or missing_title:
             key = "listing_unavailable" if parsed.get("reason") == "unavailable" else "details_unverified"
             self.counts[role][key] += 1
             self.counts[role]["rejected_match"] += 1

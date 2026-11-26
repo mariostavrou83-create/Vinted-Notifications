@@ -714,6 +714,48 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         self.assertFalse(self.worker.pending["seller"])
         self.assertEqual(len(self.rows()), 1)
 
+    def test_titleless_recommendation_uses_confirmed_listing_title_after_card_rotates(self):
+        import vinted_home_feed as feed
+        from test_vinted_home_feed import card, home as page, listing, native
+
+        home.controls.save_target("1")
+        self.worker = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
+        self.worker.scheduled_seconds = 1
+        target = listing(catalog_id=13)
+        blank_heading = target.replace("<h1>Fitted top</h1>", "<h1> </h1>").replace(
+            "<main>", "<main><h1>Unrelated recommendation</h1>"
+        )
+        pages = iter([
+            page(card(title="")), blank_heading,
+            page(card("124") + native(id="124", created_at_ts=600)), target,
+        ])
+        self.fetch.side_effect = lambda role, url: (next(pages), self.now)
+        with patch.object(home, "parse_home", side_effect=feed.parse_home), \
+             patch.object(home, "parse_listing", side_effect=feed.parse_listing):
+            for self.now in (1000, 1001, 1002):
+                self.worker.tick()
+                self.assertFalse(self.rows())
+            self.now = 1006
+            self.worker.tick()
+        rows = self.rows()
+        self.assertEqual([(r["item_id"], r["title"]) for r in rows], [("123", "Fitted top")])
+        self.assertEqual(sum("/items/123" in call.args[1] for call in self.fetch.call_args_list), 2)
+        self.assertNotIn("123", self.worker.recheck_until)
+
+    def test_titleless_card_cannot_publish_without_target_title_and_only_retries_once(self):
+        home.controls.save_target("1")
+        self.worker = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
+        self.worker.scheduled_seconds = 1
+        item = dict(self.item, title="  ", home_available=True, home_created_at=990)
+        home.parse_home.return_value["items"] = [item]
+        home.parse_listing.side_effect = lambda *args, **kwargs: {"item": item, "reason": "ok", "age": self.age}
+        for self.now in (1000, 1001, 1002, 1006, 1007, 1012):
+            self.worker.tick()
+        self.assertFalse(self.rows())
+        self.assertFalse(self.worker.pending["seller"])
+        self.assertNotIn("500", self.worker.recheck_until)
+        self.assertEqual(home.parse_listing.call_count, 2)
+
     def test_inconclusive_recheck_uses_only_spare_slots_and_expires(self):
         self.age = {"verified": False}
         self.discover()

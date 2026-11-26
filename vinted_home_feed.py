@@ -142,6 +142,7 @@ def _home_uploads(body, cards):
     roots, refs = _records(scripts.scripts)
     listed = {card["id"]: card for card in cards}
     stamps, category_ids, available, unavailable = {}, {}, set(), set()
+    missing_titles = {}
     queue, visited = deque(roots), 0
     while queue:
         record = queue.popleft()
@@ -161,10 +162,16 @@ def _home_uploads(body, cards):
         if record.get("item_id") is not None and _identity(record.get("item_id")) != identity:
             continue
         title, price = _resolve(record.get("title"), refs), _resolve(record.get("price"), refs)
-        if title != card["title"] or not isinstance(price, dict) or price.get("currency_code") != "GBP":
+        if not isinstance(title, str) or not title.strip() or len(title) > 500:
+            continue
+        if card["title"] and title != card["title"]:
+            continue
+        if not isinstance(price, dict) or price.get("currency_code") != "GBP":
             continue
         if _money("£" + str(price.get("amount", ""))) != card["price"]:
             continue
+        if not card["title"]:
+            missing_titles.setdefault(identity, set()).add(title.strip())
         category = _identity(_resolve(record.get("catalog_id"), refs))
         if category:
             category_ids.setdefault(identity,set()).add(category)
@@ -178,13 +185,19 @@ def _home_uploads(body, cards):
         if can_buy is False or any(_resolve(record.get(k), refs) is True
                                    for k in ("is_reserved", "is_hidden", "is_sold", "is_closed")):
             unavailable.add(identity)
+    # A titleless card is still a visible listing. Only an unambiguous native
+    # title with the same item ID and displayed price can supply its fast path.
+    # Otherwise leave its age and category for the exact listing detail read.
+    for identity, titles in missing_titles.items():
+        if len(titles) == 1:
+            listed[identity]["title"] = next(iter(titles))
     for identity, values in category_ids.items():
-        if len(values) == 1:
+        if len(values) == 1 and listed[identity]["title"]:
             listed[identity]["category_ids"] = list(values)
     for identity in unavailable:
         listed[identity]["home_available"] = False
     for identity, values in stamps.items():
-        if max(values) - min(values) <= 1:
+        if max(values) - min(values) <= 1 and listed[identity]["title"]:
             card = listed[identity]
             card["home_created_at"] = min(values)
             if identity in available and identity not in unavailable:
@@ -278,7 +291,20 @@ def parse_home(body):
         caption = links[0].get("title") or links[0].get("aria-label") or ""
         title = re.split(r", (?:brand|condition): ", caption, maxsplit=1)[0].strip()
         if not title or len(title) > 500:
-            continue
+            visible_in_main = links[0].xpath(
+                'boolean(ancestor::*[self::main or @role="main"]) and '
+                'not(ancestor-or-self::*[@hidden or @inert or @aria-hidden="true" or self::template or self::noscript])'
+            )
+            if not visible_in_main or not parse_qs(urlsplit(links[0].get("href")).query).get("homepage_session_id"):
+                continue
+            title = ""
+            # The card's description title is the brand. A dedicated item-title
+            # node is safe. Generic image alt text cannot establish a listing title.
+            names = card.xpath('.//*[@data-testid="feed-item--title"]')
+            if len(names) == 1:
+                title = _text(names[0])
+        if len(title) > 500:
+            title = ""
         images = card.xpath('.//img[@data-testid="feed-item--image--img"]/@src')
         brand = card.xpath('.//*[@data-testid="feed-item--description-title"]')
         subtitle = card.xpath('.//*[@data-testid="feed-item--description-subtitle"]')
@@ -549,7 +575,11 @@ def parse_listing(body, item_id, now, *, home_card=None):
         return result
     titles = side.xpath('.//*[@data-testid="item-page-summary-plugin"]//h1')
     prices = side.xpath('.//*[@data-testid="item-price"]')
-    if len(titles) != 1 or len(prices) != 1:
+    title = _text(titles[0]) if len(titles) == 1 else ""
+    if not title or len(title) > 500:
+        result["reason"] = "title_unverified"
+        return result
+    if len(prices) != 1:
         return result
     price = _money(_text(prices[0]))
     native_price = (native or {}).get("price")
@@ -593,7 +623,7 @@ def parse_listing(body, item_id, now, *, home_card=None):
     item = {
         "id": identity,
         "url": item_url(canonical, identity),
-        "title": _text(titles[0])[:500],
+        "title": title,
         "price": price,
         "seller_id": (native or {}).get("user_id"),
         "description": description,

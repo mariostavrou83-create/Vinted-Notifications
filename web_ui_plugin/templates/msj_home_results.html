@@ -33,7 +33,7 @@
   <p class="muted">The most recent saved snapshot in Vinted’s order. These recommendations include all categories.</p>
   <div class="home-deals">{% for card in page.cards %}<article class="home-deal">
     <a class="home-cover" href="{{ card.url }}" target="_blank" rel="noopener noreferrer">{% if card.photo %}<img src="{{ card.photo }}" loading="lazy" alt="">{% else %}<span>Vinted ↗</span>{% endif %}</a>
-    <div><a class="home-item-title" href="{{ card.url }}" target="_blank" rel="noopener noreferrer">{{ card.title }}</a>
+    <div><a class="home-item-title" href="{{ card.url }}" target="_blank" rel="noopener noreferrer">{{ card.title or 'View listing' }}</a>
       <div class="home-price"><strong>£{{ card.price }}</strong></div><small>{{ card.brand }}{% if card.brand and card.size %} · {% endif %}{{ card.size }}</small>{% if card.sent_via %}<small>Alerted via {{ card.sent_via }}</small>{% endif %}</div>
   </article>{% endfor %}</div>
 </details>{% endfor %}
