@@ -39,7 +39,8 @@ def pending_reminder(chat_id):
             with closing(connection()) as conn:
                 saved = conn.execute(
                     """SELECT item_id,state,updated FROM vinted_buy_attempts
-                    WHERE state IN ('unknown','needs_action') ORDER BY updated,item_id LIMIT 1"""
+                    WHERE state IN ('unknown','needs_action') AND item_id NOT IN
+                    (SELECT item_id FROM vinted_payment_watch) ORDER BY updated,item_id LIMIT 1"""
                 ).fetchone()
                 return descriptor(dict(saved)) if saved else None
     except sqlite3.Error as exc:
@@ -167,6 +168,10 @@ def with_offer(row, outcome):
         offer = descriptor(buying.result(str(row["item_id"])))
     elif outcome.get("reason") == "earlier_payment_uncertain":
         offer = descriptor(pending_other(row["item_id"]))
+    if offer:
+        with closing(connection()) as conn:
+            if conn.execute("SELECT 1 FROM vinted_payment_watch WHERE item_id=?", (offer["item_id"],)).fetchone():
+                offer = None
     result = dict(outcome)
     result.pop("owner_resolution", None)
     if offer:

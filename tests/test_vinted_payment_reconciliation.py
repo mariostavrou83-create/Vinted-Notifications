@@ -272,9 +272,34 @@ class PaymentReconciliationTests(DatabaseFixture, unittest.TestCase):
         self.payment = {"payment": {"status": "preparing"}}
         self.assertEqual(buying.buy(self.row)["state"], "paying")
         self.client.request.reset_mock()
-        watch.advance(buying.time.time() + watch.WINDOW + 1)
+        watch.advance(buying.time.time() + watch.FOLLOW_UP + 1)
         self.assertEqual(buying.buy(self.row)["state"], "unknown")
         self.client.request.assert_not_called()
+
+    def test_existing_database_upgrades_without_reopening_owner_confirmed_item(self):
+        import vinted_payment_watch as watch
+        self.pending(state="paid")
+        with closing(search_settings.connection()) as conn, conn:
+            conn.execute("DROP TABLE vinted_payment_watch")
+            conn.execute("UPDATE parameters SET value='37' WHERE key='msj_search_schema'")
+        self.assertTrue(search_settings.ensure_schema())
+        self.assertIsNone(search_settings.ensure_schema())
+        self.assertEqual(watch.advance(buying.time.time()), (45, None))
+        self.assertEqual(buying.result("123")["state"], "paid")
+
+    def test_lost_payment_reply_automatically_checks_same_order(self):
+        import vinted_payment_watch as watch
+        import vinted_owner_controls as controls
+        self.enable()
+        self.payment = buyer.BuyerError("Timed out", reason="network")
+        result = buying.buy(self.row)
+        self.assertEqual(result["state"], "unknown")
+        self.assertNotIn("owner_resolution", controls.with_offer(self.row, result))
+        self.client.request.reset_mock()
+        self.assertEqual(watch.advance(buying.time.time() + 300), (0, "123"))
+        self.transaction["is_paid"] = True
+        self.assertEqual(buying.check_payment("123")["state"], "paid")
+        self.assert_only_gets()
 
     def enable(self):
         with closing(search_settings.connection()) as conn, conn:

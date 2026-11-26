@@ -11,6 +11,7 @@ from search_settings import connection
 logger = get_logger(__name__)
 _listener = None
 WINDOW = 180
+FOLLOW_UP = 3600
 
 
 def wake():
@@ -46,14 +47,14 @@ def advance(now):
             return row["next_check"] - now, None
         item, checkout, state = row["item_id"], row["checkout_id"], row["state"]
         age = now - row["started"]
-        finished = state not in ("paying", "needs_action") or age >= WINDOW
+        finished = state not in ("paying", "needs_action", "unknown") or age >= FOLLOW_UP
         kind = text = None
         if state == "paid":
             kind, text = "paid", "Vinted confirmed your order is paid."
         elif state == "payment_failed":
             kind, text = "failed", "Vinted reported that this payment failed."
-        elif state in ("paying", "needs_action"):
-            if age >= WINDOW:
+        elif state in ("paying", "needs_action", "unknown"):
+            if age >= FOLLOW_UP:
                 kind, text = "unconfirmed", "The automatic status checks ended without a final result. Check this order in Vinted Purchases before buying again."
                 if state == "paying":
                     conn.execute(
@@ -76,9 +77,11 @@ def advance(now):
             conn.execute("DELETE FROM vinted_payment_watch WHERE item_id=?", (item,))
             return 0, None
         delay = 2 if age < 10 else (6 if age < 40 else 15)
+        if age >= WINDOW:
+            delay = 120
         conn.execute(
             "UPDATE vinted_payment_watch SET next_check=?,notice=? WHERE item_id=?",
-            (min(now + delay, row["started"] + WINDOW), kind or row["notice"], item),
+            (min(now + delay, row["started"] + FOLLOW_UP), kind or row["notice"], item),
         )
         return 0, item
 
@@ -127,11 +130,15 @@ async def run():
 
     event = asyncio.Event()
     _listener = asyncio.get_running_loop(), event
+    first_check = True
     try:
         while True:
             event.clear()
             try:
                 delay, item = await asyncio.to_thread(advance, time.time())
+                if first_check:
+                    logger.info("Autobuy payment follow-up ready: database verified")
+                    first_check = False
                 if delay == 0:
                     if incidents._wake is not None:
                         incidents._wake.set()

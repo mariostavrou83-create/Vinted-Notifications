@@ -11,7 +11,7 @@ from pathlib import Path
 
 import db
 
-SCHEMA_VERSION = "37"
+SCHEMA_VERSION = "38"
 
 
 def connection():
@@ -50,6 +50,12 @@ def ensure_schema():
                 raise RuntimeError("Database backup failed integrity check")
         with conn:
             conn.execute("BEGIN IMMEDIATE")
+            if version and version[0] == "37":
+                from vinted_buyer import migrate_payment_watch
+
+                migrate_payment_watch(conn)
+                conn.execute("UPDATE parameters SET value=? WHERE key='msj_search_schema'", (SCHEMA_VERSION,))
+                return str(backup)
             conn.execute("""CREATE TABLE IF NOT EXISTS search_preferences (
                 query_id INTEGER PRIMARY KEY REFERENCES queries(id) ON DELETE CASCADE,
                 reminder TEXT NOT NULL DEFAULT '',

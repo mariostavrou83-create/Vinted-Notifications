@@ -1697,6 +1697,7 @@ def buy_checkout_quote(token, *, alert_row=None):
                     total=total,
                     buyer_id=current["user_id"],
                     transaction_id=quote.get("transaction_id"),
+                    watch=((alert_row or {}).get("title"), funding["payment_due"]),
                 )
             payment_started = True
             phase = "submitting payment"
@@ -1974,6 +1975,7 @@ def _buy(row):
                     total=total,
                     buyer_id=current["user_id"],
                     transaction_id=str(transaction_id),
+                    watch=(row.get("title"), payment_due),
                 )
             payment_started = True
             phase = "submitting payment"
