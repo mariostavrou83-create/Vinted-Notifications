@@ -6,33 +6,102 @@ from decimal import Decimal, InvalidOperation
 from statistics import median
 from unicodedata import normalize
 
-
 # Multi-word and specific garment types take precedence over broader names.
 GARMENTS = {
-    "dress": ("dress", "dresses"), "jumpsuit": ("jumpsuit", "playsuit"),
-    "blazer": ("blazer",), "jacket": ("jacket", "bomber", "biker", "shacket"),
-    "coat": ("coat", "parka", "trench"), "cardigan": ("cardigan", "cardi"),
-    "jumper": ("jumper", "sweater", "pullover"), "hoodie": ("hoodie", "hooded sweatshirt"),
-    "waistcoat": ("waistcoat",), "blouse": ("blouse",), "shirt": ("shirt",),
+    "dress": ("dress", "dresses"),
+    "jumpsuit": ("jumpsuit", "playsuit"),
+    "blazer": ("blazer",),
+    "jacket": ("jacket", "bomber", "biker", "shacket"),
+    "coat": ("coat", "parka", "trench"),
+    "cardigan": ("cardigan", "cardi"),
+    "jumper": ("jumper", "sweater", "pullover"),
+    "hoodie": ("hoodie", "hooded sweatshirt"),
+    "waistcoat": ("waistcoat",),
+    "blouse": ("blouse",),
+    "shirt": ("shirt",),
     "top": ("top", "tops", "cami", "tee", "t shirt", "tshirt", "bodysuit", "corset"),
-    "skirt": ("skirt", "skirts"), "shorts": ("shorts",),
-    "jeans": ("jeans",), "trousers": ("trousers", "pants", "capris"),
+    "skirt": ("skirt", "skirts"),
+    "shorts": ("shorts",),
+    "jeans": ("jeans",),
+    "trousers": ("trousers", "pants", "capris"),
 }
-FEATURES = {"leather", "suede", "silk", "wool", "cashmere", "linen", "mesh", "lace",
-            "denim", "satin", "velvet", "bomber", "biker", "cropped", "quilted",
-            "waxed", "fitted", "ribbed", "pinstripe", "cable", "maxi", "midi", "mini",
-            "wrap", "frill", "beaded", "sequin", "embroidered", "shearling"}
-COMMON = {"women", "womens", "ladies", "lady", "mens", "men", "size", "uk", "new",
-          "very", "good", "condition", "vintage", "y2k", "style", "with", "and", "the",
-          "black", "white", "blue", "green", "red", "brown", "pink", "grey", "khaki"}
+FEATURES = {
+    "leather",
+    "suede",
+    "silk",
+    "wool",
+    "cashmere",
+    "linen",
+    "mesh",
+    "lace",
+    "denim",
+    "satin",
+    "velvet",
+    "bomber",
+    "biker",
+    "cropped",
+    "quilted",
+    "waxed",
+    "fitted",
+    "ribbed",
+    "pinstripe",
+    "cable",
+    "maxi",
+    "midi",
+    "mini",
+    "wrap",
+    "frill",
+    "beaded",
+    "sequin",
+    "embroidered",
+    "shearling",
+}
+COMMON = {
+    "women",
+    "womens",
+    "ladies",
+    "lady",
+    "mens",
+    "men",
+    "size",
+    "uk",
+    "new",
+    "very",
+    "good",
+    "condition",
+    "vintage",
+    "y2k",
+    "style",
+    "with",
+    "and",
+    "the",
+    "black",
+    "white",
+    "blue",
+    "green",
+    "red",
+    "brown",
+    "pink",
+    "grey",
+    "khaki",
+}
 UNBRANDED = {"", "unbranded", "no brand", "unknown", "not specified", "other"}
 MAX_MARKET_AGE = 12 * 3600
 PROFIT_TARGET = 1500
 
 
 def words(value):
-    return " ".join(re.findall(r"[a-z0-9]+", normalize("NFKD", str(value or "")).encode(
-        "ascii", "ignore").decode().lower().replace("'", "").replace("’", "")))
+    return " ".join(
+        re.findall(
+            r"[a-z0-9]+",
+            normalize("NFKD", str(value or ""))
+            .encode("ascii", "ignore")
+            .decode()
+            .lower()
+            .replace("'", "")
+            .replace("’", ""),
+        )
+    )
 
 
 def label(value):
@@ -43,8 +112,14 @@ def label(value):
 
 def garment(title):
     text = " " + words(title).replace("t shirt", "tshirt") + " "
-    return next((kind for kind, names in GARMENTS.items()
-                 if any(" " + name + " " in text for name in names)), "")
+    return next(
+        (
+            kind
+            for kind, names in GARMENTS.items()
+            if any(" " + name + " " in text for name in names)
+        ),
+        "",
+    )
 
 
 def market_key(item):
@@ -77,7 +152,7 @@ def timestamp(value):
         return float(value)
     if isinstance(value, str):
         try:
-            date = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            date = datetime.fromisoformat(value)
             return date.timestamp() if date.tzinfo else None
         except (OverflowError, ValueError):
             pass
@@ -88,7 +163,10 @@ def market_listing(raw, currency):
     """Only Scavio's market results enter the cache. Keep no seller contact details."""
     if not isinstance(raw, dict) or raw.get("currency", currency) != "GBP":
         return None
-    if any(raw.get(key) is True for key in ("is_sold", "is_reserved", "sold", "reserved", "is_hidden")):
+    if any(
+        raw.get(key) is True
+        for key in ("is_sold", "is_reserved", "sold", "reserved", "is_hidden")
+    ):
         return None
     title, brand = label(raw.get("title")), label(raw.get("brand"))
     if not title or raw.get("id") is None:
@@ -99,9 +177,16 @@ def market_listing(raw, currency):
         return None
     seller = raw.get("seller")
     seller_id = seller.get("id") if isinstance(seller, dict) else raw.get("seller_id")
-    return dict(id=str(raw["id"]), title=title, brand=brand, size=label(raw.get("size")),
-                condition=label(raw.get("condition")), price=min(price, discounted or price),
-                seller=str(seller_id or ""), listed=timestamp(raw.get("listed_at") or raw.get("created_at")))
+    return {
+        "id": str(raw["id"]),
+        "title": title,
+        "brand": brand,
+        "size": label(raw.get("size")),
+        "condition": label(raw.get("condition")),
+        "price": min(price, discounted or price),
+        "seller": str(seller_id or ""),
+        "listed": timestamp(raw.get("listed_at") or raw.get("created_at")),
+    }
 
 
 def distinctive(item):
@@ -130,12 +215,20 @@ def shortlist(target, listings, now):
     ranked = []
     seen = set()
     for item in listings:
-        if item["id"] == str(target["id"]) or item["id"] in seen or market_key(item) != key:
+        if (
+            item["id"] == str(target["id"])
+            or item["id"] in seen
+            or market_key(item) != key
+        ):
             continue
         title = words(item["title"])
-        if re.search(r"\b(bundle|replica|wanted|iso|kids|childrens|boys|girls)\b", title):
+        if re.search(
+            r"\b(bundle|replica|wanted|iso|kids|childrens|boys|girls)\b", title
+        ):
             continue
-        if re.search(r"\b(mens|men|man)\b", title) and not re.search(r"\b(men|mens)\b", words(target["title"])):
+        if re.search(r"\b(mens|men|man)\b", title) and not re.search(
+            r"\b(men|mens)\b", words(target["title"])
+        ):
             continue
         observed = item.get("listed") or item.get("first_seen")
         if observed and (observed > now + 300 or now - observed > 30 * 86400):
@@ -146,29 +239,58 @@ def shortlist(target, listings, now):
         traits = distinctive(item)
         specific = target_words & traits
         size_matches = bool(target_size and target_size == words(item.get("size")))
-        condition_matches = bool(target_condition and target_condition == words(item.get("condition")))
+        condition_matches = bool(
+            target_condition and target_condition == words(item.get("condition"))
+        )
         distinctive_match = bool(specific & FEATURES or specific - COMMON - FEATURES)
         same_material = not target_fabric or material == target_fabric
         days = max(0, int((now - observed) / 86400)) if observed else None
         weeks_old = days is not None and days >= 14
-        age_band = (f"listed {days} days ago" if item.get("listed") else
-                    f"seen active for at least {days} days" if days else "")
-        score = len(specific) * 2 + len(specific & FEATURES) + size_matches + condition_matches - 2 * weeks_old
-        ranked.append((score, item["id"], dict(item, strong=distinctive_match and same_material,
-                                               long_listed=weeks_old, age_band=age_band)))
+        age_band = (
+            f"listed {days} days ago"
+            if item.get("listed")
+            else f"seen active for at least {days} days" if days else ""
+        )
+        score = (
+            len(specific) * 2
+            + len(specific & FEATURES)
+            + size_matches
+            + condition_matches
+            - 2 * weeks_old
+        )
+        ranked.append(
+            (
+                score,
+                item["id"],
+                dict(
+                    item,
+                    strong=distinctive_match and same_material,
+                    long_listed=weeks_old,
+                    age_band=age_band,
+                ),
+            )
+        )
         seen.add(item["id"])
-    return [item for _, _, item in sorted(ranked, key=lambda hit: (-hit[0], hit[1]))[:10]]
+    return [
+        item for _, _, item in sorted(ranked, key=lambda hit: (-hit[0], hit[1]))[:10]
+    ]
 
 
 def percentile(prices, fraction):
     position = (len(prices) - 1) * fraction
     lower = int(position)
-    return prices[lower] + (prices[min(lower + 1, len(prices) - 1)] - prices[lower]) * (position - lower)
+    return prices[lower] + (prices[min(lower + 1, len(prices) - 1)] - prices[lower]) * (
+        position - lower
+    )
 
 
 def estimate(target, candidates, *, verified=None, approximate=()):
     """Undercut nearby active asks. A single seller cannot supply a confident consensus."""
-    eligible = candidates if verified is None else [candidates[i] for i in (verified or approximate)]
+    eligible = (
+        candidates
+        if verified is None
+        else [candidates[i] for i in (verified or approximate)]
+    )
     independent, sellers = [], set()
     for item in eligible:
         seller = item.get("seller")
@@ -177,24 +299,39 @@ def estimate(target, candidates, *, verified=None, approximate=()):
         independent.append(item)
         if seller:
             sellers.add(seller)
-    strong = [item for item in independent if (item["strong"] if verified is None else bool(verified))]
+    strong = [
+        item
+        for item in independent
+        if (item["strong"] if verified is None else bool(verified))
+    ]
     evidence = strong if strong else independent
     prices = sorted(item["price"] for item in evidence)
-    result = dict(verdict="Not sure", resale_pence=None, profit_pence=None, comparisons=len(prices))
+    result = {
+        "verdict": "Not sure",
+        "resale_pence": None,
+        "profit_pence": None,
+        "comparisons": len(prices),
+    }
     if not prices:
         return result
+
     def undercut(value):
-        return max(50, int((value * .95) // 50) * 50)
-    low, high = undercut(percentile(prices, .25)), undercut(percentile(prices, .75))
-    resale = undercut(percentile(prices, .4))
+        return max(50, int((value * 0.95) // 50) * 50)
+
+    low, high = undercut(percentile(prices, 0.25)), undercut(percentile(prices, 0.75))
+    resale = undercut(percentile(prices, 0.4))
     result["resale_pence"] = resale
     result["verdict"] = "Not confident"
     cost = target.get("total_pence")
     if type(cost) is not int or cost <= 0:
         return result
     result["profit_pence"] = resale - cost
-    confirmed_sellers = {item["seller"] for item in strong if item.get("seller") and not item.get("long_listed")}
-    if len(confirmed_sellers) >= 3 and (high - low) <= median(prices) * .35:
+    confirmed_sellers = {
+        item["seller"]
+        for item in strong
+        if item.get("seller") and not item.get("long_listed")
+    }
+    if len(confirmed_sellers) >= 3 and (high - low) <= median(prices) * 0.35:
         if low - cost > PROFIT_TARGET:
             result["verdict"] = "Yes"
         elif high - cost <= PROFIT_TARGET:
@@ -210,9 +347,13 @@ def alert_line(result):
         return "AI review unavailable · no estimate yet"
     if resale is None:
         return "Not sure · no reliable resale estimate"
+
     def money(n):
         return ("−" if n < 0 else "") + f"£{abs(n) / 100:.2f}"
-    gain = f"est. profit {money(profit)}" if profit is not None else "all-in cost unknown"
+
+    gain = (
+        f"est. profit {money(profit)}" if profit is not None else "all-in cost unknown"
+    )
     verdict = result["verdict"]
     if verdict == "Not confident" and profit is not None:
         verdict += " (likely Yes)" if profit > PROFIT_TARGET else " (likely No)"

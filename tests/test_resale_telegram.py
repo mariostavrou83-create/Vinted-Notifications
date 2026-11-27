@@ -3,27 +3,32 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from test_finds_delivery import outbox
+from test_search_controls import DatabaseFixture
+
 import photo_cards
 import resale_telegram as display
 import telegram_shared_alerts as shared
 import vinted_alerts
-from test_finds_delivery import outbox
-from test_search_controls import DatabaseFixture
-
 
 LINE = "Over £15 profit? Not confident (likely No) · est. profit £11.00 · est. resale £24.00"
 
 
 def receipt(chat, number, markup=None):
-    return SimpleNamespace(message_id=number, chat=SimpleNamespace(id=chat),
-                           photo=[SimpleNamespace(file_id="test-photo")], caption_html="<b>Jacket</b>",
-                           reply_markup=markup, edit_caption=AsyncMock(return_value=True))
+    return SimpleNamespace(
+        message_id=number,
+        chat=SimpleNamespace(id=chat),
+        photo=[SimpleNamespace(file_id="test-photo")],
+        caption_html="<b>Jacket</b>",
+        reply_markup=markup,
+        edit_caption=AsyncMock(return_value=True),
+    )
 
 
 class TelegramResaleTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         display.configure(True)
-        self.group = shared.Group(-100, 123, 456, "test", 0.)
+        self.group = shared.Group(-100, 123, 456, "test", 0.0)
         self.addAsyncCleanup(display.close)
 
     async def drain(self):
@@ -61,7 +66,9 @@ class TelegramResaleTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertIn("Did you get it?", group["caption"])
         self.assertEqual(display.group_body("110", group["caption"]).count(LINE), 1)
 
-    async def test_late_group_receipt_still_gets_result_and_revoked_group_gets_no_edit(self):
+    async def test_late_group_receipt_still_gets_result_and_revoked_group_gets_no_edit(
+        self,
+    ):
         display.publish(200, LINE)
         display.finish_sample()
         late = receipt(self.group.chat, 30)
@@ -77,7 +84,9 @@ class TelegramResaleTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         display.remember(201, receipt(self.group.chat, 32), group=self.group)
         self.assertNotIn(("201", "group"), display._messages)
 
-    async def test_already_priced_group_copy_needs_no_edit_and_shadow_mode_is_silent(self):
+    async def test_already_priced_group_copy_needs_no_edit_and_shadow_mode_is_silent(
+        self,
+    ):
         display.restore_lines([("303", LINE)])
         msg = receipt(self.group.chat, 40)
         msg.caption_html = display.group_body("303", msg.caption_html)
