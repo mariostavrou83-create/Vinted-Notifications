@@ -82,6 +82,8 @@ def message_text(message):
 
 def initial_price(message):
     footer = message_text(message).rpartition("\nTotal: ")[2]
+    if "\nEst. resell: Checking this item" in footer:
+        return "pending"
     if "\nEst. resell: £" in footer:
         return "priced"
     return "unknown" if "\nConf: " in footer else "absent"

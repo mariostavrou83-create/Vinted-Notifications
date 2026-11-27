@@ -17,6 +17,7 @@ from resale_pricing import (
     estimate,
     market_key,
     market_listing,
+    search_key,
     shortlist,
 )
 
@@ -241,9 +242,7 @@ class ReviewFlow(unittest.IsolatedAsyncioTestCase):
                 transport=httpx.MockTransport(model)
             ) as client:
                 with patch.object(sampler, "LIMIT", 1):
-                    await sampler.sample_loop(
-                        receipts, live, cache, client, "test", [], asyncio.Event()
-                    )
+                    await sampler.sample_loop(receipts, live, cache, client, "test")
                     self.assertFalse(sampler.reserve_item(cache, "101", "home"))
             summary = sampler.sample_summary(cache)
             self.assertEqual(
@@ -373,14 +372,14 @@ class ReviewFlow(unittest.IsolatedAsyncioTestCase):
                 await pilot.warm([alert("104")], db, client, "test", 1)
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(
-                    pilot.cached_listings(db, market_key(alert()), time.time())[0][
+                    pilot.cached_listings(db, search_key(alert()), time.time())[0][
                         "price"
                     ],
                     2600,
                 )
                 self.assertIsNone(
                     pilot.cached_listings(
-                        db, market_key(alert()), time.time() + MAX_MARKET_AGE + 1
+                        db, search_key(alert()), time.time() + MAX_MARKET_AGE + 1
                     )
                 )
                 db.executemany(
@@ -392,7 +391,7 @@ class ReviewFlow(unittest.IsolatedAsyncioTestCase):
                     pilot.reserve_search(db, ("another", "jacket"), time.time())
                 )
 
-    async def test_market_outage_and_empty_market_still_show_a_rough_estimate(self):
+    async def test_market_outage_and_empty_market_do_not_invent_an_item_price(self):
         with tempfile.TemporaryDirectory() as tmp, pilot.market_cache(
             Path(tmp) / "cache"
         ) as db:
@@ -413,8 +412,8 @@ class ReviewFlow(unittest.IsolatedAsyncioTestCase):
                 output = Path(tmp) / "cold.jsonl"
                 await pilot.evaluate([alert()], db, client, "test", None, output)
                 cold = json.loads(output.read_text())
-                self.assertEqual(cold["review"]["basis"], "category")
-                self.assertEqual(cold["review"]["resale_pence"], 1200)
+                self.assertEqual(cold["review"]["basis"], "insufficient")
+                self.assertIsNone(cold["review"]["resale_pence"])
                 db.execute(
                     "INSERT INTO market VALUES(?,?,?)",
                     (pilot.encoded(market_key(alert())), time.time(), "[]"),

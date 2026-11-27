@@ -6,24 +6,24 @@ import logging
 import os
 import sqlite3
 import time
-from collections import deque
 from contextlib import closing
 from pathlib import Path
 
 import httpx
 
 from resale_pilot import (
+    MARKET_SECONDS,
+    TRIAL_SEARCH_LIMIT,
     cached_listings,
     encoded,
     evaluate_one,
     export_alerts,
     market_cache,
+    market_pool,
     warm,
 )
 from resale_pricing import (
-    cache_guide,
-    forget_reference,
-    market_key,
+    search_key,
     shortlist,
     valuation_text,
 )
@@ -40,7 +40,6 @@ def active():
 def accepted(identity, cover=None, message=None):
     """No network, DB, image processing or awaits on the initial Telegram delivery path."""
     if _receipts is not None:
-        forget_reference(identity)
         # A burst can queue lightweight identities, but never an unbounded pile of photos.
         _receipts.put_nowait(
             (str(identity), cover if _receipts.qsize() < 16 else None, time.monotonic())
@@ -57,12 +56,15 @@ def independent_items(path, rows):
         return []
     uri = Path(path).resolve().as_uri() + "?mode=ro"
     with closing(sqlite3.connect(uri, uri=True, timeout=0.2)) as conn:
-        parameters = ",".join("?" for _ in rows)
-        seen = conn.execute(
-            f"SELECT item_id FROM alert_outbox WHERE item_id IN ({parameters})",
-            [row["id"] for row in rows],
-        )
-        alerted = {str(row[0]) for row in seen}
+        alerted = set()
+        for pos in range(0, len(rows), 400):
+            block = [row["id"] for row in rows[pos : pos + 400]]
+            parameters = ",".join("?" for _ in block)
+            hits = conn.execute(
+                f"SELECT item_id FROM alert_outbox WHERE item_id IN ({parameters})",
+                block,
+            )
+            alerted.update(str(row[0]) for row in hits)
     return [row for row in rows if row["id"] not in alerted]
 
 
@@ -81,20 +83,61 @@ def sample_table(conn):
     conn.commit()
 
 
-async def load_guides(conn, database, since):
-    rows = conn.execute(
-        "SELECT query,fetched_at,listings FROM market WHERE fetched_at>=?", (since,)
-    ).fetchall()
-    for group, observed, items in rows:
+class MarketLookups:
+    """Share a market request across similar garments, never a valuation or decision."""
+
+    def __init__(self, conn, client, token):
+        self.conn = conn
+        self.client = client
+        self.token = token
+        self.running = {}
+
+    async def get(self, target):
+        key = search_key(target)
+        if not key or not self.token:
+            return "unavailable"
+        if cached_listings(self.conn, key, time.time()) is not None:
+            return "cached"
+        task = self.running.get(key)
+        if task is None:
+            task = asyncio.create_task(self.fetch(target))
+            self.running[key] = task
         try:
-            independent = await asyncio.to_thread(
-                independent_items, database, json.loads(items)
-            )
-            cache_guide(tuple(json.loads(group)), independent, observed)
-        except (ValueError, KeyError, TypeError, sqlite3.Error) as exc:
-            logger.info(
-                "Saved resale prices unavailable for one group: %s", type(exc).__name__
-            )
+            return await task
+        finally:
+            if self.running.get(key) is task and task.done():
+                del self.running[key]
+
+    async def fetch(self, target):
+        try:
+            async with asyncio.timeout(MARKET_SECONDS):
+                result = await warm(
+                    [target],
+                    self.conn,
+                    self.client,
+                    self.token,
+                    1,
+                    pilot_limit=TRIAL_SEARCH_LIMIT,
+                )
+        except TimeoutError:
+            return "timeout"
+        if result["market_groups_refreshed"]:
+            return "refreshed"
+        if result["search_requests"]:
+            return "unavailable"
+        used = self.conn.execute(
+            "SELECT used FROM pilot_search_budget WHERE id=1"
+        ).fetchone()
+        return (
+            "allowance_used" if used and used[0] >= TRIAL_SEARCH_LIMIT else "deferred"
+        )
+
+
+async def item_candidates(target, database, conn):
+    now = time.time()
+    pool = market_pool(conn, target, now)
+    independent = await asyncio.to_thread(independent_items, database, pool)
+    return shortlist(target, independent, now)
 
 
 def reserve_item(conn, identity, source, *, continuous=False):
@@ -126,9 +169,7 @@ async def sample_loop(
     conn,
     client,
     token,
-    recent,
-    refresh_needed,
-    market_token=None,
+    lookups=None,
     *,
     continuous=False,
 ):
@@ -161,22 +202,21 @@ async def sample_loop(
             ):
                 continue
             target = alerts[0]
-            recent.append(target)
-            key = market_key(target)
-            entries = cached_listings(conn, key, time.time())
-            older_snapshot = False
-            if entries is None and key and market_token:
-                refresh_needed.set()
-            if entries is None and key:
-                entries = cached_listings(conn, key, time.time(), max_age=7 * 86400)
-                older_snapshot = bool(entries)
-            rows = await asyncio.to_thread(independent_items, database, entries or [])
-            candidates = shortlist(target, rows, time.time())
+            candidates = await item_candidates(target, database, conn)
+            close_sellers = {
+                c["seller"]
+                for c in candidates
+                if c.get("seller") and c["strong"] and not c["long_listed"]
+            }
+            market_state = "cached" if candidates else "unavailable"
+            if lookups and len(close_sellers) < 3:
+                market_state = await lookups.get(target)
+                if market_state == "refreshed":
+                    # This alert gets to use the prices its own search just found.
+                    candidates = await item_candidates(target, database, conn)
             baseline, review, path = await evaluate_one(
                 target, candidates, conn, client, token, cover_bytes=cover
             )
-            if older_snapshot and review.get("comparisons"):
-                review = dict(review, verdict="Not confident", basis="saved")
             elapsed = round((time.monotonic() - started) * 1000)
             display = valuation_text(review)
             with conn:
@@ -197,13 +237,16 @@ async def sample_loop(
 
             publish(identity, display)
             logger.info(
-                "Resale trial observation source=%s path=%s verdict=%s elapsed_ms=%d basis=%s priced=%s",
+                "Resale trial observation source=%s path=%s verdict=%s elapsed_ms=%d basis=%s priced=%s market=%s candidates=%d comparisons=%d",
                 target["source"],
                 path,
                 review["verdict"],
                 elapsed,
                 review.get("basis", "comparisons"),
                 review.get("resale_pence") is not None,
+                market_state,
+                len(candidates),
+                review.get("comparisons", 0),
             )
             if (
                 reporting
@@ -259,6 +302,7 @@ async def run(database):
             recent_reviews = conn.execute(
                 """SELECT item_id,reviewed FROM resale_sample
                 WHERE status!='running' AND json_valid(reviewed)
+                AND COALESCE(json_extract(reviewed,'$.basis'),'comparisons') != 'category'
                 AND json_type(reviewed,'$.resale_pence')='integer' ORDER BY sampled DESC LIMIT ?""",
                 (LIMIT,),
             )
@@ -266,40 +310,12 @@ async def run(database):
                 (identity, valuation_text(json.loads(data)))
                 for identity, data in recent_reviews
             )
-            recent = deque(maxlen=32)
             async with httpx.AsyncClient(
                 follow_redirects=False, trust_env=False, timeout=4
             ) as client:
-                refresh_needed = asyncio.Event()
-
-                # Keep up to 50 paid lookups for the first pilot. Persist the allowance across restarts.
-                async def refresh():
-                    await load_guides(conn, database, time.time() - 7 * 86400)
-                    while True:
-                        await refresh_needed.wait()
-                        refresh_needed.clear()
-                        used = conn.execute(
-                            "SELECT COALESCE(MAX(used),0) FROM pilot_search_budget"
-                        ).fetchone()[0]
-                        if used >= 50:
-                            return
-                        # Spend a limited lookup only on a garment that just triggered an alert.
-                        started = time.time()
-                        outcome = await warm(
-                            list(reversed(recent)),
-                            conn,
-                            client,
-                            market_token,
-                            1,
-                            pilot_limit=50,
-                        )
-                        if outcome["market_groups_refreshed"]:
-                            await load_guides(conn, database, started)
-                        await asyncio.sleep(15)
-
+                lookups = MarketLookups(conn, client, market_token)
                 receipts = asyncio.Queue()
                 _receipts = receipts
-                refill = asyncio.create_task(refresh())
                 workers = []
                 try:
                     logger.info(
@@ -313,9 +329,7 @@ async def run(database):
                                 conn,
                                 client,
                                 model_token,
-                                recent,
-                                refresh_needed,
-                                market_token,
+                                lookups,
                                 continuous=True,
                             )
                         )
@@ -325,9 +339,9 @@ async def run(database):
                 finally:
                     _receipts = None
                     resale_telegram.finish_sample()
-                    for task in [refill, *workers]:
+                    for task in workers:
                         task.cancel()
-                    await asyncio.gather(refill, *workers, return_exceptions=True)
+                    await asyncio.gather(*workers, return_exceptions=True)
     except (OSError, ValueError, sqlite3.Error, httpx.HTTPError) as exc:
         logger.warning("Resale trial unavailable: %s", type(exc).__name__)
 
