@@ -535,6 +535,7 @@ def markup(row, state=None, stop=None, *, progress=None):
 
 
 async def send(bot, group, row):
+    import resale_telegram
     import vinted_alerts
     import vinted_buying
 
@@ -546,20 +547,22 @@ async def send(bot, group, row):
         finish(row, failed=True)
         return
     state = (vinted_buying.result(row["item_id"]) or {}).get("state")
+    body = resale_telegram.group_body(row["item_id"], row["body"])
     common = dict(chat_id=group.chat, parse_mode="HTML", reply_markup=markup(row, state), **photo_cards.TIMEOUTS)
     try:
         response = None
         if row["photo_id"]:
             try:
                 response = await bot.send_photo(
-                    **common, photo=row["photo_id"], caption=row["body"], show_caption_above_media=True
+                    **common, photo=row["photo_id"], caption=body, show_caption_above_media=True
                 )
             except BadRequest:
                 pass  # The cached file or caption was rejected; preserve the deal link.
         if not response and current() == group:
-            response = await bot.send_message(**common, text=row["body"], link_preview_options=LinkPreviewOptions(is_disabled=True))
+            response = await bot.send_message(**common, text=body, link_preview_options=LinkPreviewOptions(is_disabled=True))
         if response:
             finish(row, message_id=response.message_id)
+            resale_telegram.remember(row["item_id"], response, group=group)
             logger.info("Telegram accepted shared Vinted alert")
         else:
             finish(row, failed=True)

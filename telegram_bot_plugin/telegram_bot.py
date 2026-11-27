@@ -529,6 +529,9 @@ class LeRobot:
         self._shared_task = asyncio.create_task(
             shared.run(application.bot), name="vinted-shared-telegram-delivery"
         )
+        if os.getenv("FINDER_RESALE_PILOT") == "1":
+            from resale_sampler import run as sample_resale
+            self._resale_task = asyncio.create_task(sample_resale(db.DB_PATH), name="vinted-resale-pilot")
         from vinted_connection_notices import ConnectionNotifier
         from vinted_session_worker import run as maintain_buyer_session
 
@@ -571,6 +574,7 @@ class LeRobot:
             running
             for running in (task, maintenance, owner_controls, incidents,
                             getattr(self, "_home_buy_task", None), getattr(self, "_shared_task", None),
+                            getattr(self, "_resale_task", None),
                             getattr(self, "_payment_watch_task", None))
             if running is not None
         ]
@@ -578,6 +582,10 @@ class LeRobot:
             running.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        if getattr(self, "_resale_task", None) is not None:
+            from resale_telegram import close as close_resale_edits
+            await close_resale_edits()
+            self._resale_task = None
         if worker is not None:
             # Photo edits run separately from the listing dispatcher. Cancel
             # these too; durable leases make unfinished alerts recoverable.

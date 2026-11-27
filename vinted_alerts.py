@@ -2,6 +2,7 @@
 
 import json
 import math
+import os
 import time
 from contextlib import closing
 from html import escape
@@ -224,6 +225,11 @@ def snapshot(item, search):
         "description": clean_description(raw_description),
         "description_pending": True,
     }
+    if os.getenv("FINDER_RESALE_PILOT") == "1":
+        from resale_pricing import label
+        raw = getattr(item, "raw_data", None) or {}
+        result["resale_size"] = label(getattr(item, "size_title", None))
+        result["resale_condition"] = label(raw.get("condition") or raw.get("status"))
     if required_keywords(search):
         keyword_description, description_complete = description_text(raw_description)
         result.update(
@@ -245,7 +251,9 @@ def recap(row, details):
         )
     total = (budget or {}).get("total")
     estimate = f"£{total / 100:.2f}" if type(total) is int else "Unavailable"
-    return f"<b>{title}</b>\nBrand: {brand}\nEst. total incl. shipping: <b>{estimate}</b>"
+    summary = f"<b>{title}</b>\nBrand: {brand}\nEst. total incl. shipping: <b>{estimate}</b>"
+    line = details.get("resale_line")
+    return summary + "\n" + escape(line) if line else summary
 
 
 def sections(row, details):

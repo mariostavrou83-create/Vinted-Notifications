@@ -8,6 +8,7 @@ reference-photo failure. A crashed worker's lease expires automatically.
 
 import asyncio
 import io
+import os
 import secrets
 import time
 from contextlib import closing
@@ -306,6 +307,9 @@ class DeliveryWorker:
                 send_started = time.monotonic()
                 result = await self.send_listing(row)
                 finish(row, message_id=result.message_id, now=now, listing_message=result)
+                if self.platform == "vinted" and os.getenv("FINDER_RESALE_PILOT") == "1":
+                    from resale_sampler import accepted
+                    accepted(row["item_id"], row.pop("_resale_cover", None), result)
                 self.preferred_photo = row["item_id"]
                 logger.info(
                     "Telegram accepted item %s; message_id=%s; outbox-to-accepted %.3fs; send %.3fs; source=%s",
