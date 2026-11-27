@@ -1,3 +1,30 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light"><title>MSJ · Finder</title><link rel="stylesheet" href="{{ url_for('static',filename='msj.css',v=asset_version) }}">{% if request.endpoint=='offers_page' %}<link rel="stylesheet" href="{{ url_for('static',filename='msj_offers.css',v=asset_version) }}">{% endif %}<script src="{{ url_for('static',filename='msj.js',v=asset_version) }}" defer></script><link rel="stylesheet" href="{{url_for('static',filename='msj_workspace.css',v=asset_version)}}"></head><body>
-<header class="topbar"><a class="brand" href="/" aria-label="MSJ Finder home"><span class="monogram">msj<span>•</span></span><span class="brand-name">FINDER</span></a><div class="top-right"><span class="private-label">YOUR PRIVATE FINDER</span>{% if session.get('owner') %}<form method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="text-button">Sign out</button></form>{% endif %}</div></header>
-{% if session.get('owner') %}<nav class="main-nav" aria-label="Main navigation"><a class="{{'selected' if request.endpoint in ('dashboard','edit')}}" href="/">My searches</a><a class="{{'selected' if request.endpoint=='sourcing_page'}}" href="/sourcing">Daily sourcing</a><a class="{{'selected' if request.endpoint=='vinted_home_page'}}" href="/vinted-home">Vinted Home</a><a class="{{'selected' if request.endpoint=='finds'}}" href="/finds">Recent Finds</a><a class="{{'selected' if request.endpoint=='offers_page'}}" href="/offers">Offers</a><a class="{{'selected' if request.endpoint=='order_messages_page'}}" href="/messages">Messages</a><a class="{{'selected' if request.endpoint=='connections'}}" href="/connections">Connections</a><a class="{{'selected' if request.endpoint=='folders'}}" href="/folders">Folders</a></nav>{% endif %}<main>{% with messages=get_flashed_messages(with_categories=true) %}{% for kind,message in messages %}<div class="notice {{kind}}" role="status">{{message}}</div>{% endfor %}{% endwith %}{% block content %}{% endblock %}</main><footer>MSJ FINDER <span>Find it here. Get the alert on Telegram.</span></footer></body></html>
+{% set selling_settings = request.endpoint == 'connections' and request.args.get('account') == 'selling' %}
+{% set selling = selling_settings or request.endpoint in ('offers_page', 'order_messages_page') %}
+<header class="topbar">
+  <a class="brand" href="{{ '/offers' if selling else '/' }}" aria-label="MSJ Finder home"><span class="monogram">msj<span>•</span></span><span class="brand-name">FINDER</span></a>
+  {% if session.get('owner') %}
+  <nav class="dashboard-switch" aria-label="Choose dashboard">
+    <a href="/" {% if not selling %}aria-current="true"{% endif %}>Buying</a>
+    <a href="/offers" {% if selling %}aria-current="true"{% endif %}>Selling</a>
+  </nav>
+  <div class="top-right"><form method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="text-button">Sign out</button></form></div>
+  {% endif %}
+</header>
+{% if session.get('owner') %}
+<nav class="main-nav" aria-label="{{ 'Selling' if selling else 'Buying' }} navigation">
+  {% if selling %}
+  <a class="{{'selected' if request.endpoint=='offers_page'}}" href="/offers">Offers &amp; favourites</a>
+  <a class="{{'selected' if request.endpoint=='order_messages_page'}}" href="/messages">Order messages</a>
+  <a class="{{'selected' if selling_settings}}" href="/connections?account=selling#vinted-selling">Selling account</a>
+  {% else %}
+  <a class="{{'selected' if request.endpoint in ('dashboard','edit')}}" href="/">My searches</a>
+  <a class="{{'selected' if request.endpoint=='sourcing_page'}}" href="/sourcing">Daily sourcing</a>
+  <a class="{{'selected' if request.endpoint=='vinted_home_page'}}" href="/vinted-home">Vinted Home</a>
+  <a class="{{'selected' if request.endpoint=='finds'}}" href="/finds">Recent Finds</a>
+  <a class="{{'selected' if request.endpoint=='connections'}}" href="/connections">Connections</a>
+  <a class="{{'selected' if request.endpoint=='folders'}}" href="/folders">Folders</a>
+  {% endif %}
+</nav>
+{% endif %}
+<main>{% with messages=get_flashed_messages(with_categories=true) %}{% for kind,message in messages %}<div class="notice {{kind}}" role="status">{{message}}</div>{% endfor %}{% endwith %}{% block content %}{% endblock %}</main><footer>MSJ FINDER {% if not selling %}<span>Find it here. Get the alert on Telegram.</span>{% endif %}</footer></body></html>

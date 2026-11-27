@@ -278,5 +278,20 @@ class AccountRoutesTests(DatabaseFixture, unittest.TestCase):
         page = self.client.get("/connections").data
         self.assertNotIn(ACCESS.encode(), page)
         self.assertNotIn(REFRESH.encode(), page)
-        self.assertIn(b"Vinted selling account", page)
+        self.assertNotIn(b'id="vinted-selling"', page)
         self.assertIn(b"Vinted buying account", page)
+
+    def test_dashboard_sections_have_separate_navigation_and_connection_forms(self):
+        test_dashboard.DashboardTests.owner(self)
+        for path in ("/offers", "/messages", "/connections?account=selling"):
+            page = self.client.get(path)
+            self.assertEqual(page.status_code, 200)
+            self.assertIn(b'aria-label="Selling navigation"', page.data)
+            self.assertNotIn(b'href="/vinted-home"', page.data)
+        selling = self.client.get("/connections?account=selling").data
+        self.assertIn(b'id="vinted-selling"', selling)
+        self.assertNotIn(b'id="vinted-buying"', selling)
+        buying = self.client.get("/").data
+        self.assertIn(b'aria-label="Buying navigation"', buying)
+        self.assertIn(b'href="/vinted-home"', buying)
+        self.assertNotIn(b'href="/messages"', buying)

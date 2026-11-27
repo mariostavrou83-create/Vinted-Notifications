@@ -1,42 +1,22 @@
 <div class="guide-section platform-editor" data-shared-alert>
 <input type="hidden" name="shared_alert_version" value="1">
-<h2>Where to search</h2>
-<label for="platform_mode">Platforms for this search</label>
-<select id="platform_mode" name="platform_mode">
-{% for mode,label in [('vinted','Vinted only'),('ebay','eBay only'),('both','Vinted + eBay')] %}<option value="{{mode}}" {{'selected' if row.platform_mode==mode}}>{{label}}</option>{% endfor %}
-</select>
-<p class="shared-note">Two links. One set of keywords, exclusions, budget, notes and example photos.</p>
 
 <label for="query">Vinted search link</label>
-<textarea id="query" name="query" rows="3" maxlength="6000" placeholder="https://www.vinted.co.uk/catalog?…" {{'required' if row.platform_mode in ('vinted','both')}}>{{row.query}}</textarea>
+<textarea id="query" name="query" rows="3" maxlength="6000" placeholder="https://www.vinted.co.uk/catalog?…" required>{{row.query}}</textarea>
 <small>Choose brand, category, sizes and condition on Vinted, leave its search box empty, then paste the results link. Set your price below.</small>
-<p class="platform-disabled" data-shared-disabled="vinted" {{'hidden' if row.platform_mode in ('vinted','both')}}>Vinted is off for this search. Its link is optional until you enable it.</p>
-
-<label for="ebay_search_url">eBay search link</label>
-<textarea id="ebay_search_url" name="ebay_search_url" rows="3" maxlength="6000" placeholder="Paste your full eBay UK results or category link" {{'required' if row.platform_mode in ('ebay','both')}}>{{row.ebay.search_url}}</textarea>
-<small>Choose your filters on eBay UK, then paste the full address you see. Search-results links and category links (/b/…) work; category links are converted automatically when you save. Your shared keywords replace eBay's search text. Unsupported or unreadable filters block saving so nothing is silently dropped.</small>
-<button type="button" id="preview-ebay-link" class="secondary">Read link &amp; preview filters</button>
-<p id="ebay-import-feedback" role="status" class="muted"></p>
-<ul id="ebay-import-summary">{% for line in imported_summary %}<li>{{line}}</li>{% endfor %}</ul>
-<p class="platform-disabled" data-shared-disabled="ebay" {{'hidden' if row.platform_mode in ('ebay','both')}}>eBay is off for this search. Its link is optional until you enable it.</p>
-{% if ebay_connection.missing %}<small>To receive eBay alerts, <a href="/connections" target="_blank" rel="noopener">set up the eBay connection ↗</a>.</small>{% endif %}
 
 <label for="shared_keywords">Keyword alternatives <span>optional</span></label>
 <textarea id="shared_keywords" name="shared_keywords" rows="3" maxlength="2000" placeholder="fur, sherpa, fur hood">{{row.shared_keywords|default([])|join('\n')}}</textarea>
-<small>Separate alternatives with commas or new lines. The same alternatives apply to both platforms and replace search text in both links. At least one alternative must occur in the title or seller description before an alert is sent. Matching is case-insensitive and uses whole words; multiword phrases stay together. If the title does not match, seller details must be verified first. Leave blank to use your link filters without search text. Up to 20 alternatives; the combined eBay query must fit 100 characters.</small>
-<p id="shared-keyword-summary" class="shared-note" aria-live="polite"></p>
-<small>New searches start with a quiet first check. A matching item alerts once per platform. After saving, select this search in Connections → Your live eBay searches to run eBay checks.</small>
-{% if row.id and row.ebay_enabled %}<div class="guide-section"><button type="button" class="secondary" id="check-saved-ebay" data-url="/search/{{row.id}}/check-ebay">Check saved eBay search</button><small>Uses one API call. Tests saved links, keywords, exclusions and budget, not unsaved changes. Shows existing catalogue samples and rejection reasons; sends no Telegram alerts.</small><div id="ebay-check-result" role="status"></div></div>{% endif %}
+<small>Enter up to 20 keyword alternatives, separated by commas or new lines. A match in the title or seller description qualifies. Leave blank to use the filters in your Vinted link.</small>
 
 <label for="exclusions">Words or phrases to exclude <span>optional</span></label>
 <textarea id="exclusions" name="exclusions" rows="3" placeholder="teddy&#10;cropped&#10;faux leather">{{row.exclusions|join('\n')}}</textarea>
-<small>One phrase per line. Applies to listing titles on both platforms.</small>
+<small>One phrase per line. Applies to listing titles.</small>
 
 <label for="vinted_max_total">Maximum total including fees &amp; postage (£)</label>
 <input id="vinted_max_total" name="vinted_max_total" type="number" min="1" max="1000" step="0.01" inputmode="decimal" value="{{prices.vinted_max_total}}" placeholder="e.g. 20.00" required>
-<small>One maximum for both platforms and all your keywords. This replaces price limits in both links.</small>
+<small>The maximum applies to all keyword alternatives and replaces the price limits in the search link.</small>
 <small>Vinted alert estimate: supplied buyer-protection-inclusive price + £2.20 estimated postage. If protection is unavailable, the fallback is item price + 5% + £0.70 + £2.20 postage. {% if autobuy_shipping_maximum %}When you tap Autobuy, the item must be at or below its alert price and shipping must be under £5. Vinted fees can take the total above the estimate.{% else %}Autobuy checks the actual complete checkout total before payment and stops if it exceeds your maximum.{% endif %}</small>
-<small>eBay alert estimate: listing price + supplied postage, with a conservative Buyer Protection allowance for private or unconfirmed seller types. This can overestimate API prices that already include the fee and skip borderline items. Listings with unknown postage are skipped. Auction prices can rise.</small>
 
 <label for="reminder">Buying &amp; resale notes <span>optional</span></label>
 <textarea id="reminder" name="reminder" rows="4" maxlength="800" placeholder="Aim to resell for £50–£65. Look for a full fur hood, fitted waist and the older label.">{{row.reminder}}</textarea>
