@@ -257,7 +257,7 @@ class RichWorkerTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Check &lt;label&gt;", html)
         self.assertNotIn("Your buying guide", html)
         self.assertNotIn("Your buying reminder", html)
-        self.assertLess(html.index("Est. total incl. shipping"), html.index("id=listing"))
+        self.assertLess(html.index("Total:"), html.index("id=listing"))
         self.assertNotIn("listing:guide", str(call.kwargs["api_kwargs"]["reply_markup"]))
         first = self.bot.send_message.await_args_list[0].kwargs
         self.assertNotIn("Your buying reminder", first["text"])

@@ -1,4 +1,5 @@
 import asyncio
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -27,6 +28,7 @@ def receipt(chat, number, markup=None):
 
 class TelegramResaleTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        self.enterContext(patch.dict(os.environ, {"FINDER_RESALE_PILOT": "1", "FINDER_RESALE_SHADOW_ONLY": "0"}))
         display.configure(True)
         self.group = shared.Group(-100, 123, 456, "test", 0.0)
         self.addAsyncCleanup(display.close)
@@ -53,18 +55,33 @@ class TelegramResaleTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             display.publish("110", LINE)
             await self.drain()
         private = owner.edit_caption.await_args.kwargs
-        self.assertIn(LINE, private["caption"])
+        self.assertIn("Est. resell: £24.00", private["caption"])
         self.assertEqual(private["reply_markup"], original_controls)
         self.assertTrue(private["show_caption_above_media"])
         saved_row, saved_details, _ = photo_cards.load("vinted", 40)
         self.assertEqual(saved_details["resale_line"], LINE)
-        self.assertIn(LINE, photo_cards.captions(saved_row, saved_details)[0])
+        self.assertIn("Est. resell: £24.00", photo_cards.captions(saved_row, saved_details)[0])
+        with patch.dict(os.environ, {"FINDER_RESALE_PILOT": "0"}):
+            self.assertNotIn("Est. resell:", photo_cards.captions(saved_row, saved_details)[0])
         group_message.edit_caption.assert_not_awaited()
         group = updated.edit_caption.await_args.kwargs
         self.assertTrue(group["show_caption_above_media"])
         self.assertEqual(group["reply_markup"], updated.reply_markup)
         self.assertIn("Did you get it?", group["caption"])
         self.assertEqual(display.group_body("110", group["caption"]).count(LINE), 1)
+
+    def test_disabled_group_copy_removes_only_its_old_valuation(self):
+        display.configure(False)
+        recap = "Title: <b>Jacket</b>\nBrand: Sample\nTotal: <b>£10.50</b>"
+        result = "\nEst. profit: Pending\nEst. resell: Checking this item…\nBuy: Pending\nConf: Pending"
+        seller = "<b>Seller description</b>\nEst. profit: mentioned by seller"
+        status = "\n\nAutobuy progress\nChecking pickup"
+        self.assertEqual(
+            display.group_body("103", seller + "\n\n" + recap + result + status),
+            seller + "\n\n" + recap + status,
+        )
+        legacy = "<b>Jacket</b>\nBrand: Sample\nEst. total incl. shipping: £10.50"
+        self.assertEqual(display.group_body("103", legacy + "\n" + LINE), legacy)
 
     async def test_late_group_receipt_still_gets_result_and_revoked_group_gets_no_edit(
         self,

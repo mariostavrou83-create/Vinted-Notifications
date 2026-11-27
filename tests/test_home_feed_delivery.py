@@ -178,7 +178,7 @@ class HomeOutboxTests(DatabaseFixture, unittest.TestCase):
         from photo_cards import captions
         from vinted_native import caption
 
-        footer = "<b>Fresh vintage item</b>\nBrand: Brand\nEst. total incl. shipping: <b>£11.30</b>"
+        footer = "Title: <b>Fresh vintage item</b>\nBrand: Brand\nTotal: <b>£11.30</b>"
         self.assertTrue(vinted_alerts.text_message(row, details).endswith(footer))
         self.assertTrue(captions(row, details)[0].endswith(footer))
         self.assertTrue(caption(row, details).endswith(footer))
