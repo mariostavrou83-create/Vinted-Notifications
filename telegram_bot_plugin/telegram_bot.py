@@ -99,8 +99,11 @@ class LeRobot:
                 "start", shared.share_command, filters=filters.ChatType.GROUPS & filters.Regex(shared.GROUP_START)
             ))
             self.app.add_handler(CommandHandler("share_alerts", shared.share_command))
+            self.app.add_handler(CommandHandler("join_alerts", shared.join_command, filters=filters.ChatType.GROUPS))
             self.app.add_handler(CommandHandler("stop_sharing", shared.stop_command))
+            self.app.add_handler(CallbackQueryHandler(shared.approve_join, pattern=shared.APPROVE_PATTERN))
             self.app.add_handler(CallbackQueryHandler(shared_buy, pattern=shared.BUY_PATTERN))
+            logger.info("Telegram shared group approvals ready")
             self.app.add_handler(MessageHandler(
                 filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.StatusUpdate.LEFT_CHAT_MEMBER
                 | filters.StatusUpdate.MIGRATE, shared.members_changed,

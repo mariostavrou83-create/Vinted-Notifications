@@ -19,9 +19,13 @@ from search_settings import connection
 
 logger = get_logger(__name__)
 KEY = "telegram_shared_alert_group"
+JOIN_PREFIX = "telegram_shared_join:"
+JOIN_LIFETIME = 15 * 60
 GROUP_TYPES = {"group", "supergroup"}
 BUY_PATTERN = r"^shared:(?:buy|status|stop:[0-9a-f]{16})$"
+APPROVE_PATTERN = r"^shared:approve:([0-9a-f]{32})$"
 SETUP_COMMAND = re.compile(r"^/share_alerts(?:@\w+)?\s*$", re.I)
+JOIN_COMMAND = re.compile(r"^/join_alerts(?:@\w+)?\s*\Z", re.I)
 GROUP_START = re.compile(r"^/start(?:@\w+)?\s+shared_alerts\s*\Z", re.I)
 PRIVATE_COMMAND = re.compile(r"^/(start|share_alerts|purchase_status)(?:@(\w+))?\Z", re.I)
 
@@ -32,6 +36,14 @@ class Group(NamedTuple):
     partner: int
     version: str
     linked_at: float
+
+
+class JoinRequest(NamedTuple):
+    owner: int
+    partner: int
+    name: str
+    token: str
+    expires_at: float
 
 
 def current(conn=None):
@@ -56,9 +68,31 @@ def current(conn=None):
     return None
 
 
-def save_group(chat, owner, partner):
+def pending_join(conn, chat):
+    row = conn.execute(
+        "SELECT value FROM parameters WHERE key=?", (f"{JOIN_PREFIX}{chat}",)
+    ).fetchone()
+    if row:
+        try:
+            request = JoinRequest(**json.loads(row[0]))
+            if time.time() < request.expires_at:
+                return request
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def save_group(chat, owner, partner, *, request=None):
     with closing(connection()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
+        configured = conn.execute(
+            "SELECT value FROM parameters WHERE key='telegram_chat_id'"
+        ).fetchone()
+        if not configured or (configured[0] or "").strip() != str(owner):
+            return None
+        if request is not None and pending_join(conn, chat) != request:
+            return None
+        conn.execute("DELETE FROM parameters WHERE key=?", (f"{JOIN_PREFIX}{chat}",))
         existing = current(conn)
         if existing and existing[:3] == (chat, owner, partner):
             return existing
@@ -79,6 +113,8 @@ def save_group(chat, owner, partner):
 def unlink(version=None):
     with closing(connection()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
+        if version is None:
+            conn.execute("DELETE FROM parameters WHERE key GLOB ?", (JOIN_PREFIX + "*",))
         group = current(conn)
         if group and (version is None or group.version == version):
             conn.execute("DELETE FROM parameters WHERE key=?", (KEY,))
@@ -101,21 +137,48 @@ def allowed_update(update, owner):
     if getattr(chat, "type", None) not in GROUP_TYPES:
         return False
     message, sender = update.message, update.effective_user
+    if message and sender and JOIN_COMMAND.fullmatch(message.text or ""):
+        return True
     if message and sender and str(sender.id) == owner:
         if SETUP_COMMAND.fullmatch(message.text or "") or GROUP_START.fullmatch(message.text or ""):
             return True
-    group = current()
-    if not group or group.chat != chat.id:
-        return False
     if membership_message(message):
         return True
     query = update.callback_query
-    return bool(query and re.fullmatch(BUY_PATTERN, query.data or "") and member(group, chat, sender))
+    if not query:
+        return False
+    if re.fullmatch(APPROVE_PATTERN, query.data or ""):
+        return True
+    return bool(re.fullmatch(BUY_PATTERN, query.data or "") and member(current(), chat, sender))
 
 
 async def private_group(bot, chat_id):
     chat, count = await asyncio.gather(bot.get_chat(chat_id), bot.get_chat_member_count(chat_id))
     return chat.type in GROUP_TYPES and not chat.username and not getattr(chat, "active_usernames", None) and count == 3
+
+
+async def group_setup_error(bot, chat_id):
+    try:
+        if await private_group(bot, chat_id):
+            return None
+    except TelegramError as exc:
+        logger.info("Telegram shared group verification deferred: %s", type(exc).__name__)
+        return "Finder couldn't verify this group. Try again in a moment."
+    return "Use a private group with just you, your buying partner and Finder."
+
+
+def join_instructions(username):
+    return (
+        f"Have your buying partner send /join_alerts@{username} in the group. "
+        "Finder will show you an approval button."
+    )
+
+
+def sharing_enabled(name):
+    return (
+        f"Shared alerts are on. You and {name} can use Autobuy here with the connected Vinted buying account. "
+        "New MSJ Home and Vinted search alerts will appear here."
+    )
 
 
 def add_group_button(username):
@@ -150,7 +213,7 @@ async def private_setup_help(update, context):
     await update.message.reply_text(
         "Shared alerts and Autobuy work in your private group. "
         "Ask the person who already receives Finder alerts to add Finder to the group. "
-        "Send a message there so they can reply to it and give you access."
+        f"Then send /join_alerts@{context.bot.username} there so they can approve you."
     )
 
 
@@ -166,8 +229,7 @@ async def share_command(update, context):
     if chat.type == "private" and str(chat.id) == owner:
         await message.reply_text(
             "Tap the button and choose the private group you share with your buying partner. "
-            "Confirm adding Finder. The group should then show three members, including Finder. "
-            "Your partner can use their own Telegram account.",
+            "Confirm adding Finder. " + join_instructions(username),
             reply_markup=add_group_button(username),
         )
         return
@@ -179,27 +241,98 @@ async def share_command(update, context):
         GROUP_START.fullmatch(message.text or "") or not partner or partner.is_bot or partner.id == user.id or reply.chat.id != chat.id
         or reply.forward_origin or reply.sender_chat
     ):
-        await message.reply_text(
-            "Ask your buying partner to send a message in this group. "
-            "From the account that already receives Finder alerts, press and hold their message, "
-            "tap Reply, and send this command on one line to give them alerts and Autobuy:\n\n"
-            f"/share_alerts@{username}"
+        group = current()
+        text = (
+            "Shared alerts and Autobuy are already on in this group."
+            if group and group.chat == chat.id
+            else join_instructions(username)
         )
+        await message.reply_text(text)
         return
-    try:
-        valid = await private_group(context.bot, chat.id)
-    except TelegramError:
-        await message.reply_text("Finder couldn't verify this group. Try the setup command again shortly.")
+    error = await group_setup_error(context.bot, chat.id)
+    if error:
+        await message.reply_text(error)
         return
-    if not valid:
-        await message.reply_text("Use a private group with just you, your buying partner and Finder.")
+    if save_group(chat.id, user.id, partner.id):
+        logger.info("Telegram shared alerts linked for two buyers")
+        await message.reply_text(sharing_enabled(partner.first_name))
+
+
+async def join_command(update, context):
+    """Get the partner's authenticated Telegram identity directly."""
+    import db
+
+    message, user = update.message, update.effective_user
+    if (
+        not message or message.chat.type not in GROUP_TYPES or not user or user.is_bot
+        or user.id <= 0 or message.sender_chat or message.forward_origin
+    ):
         return
-    save_group(chat.id, user.id, partner.id)
+    owner = str(db.get_parameter("telegram_chat_id") or "").strip()
+    if not owner.isdigit() or int(owner) <= 0:
+        return
+    if user.id == int(owner):
+        await message.reply_text(join_instructions(context.bot.username))
+        return
+    chat = message.chat.id
+    error = await group_setup_error(context.bot, chat)
+    if error:
+        await message.reply_text(error)
+        return
+    group = current()
+    if group and group.chat == chat and group.partner == user.id:
+        await message.reply_text("You're already linked. Shared alerts and Autobuy are on in this group.")
+        return
+    name = " ".join(user.first_name.split())[:40] or "your partner"
+    request = JoinRequest(int(owner), user.id, name, uuid4().hex, time.time() + JOIN_LIFETIME)
+    with closing(connection()) as conn, conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO parameters(key,value) VALUES (?,?)",
+            (f"{JOIN_PREFIX}{chat}", json.dumps(request._asdict())),
+        )
     await message.reply_text(
-        f"Shared alerts are on. You and {partner.first_name} can use Autobuy here with the connected Vinted buying account. "
-        "New MSJ Home and Vinted search alerts will appear here."
+        f"{name} requested shared alerts and Autobuy. "
+        "The Finder account owner can approve this request below.",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton(f"Approve {name}", callback_data=f"shared:approve:{request.token}")
+        ]]),
     )
+    logger.info("Telegram shared group join request delivered")
+
+
+async def approve_join(update, context):
+    from vinted_owner_controls import private_owner
+
+    query, chat = update.callback_query, update.effective_chat
+    match = re.fullmatch(APPROVE_PATTERN, query.data or "")
+    if not match or getattr(chat, "type", None) not in GROUP_TYPES or not query.message:
+        return
+    if query.from_user.is_bot or not private_owner(query.from_user.id):
+        await photo_cards.answer(query, "The Finder account owner needs to tap Approve.", alert=True)
+        return
+    expired = (
+        "This request is no longer active. "
+        f"Ask your partner to send /join_alerts@{context.bot.username} again."
+    )
+    with closing(connection()) as conn:
+        request = pending_join(conn, chat.id)
+    if not request or request.token != match[1] or request.owner != query.from_user.id:
+        await photo_cards.answer(query, expired, alert=True)
+        return
+    error = await group_setup_error(context.bot, chat.id)
+    if error:
+        await photo_cards.answer(query, error, alert=True)
+        return
+    group = save_group(chat.id, request.owner, request.partner, request=request)
+    if not group:
+        await photo_cards.answer(query, expired, alert=True)
+        return
     logger.info("Telegram shared alerts linked for two buyers")
+    await photo_cards.answer(query, "Shared alerts are on.")
+    try:
+        await query.edit_message_text(sharing_enabled(request.name), **photo_cards.TIMEOUTS)
+    except TelegramError as exc:
+        logger.info("Telegram shared group confirmation edit deferred: %s", type(exc).__name__)
 
 
 async def stop_command(update, context):
@@ -214,8 +347,11 @@ async def stop_command(update, context):
 
 
 async def members_changed(update, context):
+    chat = update.effective_chat.id
+    with closing(connection()) as conn, conn:
+        conn.execute("DELETE FROM parameters WHERE key=?", (f"{JOIN_PREFIX}{chat}",))
     group = current()
-    if group and update.effective_chat.id == group.chat:
+    if group and chat == group.chat:
         # Any membership change requires the owner to pair the group again.
         await suspend(context.bot, group)
 

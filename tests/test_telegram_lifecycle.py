@@ -113,11 +113,11 @@ class TelegramLifecycleTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(worker.photo_started.wait(), timeout=1)
         return worker
 
-    def command_update(self, text, chat_id, sender, *, reply_author=None, command_entity=True):
+    def command_update(self, text, chat_id, sender, *, reply_author=None, command_entity=True, first_name="Test user"):
         chat = {"id": chat_id, "type": "private" if chat_id > 0 else "group"}
         message = {
             "message_id": 900, "date": 1, "chat": chat,
-            "from": {"id": sender, "is_bot": False, "first_name": "Test user"},
+            "from": {"id": sender, "is_bot": False, "first_name": first_name},
             "text": text, "entities": [{"type": "bot_command", "offset": 0, "length": len(text.split()[0])}] if command_entity else [],
         }
         if reply_author is not None:
@@ -146,7 +146,7 @@ class TelegramLifecycleTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
                 response.reset_mock()
 
             await self.app.process_update(self.command_update("/start@TestFinderBot shared_alerts", -321, 123))
-            self.assertIn("/share_alerts@TestFinderBot", response.await_args.args[0])
+            self.assertIn("/join_alerts@TestFinderBot", response.await_args.args[0])
             self.assertIsNone(shared.current())
             response.reset_mock()
             await self.app.process_update(self.command_update("/share_alerts@TestFinderBot", -321, 456, reply_author=123))
@@ -158,6 +158,66 @@ class TelegramLifecycleTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             verify.assert_awaited_once_with(self.app.bot, -321)
             await self.app.process_update(self.command_update("/start", 456, 456))
             self.assertIn("already linked", response.await_args.args[0])
+
+    async def test_partner_requests_access_when_group_reply_is_unavailable(self):
+        import telegram_shared_alerts as shared
+        import vinted_buying as buying
+
+        def approval(button, actor, chat=-321):
+            message = {
+                "message_id": 901, "date": 1, "chat": {"id": chat, "type": "group"},
+                "from": {"id": 123456, "first_name": "Finder", "is_bot": True},
+                "text": "Pending request",
+            }
+            callback = {
+                "id": "approve", "chat_instance": "offline", "message": message,
+                "from": {"id": actor, "first_name": "Tester", "is_bot": False}, "data": button.callback_data,
+            }
+            return Update.de_json({"update_id": 2, "callback_query": callback}, self.app.bot)
+
+        partner_command = self.command_update("/join_alerts@TestFinderBot", -321, 456, first_name="Melisa")
+        with (
+            patch.object(Message, "reply_text", new_callable=AsyncMock) as reply,
+            patch.object(CallbackQuery, "answer", new_callable=AsyncMock) as answer,
+            patch.object(CallbackQuery, "edit_message_text", new_callable=AsyncMock) as edit,
+            patch.object(shared, "private_group", new_callable=AsyncMock, return_value=True) as verify,
+            patch.object(buying, "buy") as buy,
+        ):
+            # Telegram shows a reply on the phone but can omit the original message in the bot update.
+            await self.app.process_update(self.command_update("/share_alerts@TestFinderBot", -321, 123))
+            self.assertIn("/join_alerts@TestFinderBot", reply.await_args.args[0])
+
+            await self.app.process_update(partner_command)
+            button = reply.await_args.kwargs["reply_markup"].inline_keyboard[0][0]
+            self.assertEqual(button.text, "Approve Melisa")
+            self.assertIsNone(shared.current())
+
+            await self.app.process_update(approval(button, 456))
+            self.assertIn("owner needs to tap", answer.await_args.args[0])
+            await self.app.process_update(approval(button, 123, chat=-432))
+            self.assertIn("no longer active", answer.await_args.args[0])
+            self.assertIsNone(shared.current())
+
+            verify.return_value = False
+            await self.app.process_update(approval(button, 123))
+            self.assertIn("Use a private group", answer.await_args.args[0])
+            self.assertIsNone(shared.current())
+            verify.return_value = True
+
+            await self.app.process_update(self.command_update("/stop_sharing", 123, 123))
+            await self.app.process_update(approval(button, 123))
+            self.assertIn("no longer active", answer.await_args.args[0])
+
+            await self.app.process_update(partner_command)
+            button = reply.await_args.kwargs["reply_markup"].inline_keyboard[0][0]
+            await self.app.process_update(approval(button, 123))
+            self.assertIn("Shared alerts are on", edit.await_args.args[0])
+            self.assertEqual(shared.current()[:3], (-321, 123, 456))
+            buy.assert_not_called()
+            edit.reset_mock()
+            await self.app.process_update(approval(button, 123))
+            self.assertIn("no longer active", answer.await_args.args[0])
+            edit.assert_not_awaited()
 
     async def test_private_purchase_status_deep_link_keeps_guests_and_groups_out(self):
         from vinted_owner_controls import purchase_status_command
