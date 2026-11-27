@@ -1,6 +1,9 @@
 #!/usr/bin/env sh
 set -eu
 
+# This service runs the live Finder. Keep the separately billed resale trial offline.
+unset FINDER_RESALE_PILOT FINDER_RESALE_SHADOW_ONLY
+
 APP_UID="${APP_UID:-10001}"
 APP_GID="${APP_GID:-10001}"
 APP_USER="${APP_USER:-appuser}"

@@ -130,8 +130,8 @@ class PhotoCardTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Your buying guide", sent["caption"])
         total = self.details["budget"]["total"] / 100
         self.assertTrue(sent["caption"].endswith(
-            f"<b>{self.row['title']}</b>\nBrand: {self.details['brand']}\n"
-            f"Est. total incl. shipping: <b>£{total:.2f}</b>"
+            f"Title: <b>{self.row['title']}</b>\nBrand: {self.details['brand']}\n"
+            f"Total: <b>£{total:.2f}</b>"
         ))
         self.assertTrue(sent["show_caption_above_media"])
         self.assertEqual(sent["photo"].input_file_content, photo_bytes())
@@ -558,7 +558,7 @@ class PhotoCardTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             self.assertIn(note_pages[index], photo_cards.plain(args["caption"]))
         self.bot.send_photo.assert_awaited_once()
 
-    def test_long_home_caption_keeps_recap_after_autobuy_status(self):
+    def test_long_home_caption_keeps_recap_before_autobuy_status(self):
         row = dict(self.row, title="😀" * 500)
         details = dict(
             self.details,
@@ -570,7 +570,7 @@ class PhotoCardTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         )
         text, notes = photo_cards.captions(row, details)
         self.assertLessEqual(photo_cards.units(photo_cards.plain(text)), 1024)
-        self.assertLess(text.index("Autobuy progress"), text.index("Est. total incl. shipping"))
+        self.assertLess(text.index("Total: "), text.index("Autobuy progress"))
         self.assertNotIn("🧵" * 720, "".join(notes))
 
     async def test_missing_photo_fallback_and_retry_edit_never_send_second_notification(

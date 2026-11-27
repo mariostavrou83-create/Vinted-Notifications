@@ -1,5 +1,7 @@
 # Finder resale estimates
 
+The live Finder container disables this trial. Its alerts show title, brand and total followed by any purchase progress. The valuation workflow below applies when running the separate trial outside that container.
+
 New GBP Vinted saved-search and seller Home alerts display the title, brand, estimated all-in total, estimated profit, estimated resale price, Buy and Conf. The owner and the linked group see the same valuation. Once a buyer taps Autobuy, progress follows the price summary, above the photos. Saved buying guides and personal shopping reminders live in the search settings. The Full description button opens the seller's description. Purchase outcome confirmation remains available when needed.
 
 The first Telegram alert displays a pending valuation. After delivery, each accepted listing has its own background review. Both chats receive the same result for that item. The service can reuse comparable listings across searches. It calculates the price again for each target.

@@ -252,6 +252,7 @@ def recap(row, details):
         )
     total = (budget or {}).get("total")
     estimate = f"£{total / 100:.2f}" if type(total) is int else "Unavailable"
+    summary = f"Title: <b>{title}</b>\nBrand: {brand}\nTotal: <b>{estimate}</b>"
     discovery = details.get("home_discovery")
     if (os.getenv("FINDER_RESALE_PILOT") == "1" and os.getenv("FINDER_RESALE_SHADOW_ONLY") != "1"
             and row.get("currency") == "GBP"
@@ -262,10 +263,8 @@ def recap(row, details):
             "id": row.get("item_id"), "title": row["title"], "brand": details.get("brand"),
             "category": details.get("resale_category"), "total_pence": total
         })
-        return f"Title: <b>{title}</b>\nBrand: {brand}\nTotal: <b>{estimate}</b>\n{valuation_html(line)}"
-    summary = f"<b>{title}</b>\nBrand: {brand}\nEst. total incl. shipping: <b>{estimate}</b>"
-    line = details.get("resale_line")
-    return summary + "\n" + escape(line) if line else summary
+        return summary + "\n" + valuation_html(line)
+    return summary
 
 
 def sections(row, details):

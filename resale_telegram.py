@@ -112,7 +112,21 @@ def visible_guidance(message):
 
 
 def group_body(identity, body):
-    return append_line(body, _lines.get(str(identity)))
+    if not body or _enabled:
+        return append_line(body, _lines.get(str(identity)))
+    # Pending group copies and existing group cards store the already rendered text.
+    # Only remove the system footer after its total, leaving seller descriptions alone.
+    head, separator, footer = body.rpartition("\n\nTitle: ")
+    if separator and "\nBrand: " in footer:
+        footer = re.sub(
+            r"(\nTotal: [^\n]+)\nEst\. profit: [^\n]*\nEst\. resell: [^\n]*\nBuy: [^\n]*\nConf: [^\n]*",
+            r"\1", footer, count=1,
+        )
+        return head + separator + footer
+    return re.sub(
+        r"(\nBrand: [^\n]+\nEst\. total incl\. shipping: [^\n]+)\nOver £15 profit\? [^\n]*(?=\n\n|$)",
+        r"\1", body, count=1,
+    )
 
 
 def restore_lines(records):
