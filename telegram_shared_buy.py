@@ -8,6 +8,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOpti
 from telegram.error import BadRequest, TelegramError
 
 import photo_cards
+import resale_telegram
 import telegram_shared_alerts as shared
 import vinted_buyer as buyer
 import vinted_buying as buying
@@ -102,7 +103,8 @@ async def callback(update, context):
         section = CONFIRM_PROMPT if offer else ""
         if label:
             section = f"{PROGRESS_HEADING}{escape(label)}"
-        candidate = insert_status(body, section) if body and section else ""
+        current_body = resale_telegram.group_body(item_id, body)
+        candidate = insert_status(current_body, section) if current_body and section else ""
         caption_fits = bool(candidate) and photo_cards.units(photo_cards.plain(candidate)) <= (
             1024 if has_photo else 4096
         )
@@ -123,17 +125,18 @@ async def callback(update, context):
         kwargs = dict(chat_id=group.chat, message_id=message.message_id, **photo_cards.TIMEOUTS)
         try:
             edited = False
-            if body:
-                text = candidate if caption_fits else body
+            revision = None
+            if current_body:
+                text = candidate if caption_fits else current_body
                 keyboard = controls(caption_fits)
                 try:
                     if has_photo:
-                        await context.bot.edit_message_caption(
+                        revision = await context.bot.edit_message_caption(
                             **kwargs, caption=text, parse_mode="HTML", reply_markup=keyboard,
                             show_caption_above_media=True,
                         )
                     else:
-                        await context.bot.edit_message_text(
+                        revision = await context.bot.edit_message_text(
                             **kwargs, text=text, parse_mode="HTML", reply_markup=keyboard,
                             link_preview_options=LinkPreviewOptions(is_disabled=True),
                         )
@@ -142,12 +145,13 @@ async def callback(update, context):
                     edited = "message is not modified" in str(exc).lower()
             if not edited:
                 # Long or unavailable captions can still show the stage on the status button.
-                await context.bot.edit_message_reply_markup(
+                revision = await context.bot.edit_message_reply_markup(
                     **kwargs, reply_markup=controls(False),
                 )
         except TelegramError as exc:
             logger.info("Telegram shared purchase display deferred: %s", type(exc).__name__)
         else:
+            resale_telegram.group_revision(item_id, revision)
             if stage:
                 logger.info("Telegram shared Autobuy stage displayed: stage=%s", stage)
             if offer:
