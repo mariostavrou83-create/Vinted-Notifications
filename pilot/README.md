@@ -4,7 +4,7 @@ An invite-only UK buyer dashboard with private Telegram alerts. Each buyer start
 
 ## Open the sourcing board
 
-Open your private invitation in Google Chrome and choose a Finder username and password. **Sourcing board** shows the newest matching Vinted UK listings, with photos, prices and any comparable listings behind a resale estimate. Each new buyer starts with zero saved searches.
+Open your private invitation in Google Chrome and choose a Finder username and password. **Sourcing board** shows the newest matching Vinted UK listings, with listing photos, asking prices and available checkout totals. Each new buyer starts with zero saved searches.
 
 Use **Chrome setup** in the dashboard to pair the Vinted buying profile in the same browser. Visit **Saved searches → Add search** to name a Vinted catalogue URL, add included or excluded words and attach reference pictures. From the extension, select the Home or catalogue tab to watch. Home and All use a one-second board clock. Saved searches use a five-second clock. Chrome watches listings that Vinted renders in each selected tab. The saved-search page also reports the last successful hosted source check when public monitoring is enabled.
 
@@ -12,7 +12,7 @@ In **Preferences**, set your own filters, shipping and spending limits, collecti
 
 ## Hosted service
 
-The public Chrome application runs the dashboard and worker together with `python -m pilot.hosted`. Configure the HTTPS origin, an exclusive persistent volume, session secret, encrypted-settings key and hashed owner invitation on the isolated host. A single-use owner signup creates the Team administrator. Use the Team page to issue invitation links. Private bot and market-data settings saved through the site apply to the running pilot.
+The public Chrome application runs the dashboard and worker together with `python -m pilot.hosted`. Configure the HTTPS origin, an exclusive persistent volume, session secret, encrypted-settings key and hashed owner invitation on the isolated host. A single-use owner signup creates the Team administrator. Use the Team page to issue invitation links. Telegram and optional public saved-search settings saved through the site apply to the running pilot.
 
 ## Other operator deployment options
 
@@ -52,8 +52,6 @@ Add runtime configuration to a private `.env` for Compose or use the server's se
 | `FINDER_PARTNER_AUTH_ORIGIN` | Trusted browser authorisation origin when it differs from the adapter |
 | `FINDER_PILOT_TELEGRAM_BOT_USERNAME`, `FINDER_PILOT_TELEGRAM_BOT_TOKEN`, `FINDER_PILOT_TELEGRAM_WEBHOOK_SECRET` | A separate pilot bot, private chat pairing and authenticated webhook |
 | `PILOT_PUBLIC_SEARCH_ENABLED`, `PILOT_PUBLIC_SEARCH_MAX_REQUESTS`, `PILOT_PUBLIC_SEARCH_DAILY_LIMIT` | Optional public saved-search polling with the pilot Scavio key. Enable with 1 and specify both a lifetime and rolling 24-hour cap in provider requests. These caps apply separately from comparison lookup limits. |
-| `PILOT_SCAVIO_ENABLED`, `PILOT_SCAVIO_API_KEY`, `PILOT_SCAVIO_MAX_SEARCHES` | Optional UK comparisons. Set enabled to 1 and set a positive, cumulative search cap |
-| `PILOT_MISTRAL_API_KEY`, `PILOT_MISTRAL_MODEL` | Optional, separately billed AI comparison review. The provider sees product descriptions for matching |
 | `FINDER_PILOT_DB` | Absolute SQLite filename for native deployment. Compose sets this automatically |
 
 For local Windows testing, set `FINDER_PILOT_TELEGRAM_MODE=polling` plus the separate pilot bot username and token in **both** the web and worker environment. Create a dedicated bot with BotFather if you do not already have one for this pilot. In the dashboard choose **Connect Telegram** and open the private bot link. The worker receives private links and button taps over Telegram's long-polling connection while the computer is awake. This mode needs no public webhook address or webhook secret. It checks the bot identity and stops if Telegram reports an existing webhook. If that happens, use a separate pilot bot. One active poller should run for a given token.
@@ -62,24 +60,15 @@ For hosted webhook mode, leave `FINDER_PILOT_TELEGRAM_MODE` unset and configure 
 
 ## Public saved-search alerts
 
-Signed-in invitees can receive dashboard and private Telegram saved-search alerts without connecting a buying account. An operator first enables public search, supplies a Scavio key authorised for UK listing search, and selects both polling limits. The first page is a silent baseline. Subsequent checks look for newer item IDs, with a fresh baseline after a gap of 20 minutes or an overflowed result window. Cards open their listing on Vinted. Eligible private Telegram alerts also offer AutoBuy to the Chrome profile paired when the alert was sent. The supplier's subtotal includes the buyer fee. Shipping requires checkout, so public cards leave all-in profit pending. A saved budget is checked using the subtotal plus the user's configured shipping cap.
+Signed-in invitees can receive dashboard and private Telegram saved-search alerts without connecting a buying account. An operator first enables public search, supplies a Scavio key authorised for UK listing search, and selects both polling limits. The first page is a silent baseline. Subsequent checks look for newer item IDs, with a fresh baseline after a gap of 20 minutes or an overflowed result window. Cards open their listing on Vinted. Eligible private Telegram alerts also offer AutoBuy to the Chrome profile paired when the alert was sent. The supplier's subtotal includes the buyer fee. Shipping is confirmed during checkout. A saved budget is checked using the subtotal plus the user's configured shipping cap.
 
 Supported catalogue links specify a text query, a brand, or one category; optional filters include size, condition, colour, material and price. The pilot requires confirmation of the filters in the provider response. Unsupported URL fields are reported against the relevant search in the dashboard state. Included and excluded words are checked against available public listing text. Search responses typically supply the title, and description-only matches can be missed on this route.
 
-Equivalent provider queries share one request per five-second round. Each buyer’s private rules are evaluated against that result. For independent queries the worker uses the operator’s `PILOT_PUBLIC_SEARCH_REQUESTS_PER_SECOND` and `PILOT_PUBLIC_SEARCH_CONCURRENCY` (both default to 1, range 1–100). Set each to a ceiling permitted by your provider key. Controls run across the installation. Distinct source URLs above the configured capacity are marked paused, in the order the searches were created. Missing responses, missed rounds and exhausted allowances are visible per search. The worker starts the next round on a fixed wall-clock boundary. At full coverage, 100 distinct provider requests every five seconds would use 1,728,000 credits per 24 hours. Provider latency, limits and page overflow can prevent complete coverage. Scavio charges one credit per search, including a search yielding no matches. Once either explicit budget is exhausted, checks pause. Restarting the worker does not reset the counters. Public polling and price comparisons share the rate limiter but have separate usage counters.
+Equivalent provider queries share one request per five-second round. Each buyer’s private rules are evaluated against that result. For independent queries the worker uses the operator’s `PILOT_PUBLIC_SEARCH_REQUESTS_PER_SECOND` and `PILOT_PUBLIC_SEARCH_CONCURRENCY` (both default to 1, range 1–100). Set each to a ceiling permitted by your provider key. Controls run across the installation. Distinct source URLs above the configured capacity are marked paused, in the order the searches were created. Missing responses, missed rounds and exhausted allowances are visible per search. The worker starts the next round on a fixed wall-clock boundary. At full coverage, 100 distinct provider requests every five seconds would use 1,728,000 credits per 24 hours. Provider latency, limits and page overflow can prevent complete coverage. Scavio charges one credit per search, including a search yielding no matches. Once either explicit budget is exhausted, checks pause. Restarting the worker does not reset the counters.
 
-## Pricing and measurement
+## Share Home alerts
 
-The worker sends an accepted listing first. A separate task compares current independent UK asking prices, checks condition and product details, excludes duplicates and the seller's own stock, and prices just below the cheapest credible alternative. At least two independent comparable sellers and one listing in the same condition are required. A materially inconsistent price produces a request for better evidence. Estimated profit subtracts acquisition and available selling costs. Exactly £15 qualifies. For paired Chrome orders, the dashboard combines the saved resale evidence with the buyer’s verified checkout total and any recorded selling costs. The figure shows the quote expiry or the time the purchase receipt was confirmed. An expired quote cannot count toward the target. Dashboard cards show the evidence links and exclusions.
-
-Successful public saved-search checks also refresh the shared comparison data. This reuses public prices that the pilot already paid to retrieve. Search names, filters, buyer identities, private Home feeds and browser imports stay outside the shared market cache. An explicit sold, reserved or withdrawn status removes that offer from pricing. The market lookup shares fresh public results between buyers. Scavio lookup is off by default and reservations count against an explicit limit even if the upstream call fails. An operator can also import verified active listings with:
-
-```sh
-python -m flask --app pilot.app:create_app market-import offers.jsonl
-python -m flask --app pilot.app:create_app pilot-report
-```
-
-For the first 100 alerts the report gives evidence coverage and the time from discovery to Telegram acceptance and completed pricing. Its lookup counter is lifetime usage for the pilot. Compare actual hosting, market-data and model bills for equal user counts, search load and alert volume. Validation against an achieved sale price needs the actual sale outcome.
+In the recipient’s Finder account, link their private Telegram and create a recipient code in **Preferences → Home sharing**. In a separate Chrome profile paired to the source Vinted account, start **Watch this Home tab**, then enter the code in **Home sharing**. Repeat for additional Homes or recipients. Either party can stop sharing from this panel. AutoBuy uses the recipient’s paired buying account and saved checkout choices.
 
 ## Offline checks
 

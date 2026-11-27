@@ -58,7 +58,8 @@ class LiveBoardBrowserTests(unittest.TestCase):
                 page.get_by_role("heading", name="Browser test listing 101").wait_for(timeout=2200)
                 self.assertLess(time.monotonic() - start, 2.2)
                 first = page.locator('[data-alert-id]').first
-                first.locator("summary").click()
+                self.assertEqual(first.get_by_text("Item price", exact=True).count(), 1)
+                self.assertEqual(first.locator("details").count(), 0)
                 first.evaluate("node => window.originalBoardCard = node")
 
                 with page.expect_response(version):
@@ -67,7 +68,7 @@ class LiveBoardBrowserTests(unittest.TestCase):
                 start = time.monotonic()
                 page.get_by_role("heading", name="Browser test listing 102").wait_for(timeout=6500)
                 self.assertLess(time.monotonic() - start, 6.5)
-                self.assertTrue(page.evaluate("window.originalBoardCard.isConnected && window.originalBoardCard.querySelector('details').open"))
+                self.assertTrue(page.evaluate("window.originalBoardCard.isConnected && window.originalBoardCard === document.querySelector('[data-listing-source=home]')"))
                 self.assertEqual(page.locator(".feed-card:visible").count(), 1)
                 page.get_by_role("button", name="All listings").click()
                 self.assertEqual(page.locator(".feed-card:visible").count(), 2)

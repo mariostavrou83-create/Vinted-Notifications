@@ -12,13 +12,3 @@ PILOT_PUBLIC_SEARCH_DAILY_LIMIT = 0
 ; Set both ceilings to values your key can sustain. A low ceiling pauses excess sources.
 PILOT_PUBLIC_SEARCH_REQUESTS_PER_SECOND = 1
 PILOT_PUBLIC_SEARCH_CONCURRENCY = 1
-
-; Fresh price comparisons have a separate lifetime Scavio request cap.
-PILOT_SCAVIO_ENABLED = 0
-PILOT_SCAVIO_MAX_SEARCHES = 0
-
-; Optional Mistral matching. Only eligible comparisons can reach the model.
-PILOT_MISTRAL_ENABLED = 0
-PILOT_MISTRAL_API_KEY =
-PILOT_MISTRAL_MODEL = mistral-small-2603
-PILOT_MISTRAL_MAX_REVIEWS = 0

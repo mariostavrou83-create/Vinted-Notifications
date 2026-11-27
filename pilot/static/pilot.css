@@ -87,7 +87,7 @@ main#main { width: min(100%, 1160px); padding: 0 clamp(24px,4.8vw,78px) 64px; }
 .search-info h3 a,.feed-card h3 a { text-decoration: none; }
 .search-info h3 a:hover,.feed-card h3 a:hover { text-decoration: underline; }
 .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
-.chips span,.profit-tag { width: fit-content; background: #e9f1df; color: #344f35; border-radius: 5px; padding: 3px 7px; font-size: .8rem; overflow-wrap: anywhere; }
+.chips span { width: fit-content; background: #e9f1df; color: #344f35; border-radius: 5px; padding: 3px 7px; font-size: .8rem; overflow-wrap: anywhere; }
 .feed-card { padding: 22px 24px; }
 .feed-card h3 { font-size: 1.2rem; margin: 4px 0 15px; }
 .figures { display: flex; flex-wrap: wrap; gap: 12px 32px; }
@@ -240,11 +240,11 @@ main#main { max-width:1600px; width:100%; padding-inline:clamp(20px,3.8vw,72px);
 .feed-card h3 { margin:0; font-size:1.06rem; line-height:1.3; }
 .listing-attributes { margin:0 0 5px; font-size:.72rem; color:#46695c; font-weight:600; overflow-wrap:anywhere; }
 .listing-age { font-size:.73rem; color:var(--muted); margin-top:4px; }
-.card-values { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:5px; margin-top:13px; padding:10px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
+.card-values { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:5px; margin-top:13px; padding:10px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
 .card-values dt { font-size:.7rem; line-height:1.25; color:var(--muted); }
 .card-values dd { font-variant-numeric:tabular-nums; font-weight:650; font-size:clamp(.9rem,1.35vw,1.13rem); letter-spacing:-.025em; overflow-wrap:anywhere; }
 .card-values .on-target dd { color:#0e7053; }
-.card-body .profit-tag,.card-body .price-note { font-size:.74rem; margin:7px 0 0; }
+.card-body .price-note { font-size:.74rem; margin:7px 0 0; }
 .price-note { color:var(--muted); }
 .card-body .evidence { margin:7px 0 0; }
 .card-body .evidence summary { padding-block:4px; font-size:.78rem; }
@@ -293,3 +293,7 @@ main#main { max-width:1600px; width:100%; padding-inline:clamp(20px,3.8vw,72px);
   #alerts .page-head .button { grid-column:2; grid-row:1; min-height:35px; padding:6px 10px; font-size:.8rem; }
   #alerts .page-head .lede { grid-column:1/-1; grid-row:2; margin:0; font-size:.9rem; }
 }
+
+#home-sharing ul { padding:0; margin:0; list-style:none; }
+.home-route { display:flex; align-items:center; justify-content:space-between; gap:1rem; flex-wrap:wrap; }
+.home-route + .home-route { margin-top:.5rem; }

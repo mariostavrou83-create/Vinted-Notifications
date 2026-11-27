@@ -6,7 +6,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
-from pilot.pricing import estimate_resale, optional_mistral_reviewer
+from pilot.pricing import estimate_resale
 
 
 NOW = datetime(2026, 11, 27, 18, tzinfo=timezone.utc)
@@ -100,21 +100,3 @@ class PricingTests(unittest.TestCase):
         self.assertEqual((value["resale_pence"], value["review_status"]), (1800, "ai_unavailable"))
         value = self.evaluate(rows, review=lambda _target, _rows: [])
         self.assertIsNone(value["resale_pence"])
-
-    def test_provider_receives_only_product_details(self):
-        with patch.dict(os.environ, {"PILOT_MISTRAL_API_KEY": ""}):
-            self.assertIsNone(optional_mistral_reviewer())
-        with patch.dict(os.environ, {"PILOT_MISTRAL_API_KEY": "testing"}), patch("pilot.pricing.requests.post") as post:
-            response = Mock(status_code=200)
-            response.json.return_value = {"choices": [{"message": {"content": '{"matches":[0,1]}'}}]}
-            post.return_value = response
-            self.evaluate([comparable(2, 2250), comparable(3, 2300)], review=optional_mistral_reviewer())
-            later = self.evaluate([comparable(2, 1700), comparable(3, 1750)], dict(TARGET, all_in_pence=100),
-                                  review=optional_mistral_reviewer())
-            self.assertEqual(post.call_count, 1)
-            self.assertEqual(later["resale_pence"], 1650)
-            self.assertEqual(later["profit_pence"], 1550)
-            payload = post.call_args.kwargs["json"]["messages"][-1]["content"]
-            self.assertEqual(len(json.loads(payload)["candidates"]), 2)
-            for private in ("seller_id", "ask_pence", "all_in_pence", "url", "company-a"):
-                self.assertNotIn(private, payload)

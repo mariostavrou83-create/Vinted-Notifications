@@ -61,10 +61,12 @@ def private_settings(data):
     except configparser.Error:
         # Parser details can contain the entire input line, including a key.
         raise ValueError("Check the [local] section of pilot-local.ini.") from None
-    if config.sections() != ["local"] or config.defaults() or set(config["local"]) - set(defaults["local"]):
+    retired = {"PILOT_SCAVIO_ENABLED", "PILOT_SCAVIO_MAX_SEARCHES", "PILOT_MISTRAL_ENABLED",
+               "PILOT_MISTRAL_API_KEY", "PILOT_MISTRAL_MAX_REVIEWS", "PILOT_MISTRAL_MODEL"}
+    if config.sections() != ["local"] or config.defaults() or set(config["local"]) - set(defaults["local"]) - retired:
         raise ValueError("Use only the [local] options from windows-settings.ini.template.")
     values = dict(defaults["local"])
-    values.update(config["local"])
+    values.update({k: v for k, v in config["local"].items() if k not in retired})
     if any("\n" in value or "\r" in value for value in values.values()):
         raise ValueError("Use one value per line in pilot-local.ini.")
     return values
@@ -84,8 +86,6 @@ def local_environment(data):
     services = {
         "PILOT_PUBLIC_SEARCH_ENABLED": ("PILOT_SCAVIO_API_KEY", "PILOT_PUBLIC_SEARCH_MAX_REQUESTS",
                                         "PILOT_PUBLIC_SEARCH_DAILY_LIMIT"),
-        "PILOT_SCAVIO_ENABLED": ("PILOT_SCAVIO_API_KEY", "PILOT_SCAVIO_MAX_SEARCHES"),
-        "PILOT_MISTRAL_ENABLED": ("PILOT_MISTRAL_API_KEY", "PILOT_MISTRAL_MAX_REVIEWS"),
     }
     for switch, (key, *limits) in services.items():
         if values[switch] not in {"0", "1"}:
@@ -102,8 +102,6 @@ def local_environment(data):
             if not values[key].isascii() or not values[key].isdecimal() or not 1 <= int(values[key]) <= 100:
                 raise ValueError(f"Set {key} to a whole number between 1 and 100.")
             env[key] = values[key]
-    if values["PILOT_MISTRAL_ENABLED"] == "1" and values["PILOT_MISTRAL_MODEL"]:
-        env["PILOT_MISTRAL_MODEL"] = values["PILOT_MISTRAL_MODEL"]
     return env
 
 

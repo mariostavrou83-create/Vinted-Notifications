@@ -68,7 +68,7 @@ python -m unittest discover -s pilot/tests -p test_manual_import.py
 
 ## Watch the current Vinted Home tab
 
-Pair your Chrome with your Finder account. Open your own Vinted UK homepage in a regular Chrome window and choose **Watch this Home tab** in the extension. The popup displays the paired Vinted username and Finder account. Fresh matches can be delivered to that user's linked private Telegram chat once delivery is configured. Use **Stop watching** in the popup to withdraw consent. Closing or navigating the tab ends the watch. Start it again after a page reload or browser restart.
+Pair your Chrome with your Finder account. Open your own Vinted UK homepage in a regular Chrome window and choose **Watch this Home tab** in the extension. The popup displays the paired Vinted username and Finder account. Fresh matches can be delivered to that user's linked private Telegram chat once delivery is configured. Use **Stop watching** in the popup to withdraw consent. To resume after restarting desktop Chrome, opt in when you start the Home watch. Reopen your Home tab in the same signed-in Chrome profile. Choose **Turn off automatic resume** in the popup to end that permission.
 
 This opt-in checks the rendered listings every second while that Home tab is visible. Chrome and Vinted control when the page displays fresh inventory. It uses the member menu's visible buyer name and stops if the identity becomes ambiguous or changes. Finder never forces a reload or fetches the private Home feed. A closed PC, an inactive tab, or Home cards with insufficient publication-time evidence cannot supply live alerts. With **Check missing upload times in one separate Vinted tab** enabled, Finder can open a newly rendered Home listing in one regular background tab and read its normal product page. Finder quietly records all initially visible/rendered Home IDs, verifies the same profile and listing, and opens at most one product page per 30 seconds and 30 per hour. Taking over the inspection tab stops it being reused. A challenge ends the watch. The page may show a true asking price, item condition, seller profile, size, brand, model or category; missing evidence is kept unknown. You can also open a listing yourself and use **Review visible items** for a manual dashboard-only import.
 
@@ -80,6 +80,12 @@ node pilot/tests/home-detail.browser.cjs
 node --test pilot/tests/extension-profile.test.cjs pilot/tests/home-watcher.test.cjs
 ```
 
+
+## Share additional Home profiles
+
+In Finder, open **Preferences → Home sharing** and link your private Telegram. Enter a label for each additional Home and choose **Get Home pairing code**. Install the **Home companion for Chrome** in the separate Chrome profile that is signed in to that Vinted account. Use the companion’s code and select the visible Home. **Reconnect Home** in Finder issues a fresh code for the same account.
+
+To share a Home privately, the recipient creates a **recipient code** in their Finder dashboard. Select the correct Home on your dashboard, enter their code and choose **Share Home alerts**. The recipient’s own buying account and settings handle their purchases. To share to a Telegram group, select its source Home and use **Connect a Telegram group** from the linked Telegram account that administers that group. Group alerts show the item and link. Either person can stop a private share from Finder.
 
 ## Watch a saved Vinted catalogue
 

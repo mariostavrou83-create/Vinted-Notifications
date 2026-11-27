@@ -9,13 +9,15 @@ function harness(){
   const pair={origin,pilot_username:"tester",vinted_username:"buyer",token:"fixture-device-only"};
   const values={},posted=[];
   const session={get:async key=>({[key]:values[key]}),set:async obj=>Object.assign(values,obj),remove:async key=>delete values[key]};
+  const stored={};
+  const local={get:async key=>({[key]:stored[key]}),set:async obj=>Object.assign(stored,obj),remove:async key=>delete stored[key]};
   const listeners={};
   const on=name=>({addListener:fn=>listeners[name]=fn});
   const tab={id:123,url:"https://www.vinted.co.uk/",active:true};
   const popup={id:"own",url:"chrome-extension://own/popup.html"};
   let currentName="buyer";
   const chrome={
-    storage:{session,onChanged:on("storage")},runtime:{id:"own",getURL:path=>"chrome-extension://own/"+path,onMessage:on("message")},
+    storage:{session,local,onChanged:on("storage")},runtime:{id:"own",getURL:path=>"chrome-extension://own/"+path,onStartup:on("startup"),onMessage:on("message")},
     tabs:{query:async()=>[tab],get:async()=>tab,onUpdated:on("nav"),onRemoved:on("remove")},
     scripting:{executeScript:async({files,args})=>{
       if(files)return [{documentId:"doc-home"}];
@@ -33,7 +35,7 @@ function harness(){
     return new Promise(resolve=>{if(!listeners.message(msg,sender,resolve))resolve(null);});
   }
   const page={id:"own",url:tab.url,documentId:"doc-home",tab:{id:tab.id},frameId:0};
-  return {send,page,posted,tab,changeName:name=>currentName=name,homeItems:()=>({
+  return {send,page,posted,tab,stored,restart:async()=>{delete values.finderHomeWatch;listeners.startup();await new Promise(r=>setTimeout(r,10));},changeName:name=>currentName=name,homeItems:()=>({
     type:"finder-home-items",runId:values.finderHomeWatch?.runId,username:"buyer",items:[{id:"3"}]
   })};
 }
@@ -59,4 +61,18 @@ test("foreign site and unconfirmed username cannot enable Home",async()=>{
  h.changeName("");
  assert.equal((await h.send({type:"finder-home-start"})).ok,false);
  assert.equal(h.posted.length,0);
+});
+
+test("restart restores only a remembered, visible, same-profile Home; explicit stop forgets it",async()=>{
+  const h=harness();
+  await h.restart(); assert.equal(h.posted.length,0);
+  await h.send({type:"finder-home-start",remember:true});
+  assert.equal(h.stored.finderHomeResume.username,"buyer");
+  h.changeName("other"); await h.restart();
+  assert.equal((await h.send({type:"finder-home-state"})).watching,false);
+  h.changeName("buyer"); await h.restart();
+  assert.equal((await h.send({type:"finder-home-state"})).watching,true);
+  await h.send({type:"finder-home-stop"});await h.restart();
+  assert.equal((await h.send({type:"finder-home-state"})).watching,false);
+  assert.equal(h.stored.finderHomeResume,undefined);
 });

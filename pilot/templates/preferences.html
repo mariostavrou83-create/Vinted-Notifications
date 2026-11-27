@@ -1,6 +1,6 @@
 <section id="preferences" data-view="preferences" hidden aria-labelledby="preferences-title">
   <div class="page-head"><div><h1 id="preferences-title">Preferences</h1><p class="lede">Choose what reaches your feed and where your purchases go.</p></div></div>
-  <nav class="pref-jumps" aria-label="Preference sections"><a href="#preferences">Home filters</a><a href="#limits">Purchase limits</a><a href="#chrome-checkout">Chrome checkout</a><a href="#account">Accounts</a></nav>
+  <nav class="pref-jumps" aria-label="Preference sections"><a href="#preferences">Home filters</a><a href="#home-sharing">Home sharing</a><a href="#limits">Purchase limits</a><a href="#chrome-checkout">Chrome checkout</a><a href="#account">Accounts</a></nav>
   <form id="settings-form" class="stack-form">
     <section id="home-filters" class="panel stack-form">
       <h2>Home filters</h2>
@@ -48,10 +48,47 @@
     <p class="form-error" role="alert" data-error hidden></p>
     <div class="actions"><button type="submit" class="button primary">Save preferences</button></div>
   </form>
+  <section id="home-sharing" class="panel stack-form" aria-labelledby="home-sharing-title">
+    <h2 id="home-sharing-title">Home sharing</h2>
+    <p class="field-note">Receive Home listings from more than one Vinted profile in your linked Telegram. AutoBuy uses your own buying account and delivery preferences.</p>
+    <div class="stack-form">
+      <h3>Receive another Home feed</h3>
+      <p id="home-receive-help"><span id="home-receive-connect">First link your private Telegram in <a href="#account">Connected accounts</a>. </span>Give a one-use code to the person sharing their Home.</p>
+      <button type="button" class="button secondary" id="home-invite" disabled>Create recipient code</button>
+      <div id="home-invite-result" hidden><p>Recipient code <strong><output id="home-code"></output></strong> <span id="home-expiry"></span></p></div>
+      <ul id="home-incoming" aria-label="Home feeds you receive"></ul>
+    </div>
+    <form class="stack-form" id="home-source-form">
+      <h3>Add a Vinted Home profile</h3>
+      <p class="field-note">Install the <a href="/extension/home-companion.zip">Home companion for Chrome</a> in a separate Chrome profile signed in to the other Vinted account. Enter the pairing code there and select the visible Vinted Home tab. Its listings go to your linked Telegram.</p>
+      <label>Vinted profile label<input name="label" maxlength="64" required placeholder="e.g. Weekend sourcing"></label>
+      <div><button class="button secondary" type="submit" disabled>Get Home pairing code</button></div>
+      <p id="home-extra-result" hidden>Pairing code <strong><output id="home-extra-code"></output></strong> <span id="home-extra-expiry"></span></p>
+      <ul id="home-extras" aria-label="Additional Home profiles"></ul>
+    </form>
+    <form class="stack-form" id="home-share-form">
+      <h3>Share this Home feed</h3>
+      <p id="home-share-profile" class="field-note">Checking the paired Vinted profile…</p>
+      <label>Home to share<select id="home-source-select" name="source"><option value="">Paired buying profile</option></select></label>
+      <label>Recipient code<input name="code" required autocomplete="off" spellcheck="false" maxlength="128" placeholder="Enter the recipient’s code"></label>
+      <div><button type="submit" class="button secondary" disabled>Share Home alerts</button></div>
+      <ul id="home-outgoing" aria-label="People receiving your Home feed"></ul>
+    </form>
+    <div class="stack-form">
+      <h3>Telegram groups</h3>
+      <p class="field-note">Choose a Home feed and send its listings to a Telegram group you administer. Open the invite using the Telegram account linked to Finder. AutoBuy is available in your private buying chat.</p>
+      <label>Group’s Home feed<select id="home-group-source"></select></label>
+      <button type="button" class="button secondary" id="home-group-link" disabled>Connect a Telegram group</button>
+      <p id="home-group-result" hidden><a id="home-group-url" class="button secondary" target="_blank" rel="noopener noreferrer">Choose group in Telegram</a></p>
+      <ul id="home-groups" aria-label="Linked Telegram groups"></ul>
+    </div>
+    <p id="home-sharing-status" class="field-note" role="status" aria-live="polite"></p>
+  </section>
   {% include 'chrome_checkout.html' %}
   <section id="account" class="panel account-panel">
     <h2>Connected accounts</h2>
-    <div class="account-line"{% if not buyer_provider_available and not buyer_provider_linked %} hidden{% endif %}><div><h3>Buying account at provider</h3><p id="buyer-account-status" class="muted">Checking connection…</p><p id="extension-profile-hint" hidden>Selected in Chrome: <output id="extension-profile-name"></output></p></div><div><button type="button" class="button secondary" id="connect-buyer-account" hidden>Connect account</button><button type="button" class="button secondary" id="disconnect-buyer-account" hidden>Disconnect</button></div></div>
+    <div class="account-line"><div><h3>Vinted in your browser</h3><p class="muted">Open Vinted on this device to sign in. To resume watching your Home or use Chrome checkout, open the paired desktop Chrome profile.</p></div><div><a class="button secondary" href="https://www.vinted.co.uk/" target="_blank" rel="noopener noreferrer">Open Vinted</a> <a href="#chrome-checkout">Desktop Chrome setup</a></div></div>
+    <div class="account-line"{% if not buyer_provider_available and not buyer_provider_linked %} hidden{% endif %}><div><h3>Linked buying account</h3><p id="buyer-account-status" class="muted">Checking connection…</p><p id="extension-profile-hint" hidden>Selected in Chrome: <output id="extension-profile-name"></output></p></div><div><button type="button" class="button secondary" id="connect-buyer-account" hidden>Connect account</button><button type="button" class="button secondary" id="disconnect-buyer-account" hidden>Disconnect</button></div></div>
     <details class="extension-install" id="chrome-setup"><summary>Set up the Chrome extension</summary><p><a href="/extension/install">Open the Chrome installation guide</a>, then <a href="#chrome-checkout">pair your buying profile</a> to Finder. For a one-off import, use <a href="/import/vinted">Add from Chrome</a>.</p></details>
     <div class="account-line"><div><h3>Telegram</h3><p class="muted">{{ 'Linked for private buying alerts.' if links else 'Link your own chat for buying alerts and AutoBuy.' }}</p></div>{% if not links %}<button type="button" id="link-telegram" class="button secondary">Link Telegram</button>{% endif %}</div>
     <p role="alert" class="form-error" id="telegram-error" hidden></p>

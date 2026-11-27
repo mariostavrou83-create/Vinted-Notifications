@@ -1,9 +1,9 @@
 {% extends 'base.html' %}
-{% block title %}Market data and AI · Finder{% endblock %}
+{% block title %}Saved-search provider · Finder{% endblock %}
 {% block body %}
 <main class="auth-wrap"><div class="auth-card" style="max-width:46rem;width:100%">
   <p><a href="{{ url_for('team') }}">← Team settings</a></p>
-  <h1>Market data and AI</h1>
+  <h1>Saved-search provider</h1>
   <p>These limits apply across the pilot. Requests already sent count toward the totals. Changing a limit keeps the usage already recorded.</p>
   {% for message in messages %}<p role="status">{{ message }}</p>{% endfor %}
   {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
@@ -32,21 +32,7 @@
       <p class="field-note">Use the rate and concurrency allowed by your Scavio key. These affect how many searches can be checked every five seconds.</p>
       {{ number('PILOT_PUBLIC_SEARCH_REQUESTS_PER_SECOND','Requests per second',100,1) }}
       {{ number('PILOT_PUBLIC_SEARCH_CONCURRENCY','Concurrent requests',100,1) }}
-      <h3>Fresh resale comparisons · {{ states.comparisons }}</h3>
-      <p>Used {{ usage.comparisons }} requests. Finder can reuse existing public asking prices without a new comparison request.</p>
-      {{ toggle('PILOT_SCAVIO_ENABLED','Enable paid lookup when saved comparisons are insufficient') }}
-      {{ number('PILOT_SCAVIO_MAX_SEARCHES','Lifetime comparison-request limit') }}
       <button type="submit" class="button primary">Save Scavio settings</button>
-    </fieldset></form>
-  </section>
-  <section class="panel"><h2>Mistral AI matching · {{ states.ai }}</h2>
-    <p>Used {{ usage.ai }} uncached AI reviews. Enabling this sends product descriptions to Mistral. The model and token usage determine the charge.</p>
-    <form method="post" action="{{ url_for('team_market') }}"><fieldset class="stack-form" {% if not secure %}disabled{% endif %}>
-      {{ common('mistral') }}
-      {{ toggle('PILOT_MISTRAL_ENABLED','Enable paid AI comparison review') }}
-      <label>Model<input type="text" name="PILOT_MISTRAL_MODEL" value="{{ fields.PILOT_MISTRAL_MODEL }}" maxlength="100"></label>
-      {{ number('PILOT_MISTRAL_MAX_REVIEWS','Lifetime AI review limit') }}
-      <button type="submit" class="button primary">Save Mistral settings</button>
     </fieldset></form>
   </section>
 </div></main>

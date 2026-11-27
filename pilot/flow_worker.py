@@ -11,7 +11,7 @@ from urllib.request import Request, build_opener
 
 import requests
 
-from . import checkout_profit, flow
+from . import flow
 from .connection import linked_account
 from .db import get_db, searches_for, settings_for, transaction
 from .partner import PartnerError, _NoRedirect, partner_configured, partner_request
@@ -147,34 +147,16 @@ def discover(conn, now):
     return True
 
 
-def render_alert(row, valuation=None, checkout_cost=None):
+def render_alert(row):
     item = json.loads(row["listing"])
     price = flow.money(item["price_pence"])
-    if checkout_cost and checkout_cost["total_pence"] is not None:
-        label = "Checkout at purchase" if checkout_cost["basis"] == "purchase" else "Quoted checkout"
-        price += f" · {label} {flow.money(checkout_cost['total_pence'])}"
-    elif row["origin"] == "connected":
+    if row["origin"] == "connected":
         price += f" · Estimated total {flow.money(item['total_pence'])}"
     elif type(item.get("subtotal_pence")) is int:
         price += f" · {flow.money(item['subtotal_pence'])} including buyer fee · shipping extra"
     else:
         price += " · Check fees and delivery on Vinted"
     parts = [item["title"][:350], price, item["listing_url"]]
-    if valuation:
-        price = valuation.get("resale_pence")
-        if type(price) is int:
-            parts.append("Est. resale " + flow.money(price))
-            profit = checkout_profit.profit_line(valuation)
-            if profit and (row["origin"] == "connected" or checkout_cost):
-                parts.append(profit)
-        if checkout_cost:
-            parts.append(checkout_cost["note"])
-        explanation = valuation.get("explanation")
-        if explanation:
-            parts.append(str(explanation)[:500])
-        for c in (valuation.get("evidence") or [])[:3]:
-            if c.get("url"):
-                parts.append(f"{flow.money(c['ask_pence'])} · {c['url']}")
     return "\n".join(parts)[:3900]
 
 
@@ -204,6 +186,7 @@ def deliver(conn, now):
         uid, aid = row["user_id"], row["id"]
         l = json.loads(row["listing"])
         from .home_watch import active
+        from .home_routes import routed_active
         from .catalog_watch import eligible
 
         prefs = settings_for(conn, uid)
@@ -219,7 +202,9 @@ def deliver(conn, now):
             or (
                 row["origin"] == "browser_home"
                 and (
-                    not active(conn, uid, row["account_ref"].removeprefix("home:"), now)
+                    not (routed_active(conn, uid, row["listing_id"], now)
+                         if row["account_ref"] == "routed-home"
+                         else active(conn, uid, row["account_ref"].removeprefix("home:"), now))
                     or not flow._matches_choice(prefs.get("categories"), l.get("category"))
                     or not flow._matches_choice(prefs.get("sizes"), l.get("size"))
                 )
@@ -237,12 +222,11 @@ def deliver(conn, now):
             row = {**dict(row), "native_binding": bound}
         conn.execute("UPDATE pilot_alerts SET delivery='sending',updated=? WHERE id=?", (int(now), aid))
     try:
-        valuation = json.loads(row["valuation"]) if row["valuation"] else None
         out = telegram(
             "sendMessage",
             {
                 "chat_id": row["chat_id"],
-                "text": render_alert(row, valuation),
+                "text": render_alert(row),
                 "reply_markup": listing_keyboard(row),
             },
         )
@@ -293,65 +277,6 @@ def send_references(conn, uid, search_id, chat, msg_id):
             log.warning("Search reference photo delivery was not confirmed.")
     except requests.RequestException:
         log.warning("Search reference photos remain available in the dashboard.")
-
-
-def review(conn, now):
-    from flask import current_app
-
-    from .market import comparisons_for
-    from .pricing import estimate_resale, optional_mistral_reviewer
-
-    with transaction(conn):
-        row = conn.execute(
-            """SELECT * FROM pilot_alerts WHERE valuation IS NULL AND price_after<=? AND price_attempts<3
-                         AND delivery!='sending' AND (delivery!='new' OR NOT EXISTS
-                         (SELECT 1 FROM pilot_chats c WHERE c.user_id=pilot_alerts.user_id))
-                         ORDER BY id LIMIT 1""",
-            (now,),
-        ).fetchone()
-        if not row:
-            return False
-        conn.execute(
-            "UPDATE pilot_alerts SET price_after=?,price_attempts=price_attempts+1 WHERE id=?",
-            (now + 120, row["id"]),
-        )
-    item = json.loads(row["listing"])
-    total = (
-        item.get("total_pence")
-        if row["origin"] == "connected" and not item.get("total_excludes_shipping")
-        else None
-    )
-    target = {**item, "url": item["listing_url"], "all_in_pence": total}
-    if row["origin"] == "connected" and linked_account(conn, row["user_id"]) != row["account_ref"]:
-        return True
-    comps = comparisons_for(conn, target, config=current_app.config)
-    valuation = estimate_resale(target, comps, review=optional_mistral_reviewer())
-    conn.execute(
-        "UPDATE pilot_alerts SET valuation=?,valued_at=? WHERE id=?",
-        (json.dumps(valuation), time.time(), row["id"]),
-    )
-    if (
-        row["delivery"] == "sent"
-        and conn.execute(
-            "SELECT 1 FROM pilot_chats WHERE user_id=? AND chat_id=?", (row["user_id"], row["sent_chat"])
-        ).fetchone()
-    ):
-        try:
-            valuation, checkout_cost = checkout_profit.for_alert(
-                conn, row["user_id"], row["id"], time.time()
-            )
-            telegram(
-                "editMessageText",
-                {
-                    "chat_id": row["sent_chat"],
-                    "message_id": row["message_id"],
-                    "text": render_alert(row, valuation, checkout_cost),
-                    "reply_markup": listing_keyboard(row),
-                },
-            )
-        except ValueError:
-            log.warning("Valuation available on dashboard; chat edit was not confirmed.")
-    return True
 
 
 def buy_job(conn, now):
@@ -449,6 +374,7 @@ def reconcile(conn, now):
 def run(app, stop=None):
     from threading import Event
 
+    from . import home_groups
     from .native_order import notify as native_notify
     from .public_feed import public_discover
     from .telegram_poll import receive_updates
@@ -476,7 +402,8 @@ def run(app, stop=None):
         (public_discover, 1),
         (receive_updates, 2),
         (deliver, 0.2),
-        (review, 1),
+        (home_groups.verify, 1),
+        (home_groups.deliver, 0.5),
         (buy_job, 0.2),
         (native_notify, 0.5),
         (reconcile, 3),

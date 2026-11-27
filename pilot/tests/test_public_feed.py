@@ -136,53 +136,14 @@ class PublicFeedTests(unittest.TestCase):
             self.conn.execute("SELECT used FROM public_budget").fetchone()[0], 3
         )
 
-    def test_paid_discovery_supplies_independent_resale_evidence_without_another_lookup(
-        self,
-    ):
-        self.search(term="camera", include=["private sourcing keyword"])
-        first = {
-            **self.listing(22),
-            "price": "19.00",
-            "user_id": "private owner",
-            "attributes": {"buyer_reference": "private shopping note"},
-        }
-        second = {**self.listing(23), "seller": {"id": 4567}, "price": "20.00"}
-        own_target = dict(self.listing(24), price="1.00", seller={"id": 9000})
-        same_seller = dict(self.listing(25), price="1.00", seller={"id": 9000})
-        self.assertEqual(
-            self.check(0, [first, second, own_target, same_seller]), (True, 1)
-        )
-        target = {**feed._listing(own_target), "all_in_pence": 350}
-        self.app.config.update(PILOT_SCAVIO_ENABLED=True, PILOT_SCAVIO_MAX_SEARCHES=10)
+    def test_public_discovery_uses_its_search_allowance_only(self):
+        self.search(term="camera")
         with patch.object(market, "_search") as extra_lookup:
-            comps = market.comparisons_for(self.conn, target, now=self.now + 2)
-            value = pricing.estimate_resale(target, comps, now=self.now + 2)
-            self.assertEqual(value["resale_pence"], 1850)
-            self.assertEqual(value["profit_pence"], 1500)
-            self.assertEqual({item["id"] for item in value["evidence"]}, {"22", "23"})
+            self.assertEqual(self.check(0, [self.listing(22)]), (True, 1))
             extra_lookup.assert_not_called()
-        self.assertEqual(
-            self.conn.execute("SELECT used FROM market_budget").fetchone()[0], 0
-        )
-        payloads = " ".join(
-            r[0] for r in self.conn.execute("SELECT payload FROM market_offers")
-        )
-        self.assertNotIn("private", payloads)
-        self.assertNotIn("user_id", payloads)
-        # Only explicit unavailability invalidates a listing. Omission from the first
-        # page alone cannot tell us that the seller withdrew it.
-        self.check(7, [dict(first, is_reserved=True)])
-        self.assertIsNone(
-            self.conn.execute("SELECT 1 FROM market_offers WHERE id='22'").fetchone()
-        )
-        self.assertTrue(
-            self.conn.execute("SELECT 1 FROM market_offers WHERE id='23'").fetchone()
-        )
-        with db.transaction(self.conn):
-            market.remember_public_results(self.conn, [first], self.now + 1)
-        self.assertIsNone(
-            self.conn.execute("SELECT 1 FROM market_offers WHERE id='22'").fetchone()
-        )
+        self.assertEqual(self.conn.execute("SELECT used FROM public_budget").fetchone()[0], 1)
+        self.assertEqual(self.conn.execute("SELECT used FROM market_budget").fetchone()[0], 0)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM market_offers").fetchone()[0], 0)
 
     def test_daily_and_lifetime_caps_apply_with_ambiguous_timeouts_and_restart(self):
         import requests

@@ -39,12 +39,13 @@ def enabled(value):
 
 def config_for(conn, base_config):
     config = {k: base_config.get(k, os.environ.get(k, default)) for k, default in DEFAULTS.items()}
-    # Legacy environment-only installs opt into AI by providing the dedicated model key.
-    if config["PILOT_MISTRAL_ENABLED"] is None:
-        config["PILOT_MISTRAL_ENABLED"] = "1" if config["PILOT_MISTRAL_API_KEY"] else "0"
+    # Archived options may still exist in older installations. Only saved-search discovery runs.
+    config["PILOT_SCAVIO_ENABLED"] = "0"
+    config["PILOT_MISTRAL_ENABLED"] = "0"
+    config["PILOT_MISTRAL_API_KEY"] = ""
     config["_market_generation"] = 0
     try:
-        rows = conn.execute("SELECT * FROM team_market_settings").fetchall()
+        rows = conn.execute("SELECT * FROM team_market_settings WHERE provider='scavio'").fetchall()
     except sqlite3.OperationalError as exc:
         if "no such table: team_market_settings" not in str(exc):
             raise
@@ -53,7 +54,7 @@ def config_for(conn, base_config):
 
     for row in rows:
         provider, options, ciphertext, generation = row
-        config.update(json.loads(options))
+        config.update({key: value for key, value in json.loads(options).items() if key.startswith("PILOT_PUBLIC_SEARCH_")})
         config["_market_generation"] += generation
         if ciphertext is not None:
             cipher = _cipher()

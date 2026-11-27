@@ -65,7 +65,7 @@
     const hash = location.hash.slice(1);
     if (hash.startsWith('account_hint=')) return;
     let view = 'alerts';
-    if (['preferences', 'account', 'chrome-checkout', 'chrome-setup', 'limits'].includes(hash)) view = 'preferences';
+    if (['preferences', 'account', 'chrome-checkout', 'chrome-setup', 'limits', 'home-sharing'].includes(hash)) view = 'preferences';
     if (hash === 'searches') view = 'searches';
     if (hash === 'new-search') {
       if (searches.length >= 100) {
@@ -94,7 +94,7 @@
     }
     schedulePolling(true);
     if (hash === 'chrome-setup') document.getElementById(hash).open = true;
-    if (['account', 'chrome-checkout', 'chrome-setup', 'limits'].includes(hash)) document.getElementById(hash).scrollIntoView({ block: 'start' });
+    if (['account', 'chrome-checkout', 'chrome-setup', 'limits', 'home-sharing'].includes(hash)) document.getElementById(hash).scrollIntoView({ block: 'start' });
     else window.scrollTo(0, 0);
   }
 
@@ -307,7 +307,6 @@
         let card = fresh;
         if (old && cardMarkup.get(id) === nextMarkup.get(id)) card = old;
         else if (old) {
-          if (old.querySelector('.evidence[open]')) fresh.querySelector('.evidence')?.setAttribute('open', '');
           old.replaceWith(fresh);
         }
         if (oldList.children[index] !== card) oldList.insertBefore(card, oldList.children[index] || null);

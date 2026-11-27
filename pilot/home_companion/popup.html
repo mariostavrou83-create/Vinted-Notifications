@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Finder Home Companion</title><link rel="stylesheet" href="popup.css"></head>
+<body><h1>Finder Home Companion</h1>
+<label>Finder dashboard<input id="origin" readonly></label>
+<form id="pairForm"><label>Pairing code<input id="code" autocomplete="off" required maxlength="180"></label>
+<button>Pair this Chrome profile</button></form>
+<div id="controls" hidden><label id="resumeChoice"><input type="checkbox" id="remember"> Resume on this profile’s Home after reopening Chrome</label><button id="watch">Watch this Home tab</button> <button id="stop">Stop watching</button>
+<button class="light" id="disconnect">Disconnect this profile</button></div>
+<p id="status" role="status" aria-live="polite"></p>
+<p class="help">Open your signed-in Vinted UK Home. If needed, open Vinted’s account menu so Finder can identify your own profile.</p>
+<script src="popup.js"></script></body></html>

@@ -101,6 +101,28 @@ class BuyerLinkTests(unittest.TestCase):
         self.assertIn("cancelled",r.location)
         self.assertIn("expired",self.finish(state).location)
 
+    def test_reconnect_requires_same_account_and_does_not_unlink_on_failure(self):
+        self.finish(self.start(self.name))
+        def begin():
+            response = self.client.post("/api/connection/start", json={"reconnect": True})
+            self.assertEqual(response.status_code, 200)
+            return self.calls[-1][1]["state"]
+
+        self.assertIn("reconnected", self.finish(begin()).location)
+        state = begin()
+        with patch.object(connection, "partner_request", return_value={
+            "username": self.name, "account_ref": "different-provider-ref"
+        }):
+            self.assertIn("mismatch", self.finish(state).location)
+        state = begin()
+        self.name = "different-buyer"
+        self.assertIn("mismatch", self.finish(state).location)
+        self.assertEqual(self.client.get("/api/connection").json["username"], "buyer.name")
+        state = begin()
+        self.client.post("/api/connection/disconnect")
+        self.assertIn("expired", self.finish(state).location)
+        self.assertFalse(self.client.get("/api/connection").json["linked"])
+
     def test_no_adapter_no_authorization_request(self):
         self.app.config["FINDER_PUBLIC_URL"]=""
         with patch.dict(os.environ, {"FINDER_PUBLIC_URL":""}):
