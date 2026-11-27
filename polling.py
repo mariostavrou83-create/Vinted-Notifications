@@ -16,7 +16,6 @@ import db
 import alert_controls
 import resource_controls
 import search_settings
-import trial_public_pool
 import vinted_keywords
 from logger import get_logger
 from vinted_buyer_priority import purchase_waiting
@@ -418,7 +417,6 @@ class Poller:
                             wall_start,
                         )
                     )
-                trial_public_pool.offer(db.DB_PATH, search_url, items)
                 self.failures[query_id] = 0
                 self.successes += 1
             except Exception as exc:  # noqa: BLE001

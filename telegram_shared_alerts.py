@@ -14,11 +14,11 @@ from telegram.error import BadRequest, ChatMigrated, Forbidden, RetryAfter, Tele
 
 import alert_controls
 import photo_cards
-import trial_resale_button
 from logger import get_logger
 from search_settings import connection
 
 logger = get_logger(__name__)
+LEGACY_RESALE_CALLBACK = "shared:resale"
 KEY = "telegram_shared_alert_group"
 JOIN_PREFIX = "telegram_shared_join:"
 JOIN_LIFETIME = 60 * 60
@@ -193,8 +193,16 @@ def allowed_update(update, owner):
         return False
     if re.fullmatch(APPROVE_PATTERN, query.data or ""):
         return True
-    return bool((query.data == trial_resale_button.CALLBACK or re.fullmatch(BUY_PATTERN, query.data or ""))
+    return bool((query.data == LEGACY_RESALE_CALLBACK or re.fullmatch(BUY_PATTERN, query.data or ""))
                 and member(current(), chat, sender))
+
+
+async def retired_resale_callback(update, context):
+    query = update.callback_query
+    if query and query.data == LEGACY_RESALE_CALLBACK and query.message and member(
+        current(), query.message.chat, query.from_user
+    ):
+        await photo_cards.answer(query, "Resale estimates have been switched off.", alert=True)
 
 
 async def private_group(bot, chat_id):
@@ -461,7 +469,8 @@ def enqueue(conn, row, result, now):
         return
     try:
         group = current(conn)
-        if not group or row["found_at"] < group.linked_at:
+        from home_routing_store import native_row_allowed
+        if not group or row["found_at"] < group.linked_at or not native_row_allowed(row, "shared-"+group.version, conn):
             return
         pictures = getattr(result, "photo", None)
         photo_id = pictures[-1].file_id if pictures else None
@@ -516,7 +525,7 @@ def finish(row, *, message_id=None, delay=0, failed=False):
         )
 
 
-def markup(row, state=None, stop=None, *, progress=None, show_resale=False):
+def markup(row, state=None, stop=None, *, progress=None):
     states = {
         "in_progress": "Autobuy in progress",
         "preparing": "Autobuy in progress",
@@ -533,18 +542,16 @@ def markup(row, state=None, stop=None, *, progress=None, show_resale=False):
                 else [InlineKeyboardButton("Autobuy", callback_data="shared:buy")])
     if stop:
         rows.append([InlineKeyboardButton("Stop Autobuy", callback_data=f"shared:stop:{stop}")])
-    if show_resale:
-        rows.append([trial_resale_button.button(row["item_id"])])
     return InlineKeyboardMarkup(rows)
 
 
 async def send(bot, group, row):
-    import resale_telegram
-    import trial_shared_hour
     import vinted_alerts
     import vinted_buying
 
-    if current() != group or not alert_controls.state(alert_controls.row_source(row)).allows(row["found_at"]):
+    from home_routing_store import native_row_allowed
+    if (current() != group or not native_row_allowed(row, "shared-"+group.version)
+            or not alert_controls.state(alert_controls.row_source(row)).allows(row["found_at"])):
         finish(row, failed=True)
         return
     details = vinted_alerts.get_details(row) or {}
@@ -552,9 +559,11 @@ async def send(bot, group, row):
         finish(row, failed=True)
         return
     state = (vinted_buying.result(row["item_id"]) or {}).get("state")
-    body = resale_telegram.group_body(row["item_id"], row["body"])
-    common = dict(chat_id=group.chat, parse_mode="HTML", reply_markup=markup(row, state, show_resale=trial_shared_hour.capture_active()), **photo_cards.TIMEOUTS)
+    body = vinted_alerts.without_legacy_valuation(row["body"])
+    common = dict(chat_id=group.chat, parse_mode="HTML", reply_markup=markup(row, state), **photo_cards.TIMEOUTS)
     try:
+        from home_routing_delivery import native_transport
+        bot = await native_transport(bot, group.chat, row["item_id"])
         response = None
         if row["photo_id"]:
             try:
@@ -567,13 +576,8 @@ async def send(bot, group, row):
             response = await bot.send_message(**common, text=body, link_preview_options=LinkPreviewOptions(is_disabled=True))
         if response:
             finish(row, message_id=response.message_id)
-            resale_telegram.remember(row["item_id"], response, group=group)
-            logger.info("Telegram accepted shared Vinted alert initial_resale=%s guidance=%s source=%s",
-                        resale_telegram.initial_price(response), resale_telegram.visible_guidance(response),
-                        alert_controls.row_source(row))
-            if trial_shared_hour.capture_active():
-                trial_resale_button.observe(row["item_id"], bot, group, response, common["reply_markup"])
-            trial_shared_hour.accepted(bot, group, row["item_id"], alert_controls.row_source(row), response.message_id)
+            logger.info("Telegram accepted shared Vinted alert item %s; message_id=%s; source=%s",
+                        row["item_id"], response.message_id, alert_controls.row_source(row))
         else:
             finish(row, failed=True)
     except RetryAfter as exc:

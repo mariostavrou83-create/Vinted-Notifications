@@ -8,9 +8,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOpti
 from telegram.error import BadRequest, TelegramError
 
 import photo_cards
-import resale_telegram
 import telegram_shared_alerts as shared
-import trial_resale_button
 import vinted_buyer as buyer
 import vinted_buying as buying
 from finder_incidents import queue_buy_failure
@@ -92,14 +90,15 @@ async def callback(update, context):
         await photo_cards.answer(query, "This shared alert is no longer available.", alert=True)
         return
     item_id = row["item_id"]
-    trial_resale_button.purchase_control_pressed(item_id)
+    from vinted_alerts import without_legacy_valuation
+
     key = (group.chat, message.message_id)
     edit_lock = photo_cards.lock("shared-buy", key)
     attempt_lock = buying.purchase_lock(key)
     previous = buying.result(item_id)
     has_photo = bool(getattr(message, "photo", None))
     body = getattr(message, "caption_html" if has_photo else "text_html", None) or ""
-    body = "\n\n".join(part for part in body.split("\n\n") if part not in DISPLAY_SECTIONS)
+    body = without_legacy_valuation("\n\n".join(part for part in body.split("\n\n") if part not in DISPLAY_SECTIONS))
 
     def authorised():
         return shared.current() == group
@@ -118,15 +117,13 @@ async def callback(update, context):
         section = CONFIRM_PROMPT if offer else ""
         if label:
             section = f"{PROGRESS_HEADING}{escape(label)}"
-        current_body = resale_telegram.group_body(item_id, body)
         limit = 1024 if has_photo else 4096
-        candidate = insert_status(current_body, section, limit) if current_body and section else ""
+        candidate = insert_status(body, section, limit) if body and section else ""
         caption_fits = bool(candidate) and photo_cards.units(photo_cards.plain(candidate)) <= limit
 
         def controls(show_caption):
             button_label = None if show_caption else label
-            rows = list(shared.markup(row, state, stop, progress=button_label,
-                                      show_resale=trial_resale_button.on_message(message)).inline_keyboard)
+            rows = list(shared.markup(row, state, stop, progress=button_label).inline_keyboard)
             if offer:
                 token = offer["token"]
                 rows.append((
@@ -140,18 +137,17 @@ async def callback(update, context):
         kwargs = dict(chat_id=group.chat, message_id=message.message_id, **photo_cards.TIMEOUTS)
         try:
             edited = False
-            revision = None
-            if current_body:
-                text = candidate if caption_fits else current_body
+            if body:
+                text = candidate if caption_fits else body
                 keyboard = controls(caption_fits)
                 try:
                     if has_photo:
-                        revision = await context.bot.edit_message_caption(
+                        await context.bot.edit_message_caption(
                             **kwargs, caption=text, parse_mode="HTML", reply_markup=keyboard,
                             show_caption_above_media=True,
                         )
                     else:
-                        revision = await context.bot.edit_message_text(
+                        await context.bot.edit_message_text(
                             **kwargs, text=text, parse_mode="HTML", reply_markup=keyboard,
                             link_preview_options=LinkPreviewOptions(is_disabled=True),
                         )
@@ -160,13 +156,12 @@ async def callback(update, context):
                     edited = "message is not modified" in str(exc).lower()
             if not edited:
                 # Long or unavailable captions can still show the stage on the status button.
-                revision = await context.bot.edit_message_reply_markup(
+                await context.bot.edit_message_reply_markup(
                     **kwargs, reply_markup=controls(False),
                 )
         except TelegramError as exc:
             logger.info("Telegram shared purchase display deferred: %s", type(exc).__name__)
         else:
-            resale_telegram.group_revision(item_id, revision)
             if stage:
                 logger.info("Telegram shared Autobuy stage displayed: stage=%s", stage)
             if offer:

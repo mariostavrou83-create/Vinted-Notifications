@@ -130,6 +130,30 @@ class SharedAlertTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         with closing(connection()) as conn:
             self.assertEqual(conn.execute("SELECT status FROM alert_outbox WHERE item_id='800'").fetchone()[0], "sent")
 
+    async def test_legacy_resale_settings_and_stored_footer_do_not_change_a_shared_alert(self):
+        group = await self.activate()
+        self.accepted()
+        job = shared.claim(group, time.time())
+        original = ("Seller description mentions Est. profit: £4"
+                    "\n\nTitle: <b>Jacket</b>\nBrand: Maker\nTotal: <b>£9.00</b>")
+        job["body"] = original + ("\nEst. profit: <b>£7</b>\nEst. resell: £16\nBuy: Yes\nConf: High")
+        with patch.dict("os.environ", FINDER_RESALE_PILOT="1"), \
+             patch("trial_shared_hour.accepted") as pricing, patch("trial_resale_button.observe") as observe:
+            await shared.send(self.bot, group, job)
+        pricing.assert_not_called()
+        observe.assert_not_called()
+        sent = self.bot.send_photo.await_args.kwargs
+        self.assertEqual(sent["caption"], original)
+        buttons = [b for row in sent["reply_markup"].inline_keyboard for b in row]
+        self.assertIn("shared:buy", [b.callback_data for b in buttons])
+        self.assertNotIn(shared.LEGACY_RESALE_CALLBACK, [b.callback_data for b in buttons])
+        old_tap, query = self.tap(456, shared.LEGACY_RESALE_CALLBACK)
+        await shared.retired_resale_callback(old_tap, self.context)
+        self.assertIn("switched off", query.answer.await_args.args[0])
+        other_tap, other = self.tap(999, shared.LEGACY_RESALE_CALLBACK)
+        await shared.retired_resale_callback(other_tap, self.context)
+        other.answer.assert_not_awaited()
+
     async def test_group_respects_saved_alert_pause_after_private_delivery(self):
         group = await self.activate()
         self.accepted()

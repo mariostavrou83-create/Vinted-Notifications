@@ -1,0 +1,30 @@
+{% set selling_role = account_role == 'selling' %}
+{% set role_label = 'Selling' if selling_role else 'Buying' %}
+{% set health = account.connection_health|default({}) %}
+<div class="account-connection" aria-label="{{ role_label }} account connection">
+  {% if health %}
+    <p><strong>{{ role_label }} connection · {{ health.state|replace('_',' ') }}</strong>
+    {% if selling_role and health.state == 'verified' %}<br>Vinted verified the saved selling account at the time shown.
+    {% elif selling_role and health.state == 'not_connected' %}<br>Connect your selling account to verify it in Finder.
+    {% elif health.message and not (selling_role and ('buyer' in health.message|lower or 'buying' in health.message|lower or 'autobuy' in health.message|lower)) %}<br>{{ health.message }}{% endif %}</p>
+    {% if health.last_verified %}<p><small>Last account verification · {{ health.last_verified }}</small></p>{% endif %}
+    {% if health.last_checked %}<p><small>Latest check · {{ health.last_checked }}{% if health.http_status %} · HTTP {{ health.http_status }}{% endif %}</small></p>{% endif %}
+  {% endif %}
+  {% if account.connected %}
+    <details data-account-options>
+      <summary>{{ role_label }} account connection options</summary>
+      <div class="account-options-body">
+        <h3 id="{{ account_role }}-connection-title">{{ role_label }} account · {{ account.username }}</h3>
+        <p>Open Vinted on this phone or computer and sign in to {{ account.username }} if prompted. Return to Finder, then choose <b>{{ 'Check selling account connection' if selling_role else 'Check saved buyer connection' }}</b> to verify the saved account.</p>
+        <p><a class="secondary" href="https://www.vinted.co.uk/" target="_blank" rel="noopener noreferrer">Open Vinted</a></p>
+        <form method="post" action="{{ url_for('connections', account='selling') if selling_role else url_for('connections') }}">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button class="primary" name="action" value="{{ 'seller_recheck' if selling_role else 'buyer_recheck' }}">{{ 'Check selling account connection' if selling_role else 'Check saved buyer connection' }}</button>
+        </form>
+        {% if not selling_role %}
+          <p><a href="{{ url_for('vinted_reconnect.page') }}">Open Finder’s same-account reconnect</a></p>
+        {% endif %}
+      </div>
+    </details>
+  {% endif %}
+</div>

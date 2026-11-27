@@ -8,7 +8,6 @@ reference-photo failure. A crashed worker's lease expires automatically.
 
 import asyncio
 import io
-import os
 import secrets
 import time
 from contextlib import closing
@@ -307,22 +306,14 @@ class DeliveryWorker:
                 send_started = time.monotonic()
                 result = await self.send_listing(row)
                 finish(row, message_id=result.message_id, now=now, listing_message=result)
-                resale = guidance = "off"
-                if self.platform == "vinted" and os.getenv("FINDER_RESALE_PILOT") == "1":
-                    from resale_sampler import accepted
-                    from resale_telegram import initial_price, visible_guidance
-                    resale = initial_price(result)
-                    guidance = visible_guidance(result)
-                    accepted(row["item_id"], row.pop("_resale_cover", None), result)
                 self.preferred_photo = row["item_id"]
                 logger.info(
-                    "Telegram accepted item %s; message_id=%s; outbox-to-accepted %.3fs; send %.3fs; source=%s initial_resale=%s guidance=%s",
+                    "Telegram accepted item %s; message_id=%s; outbox-to-accepted %.3fs; send %.3fs; source=%s",
                     row["item_id"],
                     result.message_id,
                     max(0, time.time() - row["found_at"]),
                     time.monotonic() - send_started,
                     "Vinted Home" if (row.get("content") or "").startswith("🏠") else "saved search",
-                    resale, guidance,
                 )
         except ListingCancelled:
             # The validator already cancelled the bound pending lease. Calling
@@ -372,7 +363,7 @@ class DeliveryWorker:
             )
         return True
 
-    async def send_listing(self, row):
+    async def send_listing(self, row, *, bot=None):
         from vinted_owner_controls import pending_reminder, reminder_rows
 
         self.require_listing(row)
@@ -380,15 +371,19 @@ class DeliveryWorker:
         if self.platform == "ebay" or self.disable_previews:
             # The clickable listing must not depend on an external image fetch.
             extra["link_preview_options"] = LinkPreviewOptions(is_disabled=True)
+        body = row["content"]
+        if self.platform == "vinted":
+            from vinted_alerts import without_legacy_valuation
+            body = without_legacy_valuation(body)
         self.last_send_started = time.monotonic()
         buttons = [[InlineKeyboardButton(
             "Open eBay" if self.platform == "ebay" else "Open Vinted", url=row["url"]
         )]]
         buttons.extend(reminder_rows(pending_reminder(self.chat_id), self.platform))
-        return await self.bot.send_message(
+        return await (bot or self.bot).send_message(
             **extra,
             chat_id=self.chat_id,
-            text=row["content"],
+            text=body,
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(buttons),
             read_timeout=10,
@@ -529,6 +524,9 @@ class VintedDeliveryWorker(EbayDeliveryWorker):
 
     async def send_listing(self, row):
         from vinted_native import send_initial
+        from home_routing_delivery import native_transport
+
+        bot = await native_transport(self.bot, self.chat_id, row['item_id'])
 
         details = self.alert_module.get_details(row)
         if details and details.get("photo_card"):
@@ -541,16 +539,16 @@ class VintedDeliveryWorker(EbayDeliveryWorker):
                 self.require_listing(row, details)
 
             return await photo_cards.send_initial(
-                self.bot, self.chat_id, row, details, reserve_photo_slot
+                bot, self.chat_id, row, details, reserve_photo_slot
             )
         if details and not details.get("native_photo"):
             from vinted_alerts import send_text
 
             self.last_send_started = time.monotonic()
             self.require_listing(row, details)
-            return await send_text(self.bot, self.chat_id, row, details)
+            return await send_text(bot, self.chat_id, row, details)
         if not details or not details.get("native_photo"):
-            return await super().send_listing(row)
+            return await super().send_listing(row, bot=bot)
 
         async def reserve_slot():
             while delay := self.send_slot_delay():
@@ -558,7 +556,7 @@ class VintedDeliveryWorker(EbayDeliveryWorker):
             self.last_send_started = time.monotonic()
             self.require_listing(row, details)
 
-        return await send_initial(self.bot, self.chat_id, row, details, reserve_slot)
+        return await send_initial(bot, self.chat_id, row, details, reserve_slot)
 
     async def photo_slot(self):
         # Downloads happen before reserving a Telegram send slot. Recheck after

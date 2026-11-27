@@ -59,6 +59,8 @@ class LeRobot:
 
             # Only the configured chat may manage this private sourcing bot.
             self.app.add_handler(TypeHandler(Update, self.restrict_access), group=-1)
+            from home_routing_delivery import pair_command
+            self.app.add_handler(CommandHandler("home_alerts", pair_command))
             from telegram.ext import CallbackQueryHandler
 
             from photo_cards import vinted_callback
@@ -85,15 +87,6 @@ class LeRobot:
             from telegram.ext import MessageHandler, filters
 
             from telegram_shared_buy import callback as shared_buy
-            from trial_price_feedback import FEEDBACK_TEXT, receive as receive_price_feedback
-
-            # The group access handler rejects ordinary conversation. This narrow handler
-            # independently verifies the two linked members and the exact trial reply.
-            self.app.add_handler(MessageHandler(
-                filters.ChatType.GROUPS & filters.REPLY & filters.Regex(FEEDBACK_TEXT),
-                receive_price_feedback,
-            ), group=-2)
-
             self.app.add_handler(CommandHandler("purchase_status", purchase_status_command, filters=filters.ChatType.PRIVATE))
             self.app.add_handler(MessageHandler(
                 filters.ChatType.PRIVATE & filters.Regex(re.compile(r"\A/purchase[ _]status\s*\Z", re.I)),
@@ -114,8 +107,7 @@ class LeRobot:
             self.app.add_handler(CommandHandler("join_alerts", shared.join_command, filters=filters.ChatType.GROUPS))
             self.app.add_handler(CommandHandler("stop_sharing", shared.stop_command))
             self.app.add_handler(CallbackQueryHandler(shared.approve_join, pattern=shared.APPROVE_PATTERN))
-            import trial_resale_button
-            self.app.add_handler(CallbackQueryHandler(trial_resale_button.receive, pattern=r"^shared:resale$"))
+            self.app.add_handler(CallbackQueryHandler(shared.retired_resale_callback, pattern=r"^shared:resale$"))
             self.app.add_handler(CallbackQueryHandler(shared_buy, pattern=shared.BUY_PATTERN))
             logger.info("Telegram shared group approvals ready")
             self.app.add_handler(MessageHandler(
@@ -149,6 +141,9 @@ class LeRobot:
     async def restrict_access(self, update, context):
         expected = str(db.get_parameter("telegram_chat_id") or "").strip()
         if update.effective_chat and str(update.effective_chat.id) == expected:
+            return
+        from home_routing_delivery import pairing_update
+        if pairing_update(update):
             return
         if not shared.allowed_update(update, expected):
             await shared.private_setup_help(update, context)
@@ -536,12 +531,11 @@ class LeRobot:
         self._delivery_task = asyncio.create_task(
             self._delivery_worker.run(), name="vinted-telegram-delivery"
         )
+        from home_routing_delivery import run as run_home_routes
+        self._home_routing_task = asyncio.create_task(run_home_routes(application.bot), name="home-routing-delivery")
         self._shared_task = asyncio.create_task(
             shared.run(application.bot), name="vinted-shared-telegram-delivery"
         )
-        if os.getenv("FINDER_RESALE_PILOT") == "1":
-            from resale_sampler import run as sample_resale
-            self._resale_task = asyncio.create_task(sample_resale(db.DB_PATH), name="vinted-resale-pilot")
         from vinted_connection_notices import ConnectionNotifier
         from vinted_session_worker import run as maintain_buyer_session
 
@@ -582,9 +576,8 @@ class LeRobot:
         self._owner_controls_task = None
         tasks = [
             running
-            for running in (task, maintenance, owner_controls, incidents,
+            for running in (task, maintenance, owner_controls, incidents, getattr(self, "_home_routing_task", None),
                             getattr(self, "_home_buy_task", None), getattr(self, "_shared_task", None),
-                            getattr(self, "_resale_task", None),
                             getattr(self, "_payment_watch_task", None))
             if running is not None
         ]
@@ -592,10 +585,6 @@ class LeRobot:
             running.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        if getattr(self, "_resale_task", None) is not None:
-            from resale_telegram import close as close_resale_edits
-            await close_resale_edits()
-            self._resale_task = None
         if worker is not None:
             # Photo edits run separately from the listing dispatcher. Cancel
             # these too; durable leases make unfinished alerts recoverable.

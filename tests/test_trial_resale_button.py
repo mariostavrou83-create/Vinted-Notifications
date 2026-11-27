@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from telegram import InlineKeyboardMarkup
+
 import telegram_shared_alerts as shared
 import trial_resale_button as trial
 import trial_shared_hour
@@ -80,7 +82,7 @@ class ResaleButtonTests(unittest.IsolatedAsyncioTestCase):
     def test_button_keeps_existing_purchase_keyboard_and_uses_cached_result_on_refresh(self):
         row = {"url": "https://www.vinted.co.uk/items/101", "item_id": "101"}
         original = shared.markup(row, "paid")
-        initial = shared.markup(row, "paid", show_resale=True)
+        initial = self.historical_keyboard(row, "paid")
         self.assertEqual(initial.inline_keyboard[:-1], original.inline_keyboard)
         self.assertTrue(trial.on_message(SimpleNamespace(reply_markup=initial)))
         self.assertFalse(trial.on_message(SimpleNamespace(reply_markup=original)))
@@ -90,13 +92,18 @@ class ResaleButtonTests(unittest.IsolatedAsyncioTestCase):
             "evidence": [{"ask_pence": 1600}, {"ask_pence": 1650}],
         }
         trial.remember("101", result)
-        after = shared.markup(row, "paid", show_resale=True)
+        after = self.historical_keyboard(row, "paid")
         self.assertEqual(after.inline_keyboard[:-1], original.inline_keyboard)
         self.assertIn("£15.00", after.inline_keyboard[-1][0].text)
         trial.remember("101", {"status": "insufficient", "evidence": [{"ask_pence": 3400}]})
         self.assertIn("1 comparable · £34.00", trial.button("101").text)
         trial.remember("101", {"status": "insufficient"})
         self.assertIn("no verified estimate", trial.button("101").text)
+
+    @staticmethod
+    def historical_keyboard(row, state=None):
+        ordinary = shared.markup(row, state)
+        return InlineKeyboardMarkup([*ordinary.inline_keyboard, [trial.button(row["item_id"])]])
 
     def photo(self):
         return {
@@ -125,7 +132,7 @@ class ResaleButtonTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_original_card_edit_replaces_only_our_button_after_photo(self):
         row = {"url": "https://www.vinted.co.uk/items/101", "item_id": "101"}
-        initial = shared.markup(row, show_resale=True)
+        initial = self.historical_keyboard(row)
         bot = SimpleNamespace(edit_message_reply_markup=AsyncMock())
         card = (bot, self.group, 20, initial)
         self.enterContext(patch.dict(trial._cards, {"101": card}, clear=True))

@@ -65,6 +65,27 @@ main { padding-top:32px; }
 .guide-section input,.guide-section select,.guide-section textarea { max-width:100%; }
 .guide-section details[open]>summary { margin-bottom:14px; }
 .connection-panel[hidden] { display:none!important; }
+.home-routing-form { margin:20px 0 0; padding-top:18px; border-top:1px solid var(--line); }
+.home-routing-form fieldset { margin:0 0 14px; padding:0; border:0; min-width:0; }
+.home-routing-form legend { padding:0; font-weight:700; overflow-wrap:anywhere; }
+.home-routing-form .checkbox { margin:4px 0; padding:5px 0; font-size:14px; overflow-wrap:anywhere; cursor:pointer; }
+.home-routing-form .checkbox input { flex:none; margin:0; accent-color:var(--green); }
+.home-routing-links { display:flex; flex-wrap:wrap; gap:8px; }
+.account-connection { padding:14px 0; }
+.account-connection p { margin:0 0 8px; }
+.account-options-dialog { width:min(430px,92vw); max-height:85vh; padding:24px; color:var(--ink); background:white; border:1px solid var(--line); border-radius:10px; }
+.account-options-dialog::backdrop { background:rgb(30 48 39 / 45%); }
+.account-options-body h3 { margin:0 0 12px; overflow-wrap:anywhere; }
+.account-options-body form,.account-options-body p { margin:12px 0; }
+.account-options-body a:not(.secondary) { text-decoration:underline; }
+.home-routing-pair { border-top:1px solid var(--line); margin-top:20px; padding-top:16px; }
+.home-routing-pair summary,.home-routing-remove summary { cursor:pointer; }
+.home-routing-remove { margin:8px 0 0; }
+.home-routing-remove summary { color:var(--muted); font-size:13px; }
+.home-pairing-values { margin:12px 0; }
+.home-pairing-values dt { font-size:12px; color:var(--muted); }
+.home-pairing-values dd { overflow-wrap:anywhere; margin:0 0 8px; }
+.home-pairing-values code { font-size:18px; }
 .detail-count { background:#edf0e8; padding:3px 7px; margin-left:10px; border-radius:8px; font-size:11px; }
 .purchase-attention { border-left:3px solid #c28c46; padding-left:18px; }
 .purchase-attention>h3 { font-size:16px; margin:0 0 6px; }

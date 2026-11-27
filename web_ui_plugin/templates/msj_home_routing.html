@@ -1,0 +1,123 @@
+<section class="form-card guide-section" id="home-routing" aria-labelledby="home-routing-title">
+  <h2 id="home-routing-title">Home alert chats</h2>
+  <p>Choose which Telegram chats receive alerts from each Vinted Home. AutoBuy uses separate buying permissions.</p>
+  {% if home_routing is defined and home_routing %}
+    {% set original = home_routing.sources|selectattr('kind', 'equalto', 'original')|first %}
+    {% if original and not original.connected and not home_routing.destinations %}
+      <p class="muted">Connect the dashboard owner’s Telegram chat, then refresh Connections to pair Home feeds and choose their chats.</p>
+    {% else %}
+    {% if not home_routing.sources %}
+      <p class="muted">No Home feeds are available. Pair a Home below to get started.</p>
+    {% elif not home_routing.destinations %}
+      <p class="muted">Add a Telegram chat below to choose where these feeds send alerts.</p>
+    {% endif %}
+    {% for source in home_routing.sources %}
+      <form class="home-routing-form" method="post" action="/api/home/telegram-routing">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="action" value="routes">
+        <input type="hidden" name="source" value="{{ source.id }}">
+        <input type="hidden" name="revision" value="{{ home_routing.revision }}">
+        <fieldset>
+          <legend>{{ source.label }}</legend>
+          {% if source.kind == 'browser' %}
+            <small class="muted">
+              {% if not source.connected %}Chrome pairing unavailable
+              {% elif source.state == 'active' %}Chrome paired · Home tab checked in within 10 minutes
+              {% elif source.state == 'stale' %}Chrome paired · Home tab has stopped checking in
+              {% else %}Chrome paired · Waiting for the first Home tab check-in{% endif %}
+              {% if source.last_seen %}<time data-home-check="{{ source.last_seen }}"></time>{% endif %}
+            </small>
+          {% else %}
+            <small class="muted">{{ 'Original Home alert route' if source.connected else 'Connect an owner Telegram chat to set up this route.' }}</small>
+          {% endif %}
+          {% for chat in home_routing.destinations %}
+            <label class="checkbox">
+              <input type="checkbox" name="destination" value="{{ chat.id }}"{% if chat.id in source.destinations %} checked{% endif %}>
+              <span>{{ chat.label }}</span>
+            </label>
+          {% endfor %}
+        </fieldset>
+        {% if home_routing.destinations %}
+          <button class="secondary" aria-label="Save chats for {{ source.label }}">Save chats</button>
+        {% endif %}
+      </form>
+      {% if source.kind == 'browser' %}
+        <details class="home-routing-remove">
+          <summary>Reconnect this Chrome Home</summary>
+          <p>You can manage chats from your phone. To resume this feed, open <a href="https://www.vinted.co.uk/" target="_blank" rel="noopener noreferrer">Vinted Home</a>
+            in the paired desktop Chrome profile, check that the right Vinted account is open, then choose <b>Watch this Home tab</b> in Finder Home Companion.</p>
+          <form method="get" action="/connections#home-routing">
+            <button class="secondary">Refresh Home status</button>
+          </form>
+        </details>
+        <details class="home-routing-remove">
+          <summary>Disconnect {{ source.label }}</summary>
+          <form method="post" action="/api/home/telegram-routing">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="action" value="remove">
+            <input type="hidden" name="source" value="{{ source.id }}">
+            <input type="hidden" name="revision" value="{{ home_routing.revision }}">
+            <p>Disconnecting stops this Chrome Home from supplying new alerts.</p>
+            <button class="secondary">Disconnect this Home</button>
+          </form>
+        </details>
+      {% endif %}
+    {% endfor %}
+    <details class="home-routing-pair"{% if home_destination_pairing or not home_routing.destinations %} open{% endif %}>
+      <summary>Manage Telegram chats</summary>
+      {% if home_destination_pairing %}
+        <div role="status">
+          <p>Send this command in the Telegram chat you want to add. Then refresh this page and select the chat for each Home.</p>
+          <p><code>/home_alerts {{ home_destination_pairing.code }}</code>{% if home_destination_pairing.expires_in %} · valid for {{ ((home_destination_pairing.expires_in|int + 59) // 60) }} min{% endif %}</p>
+        </div>
+      {% else %}
+        <p>Pair a private chat or group by confirming a code in that chat.</p>
+      {% endif %}
+      <form method="post" action="/api/home/telegram-routing">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="action" value="pair_destination">
+        <label for="home-chat-label">Telegram chat name</label>
+        <input id="home-chat-label" name="label" type="text" placeholder="e.g. Sourcing team" maxlength="64" required>
+        <button class="secondary">Create Telegram pairing code</button>
+      </form>
+      {% for chat in home_routing.destinations if chat.removable %}
+        <details class="home-routing-remove">
+          <summary>Remove {{ chat.label }}</summary>
+          <form method="post" action="/api/home/telegram-routing">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="action" value="remove_destination">
+            <input type="hidden" name="destination" value="{{ chat.id }}">
+            <input type="hidden" name="revision" value="{{ home_routing.revision }}">
+            <p>Remove this chat from every Home that sends it alerts?</p>
+            <button class="secondary">Remove this Telegram chat</button>
+          </form>
+        </details>
+      {% endfor %}
+    </details>
+    <details class="home-routing-pair"{% if home_pairing or not home_routing.sources %} open{% endif %}>
+      <summary>Pair another Vinted Home</summary>
+      {% if home_pairing %}
+        <div role="status">
+          <p>In the Chrome profile for this Vinted account, open Finder Home Companion. Check the prefilled Finder dashboard address and enter the pairing code. Choose “Pair this Chrome profile”, then open your Vinted Home and choose “Watch this Home tab”.</p>
+          <dl class="home-pairing-values">
+            <dt>Dashboard address</dt><dd>{{ home_pairing.origin }}</dd>
+            <dt>Pairing code</dt><dd><code>{{ home_pairing.code }}</code>{% if home_pairing.expires_in %} · valid for {{ ((home_pairing.expires_in|int + 59) // 60) }} min{% endif %}</dd>
+          </dl>
+        </div>
+      {% else %}
+        <p>In the Chrome profile for the Vinted account you want to add, install Finder Home Companion. Give the Home a name you’ll recognise.</p>
+      {% endif %}
+      <p><a class="secondary" href="/connections/home-companion.zip" download>Download Finder Home Companion</a></p>
+      <form method="post" action="/api/home/telegram-routing">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="action" value="pair">
+        <label for="home-pair-label">Home name</label>
+        <input id="home-pair-label" name="label" type="text" placeholder="e.g. Weekend sourcing" maxlength="64" required>
+        <button class="secondary">Create pairing code</button>
+      </form>
+    </details>
+    {% endif %}
+  {% else %}
+    <p role="status">Home routing settings are unavailable. Reload Connections to try again.</p>
+  {% endif %}
+</section>

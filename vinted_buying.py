@@ -2534,12 +2534,17 @@ async def show_alert_feedback(bot, message, outcome):
         )
     }
     details = dict(details, buy_feedback=feedback)
-    try:
+
+    def save_feedback():
         with closing(connection()) as conn, conn:
             conn.execute(
                 "UPDATE telegram_photo_cards SET details=? WHERE platform='vinted' AND message_id=? AND item_id=?",
                 (json.dumps(details), message.message_id, row["item_id"]),
             )
+
+    try:
+        # SQLite can wait for a Home writer. Other Telegram callbacks must still run.
+        await asyncio.to_thread(save_feedback)
         # Picture and notes controls re-use these details, preserving buy status.
         view = card.get("view", "listing")
         note_page = int(view.split(":")[1]) if view.startswith("notes:") else None
