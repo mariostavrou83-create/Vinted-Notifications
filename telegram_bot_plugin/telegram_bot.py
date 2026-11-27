@@ -114,6 +114,8 @@ class LeRobot:
             self.app.add_handler(CommandHandler("join_alerts", shared.join_command, filters=filters.ChatType.GROUPS))
             self.app.add_handler(CommandHandler("stop_sharing", shared.stop_command))
             self.app.add_handler(CallbackQueryHandler(shared.approve_join, pattern=shared.APPROVE_PATTERN))
+            import trial_resale_button
+            self.app.add_handler(CallbackQueryHandler(trial_resale_button.receive, pattern=r"^shared:resale$"))
             self.app.add_handler(CallbackQueryHandler(shared_buy, pattern=shared.BUY_PATTERN))
             logger.info("Telegram shared group approvals ready")
             self.app.add_handler(MessageHandler(

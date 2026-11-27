@@ -71,8 +71,33 @@ def _read_end():
 
 
 class Counters:
-    def __init__(self, path):
+    def __init__(self, path, loop=None):
         self.path = path
+        self.loop = loop
+
+    def rough(self, identity, rough):
+        import trial_resale_button
+
+        partial = {"status": "evaluating", "rough": rough}
+        if not trial_resale_button.photo_range(partial):
+            return
+        # Contains only the parsed pricing answer, never an image, URL or request payload.
+        if _write(
+            self.path,
+            "UPDATE hour_alerts SET result=? WHERE item_id=? AND status='evaluating' "
+            "AND EXISTS (SELECT 1 FROM hour_window WHERE ends>?)",
+            (json.dumps(partial, ensure_ascii=False), str(identity), time.time()),
+        ):
+            log.info(
+                "Finder hourly valuation photo ready item=%s low=%s high=%s ask=%s provider_ms=%s",
+                identity,
+                rough["low_pence"],
+                rough["high_pence"],
+                rough.get("quick_pence"),
+                rough.get("provider_ms"),
+            )
+            if self.loop:
+                self.loop.call_soon_threadsafe(trial_resale_button.remember, str(identity), partial)
 
     def reserve(self, kind, limit):
         hard_limits = {"market": 2, "model": 3, "coverage_notice": 1}
@@ -101,6 +126,7 @@ def _start(path, accepted, version):
               item_id TEXT PRIMARY KEY, accepted REAL NOT NULL, source TEXT NOT NULL,
               parent_message INTEGER NOT NULL, status TEXT NOT NULL, result TEXT, ready REAL,
               reply_message INTEGER, sent REAL, publish_state TEXT);
+            CREATE TABLE IF NOT EXISTS hour_numeric_cards (item_id TEXT PRIMARY KEY, shown REAL NOT NULL, label TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS hour_cooldown (id INTEGER PRIMARY KEY, next_send REAL NOT NULL);
         """)
         created = False
@@ -222,6 +248,28 @@ def _evaluate_one(identity, database, counters, end):
     return asyncio.run(run())
 
 
+def _retained_photo(path, identity):
+    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.25)) as conn:
+        row = conn.execute(
+            "SELECT result FROM hour_alerts WHERE item_id=? AND status='evaluating'", (identity,)
+        ).fetchone()
+    if not row or not row[0]:
+        return None
+    import trial_resale_button
+
+    result = json.loads(row[0])
+    if not trial_resale_button.photo_range(result):
+        return None
+    return dict(
+        result,
+        status="insufficient",
+        resale_pence=None,
+        evidence=[],
+        market_status="check_failed",
+        explanation="The photo estimate is available; the market check did not finish.",
+    )
+
+
 def _hold(path, until=None):
     with closing(sqlite3.connect(path, timeout=1)) as conn, conn:
         if until is not None:
@@ -234,6 +282,24 @@ def _hold(path, until=None):
         return row[0] if row else 0
 
 
+async def card_slot():
+    """Reserve update capacity without delaying an initial Telegram alert."""
+    global _publish_lock
+    if _publish_lock is None:
+        _publish_lock = asyncio.Lock()
+    async with _publish_lock:
+        quiet = await asyncio.to_thread(_hold, audit_path())
+        limit = min(time.time() + 12, _window_end)
+        while time.time() < limit:
+            now = time.time()
+            send_after = max(quiet, _accepted_at + 3.1)
+            if send_after <= now:
+                await asyncio.to_thread(_hold, audit_path(), now + 3.2)
+                return True
+            await asyncio.sleep(max(0, min(send_after, limit) - now))
+    return False
+
+
 async def _mark(path, identity, state):
     await asyncio.to_thread(
         _write, path, "UPDATE hour_alerts SET publish_state=? WHERE item_id=?", (state, identity)
@@ -241,7 +307,20 @@ async def _mark(path, identity, state):
     log.info("Finder hourly valuation reply item=%s state=%s", identity, state)
 
 
-async def _publish(path, counters, bot, group, identity, parent, received, text, quote):
+async def _publish(
+    path,
+    counters,
+    bot,
+    group,
+    identity,
+    parent,
+    received,
+    text,
+    quote,
+    *,
+    is_photo=False,
+    has_external=False,
+):
     from telegram import LinkPreviewOptions
     from telegram.error import RetryAfter, TelegramError
 
@@ -249,6 +328,12 @@ async def _publish(path, counters, bot, group, identity, parent, received, text,
 
     global _notice_done, _notice_pending
     try:
+        if is_photo and not has_external:
+            import trial_resale_button
+
+            if await trial_resale_button.visible_on_card(identity):
+                await _mark(path, identity, "numeric_card_accepted")
+                return
         async with _publish_lock:
             now = time.time()
             quiet = await asyncio.to_thread(_hold, path)
@@ -265,7 +350,7 @@ async def _publish(path, counters, bot, group, identity, parent, received, text,
             if await asyncio.to_thread(shared.current) != group:
                 await _mark(path, identity, "skipped_group_changed")
                 return
-            if quote is None:
+            if quote is None and not (is_photo or has_external):
                 if not await asyncio.to_thread(counters.reserve, "coverage_notice", 1):
                     _notice_done = True
                     return
@@ -304,19 +389,20 @@ async def _publish(path, counters, bot, group, identity, parent, received, text,
                 (response.message_id, sent, identity),
             )
             log.info(
-                "Finder hourly valuation shared reply accepted item=%s quote=%s elapsed_ms=%s telegram_ms=%s utc=%s",
+                "Finder hourly valuation shared reply accepted item=%s quote=%s elapsed_ms=%s telegram_ms=%s utc=%s photo_only=%s",
                 identity,
                 quote,
                 round((sent - received) * 1000),
                 round((sent - attempted) * 1000),
                 _utc(sent),
+                bool(is_photo),
             )
     except Exception as exc:  # noqa: BLE001 -- isolate the optional reply from live alerts.
         log.warning(
             "Finder hourly valuation reply failed item=%s reason=%s", identity, type(exc).__name__
         )
     finally:
-        if quote is None:
+        if quote is None and not (is_photo or has_external):
             _notice_pending = False
 
 
@@ -325,7 +411,7 @@ async def _run(queue):
 
     global _window_end, _pool_end, _publish_lock, _notice_pending
     path = audit_path()
-    counters = Counters(path)
+    counters = Counters(path, asyncio.get_running_loop())
     window = None
     while not queue.empty():
         bot, group, identity, source, parent, accepted_at = queue.get_nowait()
@@ -348,6 +434,9 @@ async def _run(queue):
                     )
             if not start <= accepted_at < _window_end or group.version != version:
                 continue
+            import trial_wrong_price
+
+            trial_wrong_price.schedule(bot, group, path)
             inserted = await asyncio.to_thread(
                 _write,
                 path,
@@ -360,17 +449,47 @@ async def _run(queue):
             if time.time() >= _window_end:
                 result = {"status": "expired"}
             else:
-                result = await asyncio.to_thread(
-                    _evaluate_one, identity, db.DB_PATH, counters, _window_end
-                )
+                try:
+                    result = await asyncio.to_thread(
+                        _evaluate_one, identity, db.DB_PATH, counters, _window_end
+                    )
+                except Exception as exc:
+                    result = await asyncio.to_thread(_retained_photo, path, identity)
+                    if result is None:
+                        raise
+                    log.warning(
+                        "Finder hourly valuation market unfinished item=%s reason=%s",
+                        identity,
+                        type(exc).__name__,
+                    )
             ready = time.time()
             state = result.get("status", "insufficient")
+            stage = result.get("rough") or {}
+            research = result.get("cross_market") or {}
+            outcomes = result.get("sources") or {}
+            if outcomes or stage:
+                sites = ("vinted_uk", "depop_uk", "ebay_uk_active", "ebay_uk_sold")
+                counts = [
+                    f"{site}:{outcomes[site].get('status')}:{outcomes[site].get('count', 0)}"
+                    for site in sites if site in outcomes
+                ]
+                log.info(
+                    "Finder hourly valuation research item=%s photo=%s provider_ms=%s "
+                    "guide=%s low=%s high=%s lookups=%s sources=%s",
+                    identity, stage.get("photo_status"), stage.get("provider_ms"),
+                    research.get("status"), research.get("low_pence"), research.get("high_pence"),
+                    result.get("public_market_requests", 0), ",".join(counts) or "none",
+                )
             await asyncio.to_thread(
                 _write,
                 path,
                 "UPDATE hour_alerts SET status=?,result=?,ready=? WHERE item_id=?",
                 (state, json.dumps(result, ensure_ascii=False), ready, identity),
             )
+            # A subsequent normal Telegram keyboard refresh can display the finished price.
+            import trial_resale_button
+
+            trial_resale_button.remember(identity, result)
             price = result.get("resale_pence")
             evidence_ids = ",".join(
                 m.group(1)
@@ -397,12 +516,32 @@ async def _run(queue):
             if ready >= _window_end or state not in ("estimated", "insufficient"):
                 continue
             text = _quote(result) if state == "estimated" else None
+            rough = trial_resale_button.photo_range(result)
+            external = trial_resale_button.external_range(result)
+            external_lines = trial_resale_button.external_lines(result)
+            is_photo = bool(rough and not text and not external)
+            if rough:
+                if text:
+                    text = f"Photo estimate {rough}.\n" + text.replace(
+                        "Trial quick-sale estimate:", "Market-checked quick-sale ask:", 1
+                    )
+                else:
+                    text = (
+                        trial_resale_button.brief(state, result)
+                        + "\nReply here with high, fair, low, or the price you’d list it for."
+                    )
+            if external_lines:
+                if not text:
+                    text = "Finder has no confirmed Vinted price for this listing."
+                if external and f"Cross-market guide {external}" in text:
+                    external_lines = external_lines[1:]
+                text += "\n" + "\n".join(external_lines)
             if not text and (_notice_done or _notice_pending):
                 continue
             if len(_publishers) >= 24:
                 await _mark(path, identity, "skipped_reply_backlog")
                 continue
-            quote = price if text else None
+            quote = price if text and not is_photo else None
             if not text:
                 text = (
                     "The one-hour resale test is running. Finder could not verify a price for this listing. "
@@ -412,7 +551,19 @@ async def _run(queue):
             if _publish_lock is None:
                 _publish_lock = asyncio.Lock()
             task = asyncio.create_task(
-                _publish(path, counters, bot, group, identity, parent, accepted_at, text, quote)
+                _publish(
+                    path,
+                    counters,
+                    bot,
+                    group,
+                    identity,
+                    parent,
+                    accepted_at,
+                    text,
+                    quote,
+                    is_photo=is_photo,
+                    has_external=bool(external_lines),
+                )
             )
             _publishers.add(task)
             task.add_done_callback(_publishers.discard)
