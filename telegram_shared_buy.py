@@ -2,9 +2,10 @@
 
 import asyncio
 import re
+from html import escape
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import TelegramError
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
+from telegram.error import BadRequest, TelegramError
 
 import photo_cards
 import telegram_shared_alerts as shared
@@ -12,10 +13,14 @@ import vinted_buyer as buyer
 import vinted_buying as buying
 from finder_incidents import queue_buy_failure
 from logger import get_logger
-from vinted_telegram_progress import TelegramProgress, active_item, stop_purchase
+from vinted_progress import STAGE_LABELS
+from vinted_telegram_progress import TelegramProgress, active_item, active_status, stop_purchase
 
 logger = get_logger(__name__)
 RETRYABLE = {"preparing", "failed_before_payment", "cancelled"}
+PROGRESS_HEADING = "<b>Autobuy progress</b>\n"
+STOPPING_LABEL = "Stopping Autobuy…"
+PROGRESS_LABELS = frozenset(STAGE_LABELS.values()) | {STOPPING_LABEL}
 RESULT_TEXT = {
     "paid": "Bought with the connected Vinted buying account.",
     "paying": "Finder is checking the payment result.",
@@ -58,74 +63,123 @@ async def callback(update, context):
         return
     item_id = row["item_id"]
     key = (group.chat, message.message_id)
+    edit_lock = photo_cards.lock("shared-buy", key)
+    attempt_lock = buying.purchase_lock(key)
     previous = buying.result(item_id)
+    has_photo = bool(getattr(message, "photo", None))
+    body = getattr(message, "caption_html" if has_photo else "text_html", None) or ""
+    header, separator, rest = body.partition("\n\n")
+    if separator and header.startswith(PROGRESS_HEADING):
+        if photo_cards.plain(header[len(PROGRESS_HEADING):]) in PROGRESS_LABELS:
+            body = rest
 
     def authorised():
         return shared.current() == group
 
-    async def display(state, stop=None):
-        async with photo_cards.lock("shared-buy", key):
-            if not authorised():
-                return
-            try:
-                markup = shared.markup(row, state, stop)
-                if state in {"unknown", "needs_action"}:
-                    markup = InlineKeyboardMarkup((*markup.inline_keyboard, (status_button(context.bot),)))
+    def controls(state, stop, progress=None):
+        keyboard = shared.markup(row, state, stop, progress=progress)
+        if state in {"unknown", "needs_action"}:
+            keyboard = InlineKeyboardMarkup((*keyboard.inline_keyboard, (status_button(context.bot),)))
+        return keyboard
+
+    async def display(state, stop=None, *, stage=None):
+        """Render under the alert's edit lock, preserving its original listing text."""
+        if not authorised():
+            return
+        label = STOPPING_LABEL if state == "stopping" else STAGE_LABELS.get(stage)
+        candidate = f"{PROGRESS_HEADING}{escape(label)}\n\n{body}" if body and label else ""
+        caption_fits = bool(candidate) and photo_cards.units(photo_cards.plain(candidate)) <= (
+            1024 if has_photo else 4096
+        )
+        kwargs = dict(chat_id=group.chat, message_id=message.message_id, **photo_cards.TIMEOUTS)
+        try:
+            edited = False
+            if body:
+                text = candidate if caption_fits else body
+                keyboard = controls(state, stop, None if caption_fits else label)
+                try:
+                    if has_photo:
+                        await context.bot.edit_message_caption(
+                            **kwargs, caption=text, parse_mode="HTML", reply_markup=keyboard,
+                            show_caption_above_media=True,
+                        )
+                    else:
+                        await context.bot.edit_message_text(
+                            **kwargs, text=text, parse_mode="HTML", reply_markup=keyboard,
+                            link_preview_options=LinkPreviewOptions(is_disabled=True),
+                        )
+                    edited = True
+                except BadRequest as exc:
+                    edited = "message is not modified" in str(exc).lower()
+            if not edited:
+                # Long or unavailable captions can still show the stage on the status button.
                 await context.bot.edit_message_reply_markup(
-                    chat_id=group.chat, message_id=message.message_id,
-                    reply_markup=markup, **photo_cards.TIMEOUTS,
+                    **kwargs, reply_markup=controls(state, stop, label),
                 )
-            except TelegramError as exc:
-                logger.info("Telegram shared purchase display deferred: %s", type(exc).__name__)
+        except TelegramError as exc:
+            logger.info("Telegram shared purchase display deferred: %s", type(exc).__name__)
+        else:
+            if stage:
+                logger.info("Telegram shared Autobuy stage displayed: stage=%s", stage)
+
+    async def display_result(state):
+        async with edit_lock:
+            await display(state)
 
     if query.data.startswith("shared:stop:"):
         outcome = stop_purchase(key, item_id, query.data.rsplit(":", 1)[1])
         await photo_cards.answer(query, outcome["message"], alert=True)
-        if outcome["state"] == "stopping" and active_item(item_id):
-            await display("stopping")
+        if outcome["state"] == "stopping":
+            async with edit_lock:
+                if active_status(key, item_id, buying.result(item_id)):
+                    await display("stopping")
         return
-    if active_item(item_id):
-        await photo_cards.answer(query, "Autobuy is already running for this listing.", alert=True)
+    if active_item(item_id) or attempt_lock.locked():
+        stage = active_status(key, item_id, previous) if query.data == "shared:status" else None
+        await photo_cards.answer(query, stage or "Autobuy is already running for this listing.", alert=True)
         return
     if query.data == "shared:status" or (previous and previous["state"] not in RETRYABLE):
         state = previous["state"] if previous else None
         await photo_cards.answer(query, RESULT_TEXT.get(state, "Check this listing's status in Finder."), alert=True)
-        await display(state)
+        async with edit_lock:
+            if not active_item(item_id) and not attempt_lock.locked():
+                await display((buying.result(item_id) or {}).get("state"))
         return
-    role = "owner" if sender.id == group.owner else "partner"
-    logger.info("Telegram shared Autobuy tap: role=%s", role)
-    progress = TelegramProgress(context.bot, message, item_id, display=display, authorise=authorised)
-    acknowledgement = asyncio.create_task(photo_cards.answer(query, "Checking this listing for Autobuy…"))
-    try:
+    async with attempt_lock:
+        role = "owner" if sender.id == group.owner else "partner"
+        logger.info("Telegram shared Autobuy tap: role=%s", role)
+        progress = TelegramProgress(context.bot, message, item_id, display=display, authorise=authorised)
+        acknowledgement = asyncio.create_task(photo_cards.answer(query, "Checking this listing for Autobuy…"))
         try:
-            outcome = await progress.execute(buying.buy, row)
-        except buyer.BuyerError as exc:
-            outcome = {"state": "setup_required", "reason": exc.reason, "message": str(exc)}
-        except Exception as exc:  # noqa: BLE001 -- consult durable state; never replay payment
-            logger.warning("Telegram shared Autobuy stopped: %s", type(exc).__name__)
-            outcome = buying.result(item_id) or {"state": "unknown", "message": "Check the payment result in Finder."}
+            try:
+                outcome = await progress.execute(buying.buy, row)
+            except buyer.BuyerError as exc:
+                outcome = {"state": "setup_required", "reason": exc.reason, "message": str(exc)}
+            except Exception as exc:  # noqa: BLE001 -- consult durable state; never replay payment
+                logger.warning("Telegram shared Autobuy stopped: %s", type(exc).__name__)
+                outcome = buying.result(item_id) or {"state": "unknown", "message": "Check the payment result in Finder."}
+            finally:
+                await progress.finish()
+            state = outcome["state"]
+            await progress.settle(queue_buy_failure(row, outcome, query.id))
+            await progress.settle(display_result(state))
+            if state in ("setup_required", "failed_before_payment"):
+                text = REASON_TEXT.get(outcome.get("reason"), "Autobuy stopped before payment. The account owner can check Finder for details.")
+                if authorised():
+                    keyboard = None
+                    if outcome.get("reason") == "earlier_payment_uncertain":
+                        keyboard = InlineKeyboardMarkup([[status_button(context.bot)]])
+                    try:
+                        await context.bot.send_message(
+                            chat_id=group.chat, text=text, reply_to_message_id=message.message_id,
+                            reply_markup=keyboard,
+                            disable_notification=True, **photo_cards.TIMEOUTS,
+                        )
+                    except TelegramError as exc:
+                        logger.info("Telegram shared purchase note deferred: %s", type(exc).__name__)
+            logger.info("Telegram shared Autobuy outcome: state=%s", state)
         finally:
-            await progress.finish()
-        state = outcome["state"]
-        await progress.settle(queue_buy_failure(row, outcome, query.id))
-        await progress.settle(display(state))
-        if state in ("setup_required", "failed_before_payment"):
-            text = REASON_TEXT.get(outcome.get("reason"), "Autobuy stopped before payment. The account owner can check Finder for details.")
-            if authorised():
-                keyboard = None
-                if outcome.get("reason") == "earlier_payment_uncertain":
-                    keyboard = InlineKeyboardMarkup([[status_button(context.bot)]])
-                try:
-                    await context.bot.send_message(
-                        chat_id=group.chat, text=text, reply_to_message_id=message.message_id,
-                        reply_markup=keyboard,
-                        disable_notification=True, **photo_cards.TIMEOUTS,
-                    )
-                except TelegramError as exc:
-                    logger.info("Telegram shared purchase note deferred: %s", type(exc).__name__)
-        logger.info("Telegram shared Autobuy outcome: state=%s", state)
-    finally:
-        progress.close()
-        await acknowledgement
+            progress.close()
+            await acknowledgement
     if progress.cancelled:
         raise asyncio.CancelledError

@@ -18,6 +18,7 @@ import vinted_buyer
 import vinted_buying
 from search_settings import connection
 from test_search_controls import DatabaseFixture
+from vinted_progress import STAGE_LABELS
 from vinted_purchase_control import PurchaseControl, bind_control, payment_gate
 
 
@@ -34,6 +35,8 @@ class SharedAlertTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             get_chat_member_count=AsyncMock(return_value=3),
             send_photo=AsyncMock(return_value=SimpleNamespace(message_id=101)),
             send_message=AsyncMock(return_value=SimpleNamespace(message_id=101)),
+            edit_message_caption=AsyncMock(),
+            edit_message_text=AsyncMock(),
             edit_message_reply_markup=AsyncMock(),
             username="TestFinderBot",
         )
@@ -174,6 +177,63 @@ class SharedAlertTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(vinted_buying.result("800")["state"], "paid")
         self.assertIn("Bought", self.bot.edit_message_reply_markup.await_args.kwargs[
             "reply_markup"].inline_keyboard[1][0].text)
+
+    async def test_same_shared_photo_alert_shows_live_stages_and_then_the_result(self):
+        await self.ready()
+        caption = "<b>Vinted listing</b>\n\nBrand: Test\nEst. total incl. shipping: £20.00"
+        checking, paying = asyncio.Event(), asyncio.Event()
+        submit, finish = threading.Event(), threading.Event()
+
+        def purchase(row, *, progress):
+            self.assertTrue(vinted_buying.claim(row))
+            progress("checking_item")
+            self.assertTrue(submit.wait(6))
+            with payment_gate():
+                vinted_buying.record(row["item_id"], "paying", "Waiting for result")
+            progress("submitting_payment")
+            self.assertTrue(finish.wait(6))
+            vinted_buying.record(row["item_id"], "paid", "Purchase completed")
+            return vinted_buying.result(row["item_id"])
+
+        async def edit_caption(**kwargs):
+            if STAGE_LABELS["checking_item"] in kwargs["caption"]:
+                checking.set()
+            if STAGE_LABELS["submitting_payment"] in kwargs["caption"]:
+                paying.set()
+
+        self.bot.edit_message_caption.side_effect = edit_caption
+        update, query = self.tap(456)
+        query.message.photo = [SimpleNamespace(file_id="offline-file-id")]
+        query.message.caption_html = caption
+        with patch.object(vinted_buying, "buy", side_effect=purchase) as buy:
+            task = asyncio.create_task(shared_buy.callback(update, self.context))
+            try:
+                await asyncio.wait_for(checking.wait(), 3)
+                first = self.bot.edit_message_caption.await_args.kwargs
+                self.assertIn(caption, first["caption"])
+                self.assertTrue(first["show_caption_above_media"])
+                self.assertEqual(first["message_id"], 101)
+                stop = first["reply_markup"].inline_keyboard[-1][0]
+                self.assertTrue(stop.callback_data.startswith("shared:stop:"))
+                status_update, status_query = self.tap(123, "shared:status")
+                await shared_buy.callback(status_update, self.context)
+                self.assertEqual(status_query.answer.await_args.args[0], STAGE_LABELS["checking_item"])
+                submit.set()
+                await asyncio.wait_for(paying.wait(), 4)
+                payment = self.bot.edit_message_caption.await_args.kwargs
+                self.assertNotIn(STAGE_LABELS["checking_item"], payment["caption"])
+                self.assertEqual(len(payment["reply_markup"].inline_keyboard), 2)
+            finally:
+                submit.set()
+                finish.set()
+                await task
+            buy.assert_called_once()
+        final = self.bot.edit_message_caption.await_args.kwargs
+        self.assertEqual(final["caption"], caption)
+        self.assertIn("Bought", final["reply_markup"].inline_keyboard[-1][0].text)
+        self.assertEqual(final["message_id"], 101)
+        self.assertTrue(final["show_caption_above_media"])
+        self.bot.send_message.assert_not_awaited()
 
     async def test_unlink_checks_permission_again_at_payment_gate(self):
         group = await self.activate()

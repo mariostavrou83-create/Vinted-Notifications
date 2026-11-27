@@ -250,12 +250,7 @@ class TelegramProgress:
         import photo_cards
         import vinted_buying as buying
 
-        if self.display:
-            if self.closed or self._last_edit is not None or self.control.requested.is_set():
-                return False
-            await self.display("in_progress", None if self.control.paying else self.control.token)
-            return True
-        async with photo_cards.lock("vinted", self.message.message_id):
+        async with photo_cards.lock("shared-buy" if self.display else "vinted", self.key[1]):
             if self.closed or _active.get(self.key) is not self:
                 return False
             if self.control.requested.is_set():
@@ -264,9 +259,10 @@ class TelegramProgress:
             if self._pending and self._pending[0] > event[0]:
                 event, self._pending = self._pending, None
             _, stage, published = event
-            saved = photo_cards.load("vinted", self.message.message_id)
-            if not saved or str(saved[0]["item_id"]) != self.item_id:
-                return False
+            if not self.display:
+                saved = photo_cards.load("vinted", self.message.message_id)
+                if not saved or str(saved[0]["item_id"]) != self.item_id:
+                    return False
             durable = buying.result(self.item_id)
             if durable:
                 if durable.get("state") not in ("preparing", "paying"):
@@ -285,18 +281,21 @@ class TelegramProgress:
                     return False
             elif stage != "waiting":
                 return False
+            stop_token = (
+                None
+                if self.control.paying or (durable and durable["state"] == "paying")
+                else self.control.token
+            )
+            if self.display:
+                await self.display("in_progress", stop_token, stage=stage)
+                return True
             await buying.show_alert_feedback(
                 self.bot,
                 self.message,
                 {
                     "state": "in_progress",
                     "message": STAGE_LABELS[stage],
-                    "stop_token": (
-                        None
-                        if self.control.paying
-                        or (durable and durable.get("state") == "paying")
-                        else self.control.token
-                    ),
+                    "stop_token": stop_token,
                 },
             )
             return True

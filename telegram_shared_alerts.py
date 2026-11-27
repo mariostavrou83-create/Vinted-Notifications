@@ -514,7 +514,7 @@ def finish(row, *, message_id=None, delay=0, failed=False):
         )
 
 
-def markup(row, state=None, stop=None):
+def markup(row, state=None, stop=None, *, progress=None):
     states = {
         "in_progress": "Autobuy in progress",
         "preparing": "Autobuy in progress",
@@ -527,7 +527,7 @@ def markup(row, state=None, stop=None):
         "closed": "Purchase closed",
     }
     rows = [[InlineKeyboardButton("Open Vinted listing ↗", url=row["url"])]]
-    rows.append([InlineKeyboardButton(states[state], callback_data="shared:status")] if state in states
+    rows.append([InlineKeyboardButton(progress or states[state], callback_data="shared:status")] if state in states
                 else [InlineKeyboardButton("Autobuy", callback_data="shared:buy")])
     if stop:
         rows.append([InlineKeyboardButton("Stop Autobuy", callback_data=f"shared:stop:{stop}")])
