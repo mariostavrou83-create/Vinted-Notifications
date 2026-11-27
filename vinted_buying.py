@@ -166,11 +166,14 @@ def resolve_failed(item_id, expected_updated):
     return resolve_owned(item_id, expected_updated, "miss")
 
 
-def resolve_owned(item_id, expected_updated, decision, *, close_item_id=None):
+def resolve_owned(item_id, expected_updated, decision, *, close_item_id=None, from_purchase_status=False):
     """Record the owner's got/miss decision without contacting Vinted."""
-    with buyer.exclusive():
+    # Wait briefly for an in-flight payment or status read to finish. Its
+    # result always wins if it changes the attempt before the owner's tap.
+    with buyer.exclusive(wait_seconds=4 if from_purchase_status else 0):
         return _resolve_owned(
-            item_id, expected_updated, decision, close_item_id=close_item_id
+            item_id, expected_updated, decision, close_item_id=close_item_id,
+            from_purchase_status=from_purchase_status,
         )
 
 
@@ -179,7 +182,25 @@ def _resolve_failed(item_id, expected_updated):
     return _resolve_owned(item_id, expected_updated, "miss")
 
 
-def _resolve_owned(item_id, expected_updated, decision, *, close_item_id=None):
+def _owner_audit_table(conn, *, processing=False):
+    # The older owner ledger restricts original_state to unknown/needs_action.
+    # Keep it intact and audit explicit decisions on paying attempts separately.
+    table = "vinted_owner_processing_resolutions" if processing else "vinted_owner_purchase_resolutions"
+    states = "'paying'" if processing else "'unknown','needs_action'"
+    conn.execute(f"""CREATE TABLE IF NOT EXISTS {table} (
+            id INTEGER PRIMARY KEY,
+            item_id TEXT NOT NULL,
+            operation TEXT NOT NULL CHECK(operation IN ('got','miss')),
+            original_state TEXT NOT NULL CHECK(original_state IN ({states})),
+            original_updated REAL NOT NULL,
+            original_attempt TEXT NOT NULL,
+            resolved_at REAL NOT NULL,
+            UNIQUE(item_id,original_updated)
+        )""")
+    return table
+
+
+def _resolve_owned(item_id, expected_updated, decision, *, close_item_id=None, from_purchase_status=False):
     """Recheck the exact durable attempt while holding the buyer lock."""
     if not isinstance(decision, str) or decision not in ("got", "miss"):
         raise buyer.BuyerError(
@@ -260,22 +281,17 @@ def _resolve_owned(item_id, expected_updated, decision, *, close_item_id=None):
         # Keep the existing failed-only audit table intact. New owner purchase
         # decisions use a separate additive table, preserving older records and
         # distinguishing owner confirmation from independently verified payment.
-        conn.execute("""CREATE TABLE IF NOT EXISTS vinted_owner_purchase_resolutions (
-                id INTEGER PRIMARY KEY,
-                item_id TEXT NOT NULL,
-                operation TEXT NOT NULL CHECK(operation IN ('got','miss')),
-                original_state TEXT NOT NULL CHECK(original_state IN ('unknown','needs_action')),
-                original_updated REAL NOT NULL,
-                original_attempt TEXT NOT NULL,
-                resolved_at REAL NOT NULL,
-                UNIQUE(item_id,original_updated)
-            )""")
+        ledgers = [_owner_audit_table(conn)]
+        if from_purchase_status:
+            ledgers.append(_owner_audit_table(conn, processing=True))
         resolved_state = "paid" if decision == "got" else "payment_failed"
-        previous_decision = conn.execute(
-            "SELECT 1 FROM vinted_owner_purchase_resolutions WHERE item_id=? "
-            "AND operation=? AND original_updated=? AND resolved_at=?",
-            (item_id, decision, version, saved["updated"]),
-        ).fetchone()
+        previous_decision = any(
+            conn.execute(
+                f"SELECT 1 FROM {ledger} WHERE item_id=? AND operation=? AND original_updated=? AND resolved_at=?",
+                (item_id, decision, version, saved["updated"]),
+            ).fetchone()
+            for ledger in ledgers
+        )
         legacy_failed = (
             decision == "miss"
             and conn.execute(
@@ -287,7 +303,9 @@ def _resolve_owned(item_id, expected_updated, decision, *, close_item_id=None):
         if saved["state"] == resolved_state and (previous_decision or legacy_failed):
             close_source_alert()
             return dict(saved)
-        if saved["state"] not in ("unknown", "needs_action"):
+        if saved["state"] not in ("unknown", "needs_action") and not (
+            from_purchase_status and saved["state"] == "paying"
+        ):
             raise buyer.BuyerError(
                 "Only an unconfirmed existing payment can be resolved this way. "
                 "No saved payment state was changed.",
@@ -314,8 +332,9 @@ def _resolve_owned(item_id, expected_updated, decision, *, close_item_id=None):
         }
         resolved_at = time.time()
         original_attempt = json.dumps(snapshot, sort_keys=True, allow_nan=False)
+        ledger = ledgers[-1] if saved["state"] == "paying" else ledgers[0]
         conn.execute(
-            "INSERT INTO vinted_owner_purchase_resolutions "
+            f"INSERT INTO {ledger} "
             "(item_id,operation,original_state,original_updated,original_attempt,resolved_at) "
             "VALUES (?,?,?,?,?,?)",
             (
@@ -327,7 +346,9 @@ def _resolve_owned(item_id, expected_updated, decision, *, close_item_id=None):
                 resolved_at,
             ),
         )
-        if decision == "miss":
+        # Preserve failed-payment compatibility records for the two states
+        # their historical schema accepts. The owner ledger records all three.
+        if decision == "miss" and saved["state"] in ("unknown", "needs_action"):
             conn.execute(
                 "INSERT INTO vinted_payment_resolutions "
                 "(item_id,operation,original_state,original_updated,original_attempt,resolved_at) "
@@ -361,6 +382,12 @@ def _resolve_owned(item_id, expected_updated, decision, *, close_item_id=None):
                 "This payment attempt changed. No saved payment state was changed.",
                 reason="resolution_stale",
             )
+        # An owner attestation is final for this attempt. The watcher must
+        # never announce it as an independently verified marketplace result.
+        conn.execute(
+            "DELETE FROM vinted_payment_watch WHERE item_id=? AND checkout_id=?",
+            (item_id, saved["checkout_id"]),
+        )
         close_source_alert()
         outcome = dict(
             conn.execute(

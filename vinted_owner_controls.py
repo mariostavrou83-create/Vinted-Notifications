@@ -19,7 +19,7 @@ from search_settings import connection
 
 logger = get_logger(__name__)
 CALLBACK_PATTERN = r"^buy:resolve:(got|miss):([0-9]{1,24}):([0-9a-f]{16})$"
-REMINDER_PATTERN = r"^review:purchase:(got|miss):([0-9]{1,24}):([0-9a-f]{16})$"
+REMINDER_PATTERN = r"^(?:review|status):purchase:(got|miss):([0-9]{1,24}):([0-9a-f]{16})$"
 REMINDER_LABEL = "⚠️ Confirm earlier purchase"
 
 
@@ -91,18 +91,33 @@ async def confirm_reminder(update, context):
         await photo_cards.answer(query, "Only your private Telegram chat can confirm purchases.", alert=True)
         return
     decision, item_id, token = match.groups()
-    offer = descriptor(result(item_id))
+    from_status = query.data.startswith("status:purchase:")
+    offer = descriptor(result(item_id), from_status=from_status)
     if not offer or offer["token"] != token:
         await photo_cards.answer(
-            query, "This purchase reminder is out of date. Check Finder or your latest alert.", alert=True
+            query, "This purchase reminder is out of date. Open /purchase_status for the latest result.", alert=True
         )
+        if from_status:
+            return
     else:
         try:
-            await asyncio.to_thread(resolve_owned, item_id, offer["updated"], decision)
+            await asyncio.to_thread(
+                resolve_owned, item_id, offer["updated"], decision, from_purchase_status=from_status
+            )
         except buyer.BuyerError as exc:
-            await photo_cards.answer(query, str(exc), alert=True)
+            text = str(exc)
+            if from_status:
+                text = text[:140] + " Open /purchase_status to try again."
+            await photo_cards.answer(query, text, alert=True)
             return
         await photo_cards.answer(query, "Purchase confirmation saved.")
+        if from_status:
+            answer = "you got" if decision == "got" else "you didn't get"
+            try:
+                await query.edit_message_text(f"You confirmed {answer} item {item_id}.")
+            except TelegramError as exc:
+                logger.info("Purchase status edit unavailable: %s", type(exc).__name__)
+            return
     markup = getattr(message, "reply_markup", None)
     if not markup:
         return
@@ -150,7 +165,7 @@ def pending_other(item_id):
     return pending_attempt(item_id, exclude=True)
 
 
-def purchase_prompt(saved):
+def purchase_prompt(saved, *, from_status=False):
     """Pair the question and controls from the same durable attempt."""
     if not saved:
         return "There are no purchases awaiting confirmation.", None
@@ -158,14 +173,19 @@ def purchase_prompt(saved):
     label = f"item {item}" if re.fullmatch(r"[0-9]{1,24}", item) else "the earlier item"
     title = " ".join(str(saved.get("title") or "").split())[:90]
     heading = title + "\n" if title else ""
-    if saved.get("watching"):
+    if saved.get("watching") and not from_status:
         return (
             heading + f"Finder is checking the payment for {label} automatically for up to an hour. "
             "If your bank requests approval, open the payment check on the original alert. "
-            "You can check again with /purchase_status.", None
+            "Open /purchase_status to record your answer now.", None
         )
-    offer = descriptor(saved)
+    offer = descriptor(saved, from_status=from_status)
     if offer:
+        if from_status:
+            return (
+                heading + f"Did you get item {item}? Check your Vinted purchases and choose below. "
+                "If payment is still pending, leave this unanswered.", offer
+            )
         return (
             heading + f"Did you get item {item}? Check that exact item in Vinted Purchases "
             "and any pending bank payment, then choose below.", offer
@@ -179,15 +199,18 @@ async def purchase_status_command(update, context):
     if not chat or chat.type != "private" or not user or chat.id != user.id or not private_owner(chat.id):
         return
     saved = await asyncio.to_thread(pending_attempt)
-    text, offer = purchase_prompt(saved)
-    rows = reminder_rows(offer)
+    text, offer = purchase_prompt(saved, from_status=True)
+    rows = buttons({"owner_resolution": offer}, prefix="status:purchase")
+    if rows:
+        rows.append([InlineKeyboardButton("View item on Vinted", url=f"{buyer.BASE}/items/{offer['item_id']}")])
     await update.effective_message.reply_text(
         text, reply_markup=InlineKeyboardMarkup(rows) if rows else None, **photo_cards.TIMEOUTS
     )
 
 
-def descriptor(saved):
-    if not saved or saved.get("state") not in ("unknown", "needs_action"):
+def descriptor(saved, *, from_status=False):
+    eligible = ("unknown", "needs_action", "paying") if from_status else ("unknown", "needs_action")
+    if not saved or saved.get("state") not in eligible:
         return None
     identity = saved.get("item_id")
     updated = saved.get("updated")
@@ -245,10 +268,12 @@ def buttons(feedback, *, prefix="buy:resolve"):
     return [
         [
             InlineKeyboardButton(
-                "I got it", callback_data=f"{prefix}:got:{identity}:{token}"
+                "Yes, I got it" if prefix == "status:purchase" else "I got it",
+                callback_data=f"{prefix}:got:{identity}:{token}"
             ),
             InlineKeyboardButton(
-                "I didn't get it", callback_data=f"{prefix}:miss:{identity}:{token}"
+                "No, I didn't get it" if prefix == "status:purchase" else "I didn't get it",
+                callback_data=f"{prefix}:miss:{identity}:{token}"
             ),
         ]
     ]

@@ -464,7 +464,7 @@ class OwnerControlsTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             text = owner_message.reply_text.await_args.args[0]
             self.assertIn("Did you get item " + self.pending_id, text)
             self.source.reply_markup = owner_message.reply_text.await_args.kwargs["reply_markup"]
-            self.query.edit_message_reply_markup = AsyncMock()
+            self.query.edit_message_text = AsyncMock()
             callbacks = [button.callback_data for row in self.source.reply_markup.inline_keyboard
                          for button in row if button.callback_data]
             self.assertEqual(len(callbacks), 2)
@@ -472,6 +472,7 @@ class OwnerControlsTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             self.query.data = callbacks[0]
             await controls.confirm_reminder(SimpleNamespace(callback_query=self.query), self.context)
             self.assertEqual(buying.result(self.pending_id)["state"], "paid")
+            self.query.edit_message_text.assert_awaited_once_with(f"You confirmed you got item {self.pending_id}.")
             await controls.purchase_status_command(update, self.context)
         self.assertIsNone(owner_message.reply_text.await_args.kwargs["reply_markup"])
         self.assertIn("no purchases awaiting", owner_message.reply_text.await_args.args[0])
@@ -488,9 +489,9 @@ class OwnerControlsTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         await controls.purchase_status_command(update, self.context)
         text = owner_message.reply_text.await_args.args[0]
         self.assertIn("Red cardigan", text)
-        self.assertIn("up to an hour", text)
-        self.assertNotIn("Did you get", text)
-        self.assertIsNone(owner_message.reply_text.await_args.kwargs["reply_markup"])
+        self.assertIn("Did you get item " + self.pending_id, text)
+        choices = owner_message.reply_text.await_args.kwargs["reply_markup"].inline_keyboard[0]
+        self.assertEqual([button.text for button in choices], ["Yes, I got it", "No, I didn't get it"])
         blocked = await self.offer()
         self.assertIn("automatically", blocked["message"])
         self.assertFalse(blocked["owner_resolution"])
@@ -506,6 +507,31 @@ class OwnerControlsTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         callbacks = [b.callback_data or "" for row in sent["reply_markup"].inline_keyboard for b in row]
         for decision in ("got", "miss"):
             self.assertTrue(any(c.startswith(f"review:purchase:{decision}:{self.pending_id}:") for c in callbacks))
+
+    async def test_private_status_answers_a_watched_attempt_without_waiting(self):
+        owner_message = SimpleNamespace(reply_text=AsyncMock())
+        update = SimpleNamespace(effective_chat=self.source.chat, effective_user=self.query.from_user,
+                                 effective_message=owner_message)
+        self.query.edit_message_text = AsyncMock()
+        for index, (state, answer, expected) in enumerate((
+            ("paying", 1, "payment_failed"), ("unknown", 0, "paid"), ("needs_action", 1, "payment_failed")
+        )):
+            with self.subTest(state=state):
+                item = str(800 + index)
+                self.pending(item, state=state)
+                buying.record(item, state, "Waiting", watch=("Test knit", 1500))
+                await controls.purchase_status_command(update, self.context)
+                self.source.reply_markup = owner_message.reply_text.await_args.kwargs["reply_markup"]
+                options = self.source.reply_markup.inline_keyboard[0]
+                self.assertEqual([b.text for b in options], ["Yes, I got it", "No, I didn't get it"])
+                self.query.data = options[answer].callback_data
+                await controls.confirm_reminder(SimpleNamespace(callback_query=self.query), self.context)
+                self.assertEqual(buying.result(item)["state"], expected)
+                self.assertIn(item, self.query.edit_message_text.await_args.args[0])
+                self.assertIsNone(buying.result(self.item_id))
+                self.query.data = options[1-answer].callback_data
+                await controls.confirm_reminder(SimpleNamespace(callback_query=self.query), self.context)
+                self.assertEqual(buying.result(item)["state"], expected)
 
     async def test_block_warning_contains_decisions_for_the_earlier_item_only(self):
         import finder_incidents as incidents

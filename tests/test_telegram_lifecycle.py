@@ -5,7 +5,7 @@ import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from telegram import Bot, Message, Update
+from telegram import Bot, CallbackQuery, Message, Update
 from telegram.ext import Application, ApplicationBuilder
 from telegram.request import BaseRequest
 from test_search_controls import DatabaseFixture
@@ -113,12 +113,12 @@ class TelegramLifecycleTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(worker.photo_started.wait(), timeout=1)
         return worker
 
-    def command_update(self, text, chat_id, sender, *, reply_author=None):
+    def command_update(self, text, chat_id, sender, *, reply_author=None, command_entity=True):
         chat = {"id": chat_id, "type": "private" if chat_id > 0 else "group"}
         message = {
             "message_id": 900, "date": 1, "chat": chat,
             "from": {"id": sender, "is_bot": False, "first_name": "Test user"},
-            "text": text, "entities": [{"type": "bot_command", "offset": 0, "length": len(text.split()[0])}],
+            "text": text, "entities": [{"type": "bot_command", "offset": 0, "length": len(text.split()[0])}] if command_entity else [],
         }
         if reply_author is not None:
             message["reply_to_message"] = {
@@ -174,6 +174,48 @@ class TelegramLifecycleTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
                 for user in (123, 456):
                     await self.app.process_update(self.command_update(command, -321, user))
                 reply.assert_not_awaited()
+
+    async def test_owner_can_answer_purchase_status_while_automatic_checks_are_running(self):
+        import vinted_buying as buying
+
+        for item, command, command_entity, label, expected in (
+            ("801", "/PURCHASE_STATUS", True, "Yes, I got it", "paid"),
+            ("802", "/start purchase_status", True, "No, I didn't get it", "payment_failed"),
+            ("803", "/PURCHASE STATUS", False, "Yes, I got it", "paid"),
+            ("804", "/PURCHASE_STATUS", False, "No, I didn't get it", "payment_failed"),
+        ):
+            with self.subTest(command=command):
+                self.assertTrue(buying.claim({"item_id": item}))
+                buying.record(
+                    item, "unknown", "Awaiting the outcome", checkout_id=f"order-{item}",
+                    buyer_id="12", transaction_id=item, watch=("Test jacket", 1000),
+                )
+                with (
+                    patch.object(Message, "reply_text", new_callable=AsyncMock) as reply,
+                    patch.object(CallbackQuery, "answer", new_callable=AsyncMock),
+                    patch.object(CallbackQuery, "edit_message_text", new_callable=AsyncMock),
+                    patch.object(buying, "buy") as buy,
+                    patch.object(buying, "check_payment") as check,
+                ):
+                    await self.app.process_update(self.command_update(command, 123, 123, command_entity=command_entity))
+                    self.assertIn("Test jacket", reply.await_args.args[0])
+                    markup = reply.await_args.kwargs["reply_markup"]
+                    choices = {b.text: b.callback_data for row in markup.inline_keyboard for b in row if b.callback_data}
+                    self.assertEqual(set(choices), {"Yes, I got it", "No, I didn't get it"})
+                    message = {
+                        "message_id": 901, "date": 1, "chat": {"id": 123, "type": "private"},
+                        "from": {"id": 123456, "first_name": "Finder", "is_bot": True},
+                        "text": reply.await_args.args[0], "reply_markup": markup.to_dict(),
+                    }
+                    callback = {
+                        "id": "answer-" + item, "chat_instance": "offline", "message": message,
+                        "from": {"id": 123, "first_name": "Owner", "is_bot": False}, "data": choices[label],
+                    }
+                    update = Update.de_json({"update_id": 2, "callback_query": callback}, self.app.bot)
+                    await self.app.process_update(update)
+                    self.assertEqual(buying.result(item)["state"], expected)
+                    buy.assert_not_called()
+                    check.assert_not_called()
 
     async def test_real_ptb_stop_finishes_with_active_worker_and_cancels_photos(self):
         worker = await self.start_worker()

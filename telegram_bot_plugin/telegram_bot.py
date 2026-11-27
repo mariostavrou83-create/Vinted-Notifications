@@ -87,6 +87,10 @@ class LeRobot:
             from telegram_shared_buy import callback as shared_buy
 
             self.app.add_handler(CommandHandler("purchase_status", purchase_status_command, filters=filters.ChatType.PRIVATE))
+            self.app.add_handler(MessageHandler(
+                filters.ChatType.PRIVATE & filters.Regex(re.compile(r"\A/purchase[ _]status\s*\Z", re.I)),
+                purchase_status_command,
+            ))
             self.app.add_handler(CommandHandler(
                 "start", purchase_status_command,
                 filters=filters.ChatType.PRIVATE & filters.Regex(r"^/start(?:@\w+)?\s+purchase_status\s*\Z"),
