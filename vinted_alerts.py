@@ -225,6 +225,14 @@ def snapshot(item, search):
         "description": clean_description(raw_description),
         "description_pending": True,
     }
+    try:
+        from trial_shared_hour import capture_active
+        if capture_active():
+            from trial_market_hour import listing_fields
+            result["trial_listing"] = listing_fields(item)
+    except Exception:
+        # The optional experiment must never interrupt an ordinary buying alert.
+        pass
     if os.getenv("FINDER_RESALE_PILOT") == "1":
         from resale_pricing import garment, label
         raw = getattr(item, "raw_data", None) or {}
