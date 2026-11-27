@@ -183,7 +183,7 @@ class HomeRecommendationsTests(DatabaseFixture, unittest.TestCase):
         row = self.row()
         self.assertEqual((row["query_id"],row["telegram_message_id"],row["status"]),(1,222,"sent"))
         self.assertIn("Also matched your saved search", row["content"])
-        self.assertIn("Check the seam",row["content"])
+        self.assertNotIn("Check the seam",row["content"])
         with closing(search_settings.connection()) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM alert_outbox WHERE item_id='8123'").fetchone()[0],1)
             self.assertEqual(conn.execute("SELECT query_id FROM items WHERE item=8123").fetchone()[0],1)

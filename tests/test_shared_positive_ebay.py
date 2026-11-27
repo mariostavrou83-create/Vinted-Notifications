@@ -311,7 +311,7 @@ class SharedPositiveEbay(EbayFixture, unittest.TestCase):
         self.assertTrue(sent["show_caption_above_media"])
         self.assertEqual(sent["photo"].input_file_content, photo_bytes())
         self.assertIn(description, sent["caption"])
-        self.assertIn(
+        self.assertNotIn(
             "Current notes: check &lt;label&gt; &amp; pockets; resell £60.",
             sent["caption"],
         )

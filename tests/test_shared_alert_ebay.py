@@ -324,7 +324,7 @@ class SharedPersistenceTests(DatabaseFixture, unittest.TestCase):
             self.assertIn("Estimated total", text)
             self.assertIn("£19.15", text)
             self.assertIn("conservative buyer-fee allowance", text)
-            self.assertIn("&lt;hood&gt;", text)
+            self.assertNotIn("&lt;hood&gt;", text)
 
 
 class SharedDeliveryTests(EbayFixture, unittest.TestCase):

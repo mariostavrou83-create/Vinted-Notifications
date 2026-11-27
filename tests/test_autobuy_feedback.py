@@ -724,6 +724,7 @@ class FeedbackTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             brand="🧥" * 120,
             guide="Buy under the total budget",
             reminder="🧵&lt;label&gt; " * 160,
+            description="Long seller description 🧵 " * 120,
             budget={
                 "max_total": 1500,
                 "total": 1680,

@@ -134,9 +134,6 @@ class EbayNativeTests(EbayFixture, unittest.IsolatedAsyncioTestCase):
             "Hollister fur gilet",
             "id=listing",
             "id=reference",
-            "Your buying guide",
-            "Your buying reminder",
-            "Check the back pockets",
         ]
         self.assertEqual(
             [html.index(x) for x in ordered], sorted(html.index(x) for x in ordered)
@@ -157,7 +154,7 @@ class EbayNativeTests(EbayFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(request.data.multipart_data), {"listing", "reference"})
         rich = json.loads(request.data.json_parameters["rich_message"])
         self.assertIn("Open eBay listing", rich["html"])
-        self.assertIn("Check the back pockets", rich["html"])
+        self.assertNotIn("Check the back pockets", rich["html"])
 
     async def test_native_album_keeps_notes_as_text_and_tracks_both_for_deletion(self):
         row = dict(self.outbox()[0])
@@ -181,7 +178,7 @@ class EbayNativeTests(EbayFixture, unittest.IsolatedAsyncioTestCase):
         media = self.bot.send_media_group.call_args.kwargs["media"]
         self.assertEqual(len(media), 2)
         self.assertIn("Open eBay listing", media[0].caption)
-        self.assertIn("Check the back pockets", media[0].caption)
+        self.assertNotIn("Check the back pockets", media[0].caption)
         self.assertIn("15.00", media[0].caption)
         self.assertIsNone(media[1].caption)
         with closing(search_settings.connection()) as conn:
@@ -193,9 +190,9 @@ class EbayNativeTests(EbayFixture, unittest.IsolatedAsyncioTestCase):
             ]
         self.assertEqual(ids, [99, 100])
 
-    async def test_album_never_silently_truncates_long_reminders(self):
+    async def test_album_never_silently_truncates_long_seller_descriptions(self):
         row = dict(self.outbox()[0])
-        details = dict(ebay_alerts.get_details(row), reminder="😀" * 600)
+        details = dict(ebay_alerts.get_details(row), description="😀" * 600)
         self.bot.send_media_group = AsyncMock()
         with self.assertRaisesRegex(ValueError, "caption limit"):
             await vinted_alerts.phone_layout_test(
@@ -222,7 +219,7 @@ class EbayNativeTests(EbayFixture, unittest.IsolatedAsyncioTestCase):
         await self.send()
         self.bot.send_photo.assert_not_awaited()
         self.bot.send_message.assert_awaited_once()
-        self.assertIn(
+        self.assertNotIn(
             "Check the back pockets", self.bot.send_message.call_args.kwargs["text"]
         )
         self.assertEqual(self.bot.edit_message_media.call_args.kwargs["message_id"], 99)

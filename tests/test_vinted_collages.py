@@ -250,13 +250,18 @@ class RichWorkerTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             "Brand:",
             "id=listing",
             "id=reference",
-            "Your buying guide",
-            "Your buying reminder",
         ]
         self.assertEqual(
             [html.index(x) for x in ordered], sorted(html.index(x) for x in ordered)
         )
-        self.assertIn("Check &lt;label&gt;", html)
+        self.assertNotIn("Check &lt;label&gt;", html)
+        self.assertNotIn("Your buying guide", html)
+        self.assertNotIn("Your buying reminder", html)
+        self.assertLess(html.index("Est. total incl. shipping"), html.index("id=listing"))
+        self.assertNotIn("listing:guide", str(call.kwargs["api_kwargs"]["reply_markup"]))
+        first = self.bot.send_message.await_args_list[0].kwargs
+        self.assertNotIn("Your buying reminder", first["text"])
+        self.assertNotIn("listing:guide", str(first.get("reply_markup")))
         self.assertEqual(outbox(110)["photo_status"], "sent")
 
     async def test_failed_edit_retries_without_resending_original_notification(self):
@@ -407,7 +412,9 @@ class RichWorkerTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         request = self.bot.do_api_request.call_args.kwargs["api_kwargs"]
         self.assertEqual(request["message_id"], 42)
         self.assertEqual(len(request["rich_message"]["media"]), 2)
-        self.assertIn("Check &lt;label&gt;", request["rich_message"]["html"])
+        self.assertNotIn("Check &lt;label&gt;", request["rich_message"]["html"])
+        self.assertNotIn("listing:guide", str(request["reply_markup"]))
+        self.assertNotIn("listing:guide", str(self.bot.send_photo.await_args.kwargs.get("reply_markup")))
 
     async def test_rejected_photo_conversion_keeps_only_original_photo(self):
         self.batch(1, [110])

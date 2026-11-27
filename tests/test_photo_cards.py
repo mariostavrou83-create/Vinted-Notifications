@@ -126,8 +126,8 @@ class PhotoCardTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.bot.do_api_request.assert_not_awaited()
         self.bot.edit_message_media.assert_not_awaited()
         sent = self.bot.send_photo.call_args.kwargs
-        self.assertIn("Check &lt;label&gt; &amp; pockets", sent["caption"])
-        self.assertIn("£15.00", sent["caption"])
+        self.assertNotIn("Check &lt;label&gt; &amp; pockets", sent["caption"])
+        self.assertNotIn("Your buying guide", sent["caption"])
         total = self.details["budget"]["total"] / 100
         self.assertTrue(sent["caption"].endswith(
             f"<b>{self.row['title']}</b>\nBrand: {self.details['brand']}\n"
@@ -434,7 +434,8 @@ class PhotoCardTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         await photo_cards.handle_callback(self.bot, query(), "vinted", "123")
         first = self.bot.edit_message_media.call_args.kwargs
         self.assertEqual(first["message_id"], 42)
-        self.assertIn("Check &lt;label&gt;", first["media"].caption)
+        self.assertNotIn("Check &lt;label&gt;", first["media"].caption)
+        self.assertNotIn("Buying guide", str(first["reply_markup"]))
         await photo_cards.handle_callback(
             self.bot, query("card:listing"), "vinted", "123"
         )
@@ -535,6 +536,7 @@ class PhotoCardTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             brand="👖" * 120,
             reminder="🧵&lt;label&gt; " * 160,
             guide="Buy up to <b>£15</b>",
+            description="Long seller description 🧵 " * 120,
         )
         row = dict(self.row, title="😀" * 500)
         text, note_pages = photo_cards.captions(row, details)
@@ -569,7 +571,7 @@ class PhotoCardTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         text, notes = photo_cards.captions(row, details)
         self.assertLessEqual(photo_cards.units(photo_cards.plain(text)), 1024)
         self.assertLess(text.index("Autobuy progress"), text.index("Est. total incl. shipping"))
-        self.assertIn("🧵" * 720, "".join(notes))
+        self.assertNotIn("🧵" * 720, "".join(notes))
 
     async def test_missing_photo_fallback_and_retry_edit_never_send_second_notification(
         self,

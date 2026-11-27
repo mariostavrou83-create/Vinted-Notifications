@@ -159,7 +159,8 @@ class PlatformTests(EbayFixture, unittest.TestCase):
         updated = self.enable(reminder="New <note>", exclusions="teddy")
         self.assertEqual(search["ebay_generation"], updated["ebay_generation"])
         self.assertEqual(self.snapshot(updated, [item(123)], 1020), 1)
-        self.assertIn("New &lt;note&gt;", self.outbox()[0]["content"])
+        self.assertEqual(updated["reminder"], "New <note>")
+        self.assertNotIn("New &lt;note&gt;", self.outbox()[0]["content"])
 
     def test_pause_archive_resume_reset_only_ebay_state_and_preserve_history(self):
         search = self.enable()

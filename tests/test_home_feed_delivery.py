@@ -172,8 +172,8 @@ class HomeOutboxTests(DatabaseFixture, unittest.TestCase):
         details = vinted_alerts.get_details(row)
         parts = vinted_alerts.sections(row, details)
         self.assertIn("Vinted Home · feed find", parts[0])
-        self.assertIn("within 3 minutes", parts[2])
-        self.assertIn("Brand, category and style", parts[2])
+        self.assertNotIn("within 3 minutes", parts[2])
+        self.assertIn("Matched on brand, category and style", parts[2])
         self.assertIn("Exact seller description &lt;unchanged&gt;", parts[3])
         from photo_cards import captions
         from vinted_native import caption

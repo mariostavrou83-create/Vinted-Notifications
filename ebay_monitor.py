@@ -445,17 +445,6 @@ def format_alert(item, search):
         lines.append(
             "Includes a conservative buyer-fee allowance; check eBay's final total."
         )
-    for label, key in [("Buying reminder", "reminder"), ("Must have", "must_have")]:
-        if search.get(key):
-            lines += ["", "<b>" + label + "</b>", escape(search[key])]
-    if search.get("max_buy") is not None:
-        lines.append(f"Your buying guide: £{search['max_buy'] / 100:.2f} maximum")
-    low, high = search.get("resale_low"), search.get("resale_high")
-    if low is not None or high is not None:
-        lines.append(
-            "Your resale guide: "
-            + " – ".join(f"£{v / 100:.2f}" for v in (low, high) if v is not None)
-        )
     lines += ["", f'<a href="{escape(item["url"], quote=True)}">Open eBay listing</a>']
     return "\n".join(lines)
 

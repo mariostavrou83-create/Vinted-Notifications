@@ -363,9 +363,9 @@ class FindsTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(row["folder_name"], "Hollister")
         self.assertEqual([r[:3] for r in originals], [r[:3] for r in db.get_queries()])
         content = self.batch(1, [110])[0][0]
-        self.assertIn("£15.25", content)
-        self.assertIn("£30.00–£45.50", content)
-        self.assertIn("Fur &lt;hood&gt; &amp; fitted", content)
+        self.assertNotIn("£15.25", content)
+        self.assertNotIn("£30.00–£45.50", content)
+        self.assertNotIn("Fur &lt;hood&gt; &amp; fitted", content)
         self.assertEqual(len(self.batch(1, [110])), 0)
         self.assertIn(b'value="15.25"', self.client.get("/search/1").data)
         self.assertIn(b"Hollister", self.client.get("/?folder=" + str(folder)).data)

@@ -563,7 +563,9 @@ async def send(bot, group, row):
         if response:
             finish(row, message_id=response.message_id)
             resale_telegram.remember(row["item_id"], response, group=group)
-            logger.info("Telegram accepted shared Vinted alert")
+            logger.info("Telegram accepted shared Vinted alert initial_resale=%s guidance=%s source=%s",
+                        resale_telegram.initial_price(response), resale_telegram.visible_guidance(response),
+                        alert_controls.row_source(row))
         else:
             finish(row, failed=True)
     except RetryAfter as exc:

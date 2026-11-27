@@ -236,13 +236,14 @@ def captions(row, details):
         if reserving():
             reserved += CAPTION_RESERVE
     text, note_pages, recap = _captions(row, details, 1024 - reserved)
-    return "\n\n".join(part for part in (text, status, recap) if part), note_pages
+    parts = (text, recap, status) if recap.startswith("Title: ") else (text, status, recap)
+    return "\n\n".join(part for part in parts if part), note_pages
 
 
 def notes_caption(details, index, note_pages):
     status = buy_status_text(details)
     return (
-        f"<b>Description, guide and reminder · {index + 1}/{len(note_pages)}</b>\n\n"
+        f"<b>Seller description · {index + 1}/{len(note_pages)}</b>\n\n"
         + escape(note_pages[index])
         + ("\n\n" + status if status else "")
     )
@@ -270,13 +271,7 @@ def _captions(row, details, limit):
     recap = alert_recap(row, details)
     if recap:
         limit -= units(plain(recap)) + 2
-    suffix = "\n\nTap Full notes for the description, guide and reminder."
-    if recap and details.get("buying_advice") and units(plain(base + suffix)) > limit:
-        # Keep long advice accessible alongside the other notes when a photo,
-        # recap and Autobuy status use most of Telegram's caption allowance.
-        notes = "Buying guide\n" + details["buying_advice"][:720] + "\n\n" + notes
-        details["buying_advice"] = ""
-        base = "\n\n".join(sections(row, details)[:3])
+    suffix = "\n\nTap Full description to read more."
     if recap and units(plain(base + suffix)) > limit:
         limit += units(plain(recap))
         row["title"] = short(row["title"], 80)
@@ -378,7 +373,7 @@ def markup(row, details, *, view="listing", note_page=None):
     if note_pages:
         nav = []
         if note_page is None:
-            nav.append(InlineKeyboardButton("Full notes", callback_data="card:notes:0"))
+            nav.append(InlineKeyboardButton("Full description", callback_data="card:notes:0"))
         else:
             if note_page:
                 nav.append(

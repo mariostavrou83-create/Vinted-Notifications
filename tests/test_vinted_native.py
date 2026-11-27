@@ -116,7 +116,7 @@ class NativeImageTests(unittest.TestCase):
         self.assertNotIn("transaction/buy", caption)
         self.assertIn("Open Vinted listing", caption)
 
-    def test_comparison_keeps_both_square_panels_and_complete_notes_below(self):
+    def test_comparison_keeps_both_photo_panels_and_omits_buying_notes(self):
         def colour(value):
             image = Image.new("RGB", (1280, 1280), value)
             stream = io.BytesIO()
@@ -132,8 +132,8 @@ class NativeImageTests(unittest.TestCase):
         ) as draw:
             raw = vinted_native.comparison_image(colour("red"), colour("blue"), notes)
         text = " ".join(call.args[2] for call in draw.call_args_list)
-        self.assertIn("Buy up to £15", text)
-        self.assertEqual(text.count("Check <label>"), 40)
+        self.assertNotIn("Buy up to £15", text)
+        self.assertNotIn("Check <label>", text)
         with Image.open(io.BytesIO(raw)) as image:
             self.assertGreater(image.height, 2 * 1280)
             self.assertLessEqual(image.width + image.height, 10000)
@@ -220,7 +220,8 @@ class NativeDeliveryTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             await vinted_native.send_initial(self.bot, "123", row, details, AsyncMock())
         image.assert_called_once()
         self.assertEqual(self.bot.send_photo.await_args.kwargs["photo"].input_file_content, b"comparison")
-        self.assertIn("£10 delivered", self.bot.send_photo.await_args.kwargs["caption"])
+        self.assertNotIn("£10 delivered", self.bot.send_photo.await_args.kwargs["caption"])
+        self.assertNotIn("Buying guide", str(self.bot.send_photo.await_args.kwargs.get("reply_markup")))
 
     async def test_edit_retry_does_not_resend_notification_and_survives_restart(self):
         self.enqueue()
@@ -267,7 +268,8 @@ class NativeDeliveryTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         ):
             await self.worker.tick(now=1000)
         self.bot.send_message.assert_awaited_once()
-        self.assertIn("Check pockets", self.bot.send_message.await_args.kwargs["text"])
+        self.assertNotIn("Check pockets", self.bot.send_message.await_args.kwargs["text"])
+        self.assertNotIn("Buying guide", str(self.bot.send_message.await_args.kwargs.get("reply_markup")))
         await self.worker.tick(now=1002)
         await self.worker.photo_task
         self.assertEqual(outbox(110)["photo_status"], "sent")

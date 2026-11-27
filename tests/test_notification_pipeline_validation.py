@@ -168,7 +168,7 @@ class SharedNotificationPipeline(DatabaseFixture, unittest.TestCase):
                 self.assertEqual(row["reference_id"], search["reference_id"])
                 self.assertIn(f"#{query_id}", caption)
                 self.assertIn("Hollister", caption)
-                self.assertIn(
+                self.assertNotIn(
                     "Resale aim £60; check &lt;fur&gt; trim &amp; cuffs", caption
                 )
                 self.assertTrue(any(b.url == row["url"] for b in buttons))

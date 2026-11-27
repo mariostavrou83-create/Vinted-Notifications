@@ -157,7 +157,8 @@ class DataTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(self.batch(1, [99]), [])
         alert = self.batch(1, [100])[0][0]
         self.assertIn("Fur &amp; &lt;fitted&gt;", alert)
-        self.assertIn("Check &lt;label&gt; &amp; cuffs", alert)
+        self.assertEqual(settings.get_search(1)["reminder"], "Check <label> & cuffs")
+        self.assertNotIn("Check &lt;label&gt; &amp; cuffs", alert)
         self.assertEqual(self.batch(1, [100]), [])
 
     def test_exclusions_are_local_and_clearing_does_not_replay(self):
