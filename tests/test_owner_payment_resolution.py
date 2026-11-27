@@ -668,6 +668,7 @@ class OwnerResolution(DatabaseFixture, unittest.TestCase):
         content = result.get_data(as_text=True)
         self.assertIn("fur, sherpa", content)
         self.assertIn("Resale &lt;£60&gt;", content)
-        self.assertIn("_sacat=57988", content)
+        self.assertIn("brand_ids[]=111", content)
+        self.assertNotIn("_sacat=57988", content)
         self.assertIn("teddy", content)
         self.assertNotIn('id="vinted_postage_estimate"', content)

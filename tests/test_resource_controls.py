@@ -92,7 +92,9 @@ class ControlsDashboardTests(EbayFixture, unittest.TestCase):
         form.setlist("live_search", ["11"])
         self.assertEqual(self.client.post("/connections", data=form).status_code, 302)
         self.assertEqual([s["id"] for s in ebay_store.active_searches()], [11])
-        self.assertIn("Standby", self.client.get("/").text)
+        dashboard = self.client.get("/")
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertNotIn("Standby", dashboard.text)
         for rate in ("-1", "61", "bad"):
             with self.assertRaises(ValueError):
                 resource_controls.save_rate(rate)

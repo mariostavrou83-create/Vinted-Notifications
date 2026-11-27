@@ -186,13 +186,14 @@ class LinkDashboardTests(EbayFixture, unittest.TestCase):
         saved = search_settings.get_search(1)
         self.assertEqual(saved["ebay"]["keywords"], "jeans")
         self.assertEqual(saved["ebay"]["aspects"]["Size"], ["10", "12", "8"])
-        self.assertIn("Brand: 7 For All Mankind", self.client.get("/search/1").text)
+        self.assertEqual(saved["ebay"]["aspects"]["Brand"], ["7 For All Mankind"])
+        self.assertNotIn("Brand: 7 For All Mankind", self.client.get("/search/1").text)
         form = self.form()
         form["ebay_search_url"] += "&LH_Sold=1"
         response = self.client.post("/search/1", data=form)
         self.assertEqual(response.status_code, 200)
         self.assertIn("Cannot import these filters safely", response.text)
-        self.assertIn("LH_Sold=1", response.text)
+        self.assertNotIn("LH_Sold=1", response.text)
         self.assertEqual(search_settings.get_search(1), saved)
 
     def test_imported_filter_edit_resets_only_ebay_and_rebaselines_silently(self):

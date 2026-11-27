@@ -611,7 +611,8 @@ class BrowseDashboardTests(CacheIsolation, EbayFixture, unittest.TestCase):
         ):
             response = self.client.get("/search/1")
         self.assertEqual(response.status_code, 200)
-        self.assertIn("Brand: Patagonia", response.text)
+        self.assertIn('id="query"', response.text)
+        self.assertNotIn("Brand: Patagonia", response.text)
         self.assertEqual(saved["query"], self.form()["query"])
 
     def test_conversion_failure_preserves_saved_filters_baselines_and_outbox(self):
