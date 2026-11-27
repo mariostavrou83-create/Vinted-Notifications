@@ -66,7 +66,7 @@ def alerts_for_user(conn, user_id):
         l = json.loads(r["listing"])
         if r["source"] == "search" and not l.get("search_name") and type(l.get("search_id")) is int:
             l["search_name"] = search_names.get(l["search_id"])
-        valuation, checkout = checkout_profit.valuation_at_checkout(r, l, now)
+        checkout = checkout_profit.checkout_at(r, now)
         answer.append(
             {
                 **display_fields(l, r["origin"], r["created_at"]),
@@ -86,7 +86,6 @@ def alerts_for_user(conn, user_id):
                 "total_pence": l.get("total_pence") if not l.get("total_excludes_shipping") else None,
                 "created_at": r["created_at"],
                 "order_status": r["order_status"],
-                "valuation": valuation,
                 "checkout_cost": checkout,
             }
         )
@@ -188,6 +187,10 @@ def native_button_binding(conn, row):
     from .native_order import capability
 
     binding = capability(conn, row["user_id"])
+    if row["origin"] == "browser_home" and row["account_ref"] == "routed-home":
+        from .home_routes import routed_active
+        listing = json.loads(row["listing"])
+        return binding if routed_active(conn, row["user_id"], str(listing["id"])) else None
     if binding and (
         (row["origin"] == "public_search" and row["account_ref"] == "public")
         or (
@@ -576,6 +579,10 @@ def telegram_update(conn, update):
     chat_id = chat.get("id")
     author = cb.get("from") or msg.get("from") or {}
     sender = author.get("id") if isinstance(author, dict) else None
+    if not cb and chat.get("type") in {"group", "supergroup"}:
+        from .home_groups import register_command
+        register_command(conn, msg)
+        return dict(ok=True)
     if chat.get("type") != "private" or type(chat_id) is not int or chat_id <= 0 or chat_id != sender:
         return dict(ok=True)
     if not cb:
@@ -620,7 +627,6 @@ def telegram_update(conn, update):
 def init_flow(app):
     from .home_watch import init_home_watch
 
-    init_home_watch(app)
     from .catalog_watch import init_app as init_catalog_watch
 
     init_catalog_watch(app)
@@ -629,6 +635,9 @@ def init_flow(app):
     conn = get_db()
     conn.executescript(POLLING_SCHEMA)
     conn.executescript(SCHEMA)
+    init_home_watch(app)
+    from .home_groups import init_app as init_groups
+    init_groups(app)
     conn.execute("""CREATE TABLE IF NOT EXISTS pilot_buy_jobs (
         update_id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
         alert_id INTEGER NOT NULL, confirmation TEXT, started INTEGER DEFAULT 0,

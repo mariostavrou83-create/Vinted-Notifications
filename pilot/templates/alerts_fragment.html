@@ -2,7 +2,6 @@
 {% if feed %}
 <div class="feed-list">
   {% for alert in feed %}
-  {% set valuation = alert.valuation %}
   {% set home = alert.source|lower == 'home' %}
   {% set source = ('From Chrome' if alert.origin == 'browser' else 'Vinted Home') if home else (alert.search_name or 'Saved search') %}
   <article class="feed-card" data-alert-id="{{ alert.id }}" data-listing-source="{{ 'home' if home else 'search' }}">
@@ -20,19 +19,9 @@
       <p class="listing-age">{% if alert.listed_at %}<time data-listing-time="{{ alert.listed_at }}" data-time-kind="Listed">Listing time available</time>{% elif alert.listed_age_text %}Listed {{ alert.listed_age_text }} when found{% elif alert.discovered_at or alert.created_at %}<time data-listing-time="{{ alert.discovered_at or alert.created_at }}" data-time-kind="Found">Found in your feed</time>{% endif %}</p>
       <dl class="card-values">
         <div><dt>Item price</dt><dd>{{ '£%.2f'|format(alert.item_price_pence/100) if alert.item_price_pence is number else '—' }}</dd></div>
-        <div><dt>Est. resale</dt><dd>{{ '£%.2f'|format(valuation.resale_pence/100) if valuation and valuation.resale_pence is number else '—' }}</dd></div>
-        <div{% if valuation and valuation.meets_target %} class="on-target"{% endif %}><dt>Est. profit</dt><dd>{{ '£%.2f'|format(valuation.profit_pence/100) if valuation and valuation.profit_pence is number else '—' }}</dd></div>
+        {% if alert.checkout_cost and alert.checkout_cost.total_pence is number %}<div><dt>{{ 'Checkout at purchase' if alert.checkout_cost.basis == 'purchase' else 'Quoted checkout' }}</dt><dd>£{{ '%.2f'|format(alert.checkout_cost.total_pence/100) }}</dd></div>{% elif alert.total_pence is number %}<div><dt>Estimated total</dt><dd>£{{ '%.2f'|format(alert.total_pence/100) }}</dd></div>{% elif alert.subtotal_pence is number %}<div><dt>Including buyer fee</dt><dd>£{{ '%.2f'|format(alert.subtotal_pence/100) }}</dd></div>{% endif %}
       </dl>
-      {% if valuation and valuation.meets_target %}<p class="profit-tag">Meets £15 target</p>{% elif valuation and valuation.meets_target is sameas false %}<p class="price-note">Below £15 profit target</p>{% elif not valuation %}<p class="price-note">Resale estimate pending.</p>{% elif valuation.status == 'insufficient' %}<p class="price-note">{{ 'Too few close comparisons.' if valuation.evidence else 'No close comparisons found.' }}</p>{% elif valuation.profit_pence is not number %}<p class="price-note">Profit needs a complete checkout cost.</p>{% endif %}
-      <details class="evidence" data-card-detail="pricing">
-        <summary>Price evidence{% if valuation and valuation.evidence %} <span>· {{ valuation.evidence|length }} {{ 'match' if valuation.evidence|length == 1 else 'matches' }}</span>{% endif %}</summary>
-        {% if alert.checkout_cost and alert.checkout_cost.total_pence is number %}<p>{{ 'Checkout at purchase' if alert.checkout_cost.basis == 'purchase' else 'Quoted checkout' }} <b>£{{ '%.2f'|format(alert.checkout_cost.total_pence/100) }}</b>.</p>{% elif alert.total_pence is number %}<p>Estimated total <b>£{{ '%.2f'|format(alert.total_pence/100) }}</b>.</p>{% elif alert.subtotal_pence is number %}<p>Including buyer fee <b>£{{ '%.2f'|format(alert.subtotal_pence/100) }}</b>, plus shipping.</p>{% endif %}
-        {% if alert.checkout_cost and alert.checkout_cost.note %}<p>{{ alert.checkout_cost.note }}</p>{% endif %}
-        {% if valuation and valuation.explanation %}<p>{{ valuation.explanation }}</p>{% endif %}
-        {% if valuation and valuation.evidence %}<ul>{% for comp in valuation.evidence %}<li><a href="{{ comp.url }}" target="_blank" rel="noopener noreferrer">{{ comp.title }}</a> · £{{ '%.2f'|format(comp.ask_pence/100) }}{% if comp.reason %}<small>{{ comp.reason }}</small>{% endif %}</li>{% endfor %}</ul>
-        {% else %}<p>No comparable asking prices are available for this listing yet.</p>{% endif %}
-        {% if valuation and valuation.exclusions %}<p>Excluded comparisons</p><ul>{% for reason, count in valuation.exclusions.items() %}<li>{{ reason }} ({{ count }})</li>{% endfor %}</ul>{% endif %}
-      </details>
+      {% if alert.checkout_cost and alert.checkout_cost.note %}<p>{{ alert.checkout_cost.note }}</p>{% endif %}
       {% if alert.order_status %}<p class="order-status">Order {{ alert.order_status|replace('_',' ') }}</p>{% endif %}
       <div class="listing-links"><a class="button secondary" href="{{ alert.listing_url }}" target="_blank" rel="noopener noreferrer">Open on Vinted <i class="outbound-icon" aria-hidden="true"></i></a>
       {% if alert.checkout_mode in ['native','autobuy'] %}<span class="price-note">AutoBuy in your Telegram alert</span>{% endif %}</div>

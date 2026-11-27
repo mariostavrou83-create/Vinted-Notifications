@@ -36,9 +36,18 @@ def init_connection(conn):
             verifier TEXT NOT NULL,
             expected_name TEXT NOT NULL,
             expires_at INTEGER NOT NULL,
-            claimed INTEGER NOT NULL DEFAULT 0
+            claimed INTEGER NOT NULL DEFAULT 0,
+            renewal_ref TEXT
         );
     """)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if "renewal_ref" not in {row[1] for row in conn.execute("PRAGMA table_info(pilot_link_attempt)")}:
+            conn.execute("ALTER TABLE pilot_link_attempt ADD COLUMN renewal_ref TEXT")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def linked_account(conn, user_id):
@@ -136,13 +145,23 @@ def register_connection(app):
         state, verifier = secrets.token_urlsafe(32), secrets.token_urlsafe(48)
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode()
         conn.execute("BEGIN IMMEDIATE")
-        if conn.execute("SELECT 1 FROM pilot_buyer_link WHERE user_id=?", (user_id,)).fetchone():
+        previous = conn.execute(
+            "SELECT username,account_ref,revoke_pending FROM pilot_buyer_link WHERE user_id=?", (user_id,)
+        ).fetchone()
+        renew = data.get("reconnect") is True
+        if previous:
+            if not renew or previous["revoke_pending"] or (expected and expected.casefold() != previous["username"].casefold()):
+                conn.rollback()
+                return jsonify(error="Use Reconnect for the linked buying account. Disconnect it first to switch accounts."), 409
+            expected = previous["username"]
+        elif renew:
             conn.rollback()
-            return jsonify(error="Disconnect the previous buyer account before linking another."), 409
+            return jsonify(error="This buying account is no longer linked. Refresh the dashboard."), 409
         conn.execute("""
             INSERT OR REPLACE INTO pilot_link_attempt
-            (user_id,state_hash,verifier,expected_name,expires_at,claimed) VALUES(?,?,?,?,?,0)
-        """, (user_id, _state_hash(state), verifier, expected, int(time.time()) + LINK_TTL))
+            (user_id,state_hash,verifier,expected_name,expires_at,claimed,renewal_ref) VALUES(?,?,?,?,?,0,?)
+        """, (user_id, _state_hash(state), verifier, expected, int(time.time()) + LINK_TTL,
+              previous["account_ref"] if previous else None))
         conn.commit()
         try:
             result = partner_request("POST", "/v1/connections/start", {
@@ -200,6 +219,14 @@ def register_connection(app):
         if not current.rowcount:
             conn.rollback()
             return _callback_result("expired")
+        if attempt["renewal_ref"]:
+            linked = conn.execute(
+                "SELECT account_ref FROM pilot_buyer_link WHERE user_id=? AND revoke_pending=0", (user_id,)
+            ).fetchone()
+            conn.commit()
+            if not linked or linked["account_ref"] != ref or attempt["renewal_ref"] != ref:
+                return _callback_result("mismatch")
+            return _callback_result("reconnected")
         try:
             conn.execute("INSERT INTO pilot_buyer_link(user_id,account_ref,username) VALUES(?,?,?)",
                          (user_id, ref, username))

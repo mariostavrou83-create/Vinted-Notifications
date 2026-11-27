@@ -70,6 +70,6 @@ class SourcingDashboardTests(unittest.TestCase):
         self.assertIn('data-time-kind="Found"', html)
         self.assertIn('Summer linen', html)
         self.assertIn('£5.00', html)
-        self.assertIn('Resale estimate pending.', html)
+        self.assertNotIn('resale', html.lower())
         self.assertNotIn('Meets £15 target', html)
         self.assertNotIn('AutoBuy in your Telegram alert', html)

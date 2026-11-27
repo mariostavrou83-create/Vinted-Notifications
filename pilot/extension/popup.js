@@ -106,6 +106,12 @@ for(const kind of ["home","search"]){
     button.disabled=!state?.paired || (!watching && !state.eligible);
     verify.disabled=watching||button.disabled;
     if(watching)verify.checked=Boolean(state.allowDetails);
+    if(kind==="home"){
+      const remember=document.getElementById("remember-home");
+      remember.disabled=watching;
+      if(watching || state?.remembered) remember.checked=Boolean(state?.remembered);
+      document.getElementById("forget-home").hidden=!state?.remembered;
+    }
     if(kind==="search"){
       const control=document.getElementById("show-new");
       control.disabled=watching||button.disabled;
@@ -120,10 +126,16 @@ for(const kind of ["home","search"]){
   button.addEventListener("click",async()=>{
     button.disabled=true;
     try{
-      const response=await chrome.runtime.sendMessage({type:prefix+(watching?"stop":"start"),allowDetails:verify.checked,showNew:kind==="search" && document.getElementById("show-new").checked});
+      const response=await chrome.runtime.sendMessage({type:prefix+(watching?"stop":"start"),allowDetails:verify.checked,remember:kind==="home" && document.getElementById("remember-home").checked,showNew:kind==="search" && document.getElementById("show-new").checked});
       await render();
       if(!response?.ok)status.textContent=response?.error||"Check this Vinted UK tab and try again.";
     }catch{status.textContent="Finder could not update the watcher.";button.disabled=false;}
   });
   render().catch(()=>{status.textContent="Watch status is unavailable.";});
 }
+
+document.getElementById("forget-home").addEventListener("click",async()=>{
+  await chrome.runtime.sendMessage({type:"finder-home-forget"});
+  document.getElementById("remember-home").checked=false;
+  document.getElementById("forget-home").hidden=true;
+});

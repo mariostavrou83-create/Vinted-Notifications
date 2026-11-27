@@ -202,6 +202,9 @@ def _source_current(conn, alert, device):
         )
     if alert["origin"] == "public_search":
         return alert["account_ref"] == "public"
+    if alert["origin"] == "browser_home" and alert["account_ref"] == "routed-home":
+        from .home_routes import routed_active
+        return routed_active(conn, device["user_id"], alert["listing_id"])
     if alert["origin"] != "browser_home" or alert["account_ref"] != "home:" + device["binding"]:
         return False
     return bool(
@@ -348,10 +351,9 @@ def notify(conn, now):
         "text": item["text"],
         "link_preview_options": {"is_disabled": True},
     }
-    valuation, checkout_cost = checkout_profit.for_alert(conn, item["user_id"], item["alert_id"], now)
-    profit = checkout_profit.profit_line(valuation)
-    if profit and checkout_cost:
-        data["text"] += "\n" + profit + "\n" + checkout_cost["note"]
+    checkout_cost = checkout_profit.for_alert(conn, item["user_id"], item["alert_id"], now)
+    if checkout_cost:
+        data["text"] += "\n" + checkout_cost["note"]
     if item["keyboard"]:
         data["reply_markup"] = json.loads(item["keyboard"])
     telegram("sendMessage", data)

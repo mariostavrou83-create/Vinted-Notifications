@@ -46,10 +46,13 @@ def checked_item(raw, now):
 
 
 def init_home_watch(app):
+    from .home_routes import init_routes
+
     get_db().execute("""CREATE TABLE IF NOT EXISTS pilot_home_watch (
         user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
         binding TEXT NOT NULL, username TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0,
         last_observed_at REAL)""")
+    init_routes(app)
 
     @app.get("/api/native/home-status")
     def native_home_status():
@@ -114,8 +117,13 @@ def init_home_watch(app):
             prefs, accepted = settings_for(conn, uid), 0
             for raw in body["items"]:
                 item = checked_item(raw, now)
-                if item and flow.record_watched_home(conn, uid, binding, item, prefs, now):
-                    accepted += 1
+                if item:
+                    from .home_routes import fanout
+                    from .home_groups import observe
+                    own = flow.record_watched_home(conn, uid, binding, item, prefs, now)
+                    shared = fanout(conn, uid, binding, item, now)
+                    grouped = observe(conn, uid, binding, item, now)
+                    accepted += bool(own or shared or grouped)
             conn.execute(
                 "UPDATE pilot_home_watch SET last_observed_at=? WHERE user_id=? AND binding=?",
                 (now, uid, binding),

@@ -78,7 +78,8 @@ def create_app(config=None):
                          (digest(token), int(time.time()) + 72 * 3600))
         click.echo(token)
 
-    device_endpoints = native_order.DEVICE_ENDPOINTS
+    from .home_companion import DEVICE_ENDPOINTS as companion_endpoints
+    device_endpoints = native_order.DEVICE_ENDPOINTS | companion_endpoints
     public = {"static", "login", "signup", "health", "buyer_extension_install", "download_buyer_extension", "pilot_telegram_webhook"} | device_endpoints
 
     @app.before_request

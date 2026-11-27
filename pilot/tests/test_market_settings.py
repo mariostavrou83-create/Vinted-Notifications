@@ -2,11 +2,11 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from cryptography.fernet import Fernet
 
-from pilot import market, market_runtime, pricing, public_feed
+from pilot import market, market_runtime, public_feed
 from pilot import market_settings as controls
 from pilot.app import create_app
 from pilot.db import get_db
@@ -39,12 +39,7 @@ class OwnerMarketTest(unittest.TestCase):
             controls.DAILY: "5",
             controls.RATE: "1",
             controls.CONCURRENT: "1",
-            controls.COMPARE_CAP: "2",
         }
-        self.ai = {"provider": "mistral", controls.MODEL: "fixture-model", controls.AI_CAP: "1"}
-        pricing._mistral_reviewer.cache_clear()
-        self.addCleanup(pricing._mistral_reviewer.cache_clear)
-
     def client(self, uid):
         client = self.app.test_client()
         with client.session_transaction(base_url=self.origin) as session:
@@ -75,12 +70,6 @@ class OwnerMarketTest(unittest.TestCase):
             ).status_code,
             400,
         )
-        self.assertEqual(
-            self.post(
-                self.ai | {controls.AI: "1", controls.AI_CAP: "0"}, provider_key=self.mistral
-            ).status_code,
-            400,
-        )
         with self.app.app_context():
             self.assertEqual(
                 get_db().execute("SELECT count(*) FROM team_market_settings").fetchone()[0], 0
@@ -97,7 +86,7 @@ class OwnerMarketTest(unittest.TestCase):
             http.assert_not_called()
         self.assertEqual(
             self.post(
-                self.discovery | {controls.DISCOVERY: "1", controls.COMPARE: "1"}, version=1
+                self.discovery | {controls.DISCOVERY: "1"}, version=1
             ).status_code,
             303,
         )
@@ -120,8 +109,8 @@ class OwnerMarketTest(unittest.TestCase):
             }
             with patch("pilot.market._search", return_value=[]) as fetch:
                 market.comparisons_for(db, item)
-                self.assertEqual(fetch.call_args.args[0], self.scavio)
-            self.assertEqual(db.execute("SELECT used FROM market_budget").fetchone()[0], 1)
+                fetch.assert_not_called()
+            self.assertEqual(db.execute("SELECT used FROM market_budget").fetchone()[0], 0)
         self.assertEqual(self.post(self.discovery, version=2).status_code, 303)
         with self.app.app_context(), patch("pilot.market._search") as fetch:
             market.comparisons_for(
@@ -135,34 +124,18 @@ class OwnerMarketTest(unittest.TestCase):
             )
             fetch.assert_not_called()
 
-    def test_model_limits_and_key_changes_apply_to_the_running_worker(self):
-        self.assertEqual(
-            self.post(self.ai | {controls.AI: "1"}, provider_key=self.mistral).status_code, 303
-        )
+    def test_legacy_ai_settings_cannot_activate_a_provider(self):
+        self.assertEqual(self.post({"provider":"mistral"}, provider_key=self.mistral).status_code, 400)
         with self.app.app_context():
-            reviewer = pricing.optional_mistral_reviewer()
-            upstream = Mock(status_code=200)
-            upstream.json.return_value = {
-                "choices": [{"message": {"content": json.dumps({"matches": [0]})}}]
-            }
-            with patch("pilot.pricing.requests.post", return_value=upstream) as http:
-                self.assertEqual(reviewer({"title": "blue"}, [{"title": "blue"}]), [0])
-                self.assertEqual(reviewer({"title": "blue"}, [{"title": "blue"}]), [0])
-                with self.assertRaisesRegex(ValueError, "cap reached"):
-                    reviewer({"title": "red"}, [{"title": "red"}])
-                self.assertEqual(http.call_count, 1)
-                self.assertEqual(
-                    http.call_args.kwargs["headers"]["Authorization"], "Bearer " + self.mistral
-                )
-        page = self.owner.get("/team/market", base_url=self.origin).text
-        self.assertIn("Mistral AI matching · Lifetime limit reached", page)
-        self.assertNotIn(self.mistral, page)
-        self.assertEqual(self.post(self.ai, version=1).status_code, 303)
-        with self.app.app_context(), patch("pilot.pricing.requests.post") as http:
-            self.assertIsNone(pricing.optional_mistral_reviewer())
-            with self.assertRaisesRegex(ValueError, "settings changed"):
-                reviewer({"title": "green"}, [{"title": "green"}])
-            http.assert_not_called()
+            db = get_db()
+            db.execute("INSERT INTO team_market_settings VALUES('mistral',?,NULL,1)",
+                       (json.dumps({"PILOT_MISTRAL_ENABLED":"1"}),))
+            cfg = market_runtime.config_for(db, {"PILOT_MISTRAL_API_KEY": self.mistral,
+                                                  "PILOT_SCAVIO_ENABLED":"1"})
+            self.assertEqual(cfg["PILOT_MISTRAL_API_KEY"], "")
+            self.assertEqual(cfg["PILOT_MISTRAL_ENABLED"], "0")
+            self.assertEqual(cfg["PILOT_SCAVIO_ENABLED"], "0")
+        self.assertNotIn("Mistral", self.owner.get("/team/market", base_url=self.origin).text)
 
     def test_changed_encryption_key_disables_encrypted_credentials(self):
         self.assertEqual(

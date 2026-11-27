@@ -578,7 +578,6 @@ def public_discover(conn, now):
                 backoff_until = max(backoff_until, observed + delay)
                 _mark(conn, [digest], tick, "failed")
             else:
-                market.remember_public_results(conn, rows, observed)
                 _record(conn, groups[digest][1], rows, observed)
                 _mark(
                     conn, [digest], tick, "checked" if observed < next_tick else "stale"

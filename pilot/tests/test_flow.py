@@ -357,16 +357,8 @@ class FlowTest(unittest.TestCase):
                 {"text": "Buy on Vinted", "url": "https://www.vinted.co.uk/items/765-coat"},
             )
             self.assertIn("shipping extra", msg["text"])
-            with (
-                patch("pilot.market.comparisons_for", return_value=[]),
-                patch(
-                    "pilot.pricing.estimate_resale",
-                    return_value={"status": "insufficient", "resale_pence": None},
-                ) as estimate,
-            ):
-                self.assertTrue(flow_worker.review(self.conn, time.time()))
-                self.assertIsNone(estimate.call_args.args[0]["all_in_pence"])
-                self.assertEqual(tg.call_args.args[0], "editMessageText")
+            self.assertNotIn("resale", msg["text"].lower())
+            self.assertEqual(tg.call_count, 1)
         own = flow.alerts_for_user(self.conn, 1)
         self.assertEqual((own[0]["checkout_mode"], own[0]["total_pence"]), ("vinted", None))
         self.assertEqual(flow.alerts_for_user(self.conn, 2), [])

@@ -8,6 +8,10 @@
   const keyOf=s=>s.url?searchKey(s.tabId):homeKey;
   const list=async()=> (await chrome.storage.session.get(searchIndex))[searchIndex]||[];
   const save=s=>chrome.storage.session.set({[keyOf(s)]:s});
+  const resumeKey="finderHomeResume";
+  async function remembered() {
+    return chrome.storage.local ? (await chrome.storage.local.get(resumeKey))[resumeKey] : null;
+  }
   let transition=Promise.resolve();
   function ordered(fn) {
     const next=transition.then(fn,fn);
@@ -62,8 +66,9 @@
       catch{/* Once local consent is removed the worker cannot submit another capture. */}
     }
   }
-  async function start(allowDetails,catalogue,showNew) {
+  async function start(allowDetails,catalogue,showNew,remember=false,expectedTab=null) {
     const [tab]=await chrome.tabs.query({active:true,currentWindow:true});
+    if(expectedTab!==null && tab?.id!==expectedTab)return {ok:false};
     if(!tab?.id || !(catalogue?catalogueUrl(tab.url):homeUrl(tab.url)))
       return {ok:false,error:catalogue?"Open your saved Vinted UK catalogue and try again.":"Open your own Vinted UK Home tab and try again."};
     const previous=await current(catalogue?searchKey(tab.id):homeKey);
@@ -100,6 +105,9 @@
       const [enabled]=await chrome.scripting.executeScript({target,
         func:(name,id,detail,url,show)=>beginFinderHomeObserver(name,id,detail,url,show),args:[state.username,state.runId,allowDetails,state.url,state.showNew]});
       if(!enabled.result)throw new Error();
+      if(remember && !catalogue)await chrome.storage.local.set({[resumeKey]:{
+        origin:state.origin,pilot:state.pilot,username:state.username
+      }});
       return {ok:true};
     }catch{await disable(state);return {ok:false,error:"The selected page or account could not be confirmed."};}
   }
@@ -207,10 +215,14 @@
     const catalogue=msg.type.startsWith("finder-search-");
     const action=msg.type.slice(catalogue?"finder-search-".length:"finder-home-".length);
     if(sender.url===chrome.runtime.getURL("popup.html") && !sender.tab){
-      if(action==="start")return start(msg.allowDetails===true,catalogue,catalogue&&msg.showNew===true);
+      if(action==="start")return start(msg.allowDetails===true,catalogue,catalogue&&msg.showNew===true,!catalogue&&msg.remember===true);
+      if(action==="forget" && !catalogue){await chrome.storage.local.remove(resumeKey);return {ok:true};}
       const [tab]=await chrome.tabs.query({active:true,currentWindow:true});
       const state=await current(catalogue?searchKey(tab?.id):homeKey);
-      if(action==="stop"){await disable(state);return {ok:true};}
+      if(action==="stop"){
+        if(!catalogue && chrome.storage.local)await chrome.storage.local.remove(resumeKey);
+        await disable(state);return {ok:true};
+      }
       if(action==="state"){
         const p=await localState();
         let timing=null;
@@ -221,7 +233,7 @@
             timing=read.result;
           }catch{/* A closed tab has no live sample. */}
         }
-        return {ok:true,paired:!!p,watching:samePair(state,p),username:p?.vinted_username,pilot:p?.pilot_username,
+        return {ok:true,remembered:!catalogue && samePair(await remembered(),p),paired:!!p,watching:samePair(state,p),username:p?.vinted_username,pilot:p?.pilot_username,
           eligible:catalogue?catalogueUrl(tab?.url):homeUrl(tab?.url),timing,showNew:state?.showNew===true,accepted:state?.accepted||0,allowDetails:state?.allowDetails===true};
       }
       return {stop:true};
@@ -284,7 +296,21 @@
       }
     }).catch(()=>{});
   });
-  chrome.tabs.onUpdated.addListener((id,change)=>{
+  async function resumeHome(expectedTab=null) {
+    const saved=await remembered();
+    if(!saved || await current())return;
+    const p=await localState();
+    if(!samePair(saved,p))return;
+    const [tab]=await chrome.tabs.query({active:true,lastFocusedWindow:true});
+    if(!tab?.active || !homeUrl(tab.url) || (expectedTab!==null && tab.id!==expectedTab))return;
+    // A remembered profile only observes the visible Home. Extra detail tabs require a new opt-in.
+    await start(false,false,false,false,tab.id);
+  }
+  const scheduleResume=id=>{void ordered(()=>resumeHome(id)).catch(()=>{});};
+  chrome.runtime.onStartup?.addListener(()=>scheduleResume(null));
+  chrome.tabs.onActivated?.addListener(info=>scheduleResume(info.tabId));
+  chrome.tabs.onUpdated.addListener((id,change,tab)=>{
+    if(change.status==="complete" && tab?.active && homeUrl(tab.url))scheduleResume(id);
     if(change.status==="complete")void ordered(()=>finishDetail(id)).catch(()=>{});
     if(change.status==="loading" || change.url)void ordered(async()=>{
       if(change.status==="loading"){await stopTab(id);return;}
@@ -296,6 +322,7 @@
   });
   chrome.storage.onChanged.addListener((changes,area)=>{
     if(area==="local" && changes.nativePairing)void ordered(async()=>{
+      if(chrome.storage.local)await chrome.storage.local.remove(resumeKey);
       await disable(await current());
       for(const id of await list())await disable(await current(searchKey(id)));
     }).catch(()=>{});

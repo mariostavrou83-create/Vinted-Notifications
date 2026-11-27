@@ -372,7 +372,7 @@ class PairedChromeTest(unittest.TestCase):
         self.assertIsNone(self.next_task())
         self.assertEqual(self.stage(), "expired")
 
-    def test_existing_valuation_uses_exact_quote_then_receipted_total(self):
+    def test_legacy_valuation_is_hidden_but_quote_and_receipt_are_preserved(self):
         valuation = {
             "status": "estimated",
             "resale_pence": 3400,
@@ -383,60 +383,35 @@ class PairedChromeTest(unittest.TestCase):
         self.db.execute(
             "UPDATE pilot_alerts SET valuation=? WHERE id=?", (json.dumps(valuation), self.aid)
         )
-        self.assertIsNone(flow.alerts_for_user(self.db, 1)[0]["valuation"]["profit_pence"])
+        self.assertNotIn("valuation", flow.alerts_for_user(self.db, 1)[0])
         self.accept_quote()
         card = flow.alerts_for_user(self.db, 1)[0]
         self.assertEqual(card["checkout_cost"]["basis"], "quote")
         self.assertEqual(card["checkout_cost"]["total_pence"], 1850)
         self.assertIn("valid until", card["checkout_cost"]["note"])
-        self.assertTrue(card["valuation"]["meets_target"])
-        self.assertEqual(card["valuation"]["profit_pence"], 1500)
-        self.assertEqual(card["valuation"]["evidence"], valuation["evidence"])
-        expired, cost = checkout_profit.for_alert(self.db, 1, self.aid, time.time() + 3600)
-        self.assertIsNone(expired["profit_pence"])
+        self.assertNotIn("valuation", card)
+        cost = checkout_profit.for_alert(self.db, 1, self.aid, time.time() + 3600)
         self.assertEqual(cost["basis"], "expired")
         self.assertIsNone(cost["total_pence"])
-        self.assertEqual(checkout_profit.for_alert(self.db, 2, self.aid, time.time()), (None, None))
+        self.assertIsNone(checkout_profit.for_alert(self.db, 2, self.aid, time.time()))
         self.result(self.next_task(), "purchased", order_id="receipt-123")
         with patch("pilot.flow_worker.telegram") as outbound:
             self.assertTrue(native_order.notify(self.db, time.time()))
-            self.assertIn("Est. profit £15.00 · £15 target met", outbound.call_args.args[1]["text"])
+            self.assertNotIn("profit", outbound.call_args.args[1]["text"].lower())
             self.assertIn("Purchase confirmed on", outbound.call_args.args[1]["text"])
         self.owner.post("/api/native/disconnect", headers=self.headers, json={})
-        later, cost = checkout_profit.for_alert(self.db, 1, self.aid, time.time() + 3600)
-        self.assertTrue(later["meets_target"])
+        cost = checkout_profit.for_alert(self.db, 1, self.aid, time.time() + 3600)
         self.assertEqual(cost["basis"], "purchase")
 
-    def test_quote_before_valuation_updates_private_alert_without_another_lookup(self):
+    def test_only_verified_checkout_totals_appear_on_the_board(self):
         self.accept_quote()
-        self.assertIsNone(checkout_profit.for_alert(self.db, 1, self.aid, time.time())[0])
-        valuation = {
-            "status": "estimated",
-            "resale_pence": 3399,
-            "profit_pence": None,
-            "evidence": [],
-        }
-        with (
-            patch("pilot.market.comparisons_for", return_value=[]) as comparisons,
-            patch("pilot.pricing.estimate_resale", return_value=valuation) as estimate,
-            patch("pilot.flow_worker.telegram") as tg,
-        ):
-            self.assertTrue(flow_worker.review(self.db, time.time()))
-            self.assertFalse(flow_worker.review(self.db, time.time()))
-            comparisons.assert_called_once()
-            estimate.assert_called_once()
-            message = tg.call_args.args[1]
-            self.assertEqual(message["chat_id"], 101)
-            self.assertIn("Est. profit £14.99 · £15 target missed", message["text"])
-            self.assertIn("Checkout quote valid until", message["text"])
-            page = self.owner.get("/alerts/fragment")
-            self.assertEqual(page.status_code, 200)
-            self.assertIn("Quoted checkout", page.text)
-            self.assertIn("£14.99", page.text)
+        page = self.owner.get("/alerts/fragment")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("Quoted checkout", page.text)
+        self.assertIn("£18.50", page.text)
+        self.assertNotIn("resale", page.text.lower())
         self.db.execute("UPDATE pilot_alerts SET native_binding=NULL WHERE id=?", (self.aid,))
-        projected, cost = checkout_profit.for_alert(self.db, 1, self.aid, time.time())
-        self.assertIsNone(cost)
-        self.assertIsNone(projected["profit_pence"])
+        self.assertIsNone(checkout_profit.for_alert(self.db, 1, self.aid, time.time()))
 
     def test_receipted_home_estimate_survives_unpairing_without_exposing_it_to_another_account(
         self,
@@ -458,15 +433,14 @@ class PairedChromeTest(unittest.TestCase):
             "UPDATE pilot_alerts SET valuation=? WHERE id=?",
             (json.dumps({"status": "estimated", "resale_pence": 3400}), self.aid),
         )
-        valuation, checkout = checkout_profit.for_alert(self.db, 1, self.aid, time.time())
-        self.assertTrue(valuation["meets_target"])
+        checkout = checkout_profit.for_alert(self.db, 1, self.aid, time.time())
         self.assertEqual(checkout["basis"], "purchase")
         self.assertFalse(flow.alerts_for_user(self.db, 2))
         # A listing with another Home pairing may not reuse the previous receipt.
         self.db.execute(
             "UPDATE pilot_alerts SET account_ref='home:unrelated' WHERE id=?", (self.aid,)
         )
-        self.assertIsNone(checkout_profit.for_alert(self.db, 1, self.aid, time.time())[1])
+        self.assertIsNone(checkout_profit.for_alert(self.db, 1, self.aid, time.time()))
 
     def test_unconfirmed_result_and_manual_subtotal_cannot_supply_profit(self):
         self.accept_quote()
@@ -478,15 +452,13 @@ class PairedChromeTest(unittest.TestCase):
             "meets_target": True,
         }
         self.db.execute("UPDATE pilot_alerts SET valuation=?", (json.dumps(valuation),))
-        val, cost = checkout_profit.for_alert(self.db, 1, self.aid, time.time())
+        cost = checkout_profit.for_alert(self.db, 1, self.aid, time.time())
         self.assertIsNone(cost)
-        self.assertIsNone(val["profit_pence"])
         self.db.execute(
             "UPDATE pilot_alerts SET origin='browser',order_status=NULL WHERE id=?", (self.aid,)
         )
-        val, cost = checkout_profit.for_alert(self.db, 1, self.aid, time.time())
+        cost = checkout_profit.for_alert(self.db, 1, self.aid, time.time())
         self.assertIsNone(cost)
-        self.assertIsNone(val["meets_target"])
 
     def test_unbounded_unknown_fees_require_buyer_confirmation(self):
         self.aid = self.alert("2222", subtotal=None)

@@ -1,0 +1,2 @@
+:root{font:14px/1.5 system-ui,sans-serif;color:#123738;background:#fafcfb}body{width:300px;margin:16px}h1{font-size:19px;margin:0 0 12px}label{display:block;font-weight:600;margin-bottom:10px}input{box-sizing:border-box;width:100%;padding:6px;border:1px solid #98aaa8;border-radius:4px}button{border:0;border-radius:4px;padding:7px 10px;background:#006866;color:white;font-weight:600;cursor:pointer;margin:2px 0}button.light{background:white;color:#294746;border:1px solid #a0b4b1}button:disabled{opacity:.5}p.help{font-size:12px;color:#3d5553}
+input[type="checkbox"]{width:auto}

@@ -25,13 +25,7 @@ LIFETIME = "PILOT_PUBLIC_SEARCH_MAX_REQUESTS"
 DAILY = "PILOT_PUBLIC_SEARCH_DAILY_LIMIT"
 RATE = "PILOT_PUBLIC_SEARCH_REQUESTS_PER_SECOND"
 CONCURRENT = "PILOT_PUBLIC_SEARCH_CONCURRENCY"
-COMPARE = "PILOT_SCAVIO_ENABLED"
-COMPARE_CAP = "PILOT_SCAVIO_MAX_SEARCHES"
-AI = "PILOT_MISTRAL_ENABLED"
-MODEL = "PILOT_MISTRAL_MODEL"
-AI_CAP = "PILOT_MISTRAL_MAX_REVIEWS"
-SCAVIO_FIELDS = (DISCOVERY, LIFETIME, DAILY, RATE, CONCURRENT, COMPARE, COMPARE_CAP)
-MISTRAL_FIELDS = (AI, MODEL, AI_CAP)
+SCAVIO_FIELDS = (DISCOVERY, LIFETIME, DAILY, RATE, CONCURRENT)
 
 
 def init_settings(app):
@@ -48,32 +42,21 @@ def _number(data, field, *, minimum=0, maximum=1_000_000_000):
     return str(int(value))
 
 
-def _options(provider, data):
-    def checkbox(field):
-        return "1" if data.get(field) == "1" else "0"
-
-    if provider == "scavio":
-        discover, comps = checkbox(DISCOVERY), checkbox(COMPARE)
-        return {
-            DISCOVERY: discover,
-            COMPARE: comps,
-            LIFETIME: _number(data, LIFETIME, minimum=int(discover)),
-            DAILY: _number(data, DAILY, minimum=int(discover)),
-            COMPARE_CAP: _number(data, COMPARE_CAP, minimum=int(comps)),
-            RATE: _number(data, RATE, minimum=1, maximum=100),
-            CONCURRENT: _number(data, CONCURRENT, minimum=1, maximum=100),
-        }
-    enabled = checkbox(AI)
-    model = (data.get(MODEL) or runtime.DEFAULTS[MODEL]).strip()
-    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._:-]{0,99}", model):
-        raise ValueError("Enter a valid Mistral model name.")
-    return {AI: enabled, MODEL: model, AI_CAP: _number(data, AI_CAP, minimum=int(enabled))}
+def _options(data):
+    discovery = "1" if data.get(DISCOVERY) == "1" else "0"
+    return {
+        DISCOVERY: discovery,
+        LIFETIME: _number(data, LIFETIME, minimum=int(discovery)),
+        DAILY: _number(data, DAILY, minimum=int(discovery)),
+        RATE: _number(data, RATE, minimum=1, maximum=100),
+        CONCURRENT: _number(data, CONCURRENT, minimum=1, maximum=100),
+    }
 
 
 def _save(provider, data, db):
-    if provider not in runtime.KEYS:
+    if provider != "scavio":
         raise ValueError("Choose a provider.")
-    options = _options(provider, data)
+    options = _options(data)
     expected = _number(data, "generation")
     new_key = data.get("api_key", "").strip()
     if new_key and (len(new_key) > 512 or len(new_key) < 8 or not re.fullmatch(r"[!-~]+", new_key)):
@@ -93,7 +76,7 @@ def _save(provider, data, db):
                 "These settings changed in another tab. Review the current values and save again."
             )
         cfg = runtime.config_for(db, current_app.config)
-        active = any(runtime.enabled(options.get(k)) for k in (DISCOVERY, COMPARE, AI))
+        active = runtime.enabled(options[DISCOVERY])
         if active and not (new_key or cfg[runtime.KEYS[provider]]):
             raise ValueError("Add a usable provider key before enabling paid requests.")
         db.execute(
@@ -119,18 +102,15 @@ def market_page():
             flash("Market settings saved.", "market")
             return redirect(url_for("team_market"), code=303)
     cfg = runtime.config_for(db, current_app.config)
-    fields = {k: cfg[k] if cfg[k] is not None else "" for k in (*SCAVIO_FIELDS, *MISTRAL_FIELDS)}
+    fields = {k: cfg[k] if cfg[k] is not None else "" for k in SCAVIO_FIELDS}
     # The renderer receives only public controls, usage counts and key-presence flags.
-    for k in (DISCOVERY, COMPARE, AI):
-        fields[k] = runtime.enabled(fields[k])
+    fields[DISCOVERY] = runtime.enabled(fields[DISCOVERY])
     versions = dict(db.execute("SELECT provider,generation FROM team_market_settings"))
     usage = {
         "discovery": db.execute("SELECT used FROM public_budget WHERE id=1").fetchone()[0],
         "today": db.execute(
             "SELECT count(*) FROM public_checks WHERE started>?", (time.time() - 86400,)
         ).fetchone()[0],
-        "comparisons": db.execute("SELECT used FROM market_budget WHERE id=1").fetchone()[0],
-        "ai": db.execute("SELECT used FROM pilot_model_budget WHERE id=1").fetchone()[0],
     }
 
     def state(switch, provider, cap_key, used):
@@ -138,8 +118,6 @@ def market_page():
             return "Off"
         if not cfg[runtime.KEYS[provider]]:
             return "Key needed"
-        if cap_key == AI_CAP and cfg[cap_key] is None:
-            return "Enabled with no hosting limit"
         try:
             cap = int(cfg[cap_key] or 0)
             if used >= cap:
@@ -152,8 +130,6 @@ def market_page():
 
     states = {
         "discovery": state(DISCOVERY, "scavio", LIFETIME, usage["discovery"]),
-        "comparisons": state(COMPARE, "scavio", COMPARE_CAP, usage["comparisons"]),
-        "ai": state(AI, "mistral", AI_CAP, usage["ai"]),
     }
     return render_template(
         "market_settings.html",

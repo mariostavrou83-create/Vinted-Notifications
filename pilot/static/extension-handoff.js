@@ -22,7 +22,9 @@
   const disconnect = document.querySelector("#disconnect-buyer-account");
   if (!label || !connect || !disconnect) return;
   if(hint && hintBox && hintName){hintName.textContent="@"+hint; hintBox.hidden=false;}
+  let linkedBuyer = null;
   const feedback = {
+    reconnected:"Buying account verified again.",
     linked:"Buyer account connected.",expired:"The connection request expired. Start again.",
     cancelled:"Account selection was cancelled.",mismatch:"A different Vinted account was selected. Open the intended account and try again.",
     conflict:"This account is already linked.",unavailable:"The account could not be verified. Try again later."
@@ -42,7 +44,9 @@
         state.configured?"Choose and authorize your Vinted buying account." :
         "Pair your Vinted buying account under Chrome checkout.";
       label.textContent=[message,baseline].filter(Boolean).join(" ");
-      connect.hidden=state.linked||state.revoke_pending||!state.configured;
+      linkedBuyer = state.linked ? state.username : null;
+      connect.textContent = state.linked ? 'Reconnect buying account' : 'Connect buying account';
+      connect.hidden=state.revoke_pending||!state.configured;
       disconnect.hidden=!state.linked&&!state.revoke_pending;
       if(state.linked && hint && state.username.toLowerCase() !== hint.toLowerCase()){
         label.textContent += " Disconnect the current buyer before connecting the selected profile.";
@@ -63,7 +67,7 @@
       await refresh();
     }catch{await refresh("The request could not be completed.");}finally{button.disabled=false;}
   }
-  connect.addEventListener("click",()=>action(connect,"/api/connection/start",{account_hint:hint}));
+  connect.addEventListener("click",()=>action(connect,"/api/connection/start",{account_hint:linkedBuyer || hint,reconnect:Boolean(linkedBuyer)}));
   disconnect.addEventListener("click",()=>action(disconnect,"/api/connection/disconnect",{}));
   refresh(feedback[outcome] || "");
 })();
