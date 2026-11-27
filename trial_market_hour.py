@@ -19,6 +19,46 @@ def _id(value):
     return str(value) if type(value) in (str, int) and str(value).isascii() and str(value).isdigit() else ""
 
 
+AUDIENCE_KEYS = ("audience_age", "audience_gender", "audience_age_band")
+
+
+def product_facts(raw):
+    """Reduce public product labels/descriptions to a controlled set of wearer and wear facts."""
+    from trial_style_evidence import audience_fields, reported_wear
+
+    fields = {k: raw[k] for k in (
+        "title", "size", "size_title", "brand", "category", "category_path", "leaf_title",
+        "department", "gender", "age_group", "audience", "suggestedGender", "suggestedMinAge",
+        "suggestedMaxAge", "description", *AUDIENCE_KEYS,
+    ) if raw.get(k) is not None}
+    result = audience_fields(fields)
+    notes = [raw.get(key) for key in ("description", "condition_description", "seller_notes")]
+    notes = [t for t in notes if isinstance(t, str) and t.strip()]
+    for k in ("condition", "status"):
+        value = raw.get(k)
+        if isinstance(value, str) and not grade({"condition": value}) and reported_wear(value):
+            notes.append(value)
+    result["reported_wear"] = sorted({w for text in notes for w in reported_wear(text)})
+    if notes:
+        result["wear_description_observed"] = True
+    return result
+
+
+def merge_product_facts(item, earlier):
+    """Same listing only. Fresh skims must not erase documented wear or the wearer's age."""
+    from trial_style_evidence import known_wear
+
+    merged = dict(item)
+    for key in AUDIENCE_KEYS:
+        old, newer = earlier.get(key), item.get(key)
+        if old:
+            merged[key] = old if not newer or newer == old else "conflict"
+    merged["reported_wear"] = sorted(known_wear(earlier) | known_wear(item))
+    if item.get("wear_description_observed") is True or earlier.get("wear_description_observed") is True:
+        merged["wear_description_observed"] = True
+    return merged
+
+
 def public_product(raw):
     # The Home parser may retain department, parent and leaf IDs together in
     # category_ids. Only the listing's own catalogue ID identifies its leaf.
@@ -67,8 +107,8 @@ def _checked_market(raw, currency):
     url = listing_url({"url": raw.get("url") or "https://www.vinted.co.uk/items/" + identity})
     if not identity or not url or url.rsplit("/", 1)[-1] != identity:
         return None
-    from trial_style_evidence import reported_wear
-    row.update(public_product(raw), reported_wear=reported_wear(raw.get("description")))
+    row.update(public_product(raw))
+    row.update(product_facts({**raw, "leaf_title": row.get("leaf_title")}))
     row["checked_active_uk_url"] = url
     return row
 
@@ -85,9 +125,7 @@ def listing_fields(item):
     condition = next((v for v in (
         label(raw.get("condition")), label(raw.get("status")), description
     ) if grade({"condition": v})), "")
-    from trial_style_evidence import reported_wear
     result = {
-        "reported_wear": reported_wear(raw.get("description")),
         "id": _id(getattr(item, "id", None)), "title": label(getattr(item, "title", "")),
         "url": listing_url({"url": getattr(item, "url", "")}),
         "brand": label(getattr(item, "brand_title", "")),
@@ -97,6 +135,8 @@ def listing_fields(item):
         "currency": getattr(item, "currency", None), "country": "UK", "observed_at": time.time(),
         "active": available(raw), **public_product(raw),
     }
+    result.update(product_facts({**raw, "title": result["title"], "size": result["size"],
+                                 "brand": result["brand"], "leaf_title": result.get("leaf_title")}))
     country = raw.get("seller_country_code") or raw.get("seller_country") or seller.get("country_iso_code") or seller.get("country_code")
     if country and str(country).casefold() not in {"gb", "uk", "united kingdom"}:
         result["active"] = False
@@ -106,7 +146,6 @@ def listing_fields(item):
 
 
 def _live_rows(database, identity):
-    from trial_style_evidence import reported_wear
     with closing(sqlite3.connect(Path(database).resolve().as_uri() + "?mode=ro", uri=True, timeout=.3)) as conn:
         row = conn.execute(
             """SELECT json_extract(d.payload,'$.trial_listing'),o.title,o.url,substr(json_extract(d.payload,'$.description'),1,2000)
@@ -118,17 +157,21 @@ def _live_rows(database, identity):
         if not row:
             return None, []
         target = json.loads(row[0]) if row[0] else {"id": identity, "title": row[1], "url": row[2]}
-        target["reported_wear"] = sorted(set(target.get("reported_wear") or []) | set(reported_wear(row[3])))
+        target = merge_product_facts(target, product_facts({**target, "description": row[3]}))
         # This samples the listings Finder already saw; available evidence is recorded before quoting.
         rows = conn.execute(
-            """SELECT json_extract(d.payload,'$.trial_listing') FROM alert_outbox o
+            """SELECT json_extract(d.payload,'$.trial_listing'), substr(json_extract(d.payload,'$.description'),1,2000) FROM alert_outbox o
                JOIN vinted_alert_details d ON d.item_id=o.item_id
                WHERE o.found_at>=? AND o.item_id!=? AND o.platform='vinted' AND o.currency='GBP'
                AND o.status='sent' AND json_type(d.payload,'$.trial_listing')='object'
                ORDER BY o.found_at DESC LIMIT 1000""",
             (time.time() - 3700, identity),
         )
-        return target, [json.loads(r[0]) for r in rows]
+        comparisons = []
+        for packed, description in rows:
+            item = json.loads(packed)
+            comparisons.append(merge_product_facts(item, product_facts({**item, "description": description})))
+        return target, comparisons
 
 
 def _market_rows(conn, target, now):
@@ -152,7 +195,7 @@ def _market_rows(conn, target, now):
                     "ask_pence": raw.get("price"), "brand": raw.get("brand"), "size": raw.get("size"),
                     "condition": raw.get("condition"), "observed_at": observed,
                     "active": True, "country": "UK", "currency": "GBP",
-                    **{k: raw[k] for k in ("vinted_catalog_id", "vinted_brand_id", "material", "model", "reported_wear", "leaf_title") if raw.get(k)},
+                    **{k: raw[k] for k in ("vinted_catalog_id", "vinted_brand_id", "material", "model", "reported_wear", "wear_description_observed", "leaf_title", *AUDIENCE_KEYS) if raw.get(k)},
                 })
     return result
 
@@ -245,6 +288,17 @@ async def evaluate(identity, database, client, counters):
     if not target:
         return dict(status="insufficient", resale_pence=None, baseline_pence=None, evidence=[],
                     explanation="Original GBP alert is missing.", market_status="not_run", model_status="not_run")
+    from trial_listing_intent import not_for_sale
+    if target.get("active") is False or not_for_sale(target):
+        return dict(status="insufficient", resale_pence=None, baseline_pence=None, evidence=[],
+                    market_status="not_for_sale", model_status="not_run", market_calls=0, model_calls=0,
+                    explanation="This item is unavailable or its title says it is not being offered for purchase.")
+    from trial_style_evidence import audience_fields
+    audience = audience_fields(target)
+    if "conflict" in audience.values():
+        return dict(status="insufficient", resale_pence=None, baseline_pence=None, evidence=[],
+                    market_status="conflicting_audience", model_status="not_run", market_calls=0, model_calls=0,
+                    explanation="The listing gives conflicting age or department details for the intended wearer.")
     rough = await _first_price(identity, target, database, client, counters)
     original = dict(target)
     if rough.get("photo_status") == "conflicting_product_type":

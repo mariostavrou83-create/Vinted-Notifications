@@ -94,10 +94,9 @@ def _listing(database, identity):
     urls = list(dict.fromkeys(u for u in alternatives if _cover_url(u)))[:3]
     description = str(row[3] or "")[:2000]
     # Only product descriptors from our vocabulary leave the worker, not freeform seller descriptions.
-    disclosed = re.findall(
-        r"\b(?:faux leather|real leather|pilling|bobbling|scuff(?:ed|s)?|faded|stained|hole(?:s)?|"
-        r"tear(?:s)?|loose seam|missing button|cracked|broken zip)\b", description.casefold()
-    )
+    from trial_style_evidence import reported_wear
+    materials = re.findall(r"\b(?:faux leather|real leather)\b", description.casefold())
+    disclosed = [*materials, *reported_wear(description)]
     return urls, {"title": _public_label(row[0]), "brand": _public_label(row[2]),
                  "description_terms": list(dict.fromkeys([*styles(description), *disclosed]))[:32]}
 

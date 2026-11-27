@@ -162,6 +162,9 @@ def product_mismatch(target, other, *, rank_style=False):
     a, b = words(target.get("title")), words(other.get("title"))
     if not a or not b:
         return "Missing item title"
+    from trial_listing_intent import not_for_sale
+    if not_for_sale(target) or not_for_sale(other):
+        return "Not offered for sale"
     from trial_style_evidence import family_mismatch
     wrong_family = family_mismatch(target, other)
     if wrong_family:
@@ -240,6 +243,10 @@ def new_result():
 def estimate_resale(target, comparables, *, now=None, review=None, rank_style=False):
     """A cheaper superior listing caps the price. No assumed material/condition premium."""
     result = new_result()
+    from trial_listing_intent import not_for_sale
+    if not_for_sale(target):
+        result["explanation"] = "The listing title expressly indicates it is not offered for purchase."
+        return result
     instant = timestamp(now) if now is not None else datetime.now(timezone.utc).timestamp()
     if instant is None:
         raise ValueError("now must be a timezone-aware datetime or Unix timestamp")
@@ -250,8 +257,10 @@ def estimate_resale(target, comparables, *, now=None, review=None, rank_style=Fa
     if not str(target.get("seller_id") or "").strip() or not (target.get("id") or listing_url(target)):
         result["explanation"] = "Listing and seller identifiers are needed to exclude the item and its seller."
         return result
+    from trial_style_evidence import known_wear, wear_difference
     skipped = Counter()
     latest = {}
+    disclosed = {}
     for other in comparables:
         if not isinstance(other, dict):
             continue
@@ -259,12 +268,20 @@ def estimate_resale(target, comparables, *, now=None, review=None, rank_style=Fa
         if not url or when is None or not 0 <= instant - when <= RECENT_SECONDS:
             skipped["Missing or expired UK pricing evidence"] += 1
             continue
+        seller = str(other.get("seller_id") or "").strip()
+        if seller and str(other.get("id", url.rsplit("/", 1)[1])) == url.rsplit("/", 1)[1]:
+            known = known_wear(other)
+            if known:
+                disclosed.setdefault((url, seller), set()).update(known)
         if url not in latest or when > latest[url][0]:
             latest[url] = when, other
     candidates, context, match_notes = [], [], {}
     for url, (when, item) in latest.items():
         item_id = url.rsplit("/", 1)[1]
         seller = str(item.get("seller_id") or "").strip()
+        if (url, seller) in disclosed:
+            # A newer catalogue tile can omit a flaw already confirmed in the full description.
+            item = dict(item, reported_wear=sorted(disclosed[url, seller]))
         amount = item.get("ask_pence")
         if "id" in item and str(item["id"]) != item_id:
             reason = "Listing identifier does not match its link"
@@ -287,6 +304,8 @@ def estimate_resale(target, comparables, *, now=None, review=None, rank_style=Fa
                     reason = note
                 else:
                     match_notes[url] = note
+            if not reason and not rank_style and wear_difference(target, item):
+                reason = "Different disclosed wear"
             if not reason and (not level or level < target_condition):
                 reason = "Lower or unconfirmed condition"
         if reason:

@@ -361,6 +361,32 @@ def _offer_price(offer, doc):
     return pence(raw) if currency == "GBP" else None
 
 
+def _documented_facts(product, labels, title, brand, size):
+    from trial_market_hour import product_facts
+
+    raw = {
+        "title": title,
+        "brand": brand,
+        "size": size,
+        "category": product.get("category") or labels.get("category"),
+        "description": product.get("description"),
+        "condition_description": labels.get("condition description"),
+        "seller_notes": labels.get("seller notes") or labels.get("seller s notes"),
+        "audience": product.get("audience"),
+        "condition": labels.get("condition"),
+    }
+    for key, label in (
+        ("age_group", "age group"),
+        ("gender", "gender"),
+        ("department", "department"),
+        ("suggestedGender", "suggested gender"),
+        ("suggestedMinAge", "suggested min age"),
+        ("suggestedMaxAge", "suggested max age"),
+    ):
+        raw[key] = product.get(key) or labels.get(label)
+    return product_facts(raw)
+
+
 def _detail(doc, source, link, sold):
     identity, url = link
     declared = doc.xpath(
@@ -413,6 +439,7 @@ def _detail(doc, source, link, sold):
         seller = {}
     seller_id = _seller(source, seller, doc, url)
     metadata = _identity_metadata(source, seller, product)
+    metadata.update(_documented_facts(product, labels, title, brand, size))
     # Only an item-scoped category name supplied by the product, not surrounding navigation.
     category = (
         _string(product.get("category") or labels.get("product type"))
