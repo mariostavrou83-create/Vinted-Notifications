@@ -17,6 +17,7 @@ from flask import current_app, g, jsonify, request
 from . import checkout_profit
 from .db import get_db, settings_for, transaction
 from .partner import PartnerError, partner_request
+from .listing_metadata import display_fields, vinted_photo_url
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS pilot_chats (
@@ -54,11 +55,15 @@ def alerts_for_user(conn, user_id):
     rows = checkout_profit.alert_rows(conn, user_id)
     now = time.time()
     answer = []
+    search_names = dict(conn.execute("SELECT id,name FROM searches WHERE user_id=?", (user_id,)))
     for r in rows:
         l = json.loads(r["listing"])
+        if r["source"] == "search" and not l.get("search_name") and type(l.get("search_id")) is int:
+            l["search_name"] = search_names.get(l["search_id"])
         valuation, checkout = checkout_profit.valuation_at_checkout(r, l, now)
         answer.append(
             {
+                **display_fields(l, r["origin"], r["created_at"]),
                 "id": r["id"],
                 "listing_id": r["listing_id"],
                 "title": l["title"],
@@ -203,6 +208,14 @@ def _record(conn, uid, account, item, source, settings, now, origin):
             and _matches_choice(settings.get("sizes", []), item.get("size"))
         ):
             return
+    item = dict(item)
+    item["photo_url"] = vinted_photo_url(item.get("photo_url"))
+    # The search name belongs to this Finder user. Snapshot it on discovery.
+    item.pop("search_name", None)
+    if source == "search" and type(item.get("search_id")) is int:
+        rule = conn.execute("SELECT name FROM searches WHERE user_id=? AND id=?", (uid,item["search_id"])).fetchone()
+        if rule:
+            item["search_name"] = rule["name"]
     delivery = "dashboard" if origin == "browser" else "new"
     inserted = conn.execute(
         """INSERT INTO pilot_alerts

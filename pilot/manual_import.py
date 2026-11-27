@@ -7,6 +7,7 @@ import time
 from flask import g, jsonify, render_template, request, session
 
 from .db import get_db, settings_for, transaction
+from .listing_metadata import vinted_photo_url
 
 TTL = 90
 MAX_ITEMS = 12
@@ -40,6 +41,9 @@ def _item(raw, captured, now):
     item = {"id": match[1], "listing_url": "https://www.vinted.co.uk/items/"+match[1], "title": title.strip(),
             "currency": "GBP", "price_pence": price, "listed_at": posted, "age_text": evidence,
             "dashboard_only": True}
+    photo = vinted_photo_url(raw.get("photo_url"))
+    if photo:
+        item["photo_url"] = photo
     seller = raw.get("seller_id")
     if isinstance(seller, str) and re.fullmatch(r"\d{1,20}", seller):
         item["seller_id"] = seller
