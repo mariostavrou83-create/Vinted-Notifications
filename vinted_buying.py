@@ -166,14 +166,15 @@ def resolve_failed(item_id, expected_updated):
     return resolve_owned(item_id, expected_updated, "miss")
 
 
-def resolve_owned(item_id, expected_updated, decision, *, close_item_id=None, from_purchase_status=False):
-    """Record the owner's got/miss decision without contacting Vinted."""
+def resolve_owned(item_id, expected_updated, decision, *, close_item_id=None,
+                  from_purchase_status=False, shared_group=None):
+    """Record an authorised got/miss decision without contacting Vinted."""
     # Wait briefly for an in-flight payment or status read to finish. Its
     # result always wins if it changes the attempt before the owner's tap.
     with buyer.exclusive(wait_seconds=4 if from_purchase_status else 0):
         return _resolve_owned(
             item_id, expected_updated, decision, close_item_id=close_item_id,
-            from_purchase_status=from_purchase_status,
+            from_purchase_status=from_purchase_status, shared_group=shared_group,
         )
 
 
@@ -200,7 +201,8 @@ def _owner_audit_table(conn, *, processing=False):
     return table
 
 
-def _resolve_owned(item_id, expected_updated, decision, *, close_item_id=None, from_purchase_status=False):
+def _resolve_owned(item_id, expected_updated, decision, *, close_item_id=None,
+                   from_purchase_status=False, shared_group=None):
     """Recheck the exact durable attempt while holding the buyer lock."""
     if not isinstance(decision, str) or decision not in ("got", "miss"):
         raise buyer.BuyerError(
@@ -241,6 +243,14 @@ def _resolve_owned(item_id, expected_updated, decision, *, close_item_id=None, f
         ) from None
     with closing(connection()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
+        if shared_group is not None:
+            from telegram_shared_alerts import current
+
+            if not from_purchase_status or current(conn) != shared_group:
+                raise buyer.BuyerError(
+                    "Sharing has changed. Open Purchase status from the current Finder group.",
+                    reason="resolution_not_allowed",
+                )
 
         def close_source_alert():
             if close_item_id is None:
@@ -330,6 +340,9 @@ def _resolve_owned(item_id, expected_updated, decision, *, close_item_id=None, f
                 "updated",
             )
         }
+        actor = "Owner" if shared_group is None else "Shared buyer"
+        if shared_group is not None:
+            snapshot["confirmed_by"] = "shared_buyer"
         resolved_at = time.time()
         original_attempt = json.dumps(snapshot, sort_keys=True, allow_nan=False)
         ledger = ledgers[-1] if saved["state"] == "paying" else ledgers[0]
@@ -367,9 +380,9 @@ def _resolve_owned(item_id, expected_updated, decision, *, close_item_id=None, f
             (
                 resolved_state,
                 (
-                    "Owner confirmed they purchased this item; no payment resubmitted."
+                    f"{actor} confirmed they purchased this item; no payment resubmitted."
                     if decision == "got"
-                    else "Owner confirmed this attempt failed; no payment resubmitted."
+                    else f"{actor} confirmed this attempt failed; no payment resubmitted."
                 ),
                 resolved_at,
                 item_id,
@@ -394,7 +407,7 @@ def _resolve_owned(item_id, expected_updated, decision, *, close_item_id=None, f
                 "SELECT * FROM vinted_buy_attempts WHERE item_id=?", (item_id,)
             ).fetchone()
         )
-    logger.info("Autobuy owner resolution item=%s decision=%s", item_id, decision)
+    logger.info("Autobuy %s resolution item=%s decision=%s", actor.lower(), item_id, decision)
     return outcome
 
 

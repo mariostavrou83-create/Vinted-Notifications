@@ -20,13 +20,13 @@ RESULT_TEXT = {
     "paid": "Bought with the connected Vinted buying account.",
     "paying": "Finder is checking the payment result.",
     "needs_action": "The account owner needs to finish payment confirmation in the private bot chat.",
-    "unknown": "The payment outcome is unconfirmed. The account owner can open Purchase status in the private bot chat.",
+    "unknown": "The payment outcome is unconfirmed. Open Purchase status in your private Finder chat.",
     "payment_failed": "This payment failed. The account owner can review the result in Finder.",
     "closed": "This purchase is closed.",
     "cancelled": "Autobuy was stopped before payment.",
 }
 REASON_TEXT = {
-    "earlier_payment_uncertain": "An earlier payment is unconfirmed. The account owner can review it by sending /purchase_status in the private Finder chat.",
+    "earlier_payment_uncertain": "An earlier payment is unconfirmed. Send /purchase_status in your private Finder chat to review it.",
     "price_increased": "The listing price rose above the alert price.",
     "shipping_over_limit": "Shipping costs £5 or more.",
     "shipping_unverified": "Finder could not confirm the shipping charge.",
@@ -37,10 +37,9 @@ REASON_TEXT = {
 }
 
 
-def owner_status_button(bot):
-    # The private handler verifies the owner. No payment details travel in the link.
+def status_button(bot):
     return InlineKeyboardButton(
-        "Open private purchase status (owner)",
+        "Open private purchase status",
         url=f"https://t.me/{bot.username}?start=purchase_status",
     )
 
@@ -71,7 +70,7 @@ async def callback(update, context):
             try:
                 markup = shared.markup(row, state, stop)
                 if state in {"unknown", "needs_action"}:
-                    markup = InlineKeyboardMarkup((*markup.inline_keyboard, (owner_status_button(context.bot),)))
+                    markup = InlineKeyboardMarkup((*markup.inline_keyboard, (status_button(context.bot),)))
                 await context.bot.edit_message_reply_markup(
                     chat_id=group.chat, message_id=message.message_id,
                     reply_markup=markup, **photo_cards.TIMEOUTS,
@@ -115,7 +114,7 @@ async def callback(update, context):
             if authorised():
                 keyboard = None
                 if outcome.get("reason") == "earlier_payment_uncertain":
-                    keyboard = InlineKeyboardMarkup([[owner_status_button(context.bot)]])
+                    keyboard = InlineKeyboardMarkup([[status_button(context.bot)]])
                 try:
                     await context.bot.send_message(
                         chat_id=group.chat, text=text, reply_to_message_id=message.message_id,

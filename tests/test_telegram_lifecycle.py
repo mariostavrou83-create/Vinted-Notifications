@@ -3,6 +3,7 @@
 import asyncio
 import json
 import unittest
+from contextlib import closing
 from unittest.mock import AsyncMock, patch
 
 from telegram import Bot, CallbackQuery, Message, Update
@@ -210,6 +211,12 @@ class TelegramLifecycleTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
 
             await self.app.process_update(partner_command)
             button = reply.await_args.kwargs["reply_markup"].inline_keyboard[0][0]
+            with closing(shared.connection()) as conn, conn:
+                key = shared.JOIN_PREFIX + "-321"
+                raw = conn.execute("SELECT value FROM parameters WHERE key=?", (key,)).fetchone()[0]
+                request = json.loads(raw)
+                request["expires_at"] = request.pop("requested_at") - 20 * 60 + shared.LEGACY_JOIN_LIFETIME
+                conn.execute("UPDATE parameters SET value=? WHERE key=?", (json.dumps(request), key))
             await self.app.process_update(approval(button, 123))
             self.assertIn("Shared alerts are on", edit.await_args.args[0])
             self.assertEqual(shared.current()[:3], (-321, 123, 456))
@@ -235,43 +242,55 @@ class TelegramLifecycleTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
                     await self.app.process_update(self.command_update(command, -321, user))
                 reply.assert_not_awaited()
 
-    async def test_linked_group_owner_can_use_dashboard_and_alert_controls(self):
+    async def test_both_linked_accounts_can_use_dashboard_and_alert_controls(self):
         import alert_controls
         import telegram_shared_alerts as shared
 
         self.assertIsNotNone(shared.save_group(-321, 123, 456))
         alert_controls.set_paused("all", False)
         with patch.object(Message, "reply_text", new_callable=AsyncMock) as reply:
-            for chat, actor in ((-321, 456), (-432, 123)):
+            for chat, actor in ((-321, 789), (-432, 123), (-432, 456)):
                 for command in ("dashboard", "purchase_status", "pause_all", "stop_sharing"):
                     await self.app.process_update(self.command_update(f"/{command}@TestFinderBot", chat, actor))
                 reply.assert_not_awaited()
                 self.assertFalse(alert_controls.state("home").paused)
                 self.assertIsNotNone(shared.current())
 
-            for command in ("dashboard", "purchase_status"):
-                await self.app.process_update(self.command_update(f"/{command}@TestFinderBot", -321, 123))
-                self.assertIn("private Finder chat", reply.await_args.args[0])
-                button = reply.await_args.kwargs["reply_markup"].inline_keyboard[0][0]
-                self.assertEqual(button.url, f"https://t.me/TestFinderBot?start={command}")
+            for actor in (123, 456):
+                for command in ("dashboard", "purchase_status"):
+                    await self.app.process_update(self.command_update(f"/{command}@TestFinderBot", -321, actor))
+                    self.assertIn("private Finder chat", reply.await_args.args[0])
+                    button = reply.await_args.kwargs["reply_markup"].inline_keyboard[0][0]
+                    self.assertEqual(button.url, f"https://t.me/TestFinderBot?start={command}")
 
-            await self.app.process_update(self.command_update("/pause_home@TestFinderBot", -321, 123))
+            with patch.dict("telegram_bot_plugin.telegram_bot.os.environ", {"DASHBOARD_URL": "https://finder.example"}):
+                await self.app.process_update(self.command_update("/start dashboard", 456, 456))
+                button = reply.await_args.kwargs["reply_markup"].inline_keyboard[0][0]
+                self.assertEqual(button.url, "https://finder.example")
+
+            await self.app.process_update(self.command_update("/pause_home@TestFinderBot", -321, 456))
             self.assertTrue(alert_controls.state("home").paused)
             self.assertFalse(alert_controls.state("search").paused)
             await self.app.process_update(self.command_update("/resume_all@TestFinderBot", -321, 123))
             self.assertFalse(alert_controls.state("home").paused)
-            await self.app.process_update(self.command_update("/stop_sharing@TestFinderBot", -321, 123))
+            await self.app.process_update(self.command_update("/share_alerts@TestFinderBot", -321, 456))
+            self.assertIn("Autobuy are on", reply.await_args.args[0])
+            await self.app.process_update(self.command_update("/stop_sharing@TestFinderBot", -321, 456))
             self.assertIn("group Autobuy are off", reply.await_args.args[0])
             self.assertIsNone(shared.current())
 
-    async def test_owner_can_answer_purchase_status_while_automatic_checks_are_running(self):
+    async def test_both_linked_accounts_can_answer_an_uncertain_purchase(self):
+        import telegram_shared_alerts as shared
         import vinted_buying as buying
 
-        for item, command, command_entity, label, expected in (
-            ("801", "/PURCHASE_STATUS", True, "Yes, I got it", "paid"),
-            ("802", "/start purchase_status", True, "No, I didn't get it", "payment_failed"),
-            ("803", "/PURCHASE STATUS", False, "Yes, I got it", "paid"),
-            ("804", "/PURCHASE_STATUS", False, "No, I didn't get it", "payment_failed"),
+        self.assertIsNotNone(shared.save_group(-321, 123, 456))
+        for actor, item, command, command_entity, label, expected in (
+            (123, "801", "/PURCHASE_STATUS", True, "Yes, I got it", "paid"),
+            (123, "802", "/start purchase_status", True, "No, I didn't get it", "payment_failed"),
+            (123, "803", "/PURCHASE STATUS", False, "Yes, I got it", "paid"),
+            (123, "804", "/PURCHASE_STATUS", False, "No, I didn't get it", "payment_failed"),
+            (456, "805", "/start purchase_status", True, "Yes, I got it", "paid"),
+            (456, "806", "/purchase_status", True, "No, I didn't get it", "payment_failed"),
         ):
             with self.subTest(command=command):
                 self.assertTrue(buying.claim({"item_id": item}))
@@ -286,23 +305,25 @@ class TelegramLifecycleTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
                     patch.object(buying, "buy") as buy,
                     patch.object(buying, "check_payment") as check,
                 ):
-                    await self.app.process_update(self.command_update(command, 123, 123, command_entity=command_entity))
+                    await self.app.process_update(self.command_update(command, actor, actor, command_entity=command_entity))
                     self.assertIn("Test jacket", reply.await_args.args[0])
                     markup = reply.await_args.kwargs["reply_markup"]
                     choices = {b.text: b.callback_data for row in markup.inline_keyboard for b in row if b.callback_data}
                     self.assertEqual(set(choices), {"Yes, I got it", "No, I didn't get it"})
                     message = {
-                        "message_id": 901, "date": 1, "chat": {"id": 123, "type": "private"},
+                        "message_id": 901, "date": 1, "chat": {"id": actor, "type": "private"},
                         "from": {"id": 123456, "first_name": "Finder", "is_bot": True},
                         "text": reply.await_args.args[0], "reply_markup": markup.to_dict(),
                     }
                     callback = {
                         "id": "answer-" + item, "chat_instance": "offline", "message": message,
-                        "from": {"id": 123, "first_name": "Owner", "is_bot": False}, "data": choices[label],
+                        "from": {"id": actor, "first_name": "Buyer", "is_bot": False}, "data": choices[label],
                     }
                     update = Update.de_json({"update_id": 2, "callback_query": callback}, self.app.bot)
                     await self.app.process_update(update)
                     self.assertEqual(buying.result(item)["state"], expected)
+                    if actor == 456:
+                        self.assertIn("Shared buyer confirmed", buying.result(item)["message"])
                     buy.assert_not_called()
                     check.assert_not_called()
 

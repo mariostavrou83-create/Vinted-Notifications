@@ -20,7 +20,8 @@ from search_settings import connection
 logger = get_logger(__name__)
 KEY = "telegram_shared_alert_group"
 JOIN_PREFIX = "telegram_shared_join:"
-JOIN_LIFETIME = 15 * 60
+JOIN_LIFETIME = 60 * 60
+LEGACY_JOIN_LIFETIME = 15 * 60
 GROUP_TYPES = {"group", "supergroup"}
 BUY_PATTERN = r"^shared:(?:buy|status|stop:[0-9a-f]{16})$"
 APPROVE_PATTERN = r"^shared:approve:([0-9a-f]{32})$"
@@ -28,15 +29,19 @@ SETUP_COMMAND = re.compile(r"^/share_alerts(?:@\w+)?\s*$", re.I)
 JOIN_COMMAND = re.compile(r"^/join_alerts(?:@\w+)?\s*\Z", re.I)
 GROUP_START = re.compile(r"^/start(?:@\w+)?\s+shared_alerts\s*\Z", re.I)
 PRIVATE_COMMAND = re.compile(r"^/(start|share_alerts|purchase_status)(?:@(\w+))?\Z", re.I)
-OWNER_COMMANDS = [
+MENU_COMMANDS = [
     ("dashboard", "Open your search dashboard"),
     ("purchase_status", "Check or confirm a purchase"),
     *((command, label) for command, (_, _, label) in alert_controls.COMMANDS.items()),
     ("share_alerts", "Set up shared alerts and Autobuy"),
     ("stop_sharing", "Stop shared alerts and Autobuy"),
 ]
-OWNER_COMMAND = re.compile(
-    r"^/(?:" + "|".join(command for command, _ in OWNER_COMMANDS) + r")(?:@\w+)?\s*\Z",
+MENU_COMMAND = re.compile(
+    r"^/(?:" + "|".join(command for command, _ in MENU_COMMANDS) + r")(?:@\w+)?\s*\Z",
+    re.I,
+)
+PRIVATE_MENU_COMMAND = re.compile(
+    r"^/(?:(?:dashboard|purchase[ _]status)(?:@\w+)?|start(?:@\w+)?\s+(?:dashboard|purchase_status))\s*\Z",
     re.I,
 )
 
@@ -54,7 +59,7 @@ class JoinRequest(NamedTuple):
     partner: int
     name: str
     token: str
-    expires_at: float
+    requested_at: float
 
 
 def current(conn=None):
@@ -85,8 +90,11 @@ def pending_join(conn, chat):
     ).fetchone()
     if row:
         try:
-            request = JoinRequest(**json.loads(row[0]))
-            if time.time() < request.expires_at:
+            data = json.loads(row[0])
+            if "expires_at" in data:
+                data["requested_at"] = data.pop("expires_at") - LEGACY_JOIN_LIFETIME
+            request = JoinRequest(**data)
+            if time.time() < request.requested_at + JOIN_LIFETIME:
                 return request
         except (TypeError, ValueError):
             pass
@@ -139,15 +147,21 @@ def member(group, chat, sender):
                 and chat.id == group.chat and not sender.is_bot and sender.id in (group.owner, group.partner))
 
 
-def owner_control_chat(chat, user):
+def private_partner(chat, user):
+    if getattr(chat, "type", None) != "private" or not user or user.is_bot or chat.id != user.id:
+        return None
+    group = current()
+    return group if group and group.partner == user.id else None
+
+
+def control_chat(chat, user):
     if not chat or not user or user.is_bot:
         return False
     if chat.type == "private":
         from vinted_owner_controls import private_owner
 
         return chat.id == user.id and private_owner(user.id)
-    group = current()
-    return bool(group and chat.type in GROUP_TYPES and (chat.id, user.id) == (group.chat, group.owner))
+    return member(current(), chat, user)
 
 
 def membership_message(message):
@@ -156,19 +170,24 @@ def membership_message(message):
 
 def allowed_update(update, owner):
     chat = update.effective_chat
-    if getattr(chat, "type", None) not in GROUP_TYPES:
+    chat_type = getattr(chat, "type", None)
+    if chat_type != "private" and chat_type not in GROUP_TYPES:
         return False
     message, sender = update.message, update.effective_user
+    query = update.callback_query
+    if chat_type == "private":
+        opens_menu = message and PRIVATE_MENU_COMMAND.fullmatch(message.text or "")
+        answers_purchase = query and (query.data or "").startswith("status:purchase:")
+        return bool((opens_menu or answers_purchase) and private_partner(chat, sender))
     if message and sender and JOIN_COMMAND.fullmatch(message.text or ""):
         return True
     if message and sender and str(sender.id) == owner:
         if SETUP_COMMAND.fullmatch(message.text or "") or GROUP_START.fullmatch(message.text or ""):
             return True
-        if OWNER_COMMAND.fullmatch(message.text or ""):
-            return owner_control_chat(chat, sender)
+    if message and MENU_COMMAND.fullmatch(message.text or ""):
+        return member(current(), chat, sender)
     if membership_message(message):
         return True
-    query = update.callback_query
     if not query:
         return False
     if re.fullmatch(APPROVE_PATTERN, query.data or ""):
@@ -182,22 +201,25 @@ async def private_group(bot, chat_id):
 
 
 async def update_group_menu(bot, group, *, clear=False):
-    scope = BotCommandScopeChatMember(group.chat, group.owner)
-    try:
-        if clear:
-            await bot.delete_my_commands(scope=scope, **photo_cards.TIMEOUTS)
-        else:
-            await bot.set_my_commands(OWNER_COMMANDS, scope=scope, **photo_cards.TIMEOUTS)
-            logger.info("Telegram shared owner command menu ready")
-    except TelegramError as exc:
-        logger.info("Telegram shared owner command menu deferred: %s", type(exc).__name__)
-        return False
-    return True
+    async def update_member(user_id):
+        scope = BotCommandScopeChatMember(group.chat, user_id)
+        try:
+            if clear:
+                return await bot.delete_my_commands(scope=scope, **photo_cards.TIMEOUTS)
+            return await bot.set_my_commands(MENU_COMMANDS, scope=scope, **photo_cards.TIMEOUTS)
+        except TelegramError as exc:
+            logger.info("Telegram shared command menus deferred: %s", type(exc).__name__)
+            return False
+
+    updated = all(await asyncio.gather(update_member(group.owner), update_member(group.partner)))
+    if updated and not clear:
+        logger.info("Telegram shared command menus ready for two buyers")
+    return updated
 
 
 async def open_private_control(update, context):
     chat, user = update.effective_chat, update.effective_user
-    if not owner_control_chat(chat, user):
+    if not member(current(), chat, user):
         return
     command = update.effective_message.text.split(maxsplit=1)[0][1:].split("@")[0].lower()
     label = "Open dashboard" if command == "dashboard" else "Check purchase status"
@@ -276,9 +298,13 @@ async def share_command(update, context):
     import db
 
     owner = str(db.get_parameter("telegram_chat_id") or "").strip()
-    if not message or not user or user.is_bot or str(user.id) != owner:
+    if not message or not user or user.is_bot:
         return
     chat = message.chat
+    if str(user.id) != owner:
+        if member(current(), chat, user):
+            await message.reply_text("Shared alerts and Autobuy are on in this group.")
+        return
     username = context.bot.username
     if chat.type == "private" and str(chat.id) == owner:
         await message.reply_text(
@@ -338,7 +364,7 @@ async def join_command(update, context):
         await message.reply_text("You're already linked. Shared alerts and Autobuy are on in this group.")
         return
     name = " ".join(user.first_name.split())[:40] or "your partner"
-    request = JoinRequest(int(owner), user.id, name, uuid4().hex, time.time() + JOIN_LIFETIME)
+    request = JoinRequest(int(owner), user.id, name, uuid4().hex, time.time())
     with closing(connection()) as conn, conn:
         conn.execute(
             "INSERT OR REPLACE INTO parameters(key,value) VALUES (?,?)",
@@ -391,9 +417,16 @@ async def approve_join(update, context):
 
 async def stop_command(update, context):
     message, user = update.message, update.effective_user
-    if not message or not owner_control_chat(message.chat, user):
+    if not message:
         return
-    unlink()
+    if message.chat.type == "private":
+        if not control_chat(message.chat, user):
+            return
+        unlink()
+    else:
+        group = current()
+        if not member(group, message.chat, user) or not unlink(group.version):
+            return
     await message.reply_text("Shared alerts and group Autobuy are off.")
 
 
@@ -543,13 +576,14 @@ async def send(bot, group, row):
 async def run(bot):
     logger.info("Telegram shared alerts ready; can_join_groups=%s", getattr(bot.bot, "can_join_groups", None))
     verified, verify_at = None, 0
-    menu_group = None
+    menu_group, menus_ready = None, False
     while True:
         try:
             group = current()
-            if menu_group and menu_group != group:
-                await update_group_menu(bot, menu_group, clear=True)
-                menu_group = None
+            if menu_group != group:
+                if menu_group:
+                    await update_group_menu(bot, menu_group, clear=True)
+                menu_group, menus_ready = group, False
             if not group:
                 verified = None
                 await asyncio.sleep(2)
@@ -560,8 +594,8 @@ async def run(bot):
                     await suspend(bot, group)
                     continue
                 verified, verify_at = group, now + 60
-                if menu_group != group and await update_group_menu(bot, group):
-                    menu_group = group
+                if not menus_ready:
+                    menus_ready = await update_group_menu(bot, group)
             row = claim(group, now)
             if row:
                 await send(bot, group, row)

@@ -84,21 +84,30 @@ class SharedAlertTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual((group.owner, group.partner), (123, 456))
         self.assertFalse(shared.member(group, self.chat, person(789)))
 
-    async def test_shared_worker_installs_the_owner_menu_and_removes_it_after_unlink(self):
+    async def test_shared_worker_installs_both_menus_and_removes_them_after_unlink(self):
         group = await self.activate()
         installed, removed = asyncio.Event(), asyncio.Event()
         self.bot.bot = SimpleNamespace(can_join_groups=True)
-        self.bot.set_my_commands = AsyncMock(side_effect=lambda *args, **kwargs: installed.set())
-        self.bot.delete_my_commands = AsyncMock(side_effect=lambda **kwargs: removed.set())
+
+        def finish_menu(command, event):
+            if command.await_count == 2:
+                event.set()
+            return True
+
+        self.bot.set_my_commands = AsyncMock(side_effect=lambda *args, **kwargs: finish_menu(self.bot.set_my_commands, installed))
+        self.bot.delete_my_commands = AsyncMock(side_effect=lambda **kwargs: finish_menu(self.bot.delete_my_commands, removed))
+        scopes = [BotCommandScopeChatMember(group.chat, user) for user in (group.owner, group.partner)]
         worker = asyncio.create_task(shared.run(self.bot))
         try:
             await asyncio.wait_for(installed.wait(), 2)
-            scope = self.bot.set_my_commands.await_args.kwargs["scope"]
-            self.assertEqual(scope, BotCommandScopeChatMember(group.chat, group.owner))
-            self.assertEqual(self.bot.set_my_commands.await_args.args[0], shared.OWNER_COMMANDS)
+            installs = self.bot.set_my_commands.await_args_list
+            self.assertCountEqual([call.kwargs["scope"] for call in installs], scopes)
+            self.assertTrue(all(call.args[0] == shared.MENU_COMMANDS for call in installs))
             shared.unlink(group.version)
             await asyncio.wait_for(removed.wait(), 2)
-            self.assertEqual(self.bot.delete_my_commands.await_args.kwargs["scope"], scope)
+            self.assertCountEqual(
+                [call.kwargs["scope"] for call in self.bot.delete_my_commands.await_args_list], scopes
+            )
         finally:
             worker.cancel()
             with self.assertRaises(asyncio.CancelledError):

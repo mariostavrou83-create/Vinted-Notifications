@@ -147,7 +147,7 @@ class LeRobot:
     async def control_alerts(self, update, context):
         chat = update.effective_chat
         user = update.effective_user
-        if not shared.owner_control_chat(chat, user):
+        if not shared.control_chat(chat, user):
             return
         command = update.effective_message.text.split(maxsplit=1)[0][1:].split("@")[0].lower()
         source, paused, _ = alert_controls.COMMANDS[command]
@@ -158,6 +158,20 @@ class LeRobot:
 
     async def open_dashboard(self, update, context):
         if getattr(update.effective_chat, "type", None) != "private":
+            return
+        if shared.private_partner(update.effective_chat, update.effective_user):
+            from vinted_connection_notices import dashboard_url
+
+            url = dashboard_url()
+            if url:
+                await update.message.reply_text(
+                    "Open Finder in your browser. The dashboard uses its usual website sign-in.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("Open search dashboard", url=url.removesuffix("/connections#vinted-buying"))
+                    ]]),
+                )
+            else:
+                await update.message.reply_text("Finder's dashboard link is temporarily unavailable.")
             return
         match = re.fullmatch(r"/start(?:@\w+)? home_([0-9]{1,24})", update.message.text or "")
         if match:
@@ -573,10 +587,10 @@ class LeRobot:
         try:
             chat_id = str(db.get_parameter("telegram_chat_id") or "").strip()
             if chat_id.isdigit() and int(chat_id) > 0:
-                await context.bot.set_my_commands(shared.OWNER_COMMANDS, scope=BotCommandScopeChat(int(chat_id)))
+                await context.bot.set_my_commands(shared.MENU_COMMANDS, scope=BotCommandScopeChat(int(chat_id)))
                 logger.info("Bot commands set successfully; alert_controls=%s shared_controls=True", len(alert_controls.COMMANDS))
             else:
-                await context.bot.set_my_commands(shared.OWNER_COMMANDS[:1])
+                await context.bot.set_my_commands(shared.MENU_COMMANDS[:1])
                 logger.info("Bot commands set successfully; alert_controls=0 shared_controls=False")
         except Exception:
             logger.exception("Error setting bot commands")

@@ -58,6 +58,18 @@ class PurchaseStatusResolution(DatabaseFixture, unittest.TestCase):
                 future.result(timeout=5)
         self.assertEqual(buying.result("201")["message"], "Vinted confirmed the order.")
 
+    def test_shared_buyer_cannot_record_a_decision_after_relinking(self):
+        import telegram_shared_alerts as shared
+
+        group = shared.save_group(-321, 123, 456)
+        self.pending("201", "unknown")
+        self.assertTrue(shared.unlink(group.version))
+        replacement = shared.save_group(-321, 123, 456)
+        self.assertNotEqual(group.version, replacement.version)
+        with self.assertRaisesRegex(buying.buyer.BuyerError, "Sharing has changed"):
+            buying.resolve_owned("201", "10.25", "miss", from_purchase_status=True, shared_group=group)
+        self.assertEqual(buying.result("201")["state"], "unknown")
+
     def test_existing_owner_audit_survives_paying_status_resolution(self):
         self.pending("201", "paying")
         with closing(connection()) as conn, conn:

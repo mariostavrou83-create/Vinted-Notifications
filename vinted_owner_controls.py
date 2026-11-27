@@ -30,6 +30,19 @@ def private_owner(chat_id):
     ).strip()
 
 
+def purchase_access(chat, user, *, from_status):
+    if getattr(chat, "type", None) != "private" or not user or chat.id != user.id or getattr(user, "is_bot", False):
+        return False, None
+    if private_owner(chat.id):
+        return True, None
+    if from_status:
+        from telegram_shared_alerts import private_partner
+
+        group = private_partner(chat, user)
+        return group is not None, group
+    return False, None
+
+
 def pending_reminder(chat_id):
     """Read only the oldest attempt requiring an owner decision."""
     try:
@@ -83,16 +96,17 @@ async def confirm_reminder(update, context):
 
     query = update.callback_query
     message = query.message
-    match = re.fullmatch(REMINDER_PATTERN, query.data or "")
-    if (
-        not match or not message or message.chat.type != "private"
-        or query.from_user.id != message.chat.id or not private_owner(message.chat.id)
-    ):
+    data = query.data or ""
+    match = re.fullmatch(REMINDER_PATTERN, data)
+    from_status = data.startswith("status:purchase:")
+    allowed, group = purchase_access(
+        message.chat if message else None, query.from_user, from_status=from_status
+    )
+    if not match or not allowed:
         await photo_cards.answer(query, "Only your private Telegram chat can confirm purchases.", alert=True)
         return
     decision, item_id, token = match.groups()
-    from_status = query.data.startswith("status:purchase:")
-    offer = descriptor(result(item_id), from_status=from_status)
+    offer = descriptor(result(item_id), from_status=from_status, shared_group=group)
     if not offer or offer["token"] != token:
         await photo_cards.answer(
             query, "This purchase reminder is out of date. Open /purchase_status for the latest result.", alert=True
@@ -102,7 +116,8 @@ async def confirm_reminder(update, context):
     else:
         try:
             await asyncio.to_thread(
-                resolve_owned, item_id, offer["updated"], decision, from_purchase_status=from_status
+                resolve_owned, item_id, offer["updated"], decision,
+                from_purchase_status=from_status, shared_group=group,
             )
         except buyer.BuyerError as exc:
             text = str(exc)
@@ -165,7 +180,7 @@ def pending_other(item_id):
     return pending_attempt(item_id, exclude=True)
 
 
-def purchase_prompt(saved, *, from_status=False):
+def purchase_prompt(saved, *, from_status=False, shared_group=None):
     """Pair the question and controls from the same durable attempt."""
     if not saved:
         return "There are no purchases awaiting confirmation.", None
@@ -179,7 +194,7 @@ def purchase_prompt(saved, *, from_status=False):
             "If your bank requests approval, open the payment check on the original alert. "
             "Open /purchase_status to record your answer now.", None
         )
-    offer = descriptor(saved, from_status=from_status)
+    offer = descriptor(saved, from_status=from_status, shared_group=shared_group)
     if offer:
         if from_status:
             return (
@@ -196,10 +211,16 @@ def purchase_prompt(saved, *, from_status=False):
 async def purchase_status_command(update, context):
     """Recover the current decision even if the original alert is missing."""
     chat, user = update.effective_chat, update.effective_user
-    if not chat or chat.type != "private" or not user or chat.id != user.id or not private_owner(chat.id):
+    allowed, group = purchase_access(chat, user, from_status=True)
+    if not allowed:
         return
     saved = await asyncio.to_thread(pending_attempt)
-    text, offer = purchase_prompt(saved, from_status=True)
+    if group:
+        from telegram_shared_alerts import private_partner
+
+        if private_partner(chat, user) != group:
+            return
+    text, offer = purchase_prompt(saved, from_status=True, shared_group=group)
     rows = buttons({"owner_resolution": offer}, prefix="status:purchase")
     if rows:
         rows.append([InlineKeyboardButton("View item on Vinted", url=f"{buyer.BASE}/items/{offer['item_id']}")])
@@ -208,7 +229,7 @@ async def purchase_status_command(update, context):
     )
 
 
-def descriptor(saved, *, from_status=False):
+def descriptor(saved, *, from_status=False, shared_group=None):
     eligible = ("unknown", "needs_action", "paying") if from_status else ("unknown", "needs_action")
     if not saved or saved.get("state") not in eligible:
         return None
@@ -223,9 +244,10 @@ def descriptor(saved, *, from_status=False):
     ):
         return None
     version = str(float(updated))
-    token = hashlib.sha256(
-        (identity + ":" + saved["state"] + ":" + version).encode("ascii")
-    ).hexdigest()[:16]
+    binding = f"{identity}:{saved['state']}:{version}"
+    if shared_group is not None:
+        binding += f":{shared_group.version}"
+    token = hashlib.sha256(binding.encode("ascii")).hexdigest()[:16]
     return {"item_id": identity, "updated": version, "token": token}
 
 
