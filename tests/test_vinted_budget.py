@@ -248,6 +248,7 @@ class BudgetIntegration(DatabaseFixture, unittest.TestCase):
             )
         details = vinted_alerts.get_details(row)
         details.update(guide="Guide " * 400, reminder="Reminder " * 400)
+        details["description"] = "Long seller description 🧵 " * 120
         caption, pages = photo_cards.captions(row, details)
         self.assertIn(
             "Item: <b>£15</b> · Est. total: <b>£19.95</b> (fees + delivery)", caption

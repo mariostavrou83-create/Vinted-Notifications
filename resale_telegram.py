@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 import sqlite3
 import time
 from collections import OrderedDict
@@ -12,6 +13,7 @@ from telegram import LinkPreviewOptions
 from telegram.error import BadRequest, RetryAfter, TelegramError
 
 import photo_cards
+from resale_pricing import valuation_html
 from search_settings import connection
 
 logger = logging.getLogger(__name__)
@@ -53,7 +55,58 @@ def reserving():
 def append_line(body, line):
     if not line or not body or line in photo_cards.plain(body):
         return body
+    if line.startswith("Est. profit: "):
+        # Only replace the four fields in Finder's final price recap. Seller text,
+        # active checkout controls and progress below the recap stay intact.
+        head, split, tail = body.rpartition("\nTotal: ")
+        if split and "\nBrand: " in head:
+            tail, n = re.subn(
+                r"(?m)^Est\. profit: [^\n]*\nEst\. resell: [^\n]*\nBuy: [^\n]*\nConf: [^\n]*",
+                lambda _: valuation_html(line),
+                tail,
+                count=1,
+            )
+            if n:
+                return head + split + tail
+        return body + "\n" + valuation_html(line)
     return body + "\n" + escape(line)
+
+
+def message_text(message):
+    for field in ("caption", "text", "caption_html", "text_html"):
+        value = getattr(message, field, None)
+        if isinstance(value, str) and value:
+            return photo_cards.plain(value) if field.endswith("_html") else value
+    return ""
+
+
+def initial_price(message):
+    footer = message_text(message).rpartition("\nTotal: ")[2]
+    if "\nEst. resell: £" in footer:
+        return "priced"
+    return "unknown" if "\nConf: " in footer else "absent"
+
+
+def visible_guidance(message):
+    text = message_text(message)
+    if not text:
+        return "unverified"
+    keyboard = (
+        getattr(getattr(message, "reply_markup", None), "inline_keyboard", ()) or ()
+    )
+    labels = (
+        [b.text for row in keyboard for b in row]
+        if isinstance(keyboard, (tuple, list))
+        else []
+    )
+    has_heading = re.search(
+        r"(?im)^(?:💷 |📝 )?(?:Your )?Buying (?:guide|reminder)(?:[ ·:]|$)", text
+    )
+    has_button = any(
+        "buying guide" in label.lower() or "buying reminder" in label.lower()
+        for label in labels
+    )
+    return "visible" if has_heading or has_button else "hidden"
 
 
 def group_body(identity, body):
@@ -159,6 +212,8 @@ async def _edit(identity, role, state):
                                 (line, identity, msg.message_id),
                             )
                         details["resale_line"] = line
+                        if line in photo_cards.plain(body or ""):
+                            return
                         if card["view"].startswith("notes:"):
                             return  # The main view will include it when the owner returns.
                         body, _ = photo_cards.captions(row, details)

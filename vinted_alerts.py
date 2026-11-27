@@ -226,10 +226,11 @@ def snapshot(item, search):
         "description_pending": True,
     }
     if os.getenv("FINDER_RESALE_PILOT") == "1":
-        from resale_pricing import label
+        from resale_pricing import garment, label
         raw = getattr(item, "raw_data", None) or {}
         result["resale_size"] = label(getattr(item, "size_title", None))
         result["resale_condition"] = label(raw.get("condition") or raw.get("status"))
+        result["resale_category"] = label(raw.get("catalog_title") or raw.get("category_title")) or garment(result["description"] or "")
     if required_keywords(search):
         keyword_description, description_complete = description_text(raw_description)
         result.update(
@@ -251,6 +252,17 @@ def recap(row, details):
         )
     total = (budget or {}).get("total")
     estimate = f"£{total / 100:.2f}" if type(total) is int else "Unavailable"
+    discovery = details.get("home_discovery")
+    if (os.getenv("FINDER_RESALE_PILOT") == "1" and os.getenv("FINDER_RESALE_SHADOW_ONLY") != "1"
+            and row.get("currency") == "GBP"
+            and (not isinstance(discovery, dict) or discovery.get("source_role") == "seller")):
+        from resale_pricing import footer_valuation, valuation_html
+
+        line = footer_valuation(details.get("resale_line") or "", {
+            "id": row.get("item_id"), "title": row["title"], "brand": details.get("brand"),
+            "category": details.get("resale_category"), "total_pence": total
+        })
+        return f"Title: <b>{title}</b>\nBrand: {brand}\nTotal: <b>{estimate}</b>\n{valuation_html(line)}"
     summary = f"<b>{title}</b>\nBrand: {brand}\nEst. total incl. shipping: <b>{estimate}</b>"
     line = details.get("resale_line")
     return summary + "\n" + escape(line) if line else summary
@@ -288,23 +300,18 @@ def sections(row, details):
         f"<b>{escape(row['title'][:500])}</b>\n{price_line}"
         f"\n{escape(details.get('brand_label', 'Brand'))}: {escape(details['brand'])}"
     )
-    if details.get("buying_advice"):
-        listing += "\n<b>Buying guide</b> · " + escape(details["buying_advice"][:720])
     if not ebay and isinstance(discovery, dict):
         reasons = {
-            "brand_category_style": "Brand, category and style match your buying guide",
-            "brand_style": "Brand and style match your buying guide",
-            "category_style": "Category and style match your buying guide",
-            "recommendation": "From your personalised Vinted Home feed",
+            "brand_category_style": "Matched on brand, category and style",
+            "brand_style": "Matched on brand and style",
+            "category_style": "Matched on category and style",
             "also_saved_search": "Also matched your saved search",
             "scraper_style": "Seller describes the cut or fabric in your scraper examples",
             "scraper_look": "The garment details match a style in your scraper",
             "scraper_photo": "Photo resembles your scraper examples. Check the cut, fabric and condition.",
         }
-        listing += "\nListing age verified within 3 minutes when alerted."
-        listing += "\n" + reasons.get(
-            discovery.get("reason"), "Matches your saved buying criteria"
-        )
+        if discovery.get("reason") != "recommendation":
+            listing += "\n" + reasons.get(discovery.get("reason"), "Matches your saved buying criteria")
     if ebay:
         shipping = details.get("shipping")
         listing += "\nPostage: " + (
@@ -321,17 +328,7 @@ def sections(row, details):
             else "Loading from " + marketplace + "…"
         )
     )
-    guide = (
-        "💷 <b>Your buying guide</b>\n" + details["guide"]
-        if details.get("guide")
-        else ""
-    )
-    reminder = (
-        "📝 <b>Your buying reminder</b>\n" + details["reminder"]
-        if details.get("reminder")
-        else ""
-    )
-    return heading, link, listing, seller_text, guide, reminder
+    return heading, link, listing, seller_text
 
 
 def text_message(row, details):
@@ -341,6 +338,7 @@ def text_message(row, details):
 
 def fast_text(item, search, details=None):
     row = {
+        "item_id": getattr(item, "id", None),
         "query_id": search["id"],
         "search_name": "",
         "url": item.url,
@@ -362,7 +360,7 @@ def get_details(row):
 
 def rich_request(row, details, listing_image, reference_image):
     marketplace = "eBay" if details.get("platform") == "ebay" else "Vinted"
-    heading, _, listing, description, guide, reminder = sections(row, details)
+    heading, _, listing, description = sections(row, details)
     # A URL button sits directly below the search heading, above listing details.
     button = (
         '<tg-button-row align="left"><tg-button type="url" url="'
@@ -376,13 +374,13 @@ def rich_request(row, details, listing_image, reference_image):
         button,
         "<p>" + listing.replace("\n", "<br>") + "</p>",
     ]
-    media, files = [], {}
+    media, files, figures = [], {}, []
     for key, label, raw in (
         ("listing", marketplace + " listing", listing_image),
         ("reference", "Your examples", reference_image),
     ):
         if raw:
-            parts.append(
+            figures.append(
                 f'<figure><img src="tg://photo?id={key}"/><figcaption>{label}</figcaption></figure>'
             )
             media.append(
@@ -391,9 +389,10 @@ def rich_request(row, details, listing_image, reference_image):
             files[key] = InputFile(raw, filename=key + ".jpg")
     parts.extend(
         "<p>" + section.replace("\n", "<br>") + "</p>"
-        for section in (description, guide, reminder, recap(row, details))
+        for section in (description, recap(row, details))
         if section
     )
+    parts.extend(figures)
     return {
         "chat_id": None,
         "message_id": row["telegram_message_id"],

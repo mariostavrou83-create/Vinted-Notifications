@@ -231,7 +231,7 @@ class ReferencePaginationTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase
         )
 
     async def test_caption_enrichment_and_notes_preserve_second_page_button(self):
-        self.details["reminder"] = "Long reminder " * 120
+        self.details["description"] = "Long seller description " * 120
         await self.send()
         await self.tap("card:references:1")
         await self.tap("card:notes:0")
@@ -250,7 +250,7 @@ class ReferencePaginationTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase
 
     async def test_text_fallback_can_show_second_page_then_notes_and_enrichment(self):
         self.download.return_value = None
-        self.details["reminder"] = "Long reminder " * 120
+        self.details["description"] = "Long seller description " * 120
         await self.send()
         self.bot.send_message.assert_awaited_once()
         await self.tap("card:references:1")
@@ -273,7 +273,7 @@ class ReferencePaginationTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase
 
     async def test_lost_accepted_edit_response_still_records_photo_presence(self):
         self.download.return_value = None
-        self.details["reminder"] = "Long reminder " * 120
+        self.details["description"] = "Long seller description " * 120
         await self.send()
         self.bot.edit_message_media.side_effect = [
             NetworkError("accepted response lost"),

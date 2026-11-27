@@ -57,12 +57,25 @@ def status_button(bot):
     )
 
 
-def insert_status(body, status):
+def insert_status(body, status, limit=None):
     head, separator, recap = body.rpartition("\n\n")
     if separator and "\nBrand: " in recap and "\nEst. total incl. shipping: " in recap:
-        # Match the private alert and keep the price recap immediately above the photos.
         return "\n\n".join((head, status, recap))
-    return "\n\n".join((body, status))
+    updated = f"{body}\n\n{status}"
+    if limit is None or not recap.startswith("Title: "):
+        return updated
+    overflow = photo_cards.units(photo_cards.plain(updated)) - limit
+    if overflow > 0:
+        prefix, heading, description = head.partition("\n\n📄 <b>Seller description</b>\n")
+        if heading:
+            from vinted_native import short
+
+            plain = photo_cards.plain(description)
+            space = photo_cards.units(plain) - overflow
+            if space > 1:
+                snippet = escape(short(plain, space))
+                return f"{prefix}{heading}{snippet}\n\n{recap}\n\n{status}"
+    return updated
 
 
 async def callback(update, context):
@@ -104,10 +117,9 @@ async def callback(update, context):
         if label:
             section = f"{PROGRESS_HEADING}{escape(label)}"
         current_body = resale_telegram.group_body(item_id, body)
-        candidate = insert_status(current_body, section) if current_body and section else ""
-        caption_fits = bool(candidate) and photo_cards.units(photo_cards.plain(candidate)) <= (
-            1024 if has_photo else 4096
-        )
+        limit = 1024 if has_photo else 4096
+        candidate = insert_status(current_body, section, limit) if current_body and section else ""
+        caption_fits = bool(candidate) and photo_cards.units(photo_cards.plain(candidate)) <= limit
 
         def controls(show_caption):
             button_label = None if show_caption else label

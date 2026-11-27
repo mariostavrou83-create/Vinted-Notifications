@@ -1,4 +1,4 @@
-"""Bounded valuation trial driven by receipts for the original Telegram alert."""
+"""Review accepted listing alerts separately from delivery, retaining the first 100 as a sample."""
 
 import asyncio
 import json
@@ -20,7 +20,13 @@ from resale_pilot import (
     market_cache,
     warm,
 )
-from resale_pricing import alert_line, market_key, shortlist
+from resale_pricing import (
+    cache_guide,
+    forget_reference,
+    market_key,
+    shortlist,
+    valuation_text,
+)
 
 logger = logging.getLogger(__name__)
 LIMIT = 100
@@ -34,17 +40,15 @@ def active():
 def accepted(identity, cover=None, message=None):
     """No network, DB, image processing or awaits on the initial Telegram delivery path."""
     if _receipts is not None:
-        try:
-            _receipts.put_nowait((str(identity), cover, time.monotonic()))
-        except asyncio.QueueFull:
-            logger.info(
-                "Resale trial skipped one arrival while the sample queue was full"
-            )
-        else:
-            if message is not None:
-                from resale_telegram import remember
+        forget_reference(identity)
+        # A burst can queue lightweight identities, but never an unbounded pile of photos.
+        _receipts.put_nowait(
+            (str(identity), cover if _receipts.qsize() < 16 else None, time.monotonic())
+        )
+        if message is not None:
+            from resale_telegram import remember
 
-                remember(identity, message)
+            remember(identity, message)
 
 
 def independent_items(path, rows):
@@ -68,10 +72,32 @@ def sample_table(conn):
         item_id TEXT PRIMARY KEY, sampled REAL NOT NULL, source TEXT, status TEXT NOT NULL,
         baseline TEXT, reviewed TEXT, display TEXT, elapsed_ms INTEGER, cover_present INTEGER)"""
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS resale_sample_time ON resale_sample(sampled)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS resale_trial_report (id INTEGER PRIMARY KEY, summary TEXT NOT NULL)"
+    )
     conn.commit()
 
 
-def reserve_item(conn, identity, source):
+async def load_guides(conn, database, since):
+    rows = conn.execute(
+        "SELECT query,fetched_at,listings FROM market WHERE fetched_at>=?", (since,)
+    ).fetchall()
+    for group, observed, items in rows:
+        try:
+            independent = await asyncio.to_thread(
+                independent_items, database, json.loads(items)
+            )
+            cache_guide(tuple(json.loads(group)), independent, observed)
+        except (ValueError, KeyError, TypeError, sqlite3.Error) as exc:
+            logger.info(
+                "Saved resale prices unavailable for one group: %s", type(exc).__name__
+            )
+
+
+def reserve_item(conn, identity, source, *, continuous=False):
     with conn:
         conn.execute("BEGIN IMMEDIATE")
         now = time.time()
@@ -79,7 +105,11 @@ def reserve_item(conn, identity, source):
             "DELETE FROM resale_sample WHERE status='running' AND sampled<?",
             (now - 90,),
         )
-        if conn.execute("SELECT count(*) FROM resale_sample").fetchone()[0] >= LIMIT:
+        if (
+            not continuous
+            and conn.execute("SELECT count(*) FROM resale_sample").fetchone()[0]
+            >= LIMIT
+        ):
             return False
         return (
             conn.execute(
@@ -91,9 +121,23 @@ def reserve_item(conn, identity, source):
 
 
 async def sample_loop(
-    receipts, database, conn, client, token, recent, refresh_needed, market_token=None
+    receipts,
+    database,
+    conn,
+    client,
+    token,
+    recent,
+    refresh_needed,
+    market_token=None,
+    *,
+    continuous=False,
 ):
-    while (
+    reporting = (
+        continuous
+        and not conn.execute("SELECT 1 FROM resale_trial_report WHERE id=1").fetchone()
+    )
+    next_cleanup = 0.0
+    while continuous or (
         conn.execute(
             "SELECT COUNT(*) FROM resale_sample WHERE status!='running'"
         ).fetchone()[0]
@@ -101,27 +145,40 @@ async def sample_loop(
     ):
         identity, cover, started = await receipts.get()
         try:
+            if continuous and time.monotonic() >= next_cleanup:
+                cutoff = time.time() - 31 * 86400
+                with conn:
+                    conn.execute(
+                        """DELETE FROM resale_sample WHERE sampled<? AND item_id NOT IN
+                        (SELECT item_id FROM resale_sample ORDER BY sampled LIMIT ?)""",
+                        (cutoff, LIMIT),
+                    )
+                    conn.execute("DELETE FROM model_reviews WHERE started<?", (cutoff,))
+                next_cleanup = time.monotonic() + 86400
             alerts = await asyncio.to_thread(export_alerts, database, 1, identity)
-            if not alerts or not reserve_item(conn, identity, alerts[0]["source"]):
+            if not alerts or not reserve_item(
+                conn, identity, alerts[0]["source"], continuous=continuous
+            ):
                 continue
             target = alerts[0]
             recent.append(target)
             key = market_key(target)
             entries = cached_listings(conn, key, time.time())
-            if entries is None and key:
-                if market_token:
-                    await warm([target], conn, client, market_token, 1, pilot_limit=50)
-                    entries = cached_listings(conn, key, time.time())
+            older_snapshot = False
+            if entries is None and key and market_token:
                 refresh_needed.set()
+            if entries is None and key:
+                entries = cached_listings(conn, key, time.time(), max_age=7 * 86400)
+                older_snapshot = bool(entries)
             rows = await asyncio.to_thread(independent_items, database, entries or [])
             candidates = shortlist(target, rows, time.time())
             baseline, review, path = await evaluate_one(
                 target, candidates, conn, client, token, cover_bytes=cover
             )
-            if key and entries is None:
-                path = "cold_market"
-                review = dict(review, verdict="Market unavailable")
+            if older_snapshot and review.get("comparisons"):
+                review = dict(review, verdict="Not confident", basis="saved")
             elapsed = round((time.monotonic() - started) * 1000)
+            display = valuation_text(review)
             with conn:
                 conn.execute(
                     """UPDATE resale_sample SET status=?,baseline=?,reviewed=?,display=?,
@@ -130,7 +187,7 @@ async def sample_loop(
                         path,
                         encoded(baseline),
                         encoded(review),
-                        alert_line(review),
+                        display,
                         elapsed,
                         bool(cover),
                         identity,
@@ -138,15 +195,40 @@ async def sample_loop(
                 )
             from resale_telegram import publish
 
-            publish(identity, alert_line(review))
+            publish(identity, display)
             logger.info(
-                "Resale trial observation source=%s path=%s verdict=%s elapsed_ms=%d",
+                "Resale trial observation source=%s path=%s verdict=%s elapsed_ms=%d basis=%s priced=%s",
                 target["source"],
                 path,
                 review["verdict"],
                 elapsed,
+                review.get("basis", "comparisons"),
+                review.get("resale_pence") is not None,
             )
-        except (OSError, ValueError, sqlite3.Error) as exc:
+            if (
+                reporting
+                and conn.execute(
+                    "SELECT COUNT(*) FROM resale_sample WHERE status!='running'"
+                ).fetchone()[0]
+                >= LIMIT
+            ):
+                report = encoded(sample_summary(conn))
+                with conn:
+                    first = conn.execute(
+                        "INSERT OR IGNORE INTO resale_trial_report VALUES(1,?)",
+                        (report,),
+                    ).rowcount
+                if first:
+                    logger.info("Resale trial complete: %s", report)
+                reporting = False
+        except (
+            OSError,
+            ValueError,
+            TypeError,
+            KeyError,
+            sqlite3.Error,
+            httpx.HTTPError,
+        ) as exc:
             logger.warning(
                 "Resale trial observation unavailable: %s", type(exc).__name__
             )
@@ -160,7 +242,7 @@ async def run(database):
         return
     market_token = os.getenv("SCAVIO_API_KEY")
     model_token = os.getenv("MISTRAL_API_KEY")
-    if not (market_token and model_token):
+    if not (market_token or model_token):
         logger.warning(
             "Resale trial awaits separate Mistral and Scavio service settings"
         )
@@ -174,23 +256,17 @@ async def run(database):
             import resale_telegram
 
             resale_telegram.configure(os.getenv("FINDER_RESALE_SHADOW_ONLY") != "1")
+            recent_reviews = conn.execute(
+                """SELECT item_id,reviewed FROM resale_sample
+                WHERE status!='running' AND json_valid(reviewed)
+                AND json_type(reviewed,'$.resale_pence')='integer' ORDER BY sampled DESC LIMIT ?""",
+                (LIMIT,),
+            )
             resale_telegram.restore_lines(
-                conn.execute(
-                    "SELECT item_id,display FROM resale_sample WHERE status!='running' ORDER BY sampled DESC LIMIT ?",
-                    (LIMIT,),
-                )
+                (identity, valuation_text(json.loads(data)))
+                for identity, data in recent_reviews
             )
-            if (
-                conn.execute(
-                    "SELECT COUNT(*) FROM resale_sample WHERE status!='running'"
-                ).fetchone()[0]
-                >= LIMIT
-            ):
-                resale_telegram.finish_sample()
-                return
-            recent = deque(
-                await asyncio.to_thread(export_alerts, database, LIMIT), maxlen=LIMIT
-            )
+            recent = deque(maxlen=32)
             async with httpx.AsyncClient(
                 follow_redirects=False, trust_env=False, timeout=4
             ) as client:
@@ -198,6 +274,7 @@ async def run(database):
 
                 # Keep up to 50 paid lookups for the first pilot. Persist the allowance across restarts.
                 async def refresh():
+                    await load_guides(conn, database, time.time() - 7 * 86400)
                     while True:
                         await refresh_needed.wait()
                         refresh_needed.clear()
@@ -206,49 +283,62 @@ async def run(database):
                         ).fetchone()[0]
                         if used >= 50:
                             return
-                        await warm(
-                            list(recent),
+                        # Spend a limited lookup only on a garment that just triggered an alert.
+                        started = time.time()
+                        outcome = await warm(
+                            list(reversed(recent)),
                             conn,
                             client,
                             market_token,
-                            min(5, 50 - used),
+                            1,
                             pilot_limit=50,
                         )
+                        if outcome["market_groups_refreshed"]:
+                            await load_guides(conn, database, started)
                         await asyncio.sleep(15)
 
-                receipts = asyncio.Queue(maxsize=16)
+                receipts = asyncio.Queue()
                 _receipts = receipts
                 refill = asyncio.create_task(refresh())
+                workers = []
                 try:
                     logger.info(
                         "Resale trial ready for accepted Home and saved-search alerts"
                     )
-                    await sample_loop(
-                        receipts,
-                        database,
-                        conn,
-                        client,
-                        model_token,
-                        recent,
-                        refresh_needed,
-                        market_token,
-                    )
-                    logger.info(
-                        "Resale trial complete: %s",
-                        json.dumps(sample_summary(conn), sort_keys=True),
-                    )
+                    workers = [
+                        asyncio.create_task(
+                            sample_loop(
+                                receipts,
+                                database,
+                                conn,
+                                client,
+                                model_token,
+                                recent,
+                                refresh_needed,
+                                market_token,
+                                continuous=True,
+                            )
+                        )
+                        for _ in range(2)
+                    ]
+                    await asyncio.gather(*workers)
                 finally:
                     _receipts = None
                     resale_telegram.finish_sample()
-                    refill.cancel()
-                    await asyncio.gather(refill, return_exceptions=True)
+                    for task in [refill, *workers]:
+                        task.cancel()
+                    await asyncio.gather(refill, *workers, return_exceptions=True)
     except (OSError, ValueError, sqlite3.Error, httpx.HTTPError) as exc:
         logger.warning("Resale trial unavailable: %s", type(exc).__name__)
 
 
 def sample_summary(conn):
-    rows = conn.execute("""SELECT source,status,reviewed,elapsed_ms FROM resale_sample
-        WHERE status!='running' ORDER BY elapsed_ms""").fetchall()
+    rows = conn.execute(
+        """SELECT * FROM (
+        SELECT source,status,reviewed,elapsed_ms FROM resale_sample
+        WHERE status!='running' ORDER BY sampled LIMIT ?) ORDER BY elapsed_ms""",
+        (LIMIT,),
+    ).fetchall()
     counted = {}
     for _, _, review, _ in rows:
         name = json.loads(review)["verdict"]

@@ -1,21 +1,30 @@
-# Finder resale trial
+# Finder resale estimates
 
-The pilot samples up to 100 distinct Vinted listings after Telegram accepts the original alert. Home and saved searches use the same pricing rules. The owner's alert and the authorised group's copy display the same estimate below the listing details. Finder edits each alert in place and keeps the photos below the text. Each item incurs at most one model request during the trial. Set `FINDER_RESALE_SHADOW_ONLY=1` to record estimates privately without editing the alerts.
+New GBP Vinted saved-search and seller Home alerts display the title, brand, estimated all-in total, estimated profit, estimated resale price, Buy and Conf. The owner and the linked group see the same valuation. Once a buyer taps Autobuy, progress follows the price summary, above the photos. Saved buying guides and personal shopping reminders live in the search settings. The Full description button opens the seller's description. Purchase outcome confirmation remains available when needed.
 
-Use a separately billed Mistral workspace and a Scavio account. Set `MISTRAL_API_KEY` and `SCAVIO_API_KEY` in the host's private service settings. Set `FINDER_RESALE_PILOT=1` to start collecting the trial and unset it to stop. The default database is `resale-pilot.sqlite3` beside Finder's existing database. Use `FINDER_RESALE_CACHE` to select another persistent file. The first trial allows up to 50 Scavio lookups and closes after 100 unique samples. Market requests run in the background following a new receipt that lacks fresh comparison data. Billing applies at each provider's rate.
+The first price is calculated locally, before Telegram delivery. When available, Finder uses at least three other listings for the brand and garment from a market snapshot up to seven days old. Otherwise, a recognised garment starts with a broad UK category price. Both kinds of first estimate have low confidence. An unidentifiable garment starts with Unknown.
 
-The evaluator uses independent UK active asking prices. The language model receives garment descriptions consisting of title, brand, size and condition, along with the already downloaded listing cover when available. It grades the comparables as close, approximate or unsuitable. Finder undercuts comparable asking prices and subtracts the alert's all-in acquisition estimate in pence. Asking prices anchor an estimate for a quick resale. Actual selling prices are needed to measure accuracy.
+After acceptance, a separately billed Mistral model reviews the garment title, brand, size, condition and its already-downloaded cover when available. The same request grades independent UK asking prices and can provide a rough resale price when comparisons are thin. The model receives no acquisition price. Finder undercuts the 40th percentile of qualifying asking prices by 5%, rounds down to the next 50p and subtracts the alert's all-in acquisition estimate. It assumes the reseller pays no outbound postage. Other Finder alerts are excluded from the market sample. The result can update both Telegram messages in place. Reaching the provider limit or timing out leaves a local valuation available.
 
-| Display | Meaning |
+**Buy** is Yes when the point estimate puts profit above £15. Exactly £15 gives No. When Finder cannot establish a profit figure it shows Unknown and gives an insufficient-evidence No. This field is advisory.
+
+| Conf | Evidence |
 | --- | --- |
-| Yes | At least three independent sellers support a narrow range entirely above £15 estimated profit. |
-| No | The supported range gives estimated profit of £15 or less. Both estimated profit and resale appear. |
-| Not confident | A rough price is possible. The message gives estimated resale and profit, plus likely Yes or likely No, when the all-in cost is available. |
-| Not sure | No credible market price is available. |
-| AI review unavailable | The provider timed out or returned an unusable answer. |
-| Comparison prices unavailable | Finder could not obtain a fresh comparison snapshot for this garment. |
+| ⬆️ High | At least three distinct sellers have close, recently observed comparisons. The supported price range is narrow and lies entirely on one side of the profit threshold. |
+| ➡️ Medium | At least two comparable listings support a valuation and the high-confidence criteria are unmet. |
+| ⬇️ Low | A broad category price, older saved asking prices, an AI-only estimate, a single comparison or insufficient evidence. |
 
-After the hundredth observation the service logs coverage, verdicts and the 95th-percentile time from private Telegram acceptance to a computed result. Accepted Telegram edits have separate timing logs for each chat. Measure five-second coverage from the original receipt to the accepted edit, counting missed or failed edits. Fresh market lookups on a cache miss can take longer. Accuracy requires a review of the comparable items and actual resale prices where available.
+## Limits and measurement
+
+Set `FINDER_RESALE_PILOT=1` to enable valuation. Set `FINDER_RESALE_SHADOW_ONLY=1` to measure without adding estimates to Telegram. The service uses the existing separately billed Mistral and Scavio settings and the configured provider spending ceilings. Two background workers share a per-listing reservation across the chats. A Mistral call has a 3.5-second processing timeout. Scavio lookups run separately and retain the original persistent allowance of 50 requests. Provider billing or access denials pause further requests for an hour. Rate limits pause requests for one minute.
+
+The first 100 completed observations form a one-time trial report. Estimates continue after the report. A separate rolling 31-day history supports operational measurements. The default cache is `resale-pilot.sqlite3` beside Finder's database. `FINDER_RESALE_CACHE` overrides its location. Telegram receipts record whether the first alert contained a price. Subsequent accepted edits include elapsed time from each chat's receipt. Only actual completed resales can establish valuation accuracy.
+
+## UK category price references
+
+The women's and men's category figures draw on ResellTrack's October 2026 UK Vinted barometer for 25 September through 24 October. These are item listing prices observed when listings were detected as sold. Negotiated sale prices can differ. We selected relevant rows, rounded to whole pounds, and used related categories for blazers and outerwear, cardigans and jumpers, and blouses and shirts. ResellTrack publishes its barometer under Creative Commons Attribution 4.0. [October edition](https://reselltrack.io/en/vinted-barometer/2026-10) · [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
+
+Supplemental rough values for knitwear and shirts come from Fripilot's UK price barometer. FLUF's UK category figures inform shorts, waistcoats and men's shirts. Bought's jumpsuit and midi-skirt asking prices inform the jumpsuit and skirt defaults. The waistcoat and shorts references include a broader mix of listings. [Fripilot](https://fripilot.co.uk/blog/vinted-uk-price-barometer) · [FLUF](https://fluf.io/resale-data/vinted/) · [Bought jumpsuits](https://bought.app/en/items/women/jumpsuits-playsuits) · [Bought midi skirts](https://bought.app/en/items/women/midi-skirts)
 
 ## Repeatable evaluation
 

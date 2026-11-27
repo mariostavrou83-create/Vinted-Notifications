@@ -608,26 +608,6 @@ def format_alert(item, search, message_template, details=None):
     keyword = parse_qs(urlparse(search["query"]).query).get("search_text", [""])[0]
     name = search["query_name"] or keyword or "Filtered search"
     prefix = f"🔎 <b>#{search['id']} · {escape(name[:100])}</b>\n\n"
-    reminder = (
-        ("\n\n📝 <b>Your buying reminder</b>\n" + escape(search["reminder"]))
-        if search["reminder"]
-        else ""
-    )
-    guide = []
-    if search.get("max_buy") is not None:
-        guide.append(f"Buy up to <b>£{search['max_buy']/100:.2f}</b>")
-    low, high = search.get("resale_low"), search.get("resale_high")
-    if low is not None or high is not None:
-        target = (
-            f"£{low/100:.2f}–£{high/100:.2f}"
-            if low is not None and high is not None
-            else f"from £{low/100:.2f}" if low is not None else f"up to £{high/100:.2f}"
-        )
-        guide.append("Your resale target: " + target)
-    if search.get("must_have"):
-        guide.append("Must have: " + escape(search["must_have"][:400]))
-    if guide:
-        reminder = "\n\n💷 <b>Your buying guide</b>\n" + "\n".join(guide) + reminder
     body = message_template.format(
         title=escape(item.title[:500]),
         price=escape(str(item.price) + " " + item.currency),
@@ -635,22 +615,21 @@ def format_alert(item, search, message_template, details=None):
         image=None if item.photo is None else escape(item.photo, quote=True),
     )
     footer = recap(
-        {"title": item.title},
+        {"item_id": getattr(item, "id", None), "title": item.title, "currency": item.currency, "price": item.price},
         details or {
             "brand": item.brand_title,
             "budget": vinted_budget.estimate(item, search, display=True),
         },
     )
-    content = prefix + body + reminder + "\n\n" + footer
+    content = prefix + body + "\n\n" + footer
     if len(content) > 4000:
-        # Keep valid HTML and all of the personal reminder if a custom template
-        # or image URL would otherwise push an alert over Telegram's limit.
+        # Preserve a complete, usable recap if the custom template exceeds Telegram's limit.
         content = (
             prefix
             + escape(item.title[:500])
             + "\n"
             + escape(str(item.price) + " " + item.currency)
-            + reminder + "\n\n" + footer
+            + "\n\n" + footer
         )
     return content
 

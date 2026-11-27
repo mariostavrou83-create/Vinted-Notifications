@@ -139,13 +139,13 @@ class ResaleRules(unittest.TestCase):
             path = Path(tmp) / "alerts.sqlite"
             with sqlite3.connect(path) as db:
                 db.executescript(
-                    "CREATE TABLE alert_outbox(item_id,title,sent_at,platform,status,currency);"
+                    "CREATE TABLE alert_outbox(item_id,title,sent_at,platform,status,currency,price);"
                     "CREATE TABLE vinted_alert_details(item_id,payload);"
                 )
                 for i, role in enumerate(["seller", "buyer", None]):
                     db.execute(
-                        "INSERT INTO alert_outbox VALUES(?,?,?,?,?,?)",
-                        (str(i), "Jacket", 10 + i, "vinted", "sent", "GBP"),
+                        "INSERT INTO alert_outbox VALUES(?,?,?,?,?,?,?)",
+                        (str(i), "Jacket", 10 + i, "vinted", "sent", "GBP", "10.00"),
                     )
                     payload = {
                         "brand": "Maker",
@@ -164,6 +164,16 @@ class ResaleRules(unittest.TestCase):
             items = pilot.export_alerts(path, 100)
             self.assertEqual([r["source"] for r in items], ["search", "home"])
             self.assertNotIn("private", json.dumps(items))
+            with sqlite3.connect(path) as db:
+                db.execute(
+                    "UPDATE vinted_alert_details SET payload=json_remove(payload,'$.budget') WHERE item_id='2'"
+                )
+                db.execute(
+                    "UPDATE vinted_alert_details SET payload=json_set(payload,'$.budget.total',NULL) WHERE item_id='0'"
+                )
+            legacy, explicit_unknown = pilot.export_alerts(path, 100)
+            self.assertEqual(legacy["total_pence"], 1340)
+            self.assertIsNone(explicit_unknown["total_pence"])
             with self.assertRaises(sqlite3.OperationalError):
                 pilot.export_alerts(Path(tmp) / "absent.sqlite", 100)
 
@@ -178,11 +188,11 @@ class ReviewFlow(unittest.IsolatedAsyncioTestCase):
             live = Path(tmp) / "finder"
             with sqlite3.connect(live) as source:
                 source.executescript(
-                    "CREATE TABLE alert_outbox(item_id,title,sent_at,platform,status,currency);"
+                    "CREATE TABLE alert_outbox(item_id,title,sent_at,platform,status,currency,price);"
                     "CREATE TABLE vinted_alert_details(item_id,payload);"
                 )
                 source.execute(
-                    "INSERT INTO alert_outbox VALUES('101','Waxed fitted field jacket',1,'vinted','sent','GBP')"
+                    "INSERT INTO alert_outbox VALUES('101','Waxed fitted field jacket',1,'vinted','sent','GBP','10.00')"
                 )
                 payload = {
                     "brand": "Example maker",
@@ -293,7 +303,9 @@ class ReviewFlow(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(first[1]["verdict"], "Not confident")
 
-    async def test_timeout_and_invalid_model_output_never_publish_a_guessed_price(self):
+    async def test_timeout_and_invalid_model_output_keep_a_low_confidence_market_price(
+        self,
+    ):
         async def slow(request):
             await asyncio.sleep(0.1)
 
@@ -323,8 +335,8 @@ class ReviewFlow(unittest.IsolatedAsyncioTestCase):
                         None,
                     )
                     self.assertEqual(source, "model_unavailable")
-                    self.assertIsNone(reviewed["resale_pence"])
-                    self.assertIn("AI review unavailable", alert_line(reviewed))
+                    self.assertEqual(reviewed["resale_pence"], 2350)
+                    self.assertEqual(reviewed["verdict"], "Not confident")
 
     async def test_warm_keeps_unbiased_results_and_conserves_searches(self):
         calls = []
@@ -380,7 +392,7 @@ class ReviewFlow(unittest.IsolatedAsyncioTestCase):
                     pilot.reserve_search(db, ("another", "jacket"), time.time())
                 )
 
-    async def test_market_outage_and_empty_market_have_different_meanings(self):
+    async def test_market_outage_and_empty_market_still_show_a_rough_estimate(self):
         with tempfile.TemporaryDirectory() as tmp, pilot.market_cache(
             Path(tmp) / "cache"
         ) as db:
@@ -400,19 +412,18 @@ class ReviewFlow(unittest.IsolatedAsyncioTestCase):
                 )
                 output = Path(tmp) / "cold.jsonl"
                 await pilot.evaluate([alert()], db, client, "test", None, output)
-                self.assertIn(
-                    "Comparison prices unavailable",
-                    json.loads(output.read_text())["display"],
-                )
+                cold = json.loads(output.read_text())
+                self.assertEqual(cold["review"]["basis"], "category")
+                self.assertEqual(cold["review"]["resale_pence"], 1200)
                 db.execute(
                     "INSERT INTO market VALUES(?,?,?)",
                     (pilot.encoded(market_key(alert())), time.time(), "[]"),
                 )
+                db.commit()
                 output = Path(tmp) / "empty.jsonl"
                 await pilot.evaluate([alert()], db, client, "test", None, output)
                 self.assertEqual(
-                    json.loads(output.read_text())["display"],
-                    "Not sure · no reliable resale estimate",
+                    json.loads(output.read_text())["review"], cold["review"]
                 )
 
     async def test_100_alert_replay_reports_actual_coverage_and_excludes_other_alerts(

@@ -139,7 +139,7 @@ class SharedFormRendering(unittest.TestCase):
         self.assertIn("Check &lt;label&gt; &amp; cuffs.", html)
         self.assertIn("faux &lt;fur&gt;", html)
         self.assertIn("Listing photos", html)
-        self.assertIn("Full notes", html)
+        self.assertIn("Full description", html)
 
     def test_urls_are_required_only_for_enabled_platforms_without_javascript(self):
         for mode in ("vinted", "ebay", "both"):

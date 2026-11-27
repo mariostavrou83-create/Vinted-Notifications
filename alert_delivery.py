@@ -307,17 +307,22 @@ class DeliveryWorker:
                 send_started = time.monotonic()
                 result = await self.send_listing(row)
                 finish(row, message_id=result.message_id, now=now, listing_message=result)
+                resale = guidance = "off"
                 if self.platform == "vinted" and os.getenv("FINDER_RESALE_PILOT") == "1":
                     from resale_sampler import accepted
+                    from resale_telegram import initial_price, visible_guidance
+                    resale = initial_price(result)
+                    guidance = visible_guidance(result)
                     accepted(row["item_id"], row.pop("_resale_cover", None), result)
                 self.preferred_photo = row["item_id"]
                 logger.info(
-                    "Telegram accepted item %s; message_id=%s; outbox-to-accepted %.3fs; send %.3fs; source=%s",
+                    "Telegram accepted item %s; message_id=%s; outbox-to-accepted %.3fs; send %.3fs; source=%s initial_resale=%s guidance=%s",
                     row["item_id"],
                     result.message_id,
                     max(0, time.time() - row["found_at"]),
                     time.monotonic() - send_started,
                     "Vinted Home" if (row.get("content") or "").startswith("🏠") else "saved search",
+                    resale, guidance,
                 )
         except ListingCancelled:
             # The validator already cancelled the bound pending lease. Calling

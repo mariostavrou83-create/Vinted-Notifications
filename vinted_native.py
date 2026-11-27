@@ -3,7 +3,6 @@
 import asyncio
 import io
 from contextlib import closing
-from html import unescape
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from telegram import InputFile, InputMediaPhoto, LinkPreviewOptions
@@ -69,12 +68,6 @@ def caption(row, details):
         row["title"] = short(row["title"], 120)
         details["brand"] = short(details["brand"], 40)
         value = render()
-        excess = units(plain(value)) - 1024
-        if excess > 0 and details.get("buying_advice"):
-            advice = details["buying_advice"][:720]
-            allowance = units(advice) - excess
-            details["buying_advice"] = short(advice, allowance) if allowance > 1 else ""
-            value = render()
     return value
 
 
@@ -85,29 +78,9 @@ def font(size):
         return ImageFont.load_default(size=size)
 
 
-def wrapped_lines(text, face, width):
-    draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
-    lines = []
-    for paragraph in text.replace("\r", "").replace("\t", " ").split("\n"):
-        line = ""
-        for char in paragraph:
-            if line and draw.textlength(line + char, font=face) > width:
-                split = line.rfind(" ")
-                if split > len(line) // 2:
-                    lines.append(line[:split])
-                    line = line[split + 1 :] + char
-                else:
-                    lines.append(line)
-                    line = char
-            else:
-                line += char
-        lines.append(line)
-    return lines
-
-
 def comparison_image(listing, reference, details):
-    """Stack square photo panels, then complete guide/reminder text below them."""
-    size, margin, line_height = alert_images.SIZE, 40, 48
+    """Stack the listing and optional example photos with labels."""
+    size, margin = alert_images.SIZE, 40
     face = font(34)
     panels = [
         (
@@ -117,17 +90,7 @@ def comparison_image(listing, reference, details):
     ]
     if reference:
         panels.append(("YOUR EXAMPLES", reference))
-    notes = []
-    for label, key in (
-        ("YOUR BUYING GUIDE", "guide"),
-        ("YOUR BUYING REMINDER", "reminder"),
-    ):
-        text = details.get(key) or ""
-        # Only our own bold formatting is removed; escaped user text stays literal.
-        text = " ".join(unescape(text.replace("<b>", "").replace("</b>", "")).split())
-        if text:
-            notes.extend(["", label, *wrapped_lines(text, face, size - margin * 2)])
-    height = len(panels) * (size + 72) + len(notes) * line_height + margin
+    height = len(panels) * (size + 72) + margin
     canvas = Image.new("RGB", (size, height), "white")
     draw = ImageDraw.Draw(canvas)
     y = 0
@@ -148,9 +111,6 @@ def comparison_image(listing, reference, details):
                 font=face,
             )
         y += size
-    for line in notes:
-        draw.text((margin, y), line, fill="#243b36", font=face)
-        y += line_height
     result = io.BytesIO()
     canvas.save(result, "JPEG", quality=90, optimize=True)
     return result.getvalue()
