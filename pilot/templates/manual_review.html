@@ -1,0 +1,17 @@
+{% extends 'base.html' %}
+{% block title %}Review visible listings · Finder{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='manual-review.js') }}" defer></script>{% endblock %}
+{% block body %}
+<main class="auth-wrap"><section class="auth-card" style="max-width:42rem;width:100%">
+  <a href="/#alerts" class="wordmark">Finder<span>.</span></a>
+  <h1>Review visible listings</h1>
+  <p>Confirmed items appear only on <strong>{{ username }}</strong>’s dashboard. Item prices exclude shipping and buyer protection.</p>
+  <p id="source-note"></p>
+  <form id="review-form" class="stack-form" hidden>
+    <div id="cards"></div>
+    <button class="button primary" id="save-selection" type="submit">Add selected items to my dashboard</button>
+  </form>
+  <p id="review-status" role="status" aria-live="polite"></p>
+  <a href="/#alerts">Back to alerts</a>
+</section></main>
+{% endblock %}

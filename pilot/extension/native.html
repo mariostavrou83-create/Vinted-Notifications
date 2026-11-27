@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Pair Chrome for AutoBuy</title><link rel="stylesheet" href="popup.css"><link rel="stylesheet" href="native.css"></head>
+<body><main>
+<h1>Pair Chrome for AutoBuy</h1>
+<p>Keep Chrome running to receive purchases you approve in your private Finder chat. Open your Vinted account menu so your buying username is visible.</p>
+<form id="pair"><label>Finder dashboard address<input id="origin" type="url" required placeholder="https://your-finder.example"></label>
+<label>One-use code from Finder<input id="code" required autocomplete="off" spellcheck="false"></label>
+<button type="submit">Check accounts</button></form>
+<section id="confirm" hidden><p id="identity"></p><p>After you approve an item in Telegram, this device can open checkout and pay within your saved preferences. If it cannot verify the complete order, review it in Vinted.</p><button id="enable" type="button">Enable for these accounts</button></section>
+<section id="paired" hidden><p id="paired-name"></p>
+<h2>Checkout check</h2>
+<p>Open one Vinted UK checkout in another tab in this window. Enter the listing you expect to see there.</p>
+<form id="inspect"><label for="listing">Vinted listing link or item number</label><input id="listing" required spellcheck="false" autocomplete="off">
+<button type="submit">Check this checkout without paying</button></form>
+<p id="inspect-status" role="status"></p><dl id="inspect-details"></dl><ul id="inspect-missing"></ul>
+<button type="button" id="disable">Disconnect this Chrome</button></section>
+<p id="result" role="status"></p></main>
+<script src="profile.js"></script><script src="native-setup.js"></script></body></html>

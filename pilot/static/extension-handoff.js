@@ -40,7 +40,7 @@
       const baseline=state.linked?"Connected buyer: @"+state.username :
         state.revoke_pending?"Disconnected in Finder. Finish disconnecting at the provider." :
         state.configured?"Choose and authorize your Vinted buying account." :
-        "Live Vinted account linking is awaiting the pilot’s buyer integration.";
+        "Pair your Vinted buying account under Chrome checkout.";
       label.textContent=[message,baseline].filter(Boolean).join(" ");
       connect.hidden=state.linked||state.revoke_pending||!state.configured;
       disconnect.hidden=!state.linked&&!state.revoke_pending;

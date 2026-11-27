@@ -9,4 +9,13 @@
 <input type="url" id="origin" spellcheck="false" placeholder="https://your-finder.example" autocomplete="off">
 <p class="hint">Use the dashboard address from your pilot invitation.</p>
 <button type="button" id="continue" class="primary">Continue to Finder</button>
-</main><script src="profile.js"></script><script src="popup.js"></script></body></html>
+<h2>Visible listing import</h2>
+<p class="hint">Review fresh items visible on Home or open one listing. Finder asks before adding anything to your private dashboard.</p>
+<button type="button" id="capture">Review visible items</button><p id="capture-result" role="status"></p>
+<h2>Home alerts for this tab</h2>
+<p class="hint">With your Vinted buying profile visible, send fresh Home matches from this open tab to your private Finder alerts. Chrome observes listings as Vinted displays them.</p>
+<label><input type="checkbox" id="verify-home-age" style="width:auto"> Check missing upload times in one separate Vinted tab</label>
+<p class="hint">Only newly appearing links are checked. Up to one listing every 30 seconds and 30 per hour.</p>
+<p id="home-watch-status" role="status"></p><button type="button" id="home-watch-toggle" disabled>Watch this Home tab</button>
+<p><a href="native.html" target="_blank" rel="noopener">Pair Chrome for AutoBuy</a></p>
+</main><script src="profile.js"></script><script src="capture.js"></script><script src="popup.js"></script></body></html>

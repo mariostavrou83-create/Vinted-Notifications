@@ -29,6 +29,9 @@ CREATE TABLE IF NOT EXISTS market_offers (
  id TEXT PRIMARY KEY, observed_at REAL NOT NULL, payload TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS market_age ON market_offers(observed_at);
+CREATE TABLE IF NOT EXISTS market_withdrawn (
+ id TEXT PRIMARY KEY, observed_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS market_terms (
  term TEXT NOT NULL, offer_id TEXT NOT NULL REFERENCES market_offers(id) ON DELETE CASCADE,
  PRIMARY KEY(term,offer_id)
@@ -119,7 +122,7 @@ def _item_url(item_id, raw_url):
 
 def _unavailable(raw):
     return (raw.get("active") is False or raw.get("can_be_bought") is False or
-            str(raw.get("status", "")).casefold() in {"sold", "deleted", "reserved", "hidden", "unavailable"} or
+            str(raw.get("status", "")).casefold() in {"sold", "deleted", "reserved", "hidden", "unavailable", "withdrawn", "unlisted"} or
             any(raw.get(flag) for flag in ("is_sold", "is_reserved", "sold", "reserved", "is_hidden", "is_deleted")))
 
 
@@ -154,7 +157,7 @@ def _normalize(raw, now, source, imported=False):
     result = {k: _text(raw.get(k)) for k in DESCRIPTORS if _text(raw.get(k))}
     # Carry product specifications for independently verified, structured imports.
     attrs = raw.get("attributes")
-    if isinstance(attrs, dict):
+    if imported and isinstance(attrs, dict):
         result["attributes"] = {k: _text(v) for k, v in list(attrs.items())[:24]
                                 if isinstance(k,str) and len(k)<=60 and _text(v)}
     return dict(result, id=item_id, url=url, ask_pence=price, observed_at=observed,
@@ -164,14 +167,40 @@ def _normalize(raw, now, source, imported=False):
 def _save(conn, items, now):
     conn.execute("DELETE FROM market_offers WHERE observed_at < ?", (now - MAX_AGE,))
     conn.execute("DELETE FROM market_queries WHERE next_check < ?", (now - MAX_AGE,))
+    conn.execute("DELETE FROM market_withdrawn WHERE observed_at < ?", (now - MAX_AGE,))
     for item in items:
-        changed = conn.execute("""INSERT INTO market_offers(id,observed_at,payload) VALUES(?,?,?)
+        previous = conn.execute("SELECT payload FROM market_offers WHERE id=?", (item["id"],)).fetchone()
+        changed = conn.execute("""INSERT INTO market_offers(id,observed_at,payload)
+            SELECT ?,?,? WHERE NOT EXISTS(SELECT 1 FROM market_withdrawn WHERE id=? AND observed_at>=?)
             ON CONFLICT(id) DO UPDATE SET observed_at=excluded.observed_at, payload=excluded.payload
             WHERE excluded.observed_at >= market_offers.observed_at""",
-            (item["id"], item["observed_at"], json.dumps(item)))
+            (item["id"], item["observed_at"], json.dumps(item), item["id"], item["observed_at"]))
         if changed.rowcount:
+            terms = _terms(item)
+            if previous and terms == _terms(json.loads(previous[0])):
+                continue
             conn.execute("DELETE FROM market_terms WHERE offer_id=?", (item["id"],))
-            conn.executemany("INSERT INTO market_terms VALUES(?,?)", ((t, item["id"]) for t in _terms(item)))
+            conn.executemany("INSERT INTO market_terms VALUES(?,?)", ((t, item["id"]) for t in terms))
+
+
+def remember_public_results(conn, rows, observed_at):
+    """Record only public product fields from a confirmed Scavio UK/GBP response, inside a transaction."""
+    offers = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        item_id = str(row.get("id", ""))
+        if _unavailable(row) and _item_url(item_id, row.get("url")):
+            conn.execute(
+                """INSERT INTO market_withdrawn VALUES(?,?)
+                   ON CONFLICT(id) DO UPDATE SET observed_at=max(observed_at,excluded.observed_at)""",
+                (item_id, observed_at),
+            )
+            conn.execute("DELETE FROM market_offers WHERE id=? AND observed_at<=?", (item_id, observed_at))
+        elif offer := _normalize(row, observed_at, "Scavio UK search"):
+            offers.append(offer)
+    _save(conn, offers, observed_at)
+    return len(offers)
 
 
 def _cached(conn, target, now):
@@ -241,13 +270,11 @@ def comparisons_for(conn, target, *, config=None, now=None):
 
     delay, query_delay = 0, 120
     started = time.monotonic()
-    items, inactive_ids = [], []
     try:
         raw = _search(key, query)
-        inactive_ids = [str(row.get("id")) for row in raw if isinstance(row, dict)
-                        and _unavailable(row) and _item_url(str(row.get("id")), row.get("url"))]
-        items = [item for row in raw if (item := _normalize(row, now, "Scavio UK search"))]
-        query_delay = SEARCH_LIFETIME if items else 15 * 60
+        with transaction(conn):
+            count = remember_public_results(conn, raw, now)
+        query_delay = SEARCH_LIFETIME if count else 15 * 60
     except (requests.RequestException, KeyError, ValueError, TypeError) as exc:
         status = getattr(getattr(exc, "response", None), "status_code", None)
         if status in (401, 402, 403):
@@ -257,10 +284,6 @@ def comparisons_for(conn, target, *, config=None, now=None):
         log.info("Market comparison request unavailable (HTTP %s)", status)
     finally:
         with transaction(conn):
-            if items:
-                _save(conn, items, now)
-            conn.executemany("DELETE FROM market_offers WHERE id=? AND observed_at<=?",
-                             ((item_id,now) for item_id in inactive_ids))
             conn.execute("UPDATE market_queries SET next_check=? WHERE digest=?", (now+query_delay, digest))
             # An expired lease may have been claimed by another process.
             conn.execute("UPDATE market_budget SET available_at=? WHERE id=1 AND available_at=?",

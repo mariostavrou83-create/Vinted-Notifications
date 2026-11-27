@@ -1,8 +1,28 @@
 {
   "manifest_version": 3,
-  "name": "Finder · Vinted account selector",
-  "version": "0.1.0",
-  "description": "Select your visible Vinted UK profile and continue to your private Finder pilot.",
-  "permissions": ["activeTab", "scripting", "storage"],
-  "action": { "default_title": "Connect to Finder", "default_popup": "popup.html" }
+  "name": "Finder \u00b7 Vinted account selector",
+  "version": "0.2.0",
+  "description": "Select your Vinted UK account and optionally pair this Chrome to handle your own Finder checkout requests.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "action": {
+    "default_title": "Connect to Finder",
+    "default_popup": "popup.html"
+  },
+  "minimum_chrome_version": "120",
+  "optional_permissions": [
+    "alarms"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "background": {
+    "service_worker": "native-worker.js"
+  },
+  "options_page": "native.html"
 }

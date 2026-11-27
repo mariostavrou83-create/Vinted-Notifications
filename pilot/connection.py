@@ -78,7 +78,7 @@ def _trusted_auth_origin():
     return _origin(setting("FINDER_PARTNER_AUTH_ORIGIN") or setting("FINDER_PARTNER_URL"))
 
 
-def _configured():
+def connection_available():
     return bool(partner_configured() and _callback() and _trusted_auth_origin())
 
 
@@ -99,7 +99,7 @@ def register_connection(app):
         directory = Path(__file__).with_name("extension")
         archive = io.BytesIO()
         with ZipFile(archive, "w", compression=ZIP_DEFLATED) as zipped:
-            for name in ("manifest.json", "popup.html", "popup.css", "popup.js", "profile.js", "README.md"):
+            for name in ("manifest.json", "popup.html", "popup.css", "popup.js", "profile.js", "native.html", "native.css", "native-setup.js", "native-worker.js", "native-checkout.js", "capture.js", "home-observer.js", "home-watcher.js", "README.md"):
                 zipped.write(directory / name, name)
         archive.seek(0)
         return send_file(archive, mimetype="application/zip", as_attachment=True,
@@ -111,12 +111,12 @@ def register_connection(app):
             "SELECT username,revoke_pending FROM pilot_buyer_link WHERE user_id=?", (g.user["id"],)
         ).fetchone()
         linked = bool(row and not row["revoke_pending"])
-        return jsonify(configured=_configured(), linked=linked, username=row["username"] if linked else None,
+        return jsonify(configured=connection_available(), linked=linked, username=row["username"] if linked else None,
                        revoke_pending=bool(row and row["revoke_pending"]))
 
     @app.post("/api/connection/start")
     def connection_start():
-        if not _configured():
+        if not connection_available():
             return jsonify(error="A buyer integration has not been configured for this pilot."), 503
         data = request.get_json(silent=True) or {}
         expected = data.get("account_hint", "") if isinstance(data, dict) else None
@@ -156,7 +156,7 @@ def register_connection(app):
     def connection_callback():
         user_id, conn = g.user["id"], get_db()
         state = request.args.get("state", "")
-        if not _configured() or not re.fullmatch(r"[A-Za-z0-9_-]{43}", state):
+        if not connection_available() or not re.fullmatch(r"[A-Za-z0-9_-]{43}", state):
             return _callback_result("expired")
         digest = _state_hash(state)
         conn.execute("BEGIN IMMEDIATE")

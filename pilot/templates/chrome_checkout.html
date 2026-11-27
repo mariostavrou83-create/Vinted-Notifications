@@ -1,0 +1,42 @@
+<section class="panel native-panel" id="chrome-checkout" aria-labelledby="native-title">
+  <h2 id="native-title">Chrome checkout</h2>
+  <p class="muted">Pair a signed-in Chrome device to buy from new, eligible saved-search alerts in your private Telegram chat. Keep Chrome open with the extension enabled. Vinted or your bank may ask you to finish a step in the browser.</p>
+  <div class="native-status-row"><div><h3>Paired device</h3><p id="native-device-status" role="status">Checking device…</p><small id="native-last-seen"></small></div><button type="button" id="native-refresh" class="button secondary">Refresh status</button></div>
+  <p id="native-home-status" class="field-note" role="status" hidden></p>
+  <p id="native-status-error" class="form-error" role="alert" hidden></p>
+  <div id="native-account-controls" hidden>
+    <form id="native-pair-form" class="stack-form">
+      <label>Vinted username on this device <small>Open the Vinted account menu in Chrome and enter the username shown there.</small><input name="vinted_username" required autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="80" placeholder="Your buying username"></label>
+      <div class="actions"><button type="submit" class="button secondary">Get pairing code</button><a href="/extension/download">Download extension</a></div>
+    </form>
+    <button type="button" id="native-revoke" class="button secondary" hidden>Disconnect this device</button>
+    <div id="native-code-box" class="pairing-box" hidden>
+      <p>In the Chrome extension, select <b>Pair Chrome for AutoBuy</b> and enter this code for <b id="native-pilot-name"></b> and Vinted account <b id="native-vinted-name"></b>.</p>
+      <code id="native-pair-code" tabindex="-1"></code>
+      <span id="native-code-expiry" class="field-note"></span>
+    </div>
+    <p class="form-error" id="native-pair-error" role="alert" hidden></p>
+    <p role="status" id="native-pair-feedback" class="field-note" hidden></p>
+  </div>
+  <form class="stack-form native-prefs" id="native-preferences" hidden>
+    <h3>Checkout details</h3>
+    <p class="field-note">Copy the selected delivery and payment details shown on your normal Vinted checkout. You can open the checkout to see these without placing an order.</p>
+    <div class="field-grid">
+      <label>Delivery method<select name="delivery_mode"><option value="pickup">Pickup point</option><option value="home">Home delivery</option></select></label>
+      <label>Full UK postcode<input name="postcode" required placeholder="e.g. W2 1UA" autocomplete="off" maxlength="9" autocapitalize="characters"></label>
+    </div>
+    <label><span id="native-label-caption">Pickup shop or locker name</span><small>Enter the name exactly as shown in Vinted checkout.</small><input name="location_label" required maxlength="100" autocomplete="off"></label>
+    <label>Preferred courier<input name="preferred_courier" required maxlength="60" placeholder="As shown at checkout" autocomplete="off"></label>
+    <label class="check" id="native-fallback-label"><input type="checkbox" name="allow_same_shop_fallback"> Allow another courier at the same pickup point</label>
+    <label id="native-alternatives" hidden>Allowed alternative couriers <small>Enter one courier name per line.</small><textarea rows="2" name="allowed_couriers"></textarea></label>
+    <label>Saved payment method<select name="payment_type" required><option value="">Choose a method</option><option value="balance">Vinted balance</option><option value="card">Saved card</option></select></label>
+    <div class="field-grid" id="native-card-fields" hidden>
+      <label>Card label <small>Choose the label shown at checkout.</small><select name="card_brand"><option value="">Choose a label</option>{% for label in ['Visa','Visa Debit','Mastercard','Mastercard Debit','American Express','Amex','Maestro'] %}<option>{{ label }}</option>{% endfor %}</select></label>
+      <label>Last four digits <small>From the masked saved card.</small><input name="card_last4" maxlength="4" pattern="[0-9]{4}" inputmode="numeric" autocomplete="off"></label>
+    </div>
+    <p class="field-note">Your <a href="#limits">purchase limits</a> apply. A change of pickup point needs a fresh confirmation.</p>
+    <p id="native-save-error" role="alert" class="form-error" hidden></p>
+    <p id="native-save-feedback" role="status" class="field-note" hidden></p>
+    <div class="actions"><button type="submit" class="button primary" id="native-save">Save Chrome checkout details</button></div>
+  </form>
+</section>

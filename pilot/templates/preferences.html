@@ -1,5 +1,6 @@
 <section id="preferences" data-view="preferences" hidden aria-labelledby="preferences-title">
   <div class="page-head"><div><h1 id="preferences-title">Preferences</h1><p class="lede">Choose what reaches your feed and where your purchases go.</p></div></div>
+  <nav class="pref-jumps" aria-label="Preference sections"><a href="#preferences">Home filters</a><a href="#limits">Purchase limits</a><a href="#chrome-checkout">Chrome checkout</a><a href="#account">Accounts</a></nav>
   <form id="settings-form" class="stack-form">
     <section id="home-filters" class="panel stack-form">
       <h2>Home filters</h2>
@@ -11,10 +12,11 @@
         <label>Quiet hours start<input type="time" name="quiet_start" required value="{{ settings.quiet_start|default('23:00', true) }}"></label>
         <label>Quiet hours end<input type="time" name="quiet_end" required value="{{ settings.quiet_end|default('07:00', true) }}"></label>
       </div>
-      <p class="field-note">Quiet hours follow UK local time. Home checks target one second and only alert on listings under three minutes old.</p>
+      <p class="field-note">Quiet hours follow UK local time. Home alerts require a verified upload time under three minutes. In Chrome, open Vinted Home and choose <b>Watch this Home tab</b>.</p>
     </section>
-    <section class="panel stack-form">
-      <h2>Delivery and AutoBuy</h2>
+    <section class="panel stack-form"{% if not buyer_provider_available and not buyer_provider_linked %} hidden{% endif %}>
+      <h2>Provider delivery options</h2>
+      <p class="field-note">Look up delivery options through your connected buying provider. For checkout in your browser, use <a href="#chrome-checkout">Chrome checkout</a>.</p>
       <label>Delivery method<select name="delivery_mode"><option value="pickup" {% if settings.delivery_mode != 'home' %}selected{% endif %}>Pickup point</option><option value="home" {% if settings.delivery_mode == 'home' %}selected{% endif %}>Home delivery</option></select></label>
       <div id="delivery-selector" class="stack-form">
         <div class="selected-place"><span id="selected-place-kind">Pickup point</span><strong id="selected-place-name">No pickup point selected</strong><small id="selected-place-summary"></small></div>
@@ -33,6 +35,9 @@
           <fieldset id="fallback-couriers" hidden><legend>Allowed alternative couriers</legend><div id="courier-options"></div></fieldset>
         </div>
       </div>
+    </section>
+    <section id="limits" class="panel stack-form">
+      <h2>Purchase limits</h2>
       <div class="field-grid three">
         <label>Max. item price (£)<input type="number" min=".01" step=".01" name="max_item_price" value="{{ settings.max_item_price|default('',true) }}" placeholder="Optional"></label>
         <label>Max. shipping (£)<input type="number" min="0" step=".01" name="max_shipping" value="{{ settings.max_shipping|default('4.99') }}"></label>
@@ -43,9 +48,10 @@
     <p class="form-error" role="alert" data-error hidden></p>
     <div class="actions"><button type="submit" class="button primary">Save preferences</button></div>
   </form>
+  {% include 'chrome_checkout.html' %}
   <section id="account" class="panel account-panel">
     <h2>Connected accounts</h2>
-    <div class="account-line"><div><h3>Vinted buying account</h3><p id="buyer-account-status" class="muted">Checking connection…</p><p id="extension-profile-hint" hidden>Selected in Chrome: <output id="extension-profile-name"></output></p></div><div><button type="button" class="button secondary" id="connect-buyer-account" hidden>Connect account</button><button type="button" class="button secondary" id="disconnect-buyer-account" hidden>Disconnect</button></div></div>
+    <div class="account-line"{% if not buyer_provider_available and not buyer_provider_linked %} hidden{% endif %}><div><h3>Buying account at provider</h3><p id="buyer-account-status" class="muted">Checking connection…</p><p id="extension-profile-hint" hidden>Selected in Chrome: <output id="extension-profile-name"></output></p></div><div><button type="button" class="button secondary" id="connect-buyer-account" hidden>Connect account</button><button type="button" class="button secondary" id="disconnect-buyer-account" hidden>Disconnect</button></div></div>
     <details class="extension-install"><summary>Set up the Chrome extension</summary><p><a href="/extension/download">Download Chrome extension</a>. Extract the ZIP, enable Developer mode at Chrome Extensions, then select <b>Load unpacked</b> and choose the extracted folder.</p></details>
     <div class="account-line"><div><h3>Telegram</h3><p class="muted">{{ 'Linked for private buying alerts.' if links else 'Link your own chat for buying alerts and AutoBuy.' }}</p></div>{% if not links %}<button type="button" id="link-telegram" class="button secondary">Link Telegram</button>{% endif %}</div>
     <p role="alert" class="form-error" id="telegram-error" hidden></p>

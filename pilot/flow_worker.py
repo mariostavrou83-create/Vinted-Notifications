@@ -11,7 +11,7 @@ from urllib.request import Request, build_opener
 
 import requests
 
-from . import flow
+from . import checkout_profit, flow
 from .connection import linked_account
 from .db import get_db, searches_for, settings_for, transaction
 from .partner import PartnerError, _NoRedirect, partner_configured, partner_request
@@ -30,7 +30,9 @@ def telegram(method, payload):
         method="POST",
     )
     try:
-        with build_opener(_NoRedirect).open(req, timeout=8) as response:
+        with build_opener(_NoRedirect).open(
+            req, timeout=28 if method == "getUpdates" else 8
+        ) as response:
             obj = json.load(response)
         if obj.get("ok"):
             return obj["result"]
@@ -145,23 +147,30 @@ def discover(conn, now):
     return True
 
 
-def render_alert(row, valuation=None):
+def render_alert(row, valuation=None, checkout_cost=None):
     item = json.loads(row["listing"])
-    parts = [
-        item["title"][:350],
-        f"{flow.money(item['price_pence'])} · Estimated total {flow.money(item['total_pence'])}",
-        item["listing_url"],
-    ]
+    price = flow.money(item["price_pence"])
+    if checkout_cost and checkout_cost["total_pence"] is not None:
+        label = (
+            "Checkout at purchase" if checkout_cost["basis"] == "purchase" else "Quoted checkout"
+        )
+        price += f" · {label} {flow.money(checkout_cost['total_pence'])}"
+    elif row["origin"] == "connected":
+        price += f" · Estimated total {flow.money(item['total_pence'])}"
+    elif type(item.get("subtotal_pence")) is int:
+        price += f" · {flow.money(item['subtotal_pence'])} including buyer fee · shipping extra"
+    else:
+        price += " · Check fees and delivery on Vinted"
+    parts = [item["title"][:350], price, item["listing_url"]]
     if valuation:
         price = valuation.get("resale_pence")
         if type(price) is int:
             parts.append("Est. resale " + flow.money(price))
-            profit = valuation.get("profit_pence")
-            if type(profit) is int:
-                parts.append(
-                    f"Est. profit {flow.money(profit)} · £15 target "
-                    + ("met" if profit >= 1500 else "missed")
-                )
+            profit = checkout_profit.profit_line(valuation)
+            if profit and (row["origin"] == "connected" or checkout_cost):
+                parts.append(profit)
+        if checkout_cost:
+            parts.append(checkout_cost["note"])
         explanation = valuation.get("explanation")
         if explanation:
             parts.append(str(explanation)[:500])
@@ -171,8 +180,14 @@ def render_alert(row, valuation=None):
     return "\n".join(parts)[:3900]
 
 
-def buy_keyboard(aid):
-    return {"inline_keyboard": [[{"text": "AutoBuy", "callback_data": f"buy:{aid}"}]]}
+def listing_keyboard(row):
+    if row["origin"] == "connected":
+        button = {"text": "AutoBuy", "callback_data": f"buy:{row['id']}"}
+    elif row["origin"] in {"public_search", "browser_home"} and row["native_binding"]:
+        button = {"text": "AutoBuy", "callback_data": f"nbuy:{row['id']}"}
+    else:
+        button = {"text": "Buy on Vinted", "url": json.loads(row["listing"])["listing_url"]}
+    return {"inline_keyboard": [[button]]}
 
 
 def deliver(conn, now):
@@ -181,21 +196,39 @@ def deliver(conn, now):
     with transaction(conn):
         row = conn.execute(
             """SELECT a.*,c.chat_id FROM pilot_alerts a JOIN pilot_chats c ON c.user_id=a.user_id
-                     JOIN pilot_buyer_link b ON b.user_id=a.user_id AND b.account_ref=a.account_ref AND b.revoke_pending=0
-                     WHERE delivery='new' AND deliver_after<=? ORDER BY a.id LIMIT 1""",
+                     WHERE delivery='new' AND deliver_after<=? AND (a.origin IN ('public_search','browser_home') OR
+                        (a.origin='connected' AND EXISTS (SELECT 1 FROM pilot_buyer_link b WHERE b.user_id=a.user_id
+                          AND b.account_ref=a.account_ref AND b.revoke_pending=0))) ORDER BY a.id LIMIT 1""",
             (now,),
         ).fetchone()
         if not row:
             return False
         uid, aid = row["user_id"], row["id"]
         l = json.loads(row["listing"])
+        from .home_watch import active
+
+        prefs = settings_for(conn, uid)
         if (
-            flow.quiet(settings_for(conn, uid), now)
+            flow.quiet(prefs, now)
+            or (
+                row["origin"] == "browser_home"
+                and (
+                    not active(conn, uid, row["account_ref"].removeprefix("home:"), now)
+                    or not flow._matches_choice(prefs.get("categories"), l.get("category"))
+                    or not flow._matches_choice(prefs.get("sizes"), l.get("size"))
+                )
+            )
             or (row["source"] == "home" and now - (flow.listing_time(l.get("listed_at")) or 0) >= 180)
             or now - row["created_at"] > 1200
         ):
             conn.execute("UPDATE pilot_alerts SET delivery='expired' WHERE id=?", (aid,))
             return True
+        # Freeze the native purchase principal when this alert's button is issued.
+        # A subsequently paired browser cannot inherit an existing alert's authority.
+        if row["origin"] in {"public_search", "browser_home"}:
+            bound = flow.native_button_binding(conn, row)
+            conn.execute("UPDATE pilot_alerts SET native_binding=? WHERE id=?", (bound, aid))
+            row = {**dict(row), "native_binding": bound}
         conn.execute("UPDATE pilot_alerts SET delivery='sending',updated=? WHERE id=?", (int(now), aid))
     try:
         valuation = json.loads(row["valuation"]) if row["valuation"] else None
@@ -204,7 +237,7 @@ def deliver(conn, now):
             {
                 "chat_id": row["chat_id"],
                 "text": render_alert(row, valuation),
-                "reply_markup": buy_keyboard(aid),
+                "reply_markup": listing_keyboard(row),
             },
         )
         msg_id = out["message_id"]
@@ -277,8 +310,13 @@ def review(conn, now):
             (now + 120, row["id"]),
         )
     item = json.loads(row["listing"])
-    target = {**item, "url": item["listing_url"], "all_in_pence": item["total_pence"]}
-    if linked_account(conn, row["user_id"]) != row["account_ref"]:
+    total = (
+        item.get("total_pence")
+        if row["origin"] == "connected" and not item.get("total_excludes_shipping")
+        else None
+    )
+    target = {**item, "url": item["listing_url"], "all_in_pence": total}
+    if row["origin"] == "connected" and linked_account(conn, row["user_id"]) != row["account_ref"]:
         return True
     comps = comparisons_for(conn, target, config=current_app.config)
     valuation = estimate_resale(target, comps, review=optional_mistral_reviewer())
@@ -293,13 +331,16 @@ def review(conn, now):
         ).fetchone()
     ):
         try:
+            valuation, checkout_cost = checkout_profit.for_alert(
+                conn, row["user_id"], row["id"], time.time()
+            )
             telegram(
                 "editMessageText",
                 {
                     "chat_id": row["sent_chat"],
                     "message_id": row["message_id"],
-                    "text": render_alert(row, valuation),
-                    "reply_markup": buy_keyboard(row["id"]),
+                    "text": render_alert(row, valuation, checkout_cost),
+                    "reply_markup": listing_keyboard(row),
                 },
             )
         except ValueError:
@@ -320,7 +361,26 @@ def buy_job(conn, now):
         conn.execute(
             "UPDATE pilot_buy_jobs SET started=? WHERE update_id=?", (int(now), row["update_id"])
         )
-    msg, keyboard = flow.request_buy(conn, row["user_id"], row["alert_id"], row["confirmation"])
+    if row["native"]:
+        from .native_order import request_native
+
+        issued = conn.execute(
+            "SELECT user_id,origin,account_ref,native_binding FROM pilot_alerts WHERE id=? AND user_id=?",
+            (row["alert_id"], row["user_id"]),
+        ).fetchone()
+        if (
+            not issued
+            or not issued["native_binding"]
+            or issued["native_binding"] != flow.native_button_binding(conn, issued)
+        ):
+            msg, keyboard = (
+                "The linked buying browser changed. Open the listing on Vinted to continue.",
+                None,
+            )
+        else:
+            msg, keyboard = request_native(conn, row["user_id"], row["alert_id"], row["confirmation"])
+    else:
+        msg, keyboard = flow.request_buy(conn, row["user_id"], row["alert_id"], row["confirmation"])
     if not conn.execute(
         "SELECT 1 FROM pilot_chats WHERE user_id=? AND chat_id=?", (row["user_id"], row["chat_id"])
     ).fetchone():
@@ -337,7 +397,7 @@ def buy_job(conn, now):
 def reconcile(conn, now):
     with transaction(conn):
         row = conn.execute(
-            """SELECT * FROM pilot_alerts WHERE order_status IN ('unknown','submitting','pending','action_required')
+            """SELECT * FROM pilot_alerts WHERE origin='connected' AND order_status IN ('unknown','submitting','pending','action_required')
                          AND updated<? ORDER BY updated LIMIT 1""",
             (now - 45,),
         ).fetchone()
@@ -380,9 +440,17 @@ def reconcile(conn, now):
     return True
 
 
-def run(app):
+def run(app, stop=None):
+    from threading import Event
+
+    from .native_order import notify as native_notify
+    from .public_feed import public_discover
+    from .telegram_poll import receive_updates
+
+    stop = stop if stop is not None else Event()
+
     def loop(fn, idle):
-        while True:
+        while not stop.is_set():
             delay = idle
             try:
                 with app.app_context():
@@ -391,9 +459,17 @@ def run(app):
             except Exception as exc:  # noqa: BLE001 -- keep independent worker lanes alive after a failed item
                 log.warning("Pilot %s paused after %s", fn.__name__, type(exc).__name__)
                 delay = 2
-            time.sleep(delay)
+            stop.wait(delay)
 
-    lanes = [(discover, 0.25)] * 4 + [(deliver, 0.2), (review, 1), (buy_job, 0.2), (reconcile, 3)]
+    lanes = [(discover, 0.25)] * 4 + [
+        (public_discover, 1),
+        (receive_updates, 2),
+        (deliver, 0.2),
+        (review, 1),
+        (buy_job, 0.2),
+        (native_notify, 0.5),
+        (reconcile, 3),
+    ]
     with ThreadPoolExecutor(max_workers=len(lanes)) as pool:
         for fn, idle in lanes:
             pool.submit(loop, fn, idle)

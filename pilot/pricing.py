@@ -247,12 +247,30 @@ def _public_description(item):
     }
 
 
+def _reserve_model_request():
+    # The local trial supplies an explicit lifetime request cap. Cache hits need no reservation.
+    cap = os.environ.get("PILOT_MISTRAL_MAX_REVIEWS")
+    if cap is None:
+        return
+    if not cap.isascii() or not cap.isdecimal() or not 0 < int(cap) <= 1_000_000_000:
+        raise ValueError("AI review budget is disabled")
+    from .db import get_db, transaction
+    conn = get_db()
+    with transaction(conn):
+        conn.execute("CREATE TABLE IF NOT EXISTS pilot_model_budget (id INTEGER PRIMARY KEY CHECK(id=1), used INTEGER NOT NULL)")
+        conn.execute("INSERT OR IGNORE INTO pilot_model_budget VALUES(1,0)")
+        changed = conn.execute("UPDATE pilot_model_budget SET used=used+1 WHERE id=1 AND used<?", (int(cap),))
+        if not changed.rowcount:
+            raise ValueError("AI review request cap reached")
+
+
 @lru_cache(maxsize=2)
 def _mistral_reviewer(key, model):
     # Distinct billing accounts/models get distinct caches. Cache only the product
     # matching judgement. Re-read asking prices and recompute profit for each user.
     @lru_cache(maxsize=256)
     def classify(product_data):
+        _reserve_model_request()
         response = requests.post(
             "https://api.mistral.ai/v1/chat/completions",
             headers={"Authorization": f"Bearer {key}"},

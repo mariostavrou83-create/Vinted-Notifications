@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 from flask import current_app, g, jsonify, request
 
+from . import checkout_profit
 from .db import get_db, settings_for, transaction
 from .partner import PartnerError, partner_request
 
@@ -26,7 +27,7 @@ CREATE TABLE IF NOT EXISTS pilot_link_codes (
 );
 CREATE TABLE IF NOT EXISTS pilot_alerts (
  id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), account_ref TEXT NOT NULL,
- listing_id TEXT NOT NULL, listing TEXT NOT NULL, source TEXT NOT NULL, created_at INTEGER NOT NULL,
+ listing_id TEXT NOT NULL, listing TEXT NOT NULL, source TEXT NOT NULL, origin TEXT NOT NULL DEFAULT 'connected', native_binding TEXT, created_at INTEGER NOT NULL,
  sent_at REAL, valued_at REAL, valuation TEXT, price_after INTEGER NOT NULL DEFAULT 0, price_attempts INTEGER NOT NULL DEFAULT 0,
  deliver_after INTEGER NOT NULL DEFAULT 0, message_id INTEGER, sent_chat INTEGER, delivery TEXT NOT NULL DEFAULT 'new',
  order_status TEXT, check_token TEXT, attempt_key TEXT NOT NULL UNIQUE, offer TEXT, confirmation TEXT, updated INTEGER NOT NULL,
@@ -50,12 +51,12 @@ def telegram_linked(conn, user_id):
 
 
 def alerts_for_user(conn, user_id):
-    rows = conn.execute(
-        "SELECT * FROM pilot_alerts WHERE user_id=? ORDER BY id DESC LIMIT 100", (user_id,)
-    )
+    rows = checkout_profit.alert_rows(conn, user_id)
+    now = time.time()
     answer = []
     for r in rows:
         l = json.loads(r["listing"])
+        valuation, checkout = checkout_profit.valuation_at_checkout(r, l, now)
         answer.append(
             {
                 "id": r["id"],
@@ -63,11 +64,19 @@ def alerts_for_user(conn, user_id):
                 "title": l["title"],
                 "listing_url": l["listing_url"],
                 "source": r["source"],
+                "origin": r["origin"],
+                "checkout_mode": (
+                    "autobuy"
+                    if r["origin"] == "connected"
+                    else ("native" if r["native_binding"] else "vinted")
+                ),
+                "subtotal_pence": l.get("subtotal_pence"),
                 "item_price_pence": l["price_pence"],
-                "total_pence": l["total_pence"],
+                "total_pence": l.get("total_pence") if not l.get("total_excludes_shipping") else None,
                 "created_at": r["created_at"],
                 "order_status": r["order_status"],
-                "valuation": json.loads(r["valuation"]) if r["valuation"] else None,
+                "valuation": valuation,
+                "checkout_cost": checkout,
             }
         )
     return answer
@@ -97,7 +106,7 @@ def _matches_choice(values, actual):
     return not values or str(actual or "").casefold() in {str(v).casefold() for v in values}
 
 
-def valid_listing(item):
+def valid_listing(item, *, allow_missing_total=False):
     if (
         not isinstance(item, dict)
         or not str(item.get("id", "")).isdigit()
@@ -118,14 +127,73 @@ def valid_listing(item):
         and item.get("currency") == "GBP"
         and type(item.get("price_pence")) is int
         and 0 <= item["price_pence"] <= 100_000_000
-        and type(item.get("total_pence")) is int
-        and item["price_pence"] <= item["total_pence"] <= 100_000_000
+        and (
+            (allow_missing_total and item.get("total_pence") is None)
+            or (
+                type(item.get("total_pence")) is int
+                and item["price_pence"] <= item["total_pence"] <= 100_000_000
+            )
+        )
     )
 
 
 def record_listing(conn, uid, account, item, source, settings, now):
-    if not valid_listing(item) or quiet(settings, now):
-        return
+    """Private account-specific feed, delivered only with a verified account link."""
+    return _record(conn, uid, account, item, source, settings, now, "connected")
+
+
+def record_public_listing(conn, uid, item, settings, now):
+    """Public saved-search result. Public subtotals never serve as a checkout quote."""
+    item = {**item, "total_pence": None, "total_excludes_shipping": True}
+    if item.get("search_id") is not None:
+        rule = conn.execute(
+            "SELECT budget_pence FROM searches WHERE id=? AND user_id=? AND enabled=1",
+            (item["search_id"], uid),
+        ).fetchone()
+        if rule is None:
+            return None
+        item["search_budget_pence"] = rule["budget_pence"]
+    return _record(conn, uid, "public", item, "search", settings, now, "public_search")
+
+
+def record_manual_home_listing(conn, uid, item, settings, now):
+    """An explicitly imported item remains dashboard-only, even after linking an account."""
+    item = {**item, "total_pence": None, "total_excludes_shipping": True}
+    return _record(conn, uid, "manual", item, "home", settings, now, "browser")
+
+
+def record_watched_home(conn, uid, binding, item, settings, now):
+    """Called in the same write transaction that authenticated this observation."""
+    return _record(conn, uid, "home:" + binding, item, "home", settings, now, "browser_home")
+
+
+def native_button_binding(conn, row):
+    from .home_watch import active
+    from .native_order import capability
+
+    binding = capability(conn, row["user_id"])
+    if binding and (
+        (row["origin"] == "public_search" and row["account_ref"] == "public")
+        or (
+            row["origin"] == "browser_home"
+            and row["account_ref"] == "home:" + binding
+            and active(conn, row["user_id"], binding)
+        )
+    ):
+        return binding
+    return None
+
+
+def _record(conn, uid, account, item, source, settings, now, origin):
+    if not valid_listing(item, allow_missing_total=origin != "connected"):
+        return None
+    if origin != "browser" and quiet(settings, now):
+        return None
+    subtotal = item.get("subtotal_pence")
+    if subtotal is not None and (
+        type(subtotal) is not int or not item["price_pence"] <= subtotal <= 100_000_000
+    ):
+        return None
     if source == "home":
         posted = listing_time(item.get("listed_at"))
         if posted is None or not 0 <= now - posted < 180:
@@ -135,12 +203,39 @@ def record_listing(conn, uid, account, item, source, settings, now):
             and _matches_choice(settings.get("sizes", []), item.get("size"))
         ):
             return
-    conn.execute(
+    delivery = "dashboard" if origin == "browser" else "new"
+    inserted = conn.execute(
         """INSERT INTO pilot_alerts
-      (user_id,account_ref,listing_id,listing,source,created_at,attempt_key,updated)
-      VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(user_id,account_ref,listing_id) DO NOTHING""",
-        (uid, account, str(item["id"]), json.dumps(item), source, now, secrets.token_hex(16), int(now)),
+      (user_id,account_ref,listing_id,listing,source,origin,created_at,attempt_key,delivery,updated)
+      SELECT ?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS (
+            SELECT 1 FROM pilot_alerts WHERE user_id=? AND listing_id=? AND origin!='browser'
+            AND ?!='browser' AND (origin='browser_home' OR ?='browser_home')
+            AND delivery NOT IN ('dashboard','expired'))
+        ON CONFLICT(user_id,account_ref,listing_id) DO NOTHING""",
+        (
+            uid,
+            account,
+            str(item["id"]),
+            json.dumps(item),
+            source,
+            origin,
+            now,
+            secrets.token_hex(16),
+            delivery,
+            int(now),
+            uid,
+            str(item["id"]),
+            origin,
+            origin,
+        ),
     )
+    if origin == "browser_home" and not inserted.rowcount:
+        return None
+    row = conn.execute(
+        "SELECT id FROM pilot_alerts WHERE user_id=? AND account_ref=? AND listing_id=? AND origin=?",
+        (uid, account, str(item["id"]), origin),
+    ).fetchone()
+    return row["id"] if row else None
 
 
 def new_link(conn, uid):
@@ -148,9 +243,15 @@ def new_link(conn, uid):
     if (
         not re.fullmatch(r"[A-Za-z0-9_]+", name)
         or not tg_config("TELEGRAM_BOT_TOKEN")
-        or not tg_config("TELEGRAM_WEBHOOK_SECRET")
+        or (tg_config("TELEGRAM_MODE") != "polling" and not tg_config("TELEGRAM_WEBHOOK_SECRET"))
     ):
         return jsonify(error="Private Telegram delivery has not been configured."), 503
+    if tg_config("TELEGRAM_MODE") == "polling":
+        from .telegram_poll import polling_status
+
+        status = polling_status(conn)
+        if status.startswith(("Polling paused", "The configured pilot bot")):
+            return jsonify(error=status), 503
     code = secrets.token_urlsafe(24)
     conn.execute(
         "INSERT OR REPLACE INTO pilot_link_codes VALUES (?,?,?)",
@@ -161,17 +262,19 @@ def new_link(conn, uid):
 
 
 def pair_chat(conn, text, chat_id):
+    # A savepoint works both in the webhook request and inside the polling offset transaction.
     parts = text.split()
     if len(parts) != 2 or parts[0] != "/start":
         return "Open your pilot dashboard and choose Connect Telegram."
     digest = hashlib.sha256(parts[1].encode()).hexdigest()
-    conn.execute("BEGIN IMMEDIATE")
+    conn.execute("SAVEPOINT telegram_pair")
     row = conn.execute(
         "SELECT user_id FROM pilot_link_codes WHERE code_hash=? AND expires>?",
         (digest, int(time.time())),
     ).fetchone()
     if not row:
-        conn.rollback()
+        conn.execute("ROLLBACK TO telegram_pair")
+        conn.execute("RELEASE telegram_pair")
         return "This link has expired or has already been used. Create a fresh link in your dashboard."
     try:
         conn.execute(
@@ -180,9 +283,10 @@ def pair_chat(conn, text, chat_id):
             (row[0], chat_id),
         )
         conn.execute("DELETE FROM pilot_link_codes WHERE code_hash=?", (digest,))
-        conn.commit()
+        conn.execute("RELEASE telegram_pair")
     except sqlite3.IntegrityError:
-        conn.rollback()
+        conn.execute("ROLLBACK TO telegram_pair")
+        conn.execute("RELEASE telegram_pair")
         return "This private chat is linked to another Finder account."
     return "Your private Finder alerts are connected."
 
@@ -292,6 +396,9 @@ def request_buy(conn, uid, aid, confirmation=None):
     conn.execute("BEGIN IMMEDIATE")
     row = conn.execute("SELECT * FROM pilot_alerts WHERE id=? AND user_id=?", (aid, uid)).fetchone()
     account = linked_account(conn, uid)
+    if row and row["origin"] != "connected":
+        conn.rollback()
+        return "Open this listing on Vinted to review delivery, payment and the final price.", None
     if not row or not account or row["account_ref"] != account:
         conn.rollback()
         return "Connect the account that received this listing in your dashboard.", None
@@ -424,19 +531,89 @@ def _status(conn, aid, status, check_token=None):
     conn.commit()
 
 
+def telegram_update(conn, update):
+    """Handle a Telegram-authenticated update from the configured transport."""
+    cb = update.get("callback_query") or {}
+    if not isinstance(cb, dict):
+        return {"ok": True}
+    msg = cb.get("message") or update.get("message") or {}
+    if not isinstance(msg, dict):
+        return {"ok": True}
+    chat = msg.get("chat") or {}
+    if not isinstance(chat, dict):
+        return {"ok": True}
+    chat_id = chat.get("id")
+    author = cb.get("from") or msg.get("from") or {}
+    sender = author.get("id") if isinstance(author, dict) else None
+    if chat.get("type") != "private" or type(chat_id) is not int or chat_id <= 0 or chat_id != sender:
+        return dict(ok=True)
+    if not cb:
+        message = pair_chat(conn, str(msg.get("text", "")), chat_id)
+        return dict(method="sendMessage", chat_id=chat_id, text=message)
+    callback = re.fullmatch(r"(nbuy|ncf|buy|cf):(\d{1,16})(?::([0-9a-f]{12}))?", str(cb.get("data", "")))
+    if not callback or callback[1].endswith("cf") != bool(callback[3]):
+        return dict(ok=True)
+    native = callback[1].startswith("n")
+    row = conn.execute(
+        """SELECT a.user_id,a.message_id,a.native_binding,a.origin,a.account_ref FROM pilot_alerts a
+                        JOIN pilot_chats c ON c.user_id=a.user_id
+                        WHERE a.id=? AND ((?=1 AND a.origin IN ('public_search','browser_home')) OR
+                          (?=0 AND a.origin='connected')) AND c.chat_id=? AND a.sent_chat=? AND a.message_id IS NOT NULL""",
+        (int(callback[2]), int(native), int(native), chat_id, chat_id),
+    ).fetchone()
+    if row and not callback[3] and msg.get("message_id") != row["message_id"]:
+        row = None
+    if row and native:
+        if not row["native_binding"] or native_button_binding(conn, row) != row["native_binding"]:
+            row = None
+    if row:
+        conn.execute(
+            """INSERT OR IGNORE INTO pilot_buy_jobs(update_id,user_id,chat_id,alert_id,confirmation,native)
+                        VALUES(?,?,?,?,?,?)""",
+            (
+                update["update_id"],
+                row["user_id"],
+                chat_id,
+                int(callback[2]),
+                callback[3],
+                int(native),
+            ),
+        )
+    return dict(
+        method="answerCallbackQuery",
+        callback_query_id=cb.get("id"),
+        text="Checking your order." if row else "Alert unavailable.",
+    )
+
+
 def init_flow(app):
+    from .home_watch import init_home_watch
+
+    init_home_watch(app)
+    from .telegram_poll import SCHEMA as POLLING_SCHEMA
+
     conn = get_db()
+    conn.executescript(POLLING_SCHEMA)
     conn.executescript(SCHEMA)
     conn.execute("""CREATE TABLE IF NOT EXISTS pilot_buy_jobs (
         update_id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
         alert_id INTEGER NOT NULL, confirmation TEXT, started INTEGER DEFAULT 0,
-        finished INTEGER NOT NULL DEFAULT 0)""")
+        finished INTEGER NOT NULL DEFAULT 0, native INTEGER NOT NULL DEFAULT 0)""")
 
     # Upgrade pilot databases created by earlier previews, even across concurrent starts.
     with transaction(conn):
         additions = {
-            "pilot_alerts": {"check_token": "TEXT", "sent_at": "REAL", "valued_at": "REAL"},
-            "pilot_buy_jobs": {"finished": "INTEGER NOT NULL DEFAULT 0"},
+            "pilot_alerts": {
+                "check_token": "TEXT",
+                "sent_at": "REAL",
+                "valued_at": "REAL",
+                "origin": "TEXT NOT NULL DEFAULT 'connected'",
+                "native_binding": "TEXT",
+            },
+            "pilot_buy_jobs": {
+                "finished": "INTEGER NOT NULL DEFAULT 0",
+                "native": "INTEGER NOT NULL DEFAULT 0",
+            },
             "pilot_sources": {"last_ok": "REAL"},
         }
         for table, fields in additions.items():
@@ -444,6 +621,9 @@ def init_flow(app):
             for field, declaration in fields.items():
                 if field not in columns:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {field} {declaration}")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS pilot_listing_owner ON pilot_alerts(user_id,listing_id)"
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS pilot_alert_sent_time ON pilot_alerts(sent_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS pilot_alert_value_time ON pilot_alerts(valued_at)")
 
@@ -461,6 +641,8 @@ def init_flow(app):
 
     @app.post("/telegram/webhook", endpoint="pilot_telegram_webhook")
     def telegram_webhook():
+        if tg_config("TELEGRAM_MODE") == "polling":
+            return jsonify(error="Webhook is disabled in polling mode."), 403
         expected = tg_config("TELEGRAM_WEBHOOK_SECRET")
         header = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
         if not expected or not hmac.compare_digest(expected.encode(), header.encode()):
@@ -468,46 +650,10 @@ def init_flow(app):
         update = request.get_json(silent=True) or {}
         if not isinstance(update, dict) or type(update.get("update_id")) is not int:
             return jsonify(error="Invalid update"), 400
-        cb = update.get("callback_query") or {}
-        msg = cb.get("message") or update.get("message") or {}
-        chat = msg.get("chat") or {}
-        chat_id = chat.get("id")
-        sender = (cb.get("from") or msg.get("from") or {}).get("id")
-        if (
-            chat.get("type") != "private"
-            or type(chat_id) is not int
-            or chat_id <= 0
-            or chat_id != sender
-        ):
-            return jsonify(ok=True)
         conn = get_db()
-        if not cb:
-            message = pair_chat(conn, str(msg.get("text", "")), chat_id)
-            return jsonify(method="sendMessage", chat_id=chat_id, text=message)
-        callback = re.fullmatch(r"(buy|cf):(\d{1,16})(?::([0-9a-f]{12}))?", str(cb.get("data", "")))
-        if not callback or (callback[1] == "cf") != bool(callback[3]):
-            return jsonify(ok=True)
-        row = conn.execute(
-            """SELECT a.user_id FROM pilot_alerts a JOIN pilot_chats c ON c.user_id=a.user_id
-                             WHERE a.id=? AND c.chat_id=? AND a.sent_chat=? AND a.message_id IS NOT NULL""",
-            (int(callback[2]), chat_id, chat_id),
-        ).fetchone()
-        if row and callback[1] == "buy":
-            owner_message = conn.execute(
-                "SELECT message_id FROM pilot_alerts WHERE id=?", (int(callback[2]),)
-            ).fetchone()
-            if msg.get("message_id") != owner_message[0]:
-                row = None
-        if row:
-            conn.execute(
-                "INSERT OR IGNORE INTO pilot_buy_jobs(update_id,user_id,chat_id,alert_id,confirmation) VALUES(?,?,?,?,?)",
-                (update["update_id"], row["user_id"], chat_id, int(callback[2]), callback[3]),
-            )
-        return jsonify(
-            method="answerCallbackQuery",
-            callback_query_id=cb.get("id"),
-            text="Checking your order." if row else "Alert unavailable.",
-        )
+        with transaction(conn):
+            outcome = telegram_update(conn, update)
+        return jsonify(outcome)
 
     @app.cli.command("telegram-webhook")
     def telegram_webhook_command():
@@ -516,6 +662,8 @@ def init_flow(app):
 
         from .flow_worker import telegram
 
+        if tg_config("TELEGRAM_MODE") == "polling":
+            raise click.ClickException("Polling mode is active. Select webhook mode first.")
         public = current_app.config.get("FINDER_PUBLIC_URL") or os.getenv("FINDER_PUBLIC_URL", "")
         origin = urlsplit(public)
         secret = tg_config("TELEGRAM_WEBHOOK_SECRET")

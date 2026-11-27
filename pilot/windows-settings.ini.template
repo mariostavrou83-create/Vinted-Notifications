@@ -1,0 +1,21 @@
+[local]
+; Store keys only in your private copy at %LOCALAPPDATA%\FinderPilot\pilot-local.ini.
+; Leave all fields at their defaults for a zero-provider-cost local trial.
+FINDER_PILOT_TELEGRAM_BOT_USERNAME =
+FINDER_PILOT_TELEGRAM_BOT_TOKEN =
+
+; Public saved searches use one shared Scavio key for this pilot only.
+PILOT_SCAVIO_API_KEY =
+PILOT_PUBLIC_SEARCH_ENABLED = 0
+PILOT_PUBLIC_SEARCH_MAX_REQUESTS = 0
+PILOT_PUBLIC_SEARCH_DAILY_LIMIT = 0
+
+; Fresh price comparisons have a separate lifetime Scavio request cap.
+PILOT_SCAVIO_ENABLED = 0
+PILOT_SCAVIO_MAX_SEARCHES = 0
+
+; Optional Mistral matching. Only eligible comparisons can reach the model.
+PILOT_MISTRAL_ENABLED = 0
+PILOT_MISTRAL_API_KEY =
+PILOT_MISTRAL_MODEL = mistral-small-2603
+PILOT_MISTRAL_MAX_REVIEWS = 0

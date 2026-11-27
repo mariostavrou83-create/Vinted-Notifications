@@ -1,6 +1,6 @@
 # Pilot buyer integration
 
-Finder calls a separately supplied, authorised partner service. The operations below describe the contract the partner must implement. The pilot has no direct Vinted buyer API implementation. Each operation uses TLS and a server-held bearer credential. Redirects are rejected. Returned account references are opaque and uniquely linked to the invitee whose authorisation completed.
+Finder calls a separately supplied, authorised partner service. The operations below describe the contract the partner must implement. Public saved-search monitoring, deliberately shared browser items and direct links to a Vinted listing work independently of this connection. A verified partner connection can provide the account-specific feed and service-side one-tap purchasing described here. Each operation uses TLS and a server-held bearer credential. Redirects are rejected. Returned account references are opaque and uniquely linked to the invitee whose authorisation completed.
 
 ## User authorisation
 
@@ -42,4 +42,10 @@ A quote must bind immutable total, currency, item, destination, courier, account
 
 Use a dedicated private pilot bot. Set `FINDER_PILOT_TELEGRAM_BOT_USERNAME`, `FINDER_PILOT_TELEGRAM_BOT_TOKEN` and `FINDER_PILOT_TELEGRAM_WEBHOOK_SECRET`. Run `flask --app pilot.app:create_app telegram-webhook` after configuring the pilot HTTPS origin. It verifies the bot username, registers `/telegram/webhook` for messages and button callbacks, and confirms Telegram registered the intended URL. Use the bot owner's secret manager for tokens.
 
-Run `flask --app pilot.app:create_app worker` in addition to the web service, sharing its writable SQLite volume. The worker sends private alerts, then edits in the resale result. Saved-search reference photos are attached in the matched user's private chat. A Telegram link expires in ten minutes and works once. Account, chat and alert ownership are checked at each purchase callback. A confirmed public callback, a working approved partner and a running worker are required before inviting a buyer to transact.
+Run `flask --app pilot.app:create_app worker` in addition to the web service, sharing its writable SQLite volume. The worker sends private alerts, then edits in the resale result. Saved-search reference photos are attached in the matched user's private chat. A Telegram link expires in ten minutes and works once. Account, chat and alert ownership are checked at each purchase callback. Public saved-search alerts use a direct Vinted listing link when no purchase-capable native browser was paired at delivery. Each native button binds to the specific pairing that received it. A browser item shared deliberately is dashboard-only. Neither source treats a public subtotal as an all-in checkout quote. Service-side purchase submission through this adapter requires a verified account and a running worker.
+
+## Chrome Home alerts
+
+With a paired browser, the buyer can start Home alerts in the extension while viewing their own Vinted UK Home page. Only visible cards with a verifiable listing time under three minutes qualify. Size and category preferences apply to observed values. After navigation or a profile change, confirm the buying tab again. Home alerts depend on which cards Vinted currently shows and what information is visible. The watcher does not refresh the marketplace page.
+
+The pilot authenticates every batch against the device binding and displayed buyer. Overlapping Home and saved-search results are delivered once per buyer. A private Telegram purchase button is bound to the original receiving device and requires the configured checkout preferences, a fresh checkout quote, and an explicit tap. Stopping Home alerts withdraws outstanding buttons and unissued Home orders. Without purchase-capable pairing, the alert opens the Vinted listing. The asking price alone does not determine profit.

@@ -330,6 +330,118 @@ class FlowTest(unittest.TestCase):
             self.conn.execute("SELECT order_status FROM pilot_alerts").fetchone()[0], "purchased"
         )
 
+    def _public_record(self):
+        item = {
+            **self.item,
+            "id": "765",
+            "listing_url": "https://www.vinted.co.uk/items/765-coat",
+            "subtotal_pence": 625,
+        }
+        return flow.record_public_listing(self.conn, 1, item, self.preferences, time.time())
+
+    def test_public_alert_without_buyer_connection_delivers_and_prices_privately(self):
+        self.conn.execute("DELETE FROM pilot_buyer_link")
+        self.conn.execute("DELETE FROM pilot_alerts")
+        aid = self._public_record()
+        self.assertIsInstance(aid, int)
+        with (
+            patch("pilot.flow.tg_config", return_value="123:test"),
+            patch("pilot.native_order.capability", return_value=None),
+            patch("pilot.flow_worker.telegram", return_value={"message_id": 415}) as tg,
+        ):
+            self.assertTrue(flow_worker.deliver(self.conn, time.time()))
+            msg = tg.call_args.args[1]
+            self.assertEqual(msg["chat_id"], 101)
+            self.assertEqual(
+                msg["reply_markup"]["inline_keyboard"][0][0],
+                {"text": "Buy on Vinted", "url": "https://www.vinted.co.uk/items/765-coat"},
+            )
+            self.assertIn("shipping extra", msg["text"])
+            with (
+                patch("pilot.market.comparisons_for", return_value=[]),
+                patch(
+                    "pilot.pricing.estimate_resale",
+                    return_value={"status": "insufficient", "resale_pence": None},
+                ) as estimate,
+            ):
+                self.assertTrue(flow_worker.review(self.conn, time.time()))
+                self.assertIsNone(estimate.call_args.args[0]["all_in_pence"])
+                self.assertEqual(tg.call_args.args[0], "editMessageText")
+        own = flow.alerts_for_user(self.conn, 1)
+        self.assertEqual((own[0]["checkout_mode"], own[0]["total_pence"]), ("vinted", None))
+        self.assertEqual(flow.alerts_for_user(self.conn, 2), [])
+        with patch("pilot.flow.partner_request") as partner:
+            self.assertIn("Vinted", flow.request_buy(self.conn, 1, aid)[0])
+            partner.assert_not_called()
+
+    def test_native_button_never_inherits_a_newly_paired_identity(self):
+        self.conn.execute("DELETE FROM pilot_alerts")
+        aid = self._public_record()
+        with (
+            patch("pilot.flow.tg_config", return_value="123:test"),
+            patch("pilot.native_order.capability", return_value="paired-original"),
+            patch("pilot.flow_worker.telegram", return_value={"message_id": 415}) as tg,
+        ):
+            self.assertTrue(flow_worker.deliver(self.conn, time.time()))
+            self.assertEqual(
+                tg.call_args.args[1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"],
+                f"nbuy:{aid}",
+            )
+        data = {
+            "update_id": 44,
+            "callback_query": {
+                "id": "cb",
+                "from": {"id": 101},
+                "data": f"nbuy:{aid}",
+                "message": {"message_id": 415, "chat": {"id": 101, "type": "private"}},
+            },
+        }
+        headers = {"X-Telegram-Bot-Api-Secret-Token": "test-only"}
+        client = self.app.test_client()
+        with patch("pilot.native_order.capability", return_value="replacement"):
+            client.post("/telegram/webhook", json=data, headers=headers)
+            self.assertEqual(self.conn.execute("SELECT count(*) FROM pilot_buy_jobs").fetchone()[0], 0)
+        with patch("pilot.native_order.capability", return_value="paired-original"):
+            client.post("/telegram/webhook", json=data, headers=headers)
+            self.assertEqual(self.conn.execute("SELECT native FROM pilot_buy_jobs").fetchone()[0], 1)
+        with (
+            patch("pilot.native_order.capability", return_value="replacement"),
+            patch("pilot.flow_worker.telegram") as tg,
+            patch("pilot.native_order.request_native") as submit,
+        ):
+            self.assertTrue(flow_worker.buy_job(self.conn, time.time()))
+            self.assertIn("browser changed", tg.call_args.args[1]["text"])
+            submit.assert_not_called()
+
+    def test_manual_home_stays_dashboard_only_and_never_enters_checkout(self):
+        self.conn.execute("DELETE FROM pilot_alerts")
+        aid = flow.record_manual_home_listing(self.conn, 1, self.item, self.preferences, time.time())
+        self.assertIsInstance(aid, int)
+        self.assertEqual(
+            aid, flow.record_manual_home_listing(self.conn, 1, self.item, self.preferences, time.time())
+        )
+        self.assertIsNone(
+            flow.record_manual_home_listing(
+                self.conn,
+                1,
+                {**self.item, "listed_at": time.time() - 181},
+                self.preferences,
+                time.time(),
+            )
+        )
+        expected = flow.alerts_for_user(self.conn, 1)[0]
+        self.assertEqual(
+            (expected["origin"], expected["checkout_mode"], expected["total_pence"]),
+            ("browser", "vinted", None),
+        )
+        with (
+            patch("pilot.flow.tg_config", return_value="123:test"),
+            patch("pilot.flow_worker.telegram") as tg,
+        ):
+            self.assertFalse(flow_worker.deliver(self.conn, time.time()))
+            tg.assert_not_called()
+        self.assertIn("Vinted", flow.request_buy(self.conn, 1, aid)[0])
+
     def test_no_delivery_after_home_ages_out(self):
         self.conn.execute("UPDATE pilot_alerts SET delivery='new'")
         with (

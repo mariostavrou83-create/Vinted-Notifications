@@ -1,6 +1,6 @@
 {% extends 'base.html' %}
 {% block title %}{{ 'Join Finder' if mode == 'signup' else 'Sign in' }} · Finder{% endblock %}
-{% block scripts %}<script src="{{ url_for('static', filename='extension-handoff.js') }}" defer></script>{% endblock %}
+{% block scripts %}{% if mode == 'signup' %}<script src="{{ url_for('static', filename='local-invite.js') }}" defer></script>{% endif %}<script src="{{ url_for('static', filename='extension-handoff.js') }}" defer></script>{% endblock %}
 {% block body %}
 <main class="auth-wrap">
   <div class="auth-card">

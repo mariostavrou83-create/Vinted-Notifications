@@ -3,6 +3,7 @@
 {% block scripts %}
 <script src="{{ url_for('static', filename='pilot.js') }}" defer></script>
 <script src="{{ url_for('static', filename='delivery.js') }}" defer></script>
+<script src="{{ url_for('static', filename='chrome-checkout.js') }}" defer></script>
 <script src="{{ url_for('static', filename='extension-handoff.js') }}" defer></script>
 {% endblock %}
 {% block body %}
@@ -30,15 +31,16 @@
         <div><span>Profit target</span><strong>£15<small> or more</small></strong></div>
         <a href="#account"><span>Telegram</span><strong class="metric-status">{{ 'Linked' if links else 'Set up' }} <i aria-hidden="true">↗</i></strong></a>
       </div>
-      <div class="section-title"><h2>Latest alerts</h2><button type="button" class="refresh-button" id="refresh-alerts">Refresh</button></div>
+      <div class="section-title"><h2>Latest alerts</h2><div class="feed-actions"><a class="refresh-button" href="/import/vinted">Add from Chrome</a><button type="button" class="refresh-button" id="refresh-alerts">Refresh</button></div></div>
       <div id="alert-results">{% include 'alerts_fragment.html' %}</div>
     </section>
     <section id="searches" data-view="searches" hidden aria-labelledby="searches-title">
-      <div class="page-head"><div><h1 id="searches-title">Saved searches</h1><p class="lede">{{ searches|length }} of 100 searches used. Checks target a five-second repeat.</p></div>{% if searches|length < 100 %}<a class="button primary" href="#new-search">Add search</a>{% endif %}</div>
+      <div class="page-head"><div><h1 id="searches-title">Saved searches</h1><p class="lede">{{ searches|length }} of 100 searches used.</p><p class="field-note">{% if buyer_provider_linked %}Checks target a five-second repeat.{% elif public_feed.enabled %}{% if public_feed.used_requests >= public_feed.max_requests %}Monitoring is paused. The pilot’s total market-data allowance has been used.{% elif public_feed.used_last_24h >= public_feed.daily_limit %}Monitoring is paused until more of the daily market-data allowance is available.{% else %}Monitoring is on. Checks rotate between searches with a five-second minimum repeat.{% endif %}{% else %}Saved-search monitoring is off. You can set up searches now. Enable public search in the pilot configuration to begin checking for matches.{% endif %}</p></div>{% if searches|length < 100 %}<a class="button primary" href="#new-search">Add search</a>{% endif %}</div>
       {% if searches %}
       <div class="search-list">
         {% for search in searches %}
-        <article class="search-card"><div class="search-info"><h3><a href="#search-{{ search.id }}">{{ search.name }}</a></h3><p>{% if search.budget %}Up to £{{ search.budget }}{% else %}Any budget{% endif %} · {{ 'Enabled' if search.enabled else 'Paused' }}</p>{% if search.include_keywords %}<div class="chips">{% for tag in search.include_keywords[:4] %}<span>{{ tag }}</span>{% endfor %}</div>{% endif %}</div><a class="button secondary" href="#search-{{ search.id }}">Edit<span class="sr"> {{ search.name }}</span></a></article>
+        {% set unsupported = public_feed.unsupported.get(search.id|string) if public_feed and public_feed.enabled and public_feed.unsupported else none %}
+        <article class="search-card"><div class="search-info"><h3><a href="#search-{{ search.id }}">{{ search.name }}</a></h3><p>{% if search.budget %}Up to £{{ search.budget }}{% else %}Any budget{% endif %} · {{ 'Enabled' if search.enabled else 'Paused' }}</p>{% if unsupported %}<p>Independent search needs attention: {{ unsupported }}</p>{% endif %}{% if search.include_keywords %}<div class="chips">{% for tag in search.include_keywords[:4] %}<span>{{ tag }}</span>{% endfor %}</div>{% endif %}</div><a class="button secondary" href="#search-{{ search.id }}">Edit<span class="sr"> {{ search.name }}</span></a></article>
         {% endfor %}
       </div>
       {% else %}

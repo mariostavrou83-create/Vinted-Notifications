@@ -9,8 +9,8 @@ const origin="https://www.vinted.co.uk";
 function link(href,text,label="",visible=true,inMenu=true) {
   return {href:new URL(href,origin).href,innerText:text,getAttribute:()=>label,closest:selector=>inMenu && selector.includes("navigation") ? {} : null,getClientRects:()=>visible?[{}]:[]};
 }
-function pick(links,site=origin) {
-  const ctx={URL,location:new URL(site),document:{querySelectorAll:()=>links},getComputedStyle:()=>({visibility:"visible"})};
+function pick(links,site=origin,images=[]) {
+  const ctx={URL,location:new URL(site),document:{querySelectorAll:s=>s==="a[href]"?links:images},getComputedStyle:()=>({visibility:"visible"})};
   return vm.runInNewContext(source+"\nreadOwnProfile()",ctx);
 }
 test("only an explicitly self-labelled visible UK profile yields a selection",()=>{
@@ -32,5 +32,14 @@ test("manifest limits the extension to deliberate active-tab access",()=>{
   assert.deepEqual(manifest.permissions.sort(),["activeTab","scripting","storage"]);
   assert.equal(manifest.host_permissions,undefined);
   assert.equal(manifest.content_scripts,undefined);
-  assert.equal(manifest.background,undefined);
+  assert.equal(manifest.background.service_worker,"native-worker.js");
+  assert.equal(manifest.optional_permissions.includes("alarms"),true);
+});
+
+test("visible self-avatar identifies buyer; decorative alt and conflicting names are ignored",()=>{
+  const avatar=label=>({closest:()=>null,getClientRects:()=>[{}],getAttribute:()=>label});
+  assert.equal(pick([],origin,[avatar("actual.own_name")]),"actual.own_name");
+  assert.equal(pick([],origin,[avatar("Profile")]),null);
+  assert.equal(pick([],origin,[avatar("user-avatar")]),null);
+  assert.equal(pick([link("/member/19-different","My profile")],origin,[avatar("actual.own_name")]),null);
 });

@@ -46,7 +46,8 @@ def create_app(config=None):
     # SQLite inherits the file permissions for its WAL and shared-memory files.
     fd = os.open(database_path, os.O_CREAT | os.O_RDWR, 0o600)
     os.close(fd)
-    from . import connection, destinations, flow, market
+    from . import connection, destinations, flow, manual_import, market, public_feed
+    from . import native_order
     from .report import command as report_command
     app.cli.add_command(report_command)
     with app.app_context():
@@ -60,8 +61,12 @@ def create_app(config=None):
         destinations.register_destinations(app)
         connection.init_connection(conn)
         connection.register_connection(app)
+        manual_import.init_manual_import(conn)
+        manual_import.register_manual_import(app)
         flow.init_flow(app)
+        native_order.init_native(app)
         market.init_app(app)
+        public_feed.init_app(app)
 
     @app.cli.command("invite")
     def invite_command():
@@ -71,7 +76,8 @@ def create_app(config=None):
                          (digest(token), int(time.time()) + 72 * 3600))
         click.echo(token)
 
-    public = {"static", "login", "signup", "health", "pilot_telegram_webhook"}
+    device_endpoints = native_order.DEVICE_ENDPOINTS
+    public = {"static", "login", "signup", "health", "pilot_telegram_webhook"} | device_endpoints
 
     @app.before_request
     def authenticate():
@@ -84,7 +90,7 @@ def create_app(config=None):
             if request.path.startswith("/api/") or request.method != "GET":
                 return jsonify(error="Sign in to Finder."), 401
             return redirect(url_for("login"))
-        if request.method in ("POST", "PUT", "PATCH", "DELETE") and request.endpoint != "pilot_telegram_webhook":
+        if request.method in ("POST", "PUT", "PATCH", "DELETE") and request.endpoint not in (device_endpoints | {"pilot_telegram_webhook"}):
             expected = session.get("csrf_token", "")
             supplied = request.headers.get("X-CSRF-Token") or request.form.get("csrf_token", "")
             if not expected or not hmac.compare_digest(str(expected).encode(), str(supplied).encode()):
@@ -192,7 +198,9 @@ def create_app(config=None):
         return {
             "user": g.user, "settings": settings_for(conn, owner), "searches": searches_for(conn, owner),
             "alerts": flow.alerts_for_user(conn, owner), "telegram_linked": flow.telegram_linked(conn, owner),
-            "csrf_token": csrf_token(),
+            "csrf_token": csrf_token(), "public_feed": public_feed.status(conn, owner),
+            "buyer_provider_available": connection.connection_available(),
+            "buyer_provider_linked": bool(connection.linked_account(conn, owner)),
         }
 
     @app.get("/")

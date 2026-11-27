@@ -65,7 +65,7 @@
     const hash = location.hash.slice(1);
     if (hash.startsWith('account_hint=')) return;
     let view = 'alerts';
-    if (hash === 'preferences' || hash === 'account') view = 'preferences';
+    if (['preferences', 'account', 'chrome-checkout', 'limits'].includes(hash)) view = 'preferences';
     if (hash === 'searches') view = 'searches';
     if (hash === 'new-search') {
       if (searches.length >= 100) {
@@ -92,7 +92,7 @@
       if (link.dataset.nav === (view === 'editor' ? 'searches' : view)) link.setAttribute('aria-current', 'page');
       else link.removeAttribute('aria-current');
     }
-    if (hash === 'account') document.getElementById('account').scrollIntoView({ block: 'start' });
+    if (['account', 'chrome-checkout', 'limits'].includes(hash)) document.getElementById(hash).scrollIntoView({ block: 'start' });
     else window.scrollTo(0, 0);
   }
 

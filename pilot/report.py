@@ -32,4 +32,6 @@ def command():
         "discovery_to_telegram_acceptance": _latency(rows, "sent_at"),
         "discovery_to_valuation": _latency(rows, "valued_at"),
         "market_searches_reserved_lifetime": usage["used"],
+        "public_saved_search_checks_reserved_lifetime": db.execute(
+            "SELECT used FROM public_budget WHERE id=1").fetchone()["used"],
     }, indent=2))

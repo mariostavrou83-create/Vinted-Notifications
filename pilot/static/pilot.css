@@ -188,3 +188,16 @@ input[type=checkbox] { width: 17px; height: 17px; accent-color: var(--forest); }
 #fallback-couriers legend { padding: 0 4px; font-size: .85rem; }
 #courier-options { display: flex; flex-wrap: wrap; gap: 12px; }
 @media (max-width: 520px) { .lookup-row { align-items: stretch; flex-direction: column; } }
+.feed-actions,.pref-jumps { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.pref-jumps { margin: -5px 0 22px; }
+.pref-jumps a { font-size: .86rem; color: var(--muted); }
+.native-panel { display: grid; gap: 18px; margin-top: 24px; scroll-margin-top: 15px; }
+.native-panel h2 + p { margin-top: -9px; }
+.native-status-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.native-status-row p { margin-top: 5px; }
+.native-status-row small { color: var(--muted); }
+.native-prefs { padding-top: 22px; border-top: 1px solid var(--line); }
+#native-account-controls > p { margin-top: 10px; }
+.pairing-box { display: grid; gap: 7px; background: var(--accent); border-radius: 8px; padding: 13px; margin-top: 14px; }
+.pairing-box code { color: var(--forest); font-size: 1.3rem; font-weight: 600; letter-spacing: .08em; overflow-wrap: anywhere; }
+@media(max-width: 520px) { .native-status-row { align-items: flex-start; flex-direction: column; } }
