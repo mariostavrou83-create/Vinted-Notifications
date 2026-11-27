@@ -180,7 +180,9 @@ class SharedAlertTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_same_shared_photo_alert_shows_live_stages_and_then_the_result(self):
         await self.ready()
-        caption = "<b>Vinted listing</b>\n\nBrand: Test\nEst. total incl. shipping: £20.00"
+        details = "<b>Vinted listing</b>\n\nSeller's description"
+        recap = "<b>Test jacket</b>\nBrand: Test\nEst. total incl. shipping: £20.00"
+        caption = f"{details}\n\n{recap}"
         checking, paying = asyncio.Event(), asyncio.Event()
         submit, finish = threading.Event(), threading.Event()
 
@@ -210,7 +212,10 @@ class SharedAlertTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             try:
                 await asyncio.wait_for(checking.wait(), 3)
                 first = self.bot.edit_message_caption.await_args.kwargs
-                self.assertIn(caption, first["caption"])
+                self.assertEqual(
+                    first["caption"],
+                    f"{details}\n\n{shared_buy.PROGRESS_HEADING}{STAGE_LABELS['checking_item']}\n\n{recap}",
+                )
                 self.assertTrue(first["show_caption_above_media"])
                 self.assertEqual(first["message_id"], 101)
                 stop = first["reply_markup"].inline_keyboard[-1][0]
@@ -234,6 +239,63 @@ class SharedAlertTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final["message_id"], 101)
         self.assertTrue(final["show_caption_above_media"])
         self.bot.send_message.assert_not_awaited()
+
+    async def test_linked_partner_can_answer_on_each_uncertain_alert_without_rebuying(self):
+        group = await self.activate()
+
+        def purchase(row, *, progress):
+            self.assertTrue(vinted_buying.claim(row))
+            vinted_buying.record(
+                row["item_id"], "unknown", "Waiting for confirmation",
+                checkout_id="offline", buyer_id="456", transaction_id="12",
+                watch=("Test listing", 2000),
+            )
+            return vinted_buying.result(row["item_id"])
+
+        for item, choice_index, expected in (
+            (800, 0, "paid"),
+            (801, 1, "payment_failed"),
+        ):
+            with self.subTest(item=item, state=expected):
+                self.accepted(item)
+                message_id = item + 100
+                self.bot.send_photo.return_value = SimpleNamespace(message_id=message_id)
+                await shared.send(self.bot, group, shared.claim(group, time.time()))
+                caption = "<b>Test listing</b>\n\nSeller's description"
+                update, query = self.tap(456, message_id=message_id)
+                query.message.photo = [SimpleNamespace(file_id="offline-file-id")]
+                query.message.caption_html = caption
+                with patch.object(vinted_buying, "buy", side_effect=purchase) as buy:
+                    await shared_buy.callback(update, self.context)
+                    alert = self.bot.edit_message_caption.await_args.kwargs
+                    self.assertEqual(alert["caption"], caption + "\n\n" + shared_buy.CONFIRM_PROMPT)
+                    choices = alert["reply_markup"].inline_keyboard[-1]
+                    self.assertEqual([button.text for button in choices], ["Yes, I got it", "No, I didn't get it"])
+                    data = choices[choice_index].callback_data
+                    stranger, _ = self.tap(789, data, message_id=message_id)
+                    await shared_buy.callback(stranger, self.context)
+                    self.assertEqual(vinted_buying.result(str(item))["state"], "unknown")
+
+                    decision, decision_query = self.tap(456, data, message_id=message_id)
+                    decision.message = None
+                    decision.effective_chat = self.chat
+                    decision.effective_user = decision_query.from_user
+                    self.assertTrue(shared.allowed_update(decision, "123"))
+                    decision_query.message.photo = query.message.photo
+                    decision_query.message.caption_html = alert["caption"]
+                    await shared_buy.callback(decision, self.context)
+                    self.assertEqual(decision_query.answer.await_args.args[0], "Purchase confirmation saved.")
+                    saved = vinted_buying.result(str(item))
+                    self.assertEqual(saved["state"], expected)
+                    self.assertEqual(self.bot.edit_message_caption.await_args.kwargs["caption"], caption)
+                    stale, _ = self.tap(123, choices[1 - choice_index].callback_data, message_id=message_id)
+                    await shared_buy.callback(stale, self.context)
+                    self.assertEqual(vinted_buying.result(str(item)), saved)
+                    buy.assert_called_once()
+                with closing(connection()) as conn:
+                    self.assertIsNone(conn.execute(
+                        "SELECT 1 FROM vinted_payment_watch WHERE item_id=?", (str(item),),
+                    ).fetchone())
 
     async def test_unlink_checks_permission_again_at_payment_gate(self):
         group = await self.activate()
