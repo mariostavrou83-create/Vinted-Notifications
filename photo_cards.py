@@ -3,7 +3,6 @@
 import asyncio
 import hashlib
 import json
-import os
 import re
 import sqlite3
 import time
@@ -231,10 +230,6 @@ def buy_status_text(details):
 def captions(row, details):
     status = buy_status_text(details)
     reserved = units(plain(status)) + 2 if status else 0
-    if os.getenv("FINDER_RESALE_PILOT") == "1" and details.get("platform") != "ebay" and not details.get("resale_line"):
-        from resale_telegram import CAPTION_RESERVE, reserving
-        if reserving():
-            reserved += CAPTION_RESERVE
     text, note_pages, recap = _captions(row, details, 1024 - reserved)
     parts = (text, recap, status) if recap.startswith("Title: ") else (text, status, recap)
     return "\n\n".join(part for part in parts if part), note_pages
@@ -570,12 +565,6 @@ async def send_initial(bot, chat_id, row, details, before_send, *, require_photo
             raw = await listing_photo(details)
     else:
         raw = await listing_photo(details)
-    if (os.getenv("FINDER_RESALE_PILOT") == "1" and row.get("kind") == "listing"
-            and details.get("platform", "vinted") == "vinted"):
-        from resale_sampler import active as resale_pilot_active
-        if resale_pilot_active() and isinstance(raw, bytes) and len(raw) <= 2_000_000:
-            # A sizing guide can be added below. Only the original listing photos belong in a valuation.
-            row["_resale_cover"] = raw
     if reference and (raw or not require_photo):
         from vinted_native import comparison_image
 

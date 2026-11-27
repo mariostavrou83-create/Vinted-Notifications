@@ -173,10 +173,6 @@ class AlertLayout(unittest.IsolatedAsyncioTestCase):
                     "Title: <b>Mesh top</b>",
                     "Brand: A &amp; B",
                     "Total: <b>£8.00</b>",
-                    "Est. profit: <b>Pending</b>",
-                    "Est. resell: Checking this item…",
-                    "Buy: <b>Pending</b>",
-                    "Conf: Pending",
                     "<b>Autobuy progress</b>",
                 ]
                 positions = [
@@ -186,9 +182,12 @@ class AlertLayout(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(positions, sorted(positions))
                 self.assertEqual(
                     delivery.initial_price(SimpleNamespace(caption_html=base)),
-                    "pending",
+                    "absent",
                 )
                 for hidden in (
+                    "Est. resell:",
+                    "Est. profit:",
+                    "Conf:",
                     "Fixture budget",
                     "Check seams",
                     "Prefer a zip fastening",
@@ -196,13 +195,6 @@ class AlertLayout(unittest.IsolatedAsyncioTestCase):
                     "personalised Vinted Home feed",
                 ):
                     self.assertNotIn(hidden, base)
-                changed = pricing.valuation_text(
-                    pricing.rough_estimate({"total_pence": 800}, 3000, "ai")
-                )
-                edited = delivery.append_line(base, changed)
-                self.assertEqual(edited.count("Est. resell:"), 1)
-                self.assertIn("Est. profit: <b>£22.00</b>", edited)
-                self.assertLess(edited.index("Conf:"), edited.index("Autobuy progress"))
                 before, _, status = base.rpartition("\n\n")
                 self.assertEqual(shared_buy.insert_status(before, status), base)
 

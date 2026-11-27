@@ -2,7 +2,7 @@
 
 import json
 import math
-import os
+import re
 import time
 from contextlib import closing
 from html import escape
@@ -103,7 +103,10 @@ def prepare_listing(row, details=None):
         home_detail = saved_details.get("home_discovery")
         source = "home" if "home_discovery" in saved_details else alert_controls.row_source(current)
         source_state = alert_controls.state(source, conn)
-        if not source_state.allows(current["found_at"]):
+        from home_routing_store import native_allowed
+        if source == "home" and not native_allowed(conn, row["item_id"], "owner"):
+            reason = "This Home is no longer routed to the owner’s Telegram"
+        elif not source_state.allows(current["found_at"]):
             reason = "Home discovery is paused" if source == "home" else alert_controls.PAUSED_MESSAGE
         elif "home_discovery" in saved_details and isinstance(saved_details["home_discovery"], dict) and saved_details["home_discovery"].get("source_role") != "seller":
             reason = "Home recommendation is outside the selected MSJ Vinted account"
@@ -225,20 +228,6 @@ def snapshot(item, search):
         "description": clean_description(raw_description),
         "description_pending": True,
     }
-    try:
-        from trial_shared_hour import capture_active
-        if capture_active():
-            from trial_market_hour import listing_fields
-            result["trial_listing"] = listing_fields(item)
-    except Exception:
-        # The optional experiment must never interrupt an ordinary buying alert.
-        pass
-    if os.getenv("FINDER_RESALE_PILOT") == "1":
-        from resale_pricing import garment, label
-        raw = getattr(item, "raw_data", None) or {}
-        result["resale_size"] = label(getattr(item, "size_title", None))
-        result["resale_condition"] = label(raw.get("condition") or raw.get("status"))
-        result["resale_category"] = label(raw.get("catalog_title") or raw.get("category_title")) or garment(result["description"] or "")
     if required_keywords(search):
         keyword_description, description_complete = description_text(raw_description)
         result.update(
@@ -246,6 +235,21 @@ def snapshot(item, search):
             description_complete=description_complete,
         )
     return result
+
+
+def without_legacy_valuation(body):
+    """Drop the retired system footer when a stored alert is sent or refreshed."""
+    head, separator, footer = body.rpartition("\n\nTitle: ")
+    if separator and "\nBrand: " in footer:
+        footer = re.sub(
+            r"(\nTotal: [^\n]+)\nEst\. profit: [^\n]*\nEst\. resell: [^\n]*\nBuy: [^\n]*\nConf: [^\n]*",
+            r"\1", footer, count=1,
+        )
+        return head + separator + footer
+    return re.sub(
+        r"(\nBrand: [^\n]+\nEst\. total incl\. shipping: [^\n]+)\nOver £15 profit\? [^\n]*(?=\n\n|$)",
+        r"\1", body, count=1,
+    )
 
 
 def recap(row, details):
@@ -260,19 +264,7 @@ def recap(row, details):
         )
     total = (budget or {}).get("total")
     estimate = f"£{total / 100:.2f}" if type(total) is int else "Unavailable"
-    summary = f"Title: <b>{title}</b>\nBrand: {brand}\nTotal: <b>{estimate}</b>"
-    discovery = details.get("home_discovery")
-    if (os.getenv("FINDER_RESALE_PILOT") == "1" and os.getenv("FINDER_RESALE_SHADOW_ONLY") != "1"
-            and row.get("currency") == "GBP"
-            and (not isinstance(discovery, dict) or discovery.get("source_role") == "seller")):
-        from resale_pricing import footer_valuation, valuation_html
-
-        line = footer_valuation(details.get("resale_line") or "", {
-            "id": row.get("item_id"), "title": row["title"], "brand": details.get("brand"),
-            "category": details.get("resale_category"), "total_pence": total
-        })
-        return summary + "\n" + valuation_html(line)
-    return summary
+    return f"Title: <b>{title}</b>\nBrand: {brand}\nTotal: <b>{estimate}</b>"
 
 
 def sections(row, details):
@@ -515,7 +507,6 @@ async def phone_layout_test(bot, chat_id, row, details, *, mode, after_send=None
         "pool_timeout": 3,
     }
     if mode == "native_album":
-        import re
         from html import unescape
 
         # One grouped album with separate native photos and an ordinary caption.

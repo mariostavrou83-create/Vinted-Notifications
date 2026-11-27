@@ -2,9 +2,8 @@
 <h2>Vinted selling account</h2>
 <p>Offers and order messages use <b>{{seller.username if seller.connected else 'Not connected'}}</b>.</p>
 {% if accounts_separate %}<p>Your buying account has a separate saved connection. Reconnecting one account keeps the other connection intact.</p>{% else %}<p>This is your current connected account. Connect your different buying account below to separate buying from selling.</p>{% endif %}
-{% if seller.connection_health is defined %}<p>Connection: <b>{{seller.connection_health.state|replace('_',' ')}}</b> · {{seller.connection_health.message}}</p>{% endif %}
+{% with account=seller, account_role='selling' %}{% include 'msj_account_connection.html' %}{% endwith %}
 {% if seller.connected %}
-<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="seller_recheck">Check selling account connection</button></form>
 <details><summary>Reconnect the same selling account</summary>
 <p>Sign into your selling account on Vinted and use the existing Chrome connection helper to copy its original connection details. Paste them only in this private form. The account must match the saved selling account.</p>
 <form method="post" autocomplete="off"><input type="hidden" name="csrf" value="{{csrf}}">

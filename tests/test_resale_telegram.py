@@ -55,12 +55,12 @@ class TelegramResaleTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             display.publish("110", LINE)
             await self.drain()
         private = owner.edit_caption.await_args.kwargs
-        self.assertIn("Est. resell: £24.00", private["caption"])
+        self.assertNotIn("Est. resell:", private["caption"])
         self.assertEqual(private["reply_markup"], original_controls)
         self.assertTrue(private["show_caption_above_media"])
         saved_row, saved_details, _ = photo_cards.load("vinted", 40)
         self.assertEqual(saved_details["resale_line"], LINE)
-        self.assertIn("Est. resell: £24.00", photo_cards.captions(saved_row, saved_details)[0])
+        self.assertNotIn("Est. resell:", photo_cards.captions(saved_row, saved_details)[0])
         with patch.dict(os.environ, {"FINDER_RESALE_PILOT": "0"}):
             self.assertNotIn("Est. resell:", photo_cards.captions(saved_row, saved_details)[0])
         group_message.edit_caption.assert_not_awaited()

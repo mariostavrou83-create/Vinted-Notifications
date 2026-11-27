@@ -170,6 +170,15 @@ def add_item_to_db(
             if not state(source, conn).allows(evidence_at):
                 conn.rollback()
                 return False
+        if discovery:
+            import time
+            from home_routing_store import note_original
+            native, recorded = note_original(conn, id, title, price, currency, photo_url, alert, time.time())
+            if not native:
+                conn.commit()
+                return recorded
+            # Keep an independently routed Home event even if the native row already exists.
+            conn.execute("SAVEPOINT home_native_item")
         recommendation = query_id is None and discovery.get("reason") == "recommendation"
         if not recommendation and cursor.execute("SELECT 1 FROM items WHERE item=?", (id,)).fetchone():
             # A borrowed batch connection stays open after this helper returns.
@@ -241,7 +250,11 @@ def add_item_to_db(
                 from vinted_home_activity import attach_guide
 
                 if recommendation or not attach_guide(conn, str(id), query_id, alert, alert.get("vinted_details") or {}):
-                    conn.rollback()
+                    if discovery:
+                        conn.execute("ROLLBACK TO home_native_item")
+                        conn.commit()
+                    else:
+                        conn.rollback()
                     return False
             elif alert.get("vinted_details"):
                 import json

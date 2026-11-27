@@ -3,6 +3,8 @@
 <p>Tap <b>Autobuy</b>, or reply <b>BUY</b> to the original Vinted alert, to purchase using your saved delivery and payment choices. Finding a listing alone never purchases it.</p>
 {% if not accounts_separate %}<p>Buying is paused while you connect your different buying account below. Your current account continues to handle offers and messages.</p>{% endif %}
 <p>Saved buyer: <b>{{buyer.username if buyer.connected else 'Not connected'}}</b> · Autobuy permission <b>{{'on' if buyer.enabled else 'off'}}</b>.</p>
+{% with account=buyer, account_role='buying' %}{% include 'msj_account_connection.html' %}{% endwith %}
+{% if buyer.connected %}<p class="muted">A Finder reconnect takes effect when same-account verification succeeds. If the private browser is unavailable, you can still check the saved buyer connection.</p>{% endif %}
 <p><a href="{{ url_for('payment_window') }}" target="_blank" rel="noopener">Open payment standby tab</a> in the browser profile signed into your buying account.</p>
 <details class="guide-section" id="vinted-new-buyer">
 <summary><b>Connect a different account for buying</b></summary>
@@ -29,8 +31,6 @@
 <p>A successful account check or reconnect does not confirm that checkout works. This warning clears after a confirmed purchase.</p><small>{{buyer.checkout_health.checked_display}}</small></div>
 {% endif %}
 <details class="guide-section"><summary><b>Telegram connection warnings</b></summary><p>The bot confirms successful reconnects and warns your Vinted Telegram chat about account or checkout failures. The warning explains the reason and links here. An unconfirmed renewal is reported separately from a rejected login. Repeated warnings for the same unresolved problem are suppressed. Account recovery is confirmed separately from checkout readiness.</p><p><small>Idle buyer accounts are checked about every five minutes, alongside normal account requests and expiry-driven maintenance. Delivery is checked every minute. A remote logout cannot be detected immediately. Temporary request failures are reported if no later successful account check has been recorded for 15 minutes.</small></p><form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="buyer_connection_notice_test">Send connection-warning test</button></form><p><small>This sends one labelled test message, without checking Vinted or changing your connection or buying settings.</small></p></details>
-{% if buyer.connection_health is defined %}<div class="guide-section" role="status"><b>Connection status: {{buyer.connection_health.state|replace('_',' ')}}</b><p>{{buyer.connection_health.message}}</p>{% if buyer.connection_health.last_verified %}<small>Last same-account verification · {{buyer.connection_health.last_verified}}</small>{% endif %}{% if buyer.connection_health.last_checked %}<p><small>Latest check · {{buyer.connection_health.last_checked}}{% if buyer.connection_health.http_status %} · HTTP {{buyer.connection_health.http_status}}{% endif %}</small></p>{% endif %}</div>{% endif %}
-{% if buyer.connected %}<div class="guide-section"><h3>Check private reconnect availability</h3><p>First check whether private Vinted sign-in is available. If it is, sign into the same saved account, complete any Vinted checks, then verify the connection. Your saved connection is replaced only after same-account verification succeeds.</p><a class="primary" href="{{url_for('vinted_reconnect.page')}}">Check Vinted reconnect →</a><p><small>If the private browser is unavailable, your saved connection stays in place. Checking or reconnecting preserves buying permissions and preferences; it does not purchase an item.</small></p></div>{% endif %}
 {% if buyer.connected %}
 <details class="guide-section" id="vinted-browser-cookie-details"><summary><b>Reconnect preserving browser cookie details</b></summary>
 <p>Use this if a token-only reconnect verifies your login but offers or pickup requests fail. Token values alone do not include their original domain and path. This option keeps those original details and verifies the same account before replacing the saved connection.</p>
@@ -103,7 +103,6 @@
 </details>
 {% if buyer.pending_code %}<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><label for="buyer_code">Vinted verification code</label><input id="buyer_code" name="buyer_code" autocomplete="one-time-code" maxlength="12" required><button class="primary" name="action" value="buyer_verify">Verify buyer account</button></form>{% endif %}
 {% if buyer.connected %}
-<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="buyer_recheck">Check saved buyer connection</button><p><small>Verifies the saved account session without preparing a checkout or sending payment.</small></p></form>
 {% if telegram_review_mode %}
 <details class="guide-section" {{'open' if telegram_review and telegram_review.outcome == 'quoted' and not telegram_review.approved}}>
 <summary><b>Initial checkout checks</b></summary>

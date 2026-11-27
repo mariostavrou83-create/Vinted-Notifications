@@ -89,6 +89,10 @@ def create_app(test_config=None):
 
     @app.before_request
     def protect():
+        if request.endpoint in {"home_companion_pair", "home_companion_events"}:
+            # These write-only endpoints require their own owner-issued capability in their handler.
+            request.max_content_length = 65536
+            return None
         if request.endpoint == "research_feed":
             from research_trial_bridge import worker_authorized
 
@@ -998,8 +1002,9 @@ def create_app(test_config=None):
                     return redirect(url_for("connections"), code=303)
                 elif action == "seller_recheck":
                     import vinted_seller
-                    flash(vinted_seller.check_saved_connection(), "success")
-                    return redirect(url_for("connections"), code=303)
+                    vinted_seller.check_saved_connection()
+                    flash("Vinted verified your saved selling account.", "success")
+                    return redirect(url_for("connections", account="selling", _anchor="vinted-selling"), code=303)
                 elif action == "seller_session_records":
                     import vinted_seller
                     records = vinted_buyer.parse_browser_session_records(request.form.get("seller_session_records", ""))
@@ -1129,11 +1134,16 @@ def create_app(test_config=None):
                         action, exc.reason, exc.stage, exc.status
                     )
                 flash(str(exc), "error")
+                if action == "seller_recheck":
+                    return redirect(url_for("connections", account="selling", _anchor="vinted-selling"), code=303)
                 if action.startswith(("buyer_", "seller_")):
                     # Refreshing an error page must never resubmit credentials.
                     return redirect(url_for("connections"), code=303)
         return render_template(
             "msj_connections.html",
+            home_routing=__import__("home_routing_web").view_state(),
+            home_pairing=session.pop("home_pairing", None),
+            home_destination_pairing=session.pop("home_destination_pairing", None),
             home_discovery=__import__("vinted_home_controls").summary(),
             info=ebay_store.connection_summary(),
             resources=resource_controls.summary(),
@@ -1435,6 +1445,8 @@ def create_app(test_config=None):
     from research_trial_bridge import install as install_research_trial
 
     install_research_trial(app)
+    from home_routing_web import install as install_home_routing
+    install_home_routing(app)
     return app
 
 

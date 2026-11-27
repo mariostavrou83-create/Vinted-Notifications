@@ -37,6 +37,8 @@ def ensure_schema():
             "SELECT value FROM parameters WHERE key='msj_search_schema'"
         ).fetchone()
         if version and version[0] == SCHEMA_VERSION:
+            from home_routing_store import install_schema
+            install_schema(conn)
             return None
         directory = Path(db.DB_PATH).resolve().parent / "backups"
         directory.mkdir(mode=0o700, exist_ok=True)
@@ -50,6 +52,8 @@ def ensure_schema():
                 raise RuntimeError("Database backup failed integrity check")
         with conn:
             conn.execute("BEGIN IMMEDIATE")
+            from home_routing_store import migrate as migrate_home_routing
+            migrate_home_routing(conn)
             if version and version[0] in {"37", "38"}:
                 from vinted_accounts import account_scope
                 from vinted_connection_notices import migrate as migrate_notices
