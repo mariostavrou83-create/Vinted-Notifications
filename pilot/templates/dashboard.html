@@ -1,0 +1,55 @@
+{% extends 'base.html' %}
+{% block title %}Buying dashboard · Finder{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='pilot.js') }}" defer></script>
+<script src="{{ url_for('static', filename='delivery.js') }}" defer></script>
+<script src="{{ url_for('static', filename='extension-handoff.js') }}" defer></script>
+{% endblock %}
+{% block body %}
+{% set feed = alerts|default([], true) %}
+{% set links = telegram_linked|default(false) %}
+<a href="#main" class="skip">Skip to dashboard</a>
+<div class="shell">
+  <aside class="rail">
+    <a href="#alerts" class="wordmark" aria-label="Finder alerts">Finder<span>.</span></a>
+    <nav aria-label="Buyer dashboard">
+      <a href="#alerts" data-nav="alerts" aria-current="page"><i class="icon feed-icon" aria-hidden="true"></i>Alerts</a>
+      <a href="#searches" data-nav="searches"><i class="icon search-icon" aria-hidden="true"></i>Saved searches</a>
+      <a href="#preferences" data-nav="preferences"><i class="icon prefs-icon" aria-hidden="true"></i>Preferences</a>
+    </nav>
+    <div class="rail-user"><span class="avatar" aria-hidden="true">{{ user.username[:1]|upper }}</span><span>{{ user.username }}</span>
+      <form action="/logout" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="logout" type="submit">Sign out</button></form>
+    </div>
+  </aside>
+  <main id="main" tabindex="-1">
+    <div class="topline"><span>Buying dashboard</span><span class="market">Vinted UK</span></div>
+    <section id="alerts" data-view="alerts" aria-labelledby="alerts-title">
+      <div class="page-head"><div><h1 id="alerts-title">Alerts</h1><p class="lede">Your Home and saved-search matches.</p></div><a class="button primary" href="#new-search">Add search</a></div>
+      <div class="metrics">
+        <a href="#searches"><span>Saved searches</span><strong>{{ searches|length }}<small> / 100</small></strong></a>
+        <div><span>Profit target</span><strong>£15<small> or more</small></strong></div>
+        <a href="#account"><span>Telegram</span><strong class="metric-status">{{ 'Linked' if links else 'Set up' }} <i aria-hidden="true">↗</i></strong></a>
+      </div>
+      <div class="section-title"><h2>Latest alerts</h2><button type="button" class="refresh-button" id="refresh-alerts">Refresh</button></div>
+      <div id="alert-results">{% include 'alerts_fragment.html' %}</div>
+    </section>
+    <section id="searches" data-view="searches" hidden aria-labelledby="searches-title">
+      <div class="page-head"><div><h1 id="searches-title">Saved searches</h1><p class="lede">{{ searches|length }} of 100 searches used. Checks target a five-second repeat.</p></div>{% if searches|length < 100 %}<a class="button primary" href="#new-search">Add search</a>{% endif %}</div>
+      {% if searches %}
+      <div class="search-list">
+        {% for search in searches %}
+        <article class="search-card"><div class="search-info"><h3><a href="#search-{{ search.id }}">{{ search.name }}</a></h3><p>{% if search.budget %}Up to £{{ search.budget }}{% else %}Any budget{% endif %} · {{ 'Enabled' if search.enabled else 'Paused' }}</p>{% if search.include_keywords %}<div class="chips">{% for tag in search.include_keywords[:4] %}<span>{{ tag }}</span>{% endfor %}</div>{% endif %}</div><a class="button secondary" href="#search-{{ search.id }}">Edit<span class="sr"> {{ search.name }}</span></a></article>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="empty-state"><span class="empty-symbol" aria-hidden="true"><i class="icon search-icon"></i></span><h3>No searches yet</h3><p>Save a filtered Vinted link, give it a name and add any words or pictures you want to keep with it.</p><a class="button secondary" href="#new-search">Create your first search</a></div>
+      {% endif %}
+    </section>
+    {% include 'search_editor.html' %}
+    {% include 'preferences.html' %}
+    <p id="global-status" class="status-line" role="status" aria-live="polite"></p>
+  </main>
+</div>
+<script id="search-data" type="application/json">{{ searches|tojson }}</script>
+<noscript><p class="no-script">Enable JavaScript to edit preferences and saved searches.</p></noscript>
+{% endblock %}

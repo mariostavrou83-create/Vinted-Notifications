@@ -1,0 +1,56 @@
+<section id="preferences" data-view="preferences" hidden aria-labelledby="preferences-title">
+  <div class="page-head"><div><h1 id="preferences-title">Preferences</h1><p class="lede">Choose what reaches your feed and where your purchases go.</p></div></div>
+  <form id="settings-form" class="stack-form">
+    <section id="home-filters" class="panel stack-form">
+      <h2>Home filters</h2>
+      <div class="field-grid">
+        <label>Categories <small>Separate by comma. Leave blank for all.</small><input name="categories" value="{{ settings.categories|default([])|join(', ') }}" placeholder="Women, men, home"></label>
+        <label>Sizes <small>Separate by comma. Leave blank for all.</small><input name="sizes" value="{{ settings.sizes|default([])|join(', ') }}" placeholder="UK 8, UK 10"></label>
+      </div>
+      <div class="field-grid">
+        <label>Quiet hours start<input type="time" name="quiet_start" required value="{{ settings.quiet_start|default('23:00', true) }}"></label>
+        <label>Quiet hours end<input type="time" name="quiet_end" required value="{{ settings.quiet_end|default('07:00', true) }}"></label>
+      </div>
+      <p class="field-note">Quiet hours follow UK local time. Home checks target one second and only alert on listings under three minutes old.</p>
+    </section>
+    <section class="panel stack-form">
+      <h2>Delivery and AutoBuy</h2>
+      <label>Delivery method<select name="delivery_mode"><option value="pickup" {% if settings.delivery_mode != 'home' %}selected{% endif %}>Pickup point</option><option value="home" {% if settings.delivery_mode == 'home' %}selected{% endif %}>Home delivery</option></select></label>
+      <div id="delivery-selector" class="stack-form">
+        <div class="selected-place"><span id="selected-place-kind">Pickup point</span><strong id="selected-place-name">No pickup point selected</strong><small id="selected-place-summary"></small></div>
+        <div id="pickup-fields">
+          <label for="pickup-query">Find a shop or locker</label>
+          <div class="lookup-row"><input type="search" id="pickup-query" maxlength="100" placeholder="Enter a UK postcode or town"><button type="button" id="find-pickup" class="button secondary">Find pickup points</button></div>
+        </div>
+        <div id="home-address-field" hidden><button type="button" id="find-home-address" class="button secondary">Choose a saved address</button></div>
+        <p id="destination-status" class="field-note" role="status" aria-live="polite" hidden></p>
+        <div id="destination-results" class="destination-results" aria-label="Delivery choices"></div>
+        <input type="hidden" name="pickup_id" value="{{ settings.pickup_id|default('',true) }}">
+        <input type="hidden" name="home_address_ref" value="{{ settings.home_address_ref|default('',true) }}">
+        <div id="courier-settings">
+          <label>Preferred courier<select name="preferred_courier"><option value="">Choose a delivery location first</option></select></label>
+          <label class="check" id="same-shop-label"><input type="checkbox" name="allow_same_shop_fallback" {% if settings.allow_same_shop_fallback %}checked{% endif %}> Allow another courier at this pickup point</label>
+          <fieldset id="fallback-couriers" hidden><legend>Allowed alternative couriers</legend><div id="courier-options"></div></fieldset>
+        </div>
+      </div>
+      <div class="field-grid three">
+        <label>Max. item price (£)<input type="number" min=".01" step=".01" name="max_item_price" value="{{ settings.max_item_price|default('',true) }}" placeholder="Optional"></label>
+        <label>Max. shipping (£)<input type="number" min="0" step=".01" name="max_shipping" value="{{ settings.max_shipping|default('4.99') }}"></label>
+        <label>Max. total (£)<input type="number" min=".01" step=".01" name="max_total" value="{{ settings.max_total|default('',true) }}" placeholder="Optional"></label>
+      </div>
+      <p class="field-note">One tap can place an order within your saved limits. A change of pickup point needs confirmation.</p>
+    </section>
+    <p class="form-error" role="alert" data-error hidden></p>
+    <div class="actions"><button type="submit" class="button primary">Save preferences</button></div>
+  </form>
+  <section id="account" class="panel account-panel">
+    <h2>Connected accounts</h2>
+    <div class="account-line"><div><h3>Vinted buying account</h3><p id="buyer-account-status" class="muted">Checking connection…</p><p id="extension-profile-hint" hidden>Selected in Chrome: <output id="extension-profile-name"></output></p></div><div><button type="button" class="button secondary" id="connect-buyer-account" hidden>Connect account</button><button type="button" class="button secondary" id="disconnect-buyer-account" hidden>Disconnect</button></div></div>
+    <details class="extension-install"><summary>Set up the Chrome extension</summary><p><a href="/extension/download">Download Chrome extension</a>. Extract the ZIP, enable Developer mode at Chrome Extensions, then select <b>Load unpacked</b> and choose the extracted folder.</p></details>
+    <div class="account-line"><div><h3>Telegram</h3><p class="muted">{{ 'Linked for private buying alerts.' if links else 'Link your own chat for buying alerts and AutoBuy.' }}</p></div>{% if not links %}<button type="button" id="link-telegram" class="button secondary">Link Telegram</button>{% endif %}</div>
+    <p role="alert" class="form-error" id="telegram-error" hidden></p>
+    <p id="telegram-invite" hidden><a class="button secondary" rel="noopener noreferrer" target="_blank">Open Telegram</a> <span class="muted">Link expires in 10 minutes.</span></p>
+  </section>
+</section>
+
+<script id="delivery-state" type="application/json">{{ settings|tojson }}</script>

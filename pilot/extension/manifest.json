@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "Finder · Vinted account selector",
+  "version": "0.1.0",
+  "description": "Select your visible Vinted UK profile and continue to your private Finder pilot.",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "action": { "default_title": "Connect to Finder", "default_popup": "popup.html" }
+}

@@ -1,0 +1,28 @@
+name: finder-invite-pilot
+x-pilot: &pilot
+  build: .
+  image: finder-invite-pilot:local
+  restart: unless-stopped
+  volumes:
+    - data:/data
+  env_file:
+    - path: .env
+      required: false
+services:
+  web:
+    <<: *pilot
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8080/healthz', timeout=4).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  worker:
+    <<: *pilot
+    command: ["flask", "--app", "pilot.app:create_app", "worker"]
+    depends_on:
+      web:
+        condition: service_healthy
+volumes:
+  data:

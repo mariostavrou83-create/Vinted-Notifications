@@ -1,0 +1,19 @@
+<section data-view="editor" hidden aria-labelledby="editor-title">
+  <a class="back" href="#searches">← Saved searches</a>
+  <div class="page-head"><div><h1 id="editor-title">Add search</h1><p class="lede">Use a filtered UK Vinted link as your starting point.</p></div></div>
+  <form id="search-form" class="panel stack-form" enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Search name<input name="name" required placeholder="e.g. Fitted leather jackets" autocomplete="off"></label>
+    <label>Filtered Vinted URL<input type="url" name="url" required placeholder="https://www.vinted.co.uk/catalog?…"></label>
+    <div class="field-grid">
+      <label>Keywords <small>Up to 20 alternatives, one per line.</small><textarea name="include_keywords" rows="4"></textarea></label>
+      <label>Excluded words <small>Skip titles containing these phrases. One per line.</small><textarea name="exclude_keywords" rows="4"></textarea></label>
+    </div>
+    <label>Maximum total (£) <span class="optional">Optional</span><input type="number" name="budget" min="0.01" step=".01" inputmode="decimal" placeholder="Any budget"></label>
+    <label>Reference pictures <small>Up to eight pictures appear below matching Telegram alerts. JPEG, PNG or WebP, up to 5 MB each.</small><input type="file" name="photos" multiple accept="image/jpeg,image/png,image/webp"></label>
+    <div id="existing-photos" class="photo-grid"></div>
+    <label class="check"><input type="checkbox" name="enabled" checked> Search active</label>
+    <p class="form-error" role="alert" data-error hidden></p>
+    <div class="actions"><button type="submit" class="button primary" id="save-search">Save search</button><a class="button secondary" href="#searches">Cancel</a><button type="button" id="delete-search" class="text-danger" hidden>Delete search</button></div>
+  </form>
+</section>

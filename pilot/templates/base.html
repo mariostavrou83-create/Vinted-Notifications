@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <title>{% block title %}Finder{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='pilot.css') }}">
+  {% block scripts %}{% endblock %}
+</head>
+<body>{% block body %}{% endblock %}</body>
+</html>

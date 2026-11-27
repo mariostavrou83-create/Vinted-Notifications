@@ -1,0 +1,32 @@
+{% set feed = alerts|default([], true) %}
+      {% if feed %}
+      <div class="feed-list">
+        {% for alert in feed %}
+        {% set valuation = alert.valuation %}
+        <article class="feed-card" data-alert-id="{{ alert.id }}">
+          <div class="alert-source">{{ 'Vinted Home' if alert.source|lower == 'home' else 'Saved search' }}</div>
+          <h3><a href="{{ alert.listing_url }}" rel="noopener noreferrer" target="_blank">{{ alert.title }}</a></h3>
+          <dl class="figures">
+            {% if alert.item_price_pence is number %}<div><dt>Item price</dt><dd>£{{ '%.2f'|format(alert.item_price_pence/100) }}</dd></div>{% endif %}
+            {% if alert.total_pence is number %}<div><dt>Est. total</dt><dd>£{{ '%.2f'|format(alert.total_pence/100) }}</dd></div>{% endif %}
+            {% if valuation and valuation.resale_pence is number %}<div><dt>Est. resale</dt><dd>£{{ '%.2f'|format(valuation.resale_pence/100) }}</dd></div>{% endif %}
+            {% if valuation and valuation.profit_pence is number %}<div><dt>Est. profit</dt><dd>£{{ '%.2f'|format(valuation.profit_pence/100) }}</dd></div>{% endif %}
+          </dl>
+          {% if valuation %}
+            {% if valuation.status == 'insufficient' %}<p class="muted">{{ 'Insufficient comparable evidence.' if valuation.evidence else 'No close matches found.' }}</p>{% elif valuation.meets_target %}<p class="profit-tag">Meets your £15 profit target</p>{% elif valuation.meets_target is sameas false %}<p class="muted">Below your £15 profit target</p>{% endif %}
+            {% if valuation.explanation %}<p class="muted">{{ valuation.explanation }}</p>{% endif %}
+            {% if valuation.evidence %}<details class="evidence"><summary>Comparable listings ({{ valuation.evidence|length }})</summary><ul>{% for comp in valuation.evidence %}<li><a href="{{ comp.url }}" target="_blank" rel="noopener noreferrer">{{ comp.title }}</a> · £{{ '%.2f'|format(comp.ask_pence/100) }}{% if comp.reason %}<small>{{ comp.reason }}</small>{% endif %}</li>{% endfor %}</ul></details>{% endif %}
+            {% if valuation.exclusions %}<details class="evidence"><summary>Excluded comparisons</summary><ul>{% for reason, count in valuation.exclusions.items() %}<li>{{ reason }} ({{ count }})</li>{% endfor %}</ul></details>{% endif %}
+          {% else %}<p class="muted">Resale estimate pending.</p>{% endif %}
+          {% if alert.order_status %}<p class="order-status">Order status: {{ alert.order_status|replace('_',' ') }}</p>{% endif %}
+        </article>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="empty-state">
+        <span class="empty-symbol" aria-hidden="true"><i class="icon feed-icon"></i></span>
+        <h3>No alerts yet</h3>
+        <p>Choose your Home filters or save a search. New matches appear here when your feed is connected.</p>
+        <a class="button secondary" href="#preferences">Set Home filters</a>
+      </div>
+      {% endif %}
