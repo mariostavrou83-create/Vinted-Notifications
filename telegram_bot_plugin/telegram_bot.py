@@ -96,6 +96,10 @@ class LeRobot:
                 filters=filters.ChatType.PRIVATE & filters.Regex(r"^/start(?:@\w+)?\s+purchase_status\s*\Z"),
             ))
             self.app.add_handler(CommandHandler(
+                ("dashboard", "purchase_status"), shared.open_private_control,
+                filters=filters.ChatType.GROUPS,
+            ))
+            self.app.add_handler(CommandHandler(
                 "start", shared.share_command, filters=filters.ChatType.GROUPS & filters.Regex(shared.GROUP_START)
             ))
             self.app.add_handler(CommandHandler("share_alerts", shared.share_command))
@@ -143,7 +147,7 @@ class LeRobot:
     async def control_alerts(self, update, context):
         chat = update.effective_chat
         user = update.effective_user
-        if chat is None or chat.type != "private" or user is None or chat.id != user.id:
+        if not shared.owner_control_chat(chat, user):
             return
         command = update.effective_message.text.split(maxsplit=1)[0][1:].split("@")[0].lower()
         source, paused, _ = alert_controls.COMMANDS[command]
@@ -568,15 +572,11 @@ class LeRobot:
     async def set_commands(self, context: ContextTypes.DEFAULT_TYPE):
         try:
             chat_id = str(db.get_parameter("telegram_chat_id") or "").strip()
-            commands = [("dashboard", "Open your search dashboard")]
             if chat_id.isdigit() and int(chat_id) > 0:
-                commands.append(("purchase_status", "Check or confirm a purchase"))
-                commands.extend((command, label) for command, (_, _, label) in alert_controls.COMMANDS.items())
-                commands.extend([("share_alerts", "Set up shared alerts and Autobuy"), ("stop_sharing", "Stop shared alerts and Autobuy")])
-                await context.bot.set_my_commands(commands, scope=BotCommandScopeChat(int(chat_id)))
+                await context.bot.set_my_commands(shared.OWNER_COMMANDS, scope=BotCommandScopeChat(int(chat_id)))
+                logger.info("Bot commands set successfully; alert_controls=%s shared_controls=True", len(alert_controls.COMMANDS))
             else:
-                await context.bot.set_my_commands(commands)
-            logger.info("Bot commands set successfully; alert_controls=%s shared_controls=%s",
-                        len(alert_controls.COMMANDS) if len(commands) > 1 else 0, len(commands) > 1)
+                await context.bot.set_my_commands(shared.OWNER_COMMANDS[:1])
+                logger.info("Bot commands set successfully; alert_controls=0 shared_controls=False")
         except Exception:
             logger.exception("Error setting bot commands")

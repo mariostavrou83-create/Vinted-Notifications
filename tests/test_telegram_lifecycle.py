@@ -235,6 +235,35 @@ class TelegramLifecycleTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
                     await self.app.process_update(self.command_update(command, -321, user))
                 reply.assert_not_awaited()
 
+    async def test_linked_group_owner_can_use_dashboard_and_alert_controls(self):
+        import alert_controls
+        import telegram_shared_alerts as shared
+
+        self.assertIsNotNone(shared.save_group(-321, 123, 456))
+        alert_controls.set_paused("all", False)
+        with patch.object(Message, "reply_text", new_callable=AsyncMock) as reply:
+            for chat, actor in ((-321, 456), (-432, 123)):
+                for command in ("dashboard", "purchase_status", "pause_all", "stop_sharing"):
+                    await self.app.process_update(self.command_update(f"/{command}@TestFinderBot", chat, actor))
+                reply.assert_not_awaited()
+                self.assertFalse(alert_controls.state("home").paused)
+                self.assertIsNotNone(shared.current())
+
+            for command in ("dashboard", "purchase_status"):
+                await self.app.process_update(self.command_update(f"/{command}@TestFinderBot", -321, 123))
+                self.assertIn("private Finder chat", reply.await_args.args[0])
+                button = reply.await_args.kwargs["reply_markup"].inline_keyboard[0][0]
+                self.assertEqual(button.url, f"https://t.me/TestFinderBot?start={command}")
+
+            await self.app.process_update(self.command_update("/pause_home@TestFinderBot", -321, 123))
+            self.assertTrue(alert_controls.state("home").paused)
+            self.assertFalse(alert_controls.state("search").paused)
+            await self.app.process_update(self.command_update("/resume_all@TestFinderBot", -321, 123))
+            self.assertFalse(alert_controls.state("home").paused)
+            await self.app.process_update(self.command_update("/stop_sharing@TestFinderBot", -321, 123))
+            self.assertIn("group Autobuy are off", reply.await_args.args[0])
+            self.assertIsNone(shared.current())
+
     async def test_owner_can_answer_purchase_status_while_automatic_checks_are_running(self):
         import vinted_buying as buying
 

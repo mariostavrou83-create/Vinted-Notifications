@@ -8,6 +8,8 @@ from contextlib import closing
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from telegram import BotCommandScopeChatMember
+
 import alert_controls
 import alert_delivery
 import telegram_shared_alerts as shared
@@ -81,6 +83,26 @@ class SharedAlertTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         group = await self.activate()
         self.assertEqual((group.owner, group.partner), (123, 456))
         self.assertFalse(shared.member(group, self.chat, person(789)))
+
+    async def test_shared_worker_installs_the_owner_menu_and_removes_it_after_unlink(self):
+        group = await self.activate()
+        installed, removed = asyncio.Event(), asyncio.Event()
+        self.bot.bot = SimpleNamespace(can_join_groups=True)
+        self.bot.set_my_commands = AsyncMock(side_effect=lambda *args, **kwargs: installed.set())
+        self.bot.delete_my_commands = AsyncMock(side_effect=lambda **kwargs: removed.set())
+        worker = asyncio.create_task(shared.run(self.bot))
+        try:
+            await asyncio.wait_for(installed.wait(), 2)
+            scope = self.bot.set_my_commands.await_args.kwargs["scope"]
+            self.assertEqual(scope, BotCommandScopeChatMember(group.chat, group.owner))
+            self.assertEqual(self.bot.set_my_commands.await_args.args[0], shared.OWNER_COMMANDS)
+            shared.unlink(group.version)
+            await asyncio.wait_for(removed.wait(), 2)
+            self.assertEqual(self.bot.delete_my_commands.await_args.kwargs["scope"], scope)
+        finally:
+            worker.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await worker
 
     async def test_shared_alert_reuses_the_photo_and_uses_only_group_buttons(self):
         group = await self.ready()

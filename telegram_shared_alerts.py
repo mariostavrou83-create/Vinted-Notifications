@@ -9,7 +9,7 @@ from contextlib import closing
 from typing import NamedTuple
 from uuid import uuid4
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
+from telegram import BotCommandScopeChatMember, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from telegram.error import BadRequest, ChatMigrated, Forbidden, RetryAfter, TelegramError
 
 import alert_controls
@@ -28,6 +28,17 @@ SETUP_COMMAND = re.compile(r"^/share_alerts(?:@\w+)?\s*$", re.I)
 JOIN_COMMAND = re.compile(r"^/join_alerts(?:@\w+)?\s*\Z", re.I)
 GROUP_START = re.compile(r"^/start(?:@\w+)?\s+shared_alerts\s*\Z", re.I)
 PRIVATE_COMMAND = re.compile(r"^/(start|share_alerts|purchase_status)(?:@(\w+))?\Z", re.I)
+OWNER_COMMANDS = [
+    ("dashboard", "Open your search dashboard"),
+    ("purchase_status", "Check or confirm a purchase"),
+    *((command, label) for command, (_, _, label) in alert_controls.COMMANDS.items()),
+    ("share_alerts", "Set up shared alerts and Autobuy"),
+    ("stop_sharing", "Stop shared alerts and Autobuy"),
+]
+OWNER_COMMAND = re.compile(
+    r"^/(?:" + "|".join(command for command, _ in OWNER_COMMANDS) + r")(?:@\w+)?\s*\Z",
+    re.I,
+)
 
 
 class Group(NamedTuple):
@@ -128,6 +139,17 @@ def member(group, chat, sender):
                 and chat.id == group.chat and not sender.is_bot and sender.id in (group.owner, group.partner))
 
 
+def owner_control_chat(chat, user):
+    if not chat or not user or user.is_bot:
+        return False
+    if chat.type == "private":
+        from vinted_owner_controls import private_owner
+
+        return chat.id == user.id and private_owner(user.id)
+    group = current()
+    return bool(group and chat.type in GROUP_TYPES and (chat.id, user.id) == (group.chat, group.owner))
+
+
 def membership_message(message):
     return bool(message and (message.new_chat_members or message.left_chat_member or message.migrate_to_chat_id))
 
@@ -142,6 +164,8 @@ def allowed_update(update, owner):
     if message and sender and str(sender.id) == owner:
         if SETUP_COMMAND.fullmatch(message.text or "") or GROUP_START.fullmatch(message.text or ""):
             return True
+        if OWNER_COMMAND.fullmatch(message.text or ""):
+            return owner_control_chat(chat, sender)
     if membership_message(message):
         return True
     query = update.callback_query
@@ -155,6 +179,33 @@ def allowed_update(update, owner):
 async def private_group(bot, chat_id):
     chat, count = await asyncio.gather(bot.get_chat(chat_id), bot.get_chat_member_count(chat_id))
     return chat.type in GROUP_TYPES and not chat.username and not getattr(chat, "active_usernames", None) and count == 3
+
+
+async def update_group_menu(bot, group, *, clear=False):
+    scope = BotCommandScopeChatMember(group.chat, group.owner)
+    try:
+        if clear:
+            await bot.delete_my_commands(scope=scope, **photo_cards.TIMEOUTS)
+        else:
+            await bot.set_my_commands(OWNER_COMMANDS, scope=scope, **photo_cards.TIMEOUTS)
+            logger.info("Telegram shared owner command menu ready")
+    except TelegramError as exc:
+        logger.info("Telegram shared owner command menu deferred: %s", type(exc).__name__)
+        return False
+    return True
+
+
+async def open_private_control(update, context):
+    chat, user = update.effective_chat, update.effective_user
+    if not owner_control_chat(chat, user):
+        return
+    command = update.effective_message.text.split(maxsplit=1)[0][1:].split("@")[0].lower()
+    label = "Open dashboard" if command == "dashboard" else "Check purchase status"
+    button = InlineKeyboardButton(label, url=f"https://t.me/{context.bot.username}?start={command}")
+    await update.effective_message.reply_text(
+        "Open this in your private Finder chat.",
+        reply_markup=InlineKeyboardMarkup([[button]]),
+    )
 
 
 async def group_setup_error(bot, chat_id):
@@ -199,7 +250,10 @@ async def private_setup_help(update, context):
     if command[2] and command[2].lower() != context.bot.username.lower():
         return
     name = command[1].lower()
-    if len(words) > 1 and (name != "start" or words[1] != "purchase_status"):
+    if len(words) > 1 and (name != "start" or words[1] not in {"purchase_status", "dashboard"}):
+        return
+    if len(words) > 1 and words[1] == "dashboard":
+        await update.message.reply_text("The Finder account owner can open the search dashboard from their private chat.")
         return
     if name == "purchase_status" or len(words) > 1:
         await update.message.reply_text(
@@ -337,13 +391,10 @@ async def approve_join(update, context):
 
 async def stop_command(update, context):
     message, user = update.message, update.effective_user
-    if not message or not user or message.chat.type != "private" or message.chat.id != user.id:
+    if not message or not owner_control_chat(message.chat, user):
         return
-    from vinted_owner_controls import private_owner
-
-    if private_owner(user.id):
-        unlink()
-        await message.reply_text("Shared alerts and group Autobuy are off.")
+    unlink()
+    await message.reply_text("Shared alerts and group Autobuy are off.")
 
 
 async def members_changed(update, context):
@@ -492,10 +543,15 @@ async def send(bot, group, row):
 async def run(bot):
     logger.info("Telegram shared alerts ready; can_join_groups=%s", getattr(bot.bot, "can_join_groups", None))
     verified, verify_at = None, 0
+    menu_group = None
     while True:
         try:
             group = current()
+            if menu_group and menu_group != group:
+                await update_group_menu(bot, menu_group, clear=True)
+                menu_group = None
             if not group:
+                verified = None
                 await asyncio.sleep(2)
                 continue
             now = time.time()
@@ -504,6 +560,8 @@ async def run(bot):
                     await suspend(bot, group)
                     continue
                 verified, verify_at = group, now + 60
+                if menu_group != group and await update_group_menu(bot, group):
+                    menu_group = group
             row = claim(group, now)
             if row:
                 await send(bot, group, row)
