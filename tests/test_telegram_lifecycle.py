@@ -27,7 +27,7 @@ class OfflineRequest(BaseRequest):
         api_method = url.rsplit("/", 1)[-1]
         self.methods.append(api_method)
         if api_method == "getMe":
-            result = {"id": 123456, "is_bot": True, "first_name": "Offline bot"}
+            result = {"id": 123456, "is_bot": True, "first_name": "Offline bot", "username": "TestFinderBot"}
         elif api_method == "setMyCommands":
             result = True
         else:
@@ -112,6 +112,68 @@ class TelegramLifecycleTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(worker.started.wait(), timeout=1)
         await asyncio.wait_for(worker.photo_started.wait(), timeout=1)
         return worker
+
+    def command_update(self, text, chat_id, sender, *, reply_author=None):
+        chat = {"id": chat_id, "type": "private" if chat_id > 0 else "group"}
+        message = {
+            "message_id": 900, "date": 1, "chat": chat,
+            "from": {"id": sender, "is_bot": False, "first_name": "Test user"},
+            "text": text, "entities": [{"type": "bot_command", "offset": 0, "length": len(text.split()[0])}],
+        }
+        if reply_author is not None:
+            message["reply_to_message"] = {
+                "message_id": 899, "date": 1, "chat": chat, "text": "Hi",
+                "from": {"id": reply_author, "is_bot": False, "first_name": "Partner"},
+            }
+        return Update.de_json({"update_id": 1, "message": message}, self.app.bot)
+
+    async def test_two_accounts_pair_from_telegram_group_link_and_owner_reply(self):
+        import telegram_shared_alerts as shared
+
+        with (
+            patch.object(Message, "reply_text", new_callable=AsyncMock) as response,
+            patch.object(shared, "private_group", new_callable=AsyncMock, return_value=True) as verify,
+        ):
+            for command in ("/start", "/share_alerts@TestFinderBot"):
+                await self.app.process_update(self.command_update(command, 456, 456))
+                self.assertIn("Ask the person who already receives Finder alerts", response.await_args.args[0])
+                self.assertIsNone(shared.current())
+                response.reset_mock()
+            for command in ("/start", "/share_alerts"):
+                await self.app.process_update(self.command_update(command, 123, 123))
+                link = response.await_args.kwargs["reply_markup"].inline_keyboard[0][0].url
+                self.assertEqual(link, "https://t.me/TestFinderBot?startgroup=shared_alerts")
+                response.reset_mock()
+
+            await self.app.process_update(self.command_update("/start@TestFinderBot shared_alerts", -321, 123))
+            self.assertIn("/share_alerts@TestFinderBot", response.await_args.args[0])
+            self.assertIsNone(shared.current())
+            response.reset_mock()
+            await self.app.process_update(self.command_update("/share_alerts@TestFinderBot", -321, 456, reply_author=123))
+            response.assert_not_awaited()
+            verify.assert_not_awaited()
+            await self.app.process_update(self.command_update("/share_alerts@TestFinderBot", -321, 123, reply_author=456))
+            self.assertIn("Shared alerts are on", response.await_args.args[0])
+            self.assertEqual(shared.current()[:3], (-321, 123, 456))
+            verify.assert_awaited_once_with(self.app.bot, -321)
+            await self.app.process_update(self.command_update("/start", 456, 456))
+            self.assertIn("already linked", response.await_args.args[0])
+
+    async def test_private_purchase_status_deep_link_keeps_guests_and_groups_out(self):
+        from vinted_owner_controls import purchase_status_command
+
+        for command in ("/purchase_status", "/start purchase_status"):
+            owner_update = self.command_update(command, 123, 123)
+            handler = next(h for h in self.app.handlers[0] if h.check_update(owner_update))
+            self.assertIs(handler.callback, purchase_status_command)
+            with patch.object(Message, "reply_text", new_callable=AsyncMock) as reply:
+                await self.app.process_update(self.command_update(command, 456, 456))
+                self.assertIn("Only the account owner", reply.await_args.args[0])
+                self.assertFalse(reply.await_args.kwargs)
+                reply.reset_mock()
+                for user in (123, 456):
+                    await self.app.process_update(self.command_update(command, -321, user))
+                reply.assert_not_awaited()
 
     async def test_real_ptb_stop_finishes_with_active_worker_and_cancels_photos(self):
         worker = await self.start_worker()

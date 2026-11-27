@@ -128,15 +128,62 @@ async def confirm_reminder(update, context):
             logger.info("Purchase reminder edit unavailable: %s", type(exc).__name__)
 
 
-def pending_other(item_id):
+def pending_attempt(item_id=None, *, exclude=False):
+    """Read an exact pending payment or the first one blocking a new purchase."""
+    where, args = "", ()
+    if item_id is not None:
+        where = " AND a.item_id<>?" if exclude else " AND a.item_id=?"
+        args = (str(item_id),)
     with closing(connection()) as conn:
         saved = conn.execute(
-            "SELECT * FROM vinted_buy_attempts WHERE item_id<>? "
-            "AND state IN ('paying','unknown','needs_action') "
-            "ORDER BY updated,item_id LIMIT 1",
-            (str(item_id),),
+            "SELECT a.item_id,a.state,a.updated,w.item_id IS NOT NULL AS watching, "
+            "COALESCE(w.title,(SELECT o.title FROM alert_outbox o WHERE o.platform='vinted' "
+            "AND o.item_id=a.item_id ORDER BY o.found_at DESC LIMIT 1)) AS title FROM vinted_buy_attempts a "
+            "LEFT JOIN vinted_payment_watch w ON w.item_id=a.item_id AND w.checkout_id=a.checkout_id "
+            "WHERE a.state IN ('paying','unknown','needs_action')" + where +
+            " ORDER BY a.updated,a.item_id LIMIT 1", args,
         ).fetchone()
     return dict(saved) if saved else None
+
+
+def pending_other(item_id):
+    return pending_attempt(item_id, exclude=True)
+
+
+def purchase_prompt(saved):
+    """Pair the question and controls from the same durable attempt."""
+    if not saved:
+        return "There are no purchases awaiting confirmation.", None
+    item = str(saved["item_id"])
+    label = f"item {item}" if re.fullmatch(r"[0-9]{1,24}", item) else "the earlier item"
+    title = " ".join(str(saved.get("title") or "").split())[:90]
+    heading = title + "\n" if title else ""
+    if saved.get("watching"):
+        return (
+            heading + f"Finder is checking the payment for {label} automatically for up to an hour. "
+            "If your bank requests approval, open the payment check on the original alert. "
+            "You can check again with /purchase_status.", None
+        )
+    offer = descriptor(saved)
+    if offer:
+        return (
+            heading + f"Did you get item {item}? Check that exact item in Vinted Purchases "
+            "and any pending bank payment, then choose below.", offer
+        )
+    return heading + f"The payment for {label} is still unconfirmed. Check its original payment status in Finder. Use /purchase_status for an update.", None
+
+
+async def purchase_status_command(update, context):
+    """Recover the current decision even if the original alert is missing."""
+    chat, user = update.effective_chat, update.effective_user
+    if not chat or chat.type != "private" or not user or chat.id != user.id or not private_owner(chat.id):
+        return
+    saved = await asyncio.to_thread(pending_attempt)
+    text, offer = purchase_prompt(saved)
+    rows = reminder_rows(offer)
+    await update.effective_message.reply_text(
+        text, reply_markup=InlineKeyboardMarkup(rows) if rows else None, **photo_cards.TIMEOUTS
+    )
 
 
 def descriptor(saved):
@@ -161,37 +208,25 @@ def descriptor(saved):
 
 def with_offer(row, outcome):
     """Bind displayed decisions to an exact saved item and state version."""
-    import vinted_buying as buying
-
-    offer = None
-    if outcome.get("state") in ("unknown", "needs_action"):
-        offer = descriptor(buying.result(str(row["item_id"])))
-    elif outcome.get("reason") == "earlier_payment_uncertain":
-        offer = descriptor(pending_other(row["item_id"]))
-    if offer:
-        with closing(connection()) as conn:
-            if conn.execute("SELECT 1 FROM vinted_payment_watch WHERE item_id=?", (offer["item_id"],)).fetchone():
-                offer = None
     result = dict(outcome)
     result.pop("owner_resolution", None)
+    blocked = outcome.get("reason") == "earlier_payment_uncertain"
+    if blocked:
+        saved = pending_other(row["item_id"])
+    elif outcome.get("state") in ("unknown", "needs_action"):
+        saved = pending_attempt(row["item_id"])
+    else:
+        return result
+    prompt, offer = purchase_prompt(saved)
     if offer:
-        message = (outcome.get("message") or "Payment remains unconfirmed.").split(
-            "\n\nDid you get item "
-        )[0]
-        if outcome.get("reason") == "earlier_payment_uncertain" and outcome.get(
-            "state"
-        ) in ("setup_required", "failed_before_payment"):
-            # Historical blocked alerts can name a payment already resolved.
-            # Show the current exact blocker, rather than two different items.
-            message = f"An earlier payment for item {offer['item_id']} needs your confirmation. No payment was started for this alert."
         result["owner_resolution"] = offer
-        result["message"] = (
-            message
-            + f"\n\nDid you get item {offer['item_id']}? Check that exact item in "
-            "Vinted Purchases and any pending bank payment, then choose below. "
-            "Your choice clears this item's block on new purchases. "
-            "This item will never be bought again by these buttons."
-        )
+    if blocked and outcome.get("state") in ("setup_required", "failed_before_payment"):
+        result["message"] = "No payment was started for this alert. " + prompt
+    elif offer:
+        message = outcome.get("message") or "Payment remains unconfirmed."
+        if outcome.get("owner_resolution"):
+            message = message.split("\n\n", 1)[0]
+        result["message"] = message + "\n\n" + prompt
     return result
 
 

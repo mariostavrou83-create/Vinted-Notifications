@@ -22,6 +22,8 @@ KEY = "telegram_shared_alert_group"
 GROUP_TYPES = {"group", "supergroup"}
 BUY_PATTERN = r"^shared:(?:buy|status|stop:[0-9a-f]{16})$"
 SETUP_COMMAND = re.compile(r"^/share_alerts(?:@\w+)?\s*$", re.I)
+GROUP_START = re.compile(r"^/start(?:@\w+)?\s+shared_alerts\s*\Z", re.I)
+PRIVATE_COMMAND = re.compile(r"^/(start|share_alerts|purchase_status)(?:@(\w+))?\Z", re.I)
 
 
 class Group(NamedTuple):
@@ -99,8 +101,9 @@ def allowed_update(update, owner):
     if getattr(chat, "type", None) not in GROUP_TYPES:
         return False
     message, sender = update.message, update.effective_user
-    if message and sender and str(sender.id) == owner and SETUP_COMMAND.fullmatch(message.text or ""):
-        return True
+    if message and sender and str(sender.id) == owner:
+        if SETUP_COMMAND.fullmatch(message.text or "") or GROUP_START.fullmatch(message.text or ""):
+            return True
     group = current()
     if not group or group.chat != chat.id:
         return False
@@ -115,6 +118,42 @@ async def private_group(bot, chat_id):
     return chat.type in GROUP_TYPES and not chat.username and not getattr(chat, "active_usernames", None) and count == 3
 
 
+def add_group_button(username):
+    return InlineKeyboardMarkup([[InlineKeyboardButton(
+        "Add Finder to your group", url=f"https://t.me/{username}?startgroup=shared_alerts"
+    )]])
+
+
+async def private_setup_help(update, context):
+    chat = update.effective_chat
+    if getattr(chat, "type", None) != "private" or not update.message:
+        return
+    user = update.effective_user
+    words = (update.message.text or "").strip().split(maxsplit=1)
+    command = PRIVATE_COMMAND.fullmatch(words[0]) if words else None
+    if not user or user.is_bot or user.id != chat.id or not command:
+        return
+    if command[2] and command[2].lower() != context.bot.username.lower():
+        return
+    name = command[1].lower()
+    if len(words) > 1 and (name != "start" or words[1] != "purchase_status"):
+        return
+    if name == "purchase_status" or len(words) > 1:
+        await update.message.reply_text(
+            "Only the account owner can review a payment. Ask them to open Purchase status in their private Finder chat."
+        )
+        return
+    group = current()
+    if group and group.partner == user.id:
+        await update.message.reply_text("You're already linked. Open your shared group for new Finder alerts and Autobuy.")
+        return
+    await update.message.reply_text(
+        "Shared alerts and Autobuy work in your private group. "
+        "Ask the person who already receives Finder alerts to add Finder to the group. "
+        "Send a message there so they can reply to it and give you access."
+    )
+
+
 async def share_command(update, context):
     message, user = update.message, update.effective_user
     import db
@@ -126,11 +165,10 @@ async def share_command(update, context):
     username = context.bot.username
     if chat.type == "private" and str(chat.id) == owner:
         await message.reply_text(
-            "Create a private group with the person you want to buy with. Add Finder to that group, then ask them to send a message. "
-            f"Reply to their message in the group with /share_alerts@{username} to give both of you Autobuy.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
-                "Add Finder to your group", url=f"https://t.me/{username}?startgroup=shared_alerts"
-            )]]),
+            "Tap the button and choose the private group you share with your buying partner. "
+            "Confirm adding Finder. The group should then show three members, including Finder. "
+            "Your partner can use their own Telegram account.",
+            reply_markup=add_group_button(username),
         )
         return
     if chat.type not in GROUP_TYPES:
@@ -138,10 +176,15 @@ async def share_command(update, context):
     reply = message.reply_to_message
     partner = reply.from_user if reply else None
     if (
-        not partner or partner.is_bot or partner.id == user.id or reply.chat.id != chat.id
+        GROUP_START.fullmatch(message.text or "") or not partner or partner.is_bot or partner.id == user.id or reply.chat.id != chat.id
         or reply.forward_origin or reply.sender_chat
     ):
-        await message.reply_text("Reply to a message sent in this group by the person you want to give Autobuy.")
+        await message.reply_text(
+            "Ask your buying partner to send a message in this group. "
+            "From the account that already receives Finder alerts, press and hold their message, "
+            "tap Reply, and send this command on one line to give them alerts and Autobuy:\n\n"
+            f"/share_alerts@{username}"
+        )
         return
     try:
         valid = await private_group(context.bot, chat.id)

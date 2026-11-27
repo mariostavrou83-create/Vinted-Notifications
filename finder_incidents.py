@@ -65,8 +65,10 @@ def write(conn, key, data):
     )
 
 
-def enqueue(conn, key, kind, message, now, *, target="alerts"):
+def enqueue(conn, key, kind, message, now, *, target="alerts", review_item=None):
     value = {"kind": kind, "text": message, "at": now, "due": now, "target": target}
+    if review_item is not None:
+        value["review_item"] = review_item
     conn.execute(
         "INSERT OR IGNORE INTO parameters(key,value) VALUES(?,?)",
         (PREFIX + key, json.dumps(value, ensure_ascii=False)),
@@ -104,7 +106,14 @@ def buy_failure(row, outcome, callback_id):
                 or conn.execute("SELECT 1 FROM parameters WHERE key=?", (PREFIX + f"payment_{row['item_id']}_{outcome['checkout_id']}_action",)).fetchone()
             ):
                 return
-            enqueue(conn, key, "autobuy", message, time.time(), target=target)
+            review = None
+            if reason == "earlier_payment_uncertain" or outcome["state"] in ("unknown", "needs_action"):
+                from vinted_owner_controls import pending_attempt
+
+                pending = pending_attempt(row["item_id"], exclude=reason == "earlier_payment_uncertain")
+                if pending:
+                    review = pending["item_id"]
+            enqueue(conn, key, "autobuy", message, time.time(), target=target, review_item=review)
     except (sqlite3.Error, OSError, ValueError) as exc:
         logger.warning("Autobuy warning could not be queued: %s", type(exc).__name__)
 
@@ -477,14 +486,28 @@ async def deliver(notifier):
                     await asyncio.to_thread(finish, key, event["lease"], time.time())
                     continue
                 label, url = button
-            markup = (
-                InlineKeyboardMarkup([[InlineKeyboardButton(label, url=url)]])
-                if url
-                else None
-            )
+            rows = [[InlineKeyboardButton(label, url=url)]] if url else []
+            text = event["text"]
+            review = event.get("review_item")
+            if event.get("payment_watch", [None])[-1] == "unconfirmed":
+                review = event["payment_watch"][0]
+            if review:
+                from vinted_owner_controls import pending_attempt, private_owner, purchase_prompt, reminder_rows
+
+                if private_owner(notifier.chat_id):
+                    saved = await asyncio.to_thread(pending_attempt, review)
+                    if saved:
+                        prompt, offer = purchase_prompt(saved)
+                        text = text.split("\n", 2)[0] + "\n" + prompt
+                        rows = reminder_rows(offer) + rows
+                    elif "review_item" in event:
+                        # This notice was queued before the payment was resolved.
+                        await asyncio.to_thread(finish, key, event["lease"], time.time())
+                        continue
+            markup = InlineKeyboardMarkup(rows) if rows else None
             sent = await notifier.bot.send_message(
                 chat_id=notifier.chat_id,
-                text=event["text"],
+                text=text,
                 reply_markup=markup,
                 disable_web_page_preview=True,
                 read_timeout=10,

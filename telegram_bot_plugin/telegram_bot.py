@@ -66,7 +66,7 @@ class LeRobot:
             self.app.add_handler(
                 CallbackQueryHandler(vinted_callback, pattern=r"^card:")
             )
-            from vinted_owner_controls import REMINDER_PATTERN, confirm_reminder
+            from vinted_owner_controls import REMINDER_PATTERN, confirm_reminder, purchase_status_command
 
             self.app.add_handler(CallbackQueryHandler(confirm_reminder, pattern=REMINDER_PATTERN))
             from vinted_buying import callback as buy_callback
@@ -86,6 +86,14 @@ class LeRobot:
 
             from telegram_shared_buy import callback as shared_buy
 
+            self.app.add_handler(CommandHandler("purchase_status", purchase_status_command, filters=filters.ChatType.PRIVATE))
+            self.app.add_handler(CommandHandler(
+                "start", purchase_status_command,
+                filters=filters.ChatType.PRIVATE & filters.Regex(r"^/start(?:@\w+)?\s+purchase_status\s*\Z"),
+            ))
+            self.app.add_handler(CommandHandler(
+                "start", shared.share_command, filters=filters.ChatType.GROUPS & filters.Regex(shared.GROUP_START)
+            ))
             self.app.add_handler(CommandHandler("share_alerts", shared.share_command))
             self.app.add_handler(CommandHandler("stop_sharing", shared.stop_command))
             self.app.add_handler(CallbackQueryHandler(shared_buy, pattern=shared.BUY_PATTERN))
@@ -122,6 +130,7 @@ class LeRobot:
         if update.effective_chat and str(update.effective_chat.id) == expected:
             return
         if not shared.allowed_update(update, expected):
+            await shared.private_setup_help(update, context)
             raise ApplicationHandlerStop
 
     async def control_alerts(self, update, context):
@@ -149,7 +158,10 @@ class LeRobot:
             domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
             url = "https://" + domain if domain else ""
         message = "Searches, reminders, exclusions and example photos are now managed in your dashboard. Telegram is for your item alerts."
-        await update.message.reply_text(message + ("\n\n" + url if url else ""))
+        markup = None
+        if re.fullmatch(r"/start(?:@\w+)?\s*", update.message.text or "", re.I):
+            markup = shared.add_group_button(context.bot.username)
+        await update.message.reply_text(message + ("\n\n" + url if url else ""), reply_markup=markup)
 
     ### QUERIES ###
 
@@ -551,6 +563,7 @@ class LeRobot:
             chat_id = str(db.get_parameter("telegram_chat_id") or "").strip()
             commands = [("dashboard", "Open your search dashboard")]
             if chat_id.isdigit() and int(chat_id) > 0:
+                commands.append(("purchase_status", "Check or confirm a purchase"))
                 commands.extend((command, label) for command, (_, _, label) in alert_controls.COMMANDS.items())
                 commands.extend([("share_alerts", "Set up shared alerts and Autobuy"), ("stop_sharing", "Stop shared alerts and Autobuy")])
                 await context.bot.set_my_commands(commands, scope=BotCommandScopeChat(int(chat_id)))

@@ -340,7 +340,7 @@ def markup(row, details, *, view="listing", note_page=None):
     cap = home_cap(details) if unguided_home else None
     if marketplace == "Vinted" and cap and tap_shipping_maximum() is None and not details.get("buy_feedback"):
         buttons.append([InlineKeyboardButton(f"Autobuy · max £{cap / 100:.2f} all-in", callback_data="buy:click")])
-    elif marketplace == "Vinted" and (not unguided_home or cap):
+    elif marketplace == "Vinted" and (not unguided_home or cap or (details.get("buy_feedback") or {}).get("owner_resolution")):
         from vinted_buying import feedback_buttons
 
         buttons.extend(feedback_buttons(row, details.get("buy_feedback")))

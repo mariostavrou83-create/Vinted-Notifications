@@ -159,10 +159,10 @@ class BlockedFeedbackTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             )
         )
         markup = self.bot.edit_message_caption.call_args.kwargs["reply_markup"]
-        self.assertNotIn(
-            "buy:click",
-            [b.callback_data for row in markup.inline_keyboard for b in row],
-        )
+        callbacks = [b.callback_data or "" for row in markup.inline_keyboard for b in row]
+        self.assertNotIn("buy:click", callbacks)
+        for choice in ("got", "miss"):
+            self.assertTrue(any(cb.startswith(f"buy:resolve:{choice}:10320418087:") for cb in callbacks))
         self.query.data = "buy:status"
         with patch.object(buying, "buy") as buy, patch.object(
             buying, "check_payment"
@@ -182,6 +182,10 @@ class BlockedFeedbackTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             await reply.reply_buy(SimpleNamespace(message=self.message), self.context)
         self.assertEqual(self.saved_feedback()["reason"], "earlier_payment_uncertain")
         self.assertIn("10320418087", self.message.reply_text.call_args.args[0])
+        markup = self.message.reply_text.call_args.kwargs["reply_markup"]
+        callbacks = [b.callback_data or "" for row in markup.inline_keyboard for b in row]
+        for choice in ("got", "miss"):
+            self.assertTrue(any(cb.startswith(f"review:purchase:{choice}:10320418087:") for cb in callbacks))
         self.assertEqual(buying.result("10320418087"), previous)
         self.assertIsNone(buying.result("123"))
         claim.assert_not_called()

@@ -3,6 +3,7 @@
 import asyncio
 import re
 
+from telegram import InlineKeyboardMarkup
 from telegram.error import TelegramError
 
 import db
@@ -16,9 +17,11 @@ logger = get_logger(__name__)
 BUY_REPLY = re.compile(r"\A\s*buy\s*\Z", re.IGNORECASE)
 
 
-async def send_status(message, text, *, failure=None):
+async def send_status(message, text, *, failure=None, reply_markup=None):
     try:
-        await message.reply_text(text, do_quote=True, **photo_cards.TIMEOUTS)
+        await message.reply_text(
+            text, do_quote=True, reply_markup=reply_markup, **photo_cards.TIMEOUTS
+        )
     except TelegramError as exc:
         # A missing status notification must never replay a purchase.
         logger.warning("BUY reply status failed: %s", type(exc).__name__)
@@ -154,17 +157,26 @@ async def reply_buy(update, context):
             text = (outcome or {}).get(
                 "message"
             ) or "Check the status on your Vinted alert."
+        reply_markup = None
         if outcome:
+            from vinted_owner_controls import reminder_rows, with_offer
+
             feedback = buying.show_purchase_feedback(context.bot, source, outcome)
             outcome = await progress.settle(feedback) if progress else await feedback
-            text = outcome.get("message") or text
+            display = with_offer(row, outcome)
+            text = display.get("message") or text
+            rows = reminder_rows(display.get("owner_resolution"))
+            if rows:
+                reply_markup = InlineKeyboardMarkup(rows)
             if previous and previous["state"] not in (
                 "failed_before_payment",
                 "preparing",
                 "cancelled",
             ):
                 text += "\nNo payment was sent again."
-        notification = send_status(message, text, failure=(row, outcome) if outcome else None)
+        notification = send_status(
+            message, text, failure=(row, outcome) if outcome else None, reply_markup=reply_markup
+        )
         if progress:
             await progress.settle(notification)
         else:

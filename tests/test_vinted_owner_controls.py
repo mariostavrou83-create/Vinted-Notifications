@@ -454,6 +454,88 @@ class OwnerControlsTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(buying.result(self.pending_id), original)
                 self.assertEqual(self.audits(), [])
 
+    async def test_private_purchase_status_survives_missing_card_and_resolves_once(self):
+        original = self.pending()
+        owner_message = SimpleNamespace(reply_text=AsyncMock())
+        update = SimpleNamespace(effective_chat=self.source.chat, effective_user=self.query.from_user,
+                                 effective_message=owner_message)
+        with patch.object(photo_cards, "load", return_value=None):
+            await controls.purchase_status_command(update, self.context)
+            text = owner_message.reply_text.await_args.args[0]
+            self.assertIn("Did you get item " + self.pending_id, text)
+            self.source.reply_markup = owner_message.reply_text.await_args.kwargs["reply_markup"]
+            self.query.edit_message_reply_markup = AsyncMock()
+            callbacks = [button.callback_data for row in self.source.reply_markup.inline_keyboard
+                         for button in row if button.callback_data]
+            self.assertEqual(len(callbacks), 2)
+            self.assertEqual(buying.result(self.pending_id), original)
+            self.query.data = callbacks[0]
+            await controls.confirm_reminder(SimpleNamespace(callback_query=self.query), self.context)
+            self.assertEqual(buying.result(self.pending_id)["state"], "paid")
+            await controls.purchase_status_command(update, self.context)
+        self.assertIsNone(owner_message.reply_text.await_args.kwargs["reply_markup"])
+        self.assertIn("no purchases awaiting", owner_message.reply_text.await_args.args[0])
+
+    async def test_active_watch_promises_automatic_check_and_expiry_delivers_both_decisions(self):
+        import finder_incidents as incidents
+        import vinted_payment_watch as watch
+
+        self.pending()
+        buying.record(self.pending_id, "unknown", "Awaiting confirmation", watch=("Red cardigan", 1500))
+        owner_message = SimpleNamespace(reply_text=AsyncMock())
+        update = SimpleNamespace(effective_chat=self.source.chat, effective_user=self.query.from_user,
+                                 effective_message=owner_message)
+        await controls.purchase_status_command(update, self.context)
+        text = owner_message.reply_text.await_args.args[0]
+        self.assertIn("Red cardigan", text)
+        self.assertIn("up to an hour", text)
+        self.assertNotIn("Did you get", text)
+        self.assertIsNone(owner_message.reply_text.await_args.kwargs["reply_markup"])
+        blocked = await self.offer()
+        self.assertIn("automatically", blocked["message"])
+        self.assertFalse(blocked["owner_resolution"])
+        watch.advance(buying.time.time() + watch.FOLLOW_UP + 1)
+        notifier = SimpleNamespace(chat_id="123", recipient_valid=lambda: True,
+                         bot=SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=567))))
+        with patch.object(incidents.asyncio, "sleep", new_callable=AsyncMock), patch.object(
+            incidents.time, "time", return_value=buying.time.time() + watch.FOLLOW_UP + 2
+        ):
+            await incidents.deliver(notifier)
+        sent = notifier.bot.send_message.await_args.kwargs
+        self.assertIn("Did you get item " + self.pending_id, sent["text"])
+        callbacks = [b.callback_data or "" for row in sent["reply_markup"].inline_keyboard for b in row]
+        for decision in ("got", "miss"):
+            self.assertTrue(any(c.startswith(f"review:purchase:{decision}:{self.pending_id}:") for c in callbacks))
+
+    async def test_block_warning_contains_decisions_for_the_earlier_item_only(self):
+        import finder_incidents as incidents
+
+        original = self.pending()
+        outcome = {"state": "setup_required", "reason": "earlier_payment_uncertain", "message": "Blocked"}
+        incidents.buy_failure(self.row, outcome, "test-blocked")
+        notifier = SimpleNamespace(chat_id="123", recipient_valid=lambda: True,
+                         bot=SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=567))))
+        with patch.object(incidents.asyncio, "sleep", new_callable=AsyncMock):
+            await incidents.deliver(notifier)
+        sent = notifier.bot.send_message.await_args.kwargs
+        self.assertIn("Did you get item " + self.pending_id, sent["text"])
+        callbacks = [b.callback_data or "" for row in sent["reply_markup"].inline_keyboard for b in row]
+        for decision in ("got", "miss"):
+            self.assertTrue(any(c.startswith(f"review:purchase:{decision}:{self.pending_id}:") for c in callbacks))
+        self.assertEqual(buying.result(self.pending_id), original)
+        self.assertIsNone(buying.result(self.item_id))
+
+    async def test_older_home_card_without_budget_still_displays_manual_decisions(self):
+        self.pending()
+        feedback = await self.offer()
+        row, details, _ = photo_cards.load("vinted", 42)
+        markup = photo_cards.markup(dict(row, query_id=None), dict(details, buy_feedback=feedback,
+                            home_discovery={"reason": "recommendation"}, budget={}))
+        callbacks = [b.callback_data or "" for row in markup.inline_keyboard for b in row]
+        for decision in ("got", "miss"):
+            self.assertTrue(any(c.startswith(f"buy:resolve:{decision}:{self.pending_id}:") for c in callbacks))
+        self.assertNotIn("buy:click", callbacks)
+
     def test_longest_valid_item_callbacks_are_ascii_and_below_64_bytes(self):
         saved = {"item_id": "9" * 24, "state": "unknown", "updated": 1791742312.1234567}
         offer = controls.descriptor(saved)

@@ -3,6 +3,7 @@
 import asyncio
 import re
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 
 import photo_cards
@@ -19,13 +20,13 @@ RESULT_TEXT = {
     "paid": "Bought with the connected Vinted buying account.",
     "paying": "Finder is checking the payment result.",
     "needs_action": "The account owner needs to finish payment confirmation in the private bot chat.",
-    "unknown": "The payment outcome is unconfirmed. The account owner can check it in Finder.",
+    "unknown": "The payment outcome is unconfirmed. The account owner can open Purchase status in the private bot chat.",
     "payment_failed": "This payment failed. The account owner can review the result in Finder.",
     "closed": "This purchase is closed.",
     "cancelled": "Autobuy was stopped before payment.",
 }
 REASON_TEXT = {
-    "earlier_payment_uncertain": "The account owner needs to confirm an earlier purchase first.",
+    "earlier_payment_uncertain": "An earlier payment is unconfirmed. The account owner can review it by sending /purchase_status in the private Finder chat.",
     "price_increased": "The listing price rose above the alert price.",
     "shipping_over_limit": "Shipping costs £5 or more.",
     "shipping_unverified": "Finder could not confirm the shipping charge.",
@@ -34,6 +35,14 @@ REASON_TEXT = {
     "search_inactive": "The saved search is no longer active.",
     "disabled": "The account owner has turned off Autobuy.",
 }
+
+
+def owner_status_button(bot):
+    # The private handler verifies the owner. No payment details travel in the link.
+    return InlineKeyboardButton(
+        "Open private purchase status (owner)",
+        url=f"https://t.me/{bot.username}?start=purchase_status",
+    )
 
 
 async def callback(update, context):
@@ -60,9 +69,12 @@ async def callback(update, context):
             if not authorised():
                 return
             try:
+                markup = shared.markup(row, state, stop)
+                if state in {"unknown", "needs_action"}:
+                    markup = InlineKeyboardMarkup((*markup.inline_keyboard, (owner_status_button(context.bot),)))
                 await context.bot.edit_message_reply_markup(
                     chat_id=group.chat, message_id=message.message_id,
-                    reply_markup=shared.markup(row, state, stop), **photo_cards.TIMEOUTS,
+                    reply_markup=markup, **photo_cards.TIMEOUTS,
                 )
             except TelegramError as exc:
                 logger.info("Telegram shared purchase display deferred: %s", type(exc).__name__)
@@ -101,9 +113,13 @@ async def callback(update, context):
         if state in ("setup_required", "failed_before_payment"):
             text = REASON_TEXT.get(outcome.get("reason"), "Autobuy stopped before payment. The account owner can check Finder for details.")
             if authorised():
+                keyboard = None
+                if outcome.get("reason") == "earlier_payment_uncertain":
+                    keyboard = InlineKeyboardMarkup([[owner_status_button(context.bot)]])
                 try:
                     await context.bot.send_message(
                         chat_id=group.chat, text=text, reply_to_message_id=message.message_id,
+                        reply_markup=keyboard,
                         disable_notification=True, **photo_cards.TIMEOUTS,
                     )
                 except TelegramError as exc:
