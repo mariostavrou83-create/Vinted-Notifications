@@ -44,7 +44,13 @@ CREATE TABLE IF NOT EXISTS pilot_sources (
 
 def tg_config(key):
     # Never pick up the owner's existing live bot from unscoped environment variables.
-    return current_app.config.get("PILOT_" + key) or os.getenv("FINDER_PILOT_" + key, "")
+    from .team import saved_telegram_setting
+
+    return (
+        current_app.config.get("PILOT_" + key)
+        or os.getenv("FINDER_PILOT_" + key)
+        or saved_telegram_setting(key)
+    )
 
 
 def telegram_linked(conn, user_id):
@@ -172,13 +178,23 @@ def record_watched_home(conn, uid, binding, item, settings, now):
     return _record(conn, uid, "home:" + binding, item, "home", settings, now, "browser_home")
 
 
+def record_observed_search(conn, uid, binding, item, settings, now):
+    return _record(conn, uid, "catalog:" + binding, item, "search", settings, now, "browser_search")
+
+
 def native_button_binding(conn, row):
+    from .catalog_watch import eligible
     from .home_watch import active
     from .native_order import capability
 
     binding = capability(conn, row["user_id"])
     if binding and (
         (row["origin"] == "public_search" and row["account_ref"] == "public")
+        or (
+            row["origin"] == "browser_search"
+            and row["account_ref"] == "catalog:" + binding
+            and eligible(conn, row["user_id"], binding, row["listing"])
+        )
         or (
             row["origin"] == "browser_home"
             and row["account_ref"] == "home:" + binding
@@ -213,7 +229,9 @@ def _record(conn, uid, account, item, source, settings, now, origin):
     # The search name belongs to this Finder user. Snapshot it on discovery.
     item.pop("search_name", None)
     if source == "search" and type(item.get("search_id")) is int:
-        rule = conn.execute("SELECT name FROM searches WHERE user_id=? AND id=?", (uid,item["search_id"])).fetchone()
+        rule = conn.execute(
+            "SELECT name FROM searches WHERE user_id=? AND id=?", (uid, item["search_id"])
+        ).fetchone()
         if rule:
             item["search_name"] = rule["name"]
     delivery = "dashboard" if origin == "browser" else "new"
@@ -222,7 +240,7 @@ def _record(conn, uid, account, item, source, settings, now, origin):
       (user_id,account_ref,listing_id,listing,source,origin,created_at,attempt_key,delivery,updated)
       SELECT ?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS (
             SELECT 1 FROM pilot_alerts WHERE user_id=? AND listing_id=? AND origin!='browser'
-            AND ?!='browser' AND (origin='browser_home' OR ?='browser_home')
+            AND ?!='browser' AND (origin IN ('browser_search','browser_home') OR ? IN ('browser_search','browser_home'))
             AND delivery NOT IN ('dashboard','expired'))
         ON CONFLICT(user_id,account_ref,listing_id) DO NOTHING""",
         (
@@ -242,7 +260,7 @@ def _record(conn, uid, account, item, source, settings, now, origin):
             origin,
         ),
     )
-    if origin == "browser_home" and not inserted.rowcount:
+    if origin in {"browser_home", "browser_search"} and not inserted.rowcount:
         return None
     row = conn.execute(
         "SELECT id FROM pilot_alerts WHERE user_id=? AND account_ref=? AND listing_id=? AND origin=?",
@@ -568,9 +586,9 @@ def telegram_update(conn, update):
         return dict(ok=True)
     native = callback[1].startswith("n")
     row = conn.execute(
-        """SELECT a.user_id,a.message_id,a.native_binding,a.origin,a.account_ref FROM pilot_alerts a
+        """SELECT a.user_id,a.message_id,a.native_binding,a.origin,a.account_ref,a.listing FROM pilot_alerts a
                         JOIN pilot_chats c ON c.user_id=a.user_id
-                        WHERE a.id=? AND ((?=1 AND a.origin IN ('public_search','browser_home')) OR
+                        WHERE a.id=? AND ((?=1 AND a.origin IN ('public_search','browser_home','browser_search')) OR
                           (?=0 AND a.origin='connected')) AND c.chat_id=? AND a.sent_chat=? AND a.message_id IS NOT NULL""",
         (int(callback[2]), int(native), int(native), chat_id, chat_id),
     ).fetchone()
@@ -603,6 +621,9 @@ def init_flow(app):
     from .home_watch import init_home_watch
 
     init_home_watch(app)
+    from .catalog_watch import init_app as init_catalog_watch
+
+    init_catalog_watch(app)
     from .telegram_poll import SCHEMA as POLLING_SCHEMA
 
     conn = get_db()

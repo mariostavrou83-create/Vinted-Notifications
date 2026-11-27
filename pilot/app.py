@@ -47,7 +47,7 @@ def create_app(config=None):
     fd = os.open(database_path, os.O_CREAT | os.O_RDWR, 0o600)
     os.close(fd)
     from . import connection, destinations, flow, manual_import, market, public_feed
-    from . import native_order
+    from . import board_changes, native_order, team
     from .report import command as report_command
     app.cli.add_command(report_command)
     with app.app_context():
@@ -57,6 +57,7 @@ def create_app(config=None):
         if not app.secret_key:
             conn.execute("INSERT OR IGNORE INTO app_meta VALUES ('session_key',?)", (secrets.token_hex(48),))
             app.secret_key = conn.execute("SELECT value FROM app_meta WHERE key='session_key'").fetchone()[0]
+        team.init_team(app)
         destinations.init_destinations(conn)
         destinations.register_destinations(app)
         connection.init_connection(conn)
@@ -67,6 +68,7 @@ def create_app(config=None):
         native_order.init_native(app)
         market.init_app(app)
         public_feed.init_app(app)
+        board_changes.init_board_changes(app)
 
     @app.cli.command("invite")
     def invite_command():
@@ -77,7 +79,7 @@ def create_app(config=None):
         click.echo(token)
 
     device_endpoints = native_order.DEVICE_ENDPOINTS
-    public = {"static", "login", "signup", "health", "pilot_telegram_webhook"} | device_endpoints
+    public = {"static", "login", "signup", "health", "buyer_extension_install", "download_buyer_extension", "pilot_telegram_webhook"} | device_endpoints
 
     @app.before_request
     def authenticate():
@@ -163,7 +165,10 @@ def create_app(config=None):
         password = request.form.get("password", "")
         if not re.fullmatch(r"[A-Za-z0-9._-]{3,50}", name) or not 12 <= len(password) <= 256:
             return auth_form("signup", "Use a 3–50 character username and a password of at least 12 characters.", 400)
-        invitation = digest(request.form.get("invite", "").strip())
+        code = request.form.get("invite", "").strip()
+        if not code:
+            return auth_form("signup", "This invitation is invalid or expired.", 400)
+        invitation = digest(code)
         now = int(time.time())
         conn = get_db()
         if not conn.execute("SELECT 1 FROM invitations WHERE digest=? AND expires_at>? AND used_at IS NULL",
@@ -178,6 +183,7 @@ def create_app(config=None):
                     return auth_form("signup", "This invitation is invalid or expired.", 400)
                 new_id = conn.execute("INSERT INTO users(username,password_hash) VALUES(?,?)",
                                       (name, password_hash)).lastrowid
+                team.consume_invite(conn, invitation, new_id)
         except sqlite3.IntegrityError:
             return auth_form("signup", "Choose a different username.", 409)
         return sign_in(new_id)

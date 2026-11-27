@@ -1,12 +1,13 @@
 "use strict";
 
 // Runs only in the active tab after a user presses Review visible items.
-function captureVisibleListings(includeCandidates=false) {
+function captureVisibleListings(includeCandidates=false, catalogue=false) {
   const site = new Set(["vinted.co.uk", "www.vinted.co.uk"]);
   const itemPath = /^\/items\/(\d{1,20})(?:-[^/]+)?\/?$/;
   const detail = itemPath.exec(location.pathname);
+  const search=catalogue && /^\/catalog(?:\/[^?#\\]*)?$/.test(location.pathname);
   if (location.protocol !== "https:" || !site.has(location.hostname) ||
-      (!detail && !/^\/(?:feed\/?)?$/.test(location.pathname))) {
+      (!detail && !search && !/^\/(?:feed\/?)?$/.test(location.pathname))) {
     return {error:"Open your Vinted UK Home page or an individual listing."};
   }
   function visible(node) {
@@ -36,6 +37,9 @@ function captureVisibleListings(includeCandidates=false) {
       return candidates.some(s=>/^(?:(?:view |open )?(?:my|your) (?:account|profile)(?: menu)?(?:\s*[:,·]\s*@?[\w.-]+)?|member menu|log out|sign out)$/i.test(s));
     });
   }
+  if (/just a moment|access denied|verify (?:that )?you are human|checking your browser/i.test(document.title) ||
+      document.querySelector('iframe[src*="captcha"],[data-testid="captcha"]'))
+    return {error:"Vinted is requesting a browser check. This watch has stopped."};
   if (!hasOwnNav()) return {error:"Open your signed-in Vinted account menu so Finder can recognise your account."};
   const main = document.querySelector("main,[role=main]");
   if (!main) return {error:"Vinted’s listing area is not visible. Open the listing and try again."};
@@ -55,7 +59,11 @@ function captureVisibleListings(includeCandidates=false) {
       if (/^just now$/i.test(bare)) return {age_text:bare, age_bound_seconds:60};
       if (/^(?:a|one) minute ago$/i.test(bare)) return {age_text:bare, age_bound_seconds:120};
       const m=/^(\d{1,5})\s+(sec(?:ond)?|min(?:ute)?)s? ago$/i.exec(bare);
-      if(m) return {age_text:bare,age_bound_seconds:(Number(m[1])+1)*(m[2].toLowerCase().startsWith("min")?60:1)};
+      if(m){
+        const n=Number(m[1]),minutes=m[2].toLowerCase().startsWith("min");
+        return {age_text:n+" "+(minutes?"minute":"second")+(n===1?"":"s")+" ago",
+          age_bound_seconds:(n+1)*(minutes?60:1)};
+      }
       return null;
     }
     const fields=[];
@@ -162,6 +170,30 @@ function captureVisibleListings(includeCandidates=false) {
     }
     if(!title||title.length>240||p===null){incomplete++;return;}
     const item={id,listing_url:"https://www.vinted.co.uk/items/"+id,title,price_pence:p,currency:"GBP",...age};
+    // Use only the item picture rendered by the selected card or product page.
+    const photo=detail ? main.querySelector('[data-testid="item-photo-1--img"]') : image;
+    if(rendered(photo)){
+      try{
+        const url=new URL(photo.currentSrc||photo.src);
+        if(url.protocol==="https:" && !url.username && !url.password && !url.port &&
+           /^images\d{0,3}\.vinted\.net$/.test(url.hostname) && /^\/t\/[A-Za-z0-9_./-]+\.(?:jpe?g|png|webp|avif)$/i.test(url.pathname) && !url.hash && url.href.length<=2048)
+          item.photo_url=url.href;
+      }catch{/* Missing photo metadata. */}
+    }
+    if(pair && altPrice===p){
+      const subtotal=Math.round(Number(pair[2].replaceAll(",",""))*100);
+      if(Number.isSafeInteger(subtotal) && subtotal>=p)item.subtotal_pence=subtotal;
+    }
+    if(detail){
+      const total=main.querySelector('[data-testid="total-combined-price"]');
+      const match=/^£\s*([\d,]+)(?:\.(\d{2}))?$/.exec(compact(text(total)));
+      if(match){
+        const subtotal=Number(match[1].replaceAll(",",""))*100+Number(match[2]||0);
+        if(Number.isSafeInteger(subtotal) && subtotal>=p)item.subtotal_pence=subtotal;
+      }
+      const description=main.querySelector('[data-testid="item-description"],[data-testid="item-page-description"]');
+      if(rendered(description))item.description=compact(text(description)).slice(0,2000);
+    }
     const fieldSpecs={
       size:["size"],condition:["condition","status"],brand:["brand"],category:["category"],
       material:["material"],model:["model","isbn_nav"]
@@ -238,5 +270,5 @@ function captureVisibleListings(includeCandidates=false) {
   }
   const extras=includeCandidates&&!detail?{candidates,rendered_ids:[...new Set(
     [...main.querySelectorAll('a[href*="/items/"]')].map(memberItem).filter(Boolean))]}:{};
-  return {items,...extras,observed_at:Math.floor(observedAt/1000),source:detail?"listing":"home",missingAge,incomplete,inspected};
+  return {items,...extras,observed_at:Math.floor(observedAt/1000),source:detail?"listing":search?"catalogue":"home",missingAge,incomplete,inspected};
 }

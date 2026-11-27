@@ -5,23 +5,30 @@ import json
 import os
 import re
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from decimal import Decimal, InvalidOperation
 from urllib.parse import parse_qs, urlsplit
 
 import requests
-from flask import current_app
+from flask import current_app, g
 
 from . import flow, market
 from .db import DEFAULT_SETTINGS, get_db, transaction
 from .inputs import money, search_url
+from .listing_metadata import vinted_photo_url
+from .market_runtime import config_for
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS public_search_checkpoint(
  search_id INTEGER PRIMARY KEY REFERENCES searches(id) ON DELETE CASCADE,
  fingerprint TEXT NOT NULL, last_success REAL NOT NULL, highest INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS public_query_schedule(digest TEXT PRIMARY KEY, attempted REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS public_round(id INTEGER PRIMARY KEY CHECK(id=1), tick INTEGER NOT NULL);
+INSERT OR IGNORE INTO public_round VALUES (1,-1);
+CREATE TABLE IF NOT EXISTS public_pause(id INTEGER PRIMARY KEY CHECK(id=1),until REAL NOT NULL);
+INSERT OR IGNORE INTO public_pause VALUES(1,0);
+CREATE TABLE IF NOT EXISTS public_query_health(digest TEXT PRIMARY KEY, tick INTEGER NOT NULL, state TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS public_checks(id INTEGER PRIMARY KEY, started REAL NOT NULL);
 CREATE INDEX IF NOT EXISTS public_checks_time ON public_checks(started);
 CREATE TABLE IF NOT EXISTS public_budget(id INTEGER PRIMARY KEY CHECK(id=1), used INTEGER NOT NULL DEFAULT 0);
@@ -32,7 +39,15 @@ WHEN OLD.url IS NOT NEW.url OR OLD.enabled IS NOT NEW.enabled OR OLD.include_key
 BEGIN DELETE FROM public_search_checkpoint WHERE search_id=NEW.id; END;
 """
 PARAMS = {"brand_ids", "size_ids", "status_ids", "color_ids", "material_ids"}
-IGNORED = {"order", "sort", "page", "time", "search_id", "referrer", "disabled_personalization"}
+IGNORED = {
+    "order",
+    "sort",
+    "page",
+    "time",
+    "search_id",
+    "referrer",
+    "disabled_personalization",
+}
 PUBLIC_KEYS = (
     "PILOT_PUBLIC_SEARCH_ENABLED",
     "PILOT_PUBLIC_SEARCH_MAX_REQUESTS",
@@ -40,14 +55,46 @@ PUBLIC_KEYS = (
 )
 
 
+INTERVAL = 5
+RATE_KEYS = (
+    "PILOT_PUBLIC_SEARCH_REQUESTS_PER_SECOND",
+    "PILOT_PUBLIC_SEARCH_CONCURRENCY",
+)
+MESSAGES = {
+    "upcoming": "Waiting for the first five-second check.",
+    "checked": "Last check received a fresh response.",
+    "inflight": "Checking this search.",
+    "capacity": "Five-second checks paused. The configured provider capacity is full.",
+    "budget": "Five-second checks paused. The configured market-data allowance is exhausted.",
+    "stale": "Five-second check missed. Fresh results have not arrived.",
+    "backoff": "Five-second check missed. The provider requested a pause or is unavailable.",
+    "failed": "Five-second check failed. The provider returned no verified results.",
+    "provider_busy": "Five-second check missed. Another request is using the provider.",
+    "quiet": "Monitoring is paused during quiet hours.",
+    "off": "Public saved-search monitoring is off.",
+    "disabled": "This saved search is paused.",
+}
+
+
+def capacity(config):
+    try:
+        rate, concurrent = (int(config.get(k, "1")) for k in RATE_KEYS)
+    except (ValueError, TypeError):
+        return 0, 0
+    if not 1 <= rate <= 100 or not 1 <= concurrent <= 100:
+        return 0, 0
+    return rate, concurrent
+
+
 def init_app(app):
     for key in PUBLIC_KEYS:
         app.config.setdefault(key, os.environ.get(key, ""))
+    for key in RATE_KEYS:
+        app.config.setdefault(key, os.environ.get(key, "1"))
     get_db().executescript(SCHEMA)
 
 
-def limits():
-    config = current_app.config
+def limits(config):
     try:
         total = int(config.get(PUBLIC_KEYS[1]) or 0)
         daily = int(config.get(PUBLIC_KEYS[2]) or 0)
@@ -62,12 +109,21 @@ def limits():
     return enabled, total, daily
 
 
-def status(conn, user_id=None):
-    enabled, total, daily = limits()
+def digest_for(body):
+    return hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def status(conn, user_id=None, now=None):
+    now = time.time() if now is None else now
+    options = config_for(conn, current_app.config)
+    enabled, total, daily = limits(options)
     used = conn.execute("SELECT used FROM public_budget WHERE id=1").fetchone()[0]
     last = conn.execute(
-        "SELECT count(*) FROM public_checks WHERE started>?", (time.time() - 86400,)
+        "SELECT count(*) FROM public_checks WHERE started>?", (now - 86400,)
     ).fetchone()[0]
+    rate, concurrency = capacity(options)
     result = {
         "enabled": enabled,
         "mode": "public_search",
@@ -75,17 +131,58 @@ def status(conn, user_id=None):
         "used_requests": used,
         "daily_limit": daily,
         "used_last_24h": last,
-        "cadence_seconds": 5,
+        "cadence_seconds": INTERVAL,
+        "requests_per_second": rate,
+        "concurrency": concurrency,
     }
-    if user_id is not None:
-        unsupported = {}
-        for row in conn.execute("SELECT id,url FROM searches WHERE user_id=? AND enabled=1", (user_id,)):
-            try:
-                parameters(row["url"])
-            except ValueError as exc:
-                unsupported[str(row["id"])] = str(exc)
-        result["unsupported"] = unsupported
-    return result
+    if user_id is None:
+        return result
+    health = {}
+    unsupported = {}
+    rows = conn.execute(
+        """SELECT s.id,s.url,s.enabled,c.last_success,t.data FROM searches s
+        LEFT JOIN public_search_checkpoint c ON c.search_id=s.id LEFT JOIN settings t ON t.user_id=s.user_id
+        WHERE s.user_id=?""",
+        (user_id,),
+    )
+    current_tick = int(now // INTERVAL)
+    for row in rows:
+        checked = row["last_success"]
+        prefs = {**DEFAULT_SETTINGS, **json.loads(row["data"] or "{}")}
+        message = None
+        try:
+            digest = digest_for(parameters(row["url"]))
+            entry = conn.execute(
+                "SELECT tick,state FROM public_query_health WHERE digest=?", (digest,)
+            ).fetchone()
+            state = entry["state"] if entry else "upcoming"
+            if not row["enabled"]:
+                state = "disabled"
+            elif not enabled:
+                state = "off"
+            elif flow.quiet(prefs, now):
+                state = "quiet"
+            elif used >= total or last >= daily:
+                state = "budget"
+            elif not rate or not concurrency:
+                state = "capacity"
+            elif entry and (
+                current_tick - entry["tick"] > 1
+                or (state == "inflight" and current_tick > entry["tick"])
+            ):
+                state = "stale"
+            elif state == "checked" and (checked is None or now - checked > INTERVAL):
+                state = "stale" if checked is not None else "upcoming"
+        except ValueError as exc:
+            state, message = "unsupported", str(exc)
+            unsupported[str(row["id"])] = message
+        health[str(row["id"])] = {
+            "state": state,
+            "message": message or MESSAGES[state],
+            "last_checked_at": checked,
+            "target_seconds": INTERVAL,
+        }
+    return dict(result, searches=health, unsupported=unsupported)
 
 
 def parameters(url):
@@ -121,7 +218,9 @@ def parameters(url):
             body["query"] = vals[0].strip()
         elif key in PARAMS or key in {"catalog", "catalog_id", "category_id"}:
             items = [v for s in vals for v in s.split(",")]
-            if not 1 <= len(items) <= 20 or not all(re.fullmatch(r"[1-9]\d{0,8}", v) for v in items):
+            if not 1 <= len(items) <= 20 or not all(
+                re.fullmatch(r"[1-9]\d{0,8}", v) for v in items
+            ):
                 raise ValueError("Invalid catalogue filter.")
             ids = sorted(set(map(int, items)))
             if key in PARAMS:
@@ -159,7 +258,9 @@ def _confirmed(body, data):
             continue
         applied = filters.get(field)
         if isinstance(expected, list):
-            if not isinstance(applied, list) or {str(v) for v in applied} != {str(v) for v in expected}:
+            if not isinstance(applied, list) or {str(v) for v in applied} != {
+                str(v) for v in expected
+            }:
                 return False
         elif field in ("price_to", "price_from"):
             if applied is None or Decimal(str(expected)) != Decimal(str(applied)):
@@ -172,7 +273,9 @@ def _confirmed(body, data):
 def _search(body):
     response = requests.post(
         market.SEARCH_URL,
-        headers={"Authorization": "Bearer " + current_app.config["PILOT_SCAVIO_API_KEY"]},
+        headers={
+            "Authorization": "Bearer " + g.public_market_config["PILOT_SCAVIO_API_KEY"]
+        },
         json=body,
         timeout=(3, 9),
         allow_redirects=False,
@@ -186,7 +289,11 @@ def _search(body):
 
 
 def _listing(raw):
-    if not isinstance(raw, dict) or raw.get("currency") != "GBP" or market._unavailable(raw):
+    if (
+        not isinstance(raw, dict)
+        or raw.get("currency") != "GBP"
+        or market._unavailable(raw)
+    ):
         return None
     ident = str(raw.get("id", ""))
     url = market._item_url(ident, raw.get("url"))
@@ -202,19 +309,42 @@ def _listing(raw):
     if subtotal is None or subtotal < price:
         return None
     seller = raw.get("seller")
-    info = {k: market._text(raw.get(k)) for k in market.DESCRIPTORS if market._text(raw.get(k))}
+    info = {
+        k: market._text(raw.get(k))
+        for k in market.DESCRIPTORS
+        if market._text(raw.get(k))
+    }
+    photos = raw.get("photos")
+    candidates = [raw.get("photo")] + (photos[:3] if isinstance(photos, list) else [])
+    photo_url = next(
+        (
+            photo
+            for candidate in candidates
+            if (
+                photo := vinted_photo_url(
+                    candidate.get("url") if isinstance(candidate, dict) else candidate
+                )
+            )
+        ),
+        None,
+    )
     return dict(
         info,
         id=ident,
         listing_url=url,
         title=title,
-        seller_id=str((seller.get("id") if isinstance(seller, dict) else raw.get("seller_id")) or ""),
+        seller_id=str(
+            (seller.get("id") if isinstance(seller, dict) else raw.get("seller_id"))
+            or ""
+        ),
         description=market._text(raw.get("description")),
         currency="GBP",
         price_pence=price,
         subtotal_pence=subtotal,
         total_pence=subtotal,
         total_excludes_shipping=True,
+        photo_url=photo_url,
+        posted_at_exact=False,
         public_search=True,
     )
 
@@ -232,8 +362,7 @@ def _members(conn, now):
             body = parameters(row["url"])
         except ValueError:
             continue
-        encoded = json.dumps(body, sort_keys=True, separators=(",", ":"))
-        digest = hashlib.sha256(encoded.encode()).hexdigest()
+        digest = digest_for(body)
         groups.setdefault(digest, (body, []))[1].append((dict(row), prefs))
     return groups
 
@@ -241,7 +370,15 @@ def _members(conn, now):
 def _fingerprint(row):
     return hashlib.sha256(
         json.dumps(
-            [row[key] for key in ("url", "include_keywords", "exclude_keywords", "budget_pence")]
+            [
+                row[key]
+                for key in (
+                    "url",
+                    "include_keywords",
+                    "exclude_keywords",
+                    "budget_pence",
+                )
+            ]
         ).encode()
     ).hexdigest()
 
@@ -267,7 +404,8 @@ def _record(conn, selected, rows, now):
     ids = [
         int(str(raw["id"]))
         for raw in rows
-        if isinstance(raw, dict) and re.fullmatch(r"[1-9]\d{0,17}", str(raw.get("id", "")))
+        if isinstance(raw, dict)
+        and re.fullmatch(r"[1-9]\d{0,17}", str(raw.get("id", "")))
     ]
     top = max(ids, default=0)
     for old, _prefs in selected:
@@ -285,7 +423,11 @@ def _record(conn, selected, rows, now):
         prev = conn.execute(
             "SELECT * FROM public_search_checkpoint WHERE search_id=?", (s["id"],)
         ).fetchone()
-        fresh = prev and prev["fingerprint"] == _fingerprint(s) and now - prev["last_success"] < 1200
+        fresh = (
+            prev
+            and prev["fingerprint"] == _fingerprint(s)
+            and now - prev["last_success"] < 1200
+        )
         highest = prev["highest"] if fresh else 0
         # A first page at capacity with no overlap cannot prove freshness since the prior snapshot.
         if len(rows) == 96 and ids and min(ids) > highest and highest > 0:
@@ -302,57 +444,209 @@ def _record(conn, selected, rows, now):
         )
 
 
-def public_discover(conn, now):
-    enabled, total, daily = limits()
-    if not enabled:
-        return False
-    # Bound work before iterating the user roster, even while quota is exhausted.
-    with transaction(conn):
-        if (
-            conn.execute("SELECT used FROM public_budget WHERE id=1").fetchone()[0] >= total
-            or conn.execute(
-                "SELECT count(*) FROM public_checks WHERE started>?", (now - 86400,)
-            ).fetchone()[0]
-            >= daily
-        ):
-            return False
-        lease = conn.execute("SELECT available_at FROM market_budget WHERE id=1").fetchone()[0]
-        if lease > now:
-            return False
-        groups = _members(conn, now)
-        last = dict(conn.execute("SELECT digest,attempted FROM public_query_schedule"))
-        eligible = [d for d in groups if last.get(d, 0) <= now - 5]
-        if not eligible:
-            return False
-        digest = min(eligible, key=lambda d: (last.get(d, 0), d))
-        body, selected = groups[digest]
-        conn.execute("UPDATE public_budget SET used=used+1 WHERE id=1")
-        conn.execute("UPDATE market_budget SET available_at=? WHERE id=1", (now + 30,))
-        conn.execute("DELETE FROM public_checks WHERE started<=?", (now - 86400,))
-        conn.execute("INSERT INTO public_checks(started) VALUES(?)", (now,))
-        conn.execute("DELETE FROM public_query_schedule WHERE attempted<?", (now - 86400,))
-        conn.execute("INSERT OR REPLACE INTO public_query_schedule VALUES(?,?)", (digest, now))
-    started = time.monotonic()
-    delay = 1
+def _mark(conn, digests, tick, state):
+    conn.executemany(
+        """INSERT INTO public_query_health VALUES(?,?,?)
+           ON CONFLICT(digest) DO UPDATE SET tick=excluded.tick,state=excluded.state
+           WHERE excluded.tick>=public_query_health.tick""",
+        ((digest, tick, state) for digest in digests),
+    )
+
+
+def _fetch(app, body, options):
     try:
-        rows = _search(body)
-        observed = now + time.monotonic() - started
-        with transaction(conn):
-            market.remember_public_results(conn, rows, observed)
-            _record(conn, selected, rows, observed)
+        with app.app_context():
+            g.public_market_config = options
+            return _search(body), 0
     except requests.HTTPError as exc:
         status_code = getattr(exc.response, "status_code", None)
-        delay = 3600 if status_code in (401, 402, 403) else 60
         if status_code == 429:
             try:
-                delay = max(60, min(86400, int(exc.response.headers.get("Retry-After", "60"))))
-            except ValueError:
-                pass
-    except (requests.RequestException, ValueError, KeyError, TypeError, InvalidOperation):
-        delay = 30
-    finally:
+                return None, max(
+                    60, min(86400, int(exc.response.headers.get("Retry-After", "60")))
+                )
+            except (TypeError, ValueError):
+                return None, 60
+        return None, 3600 if status_code in (401, 402, 403) else 60
+    except (
+        requests.RequestException,
+        ValueError,
+        KeyError,
+        TypeError,
+        InvalidOperation,
+    ):
+        return None, 30
+
+
+def public_discover(conn, now):
+    options = config_for(conn, current_app.config)
+    enabled, total, daily = limits(options)
+    if not enabled:
+        return False
+    tick = int(now // INTERVAL)
+    started = time.monotonic()
+
+    def wall_time():
+        return now + (time.monotonic() - started)
+
+    rate, concurrent = capacity(options)
+    with transaction(conn):
+        if (
+            conn.execute("SELECT tick FROM public_round WHERE id=1").fetchone()[0]
+            >= tick
+        ):
+            return False
+        conn.execute("UPDATE public_round SET tick=? WHERE id=1", (tick,))
+        groups = _members(conn, now)
+        if not groups:
+            return False
+        conn.execute("DELETE FROM public_checks WHERE started<=?", (now - 86400,))
+        conn.execute("DELETE FROM public_query_health WHERE tick<?", (tick - 17280,))
+        used = conn.execute("SELECT used FROM public_budget WHERE id=1").fetchone()[0]
+        today = conn.execute("SELECT count(*) FROM public_checks").fetchone()[0]
+        remaining = max(0, min(total - used, daily - today))
+        lease = conn.execute(
+            "SELECT available_at FROM market_budget WHERE id=1"
+        ).fetchone()[0]
+        if lease > now:
+            backoff = conn.execute(
+                "SELECT until FROM public_pause WHERE id=1"
+            ).fetchone()[0]
+            _mark(conn, groups, tick, "backoff" if backoff > now else "provider_busy")
+            return False
+        # First-created sources keep their capacity from one round to the next.
+        sources = list(groups)
+        supported = rate * INTERVAL if concurrent else 0
+        _mark(conn, sources[supported:], tick, "capacity")
+        _mark(conn, sources[min(remaining, supported) : supported], tick, "budget")
+        pending = deque(sources[: min(remaining, supported)])
+        if not pending:
+            return False
+        _mark(conn, pending, tick, "upcoming")
+        # The same lock covers paid price lookups and other worker processes.
+        lease_until = now + 30
         conn.execute(
-            "UPDATE market_budget SET available_at=? WHERE id=1 AND available_at=?",
-            (now + max(delay, time.monotonic() - started + 0.01), now + 30),
+            "UPDATE market_budget SET available_at=? WHERE id=1", (lease_until,)
         )
-    return True
+
+    app = current_app._get_current_object()
+    next_tick = (tick + 1) * INTERVAL
+    backoff_until = 0
+    launches = deque(
+        row[0]
+        for row in conn.execute(
+            "SELECT started FROM public_checks WHERE started>? ORDER BY started",
+            (now - 1,),
+        )
+    )
+    sent_any = False
+
+    def reserve(digest, when):
+        nonlocal sent_any
+        with transaction(conn):
+            current = config_for(conn, current_app.config)
+            enabled, lifetime, per_day = limits(current)
+            if not enabled:
+                return "off"
+            if current.get("_market_generation") != options.get("_market_generation"):
+                return "stale"
+            counts = conn.execute(
+                """SELECT used, (SELECT COUNT(*) FROM public_checks WHERE started>?)
+                FROM public_budget WHERE id=1""",
+                (when - 86400,),
+            ).fetchone()
+            if counts[0] >= lifetime or counts[1] >= per_day:
+                return "budget"
+            conn.execute("UPDATE public_budget SET used=used+1 WHERE id=1")
+            conn.execute("INSERT INTO public_checks(started) VALUES(?)", (when,))
+            _mark(conn, [digest], tick, "inflight")
+        sent_any = True
+        launches.append(when)
+
+    def finish(digest, response):
+        nonlocal backoff_until
+        rows, delay = response
+        observed = wall_time()
+        with transaction(conn):
+            current_lease = conn.execute(
+                "SELECT available_at FROM market_budget WHERE id=1"
+            ).fetchone()[0]
+            if current_lease != lease_until:
+                _mark(conn, [digest], tick, "stale")
+                return
+            if rows is None:
+                backoff_until = max(backoff_until, observed + delay)
+                _mark(conn, [digest], tick, "failed")
+            else:
+                market.remember_public_results(conn, rows, observed)
+                _record(conn, groups[digest][1], rows, observed)
+                _mark(
+                    conn, [digest], tick, "checked" if observed < next_tick else "stale"
+                )
+
+    try:
+        if len(pending) == 1 and len(launches) < rate:
+            digest = pending.popleft()
+            pause = reserve(digest, wall_time())
+            if pause:
+                _mark(conn, [digest], tick, pause)
+            else:
+                finish(digest, _fetch(app, groups[digest][0], options))
+        else:
+            with ThreadPoolExecutor(max_workers=min(concurrent, len(pending))) as pool:
+                inflight = {}
+                while pending or inflight:
+                    when = wall_time()
+                    while launches and launches[0] <= when - 1:
+                        launches.popleft()
+                    if pending and (backoff_until or when >= next_tick):
+                        _mark(
+                            conn, pending, tick, "backoff" if backoff_until else "stale"
+                        )
+                        pending.clear()
+                    while (
+                        pending and len(inflight) < concurrent and len(launches) < rate
+                    ):
+                        digest = pending.popleft()
+                        when = wall_time()
+                        if when >= next_tick:
+                            _mark(conn, [digest, *pending], tick, "stale")
+                            pending.clear()
+                            break
+                        pause = reserve(digest, when)
+                        if pause:
+                            _mark(conn, [digest, *pending], tick, pause)
+                            pending.clear()
+                            break
+                        inflight[
+                            pool.submit(_fetch, app, groups[digest][0], options)
+                        ] = digest
+                    delay = (
+                        max(0, min(next_tick, launches[0] + 1) - wall_time())
+                        if launches
+                        else 0
+                    )
+                    if inflight:
+                        # Wake early when a rate slot returns and a worker is free.
+                        timeout = (
+                            delay if pending and len(inflight) < concurrent else None
+                        )
+                        done, _ = wait(
+                            inflight, timeout=timeout, return_when=FIRST_COMPLETED
+                        )
+                        for future in done:
+                            finish(inflight.pop(future), future.result())
+                    elif pending and delay:
+                        time.sleep(delay)
+    finally:
+        with transaction(conn):
+            released = conn.execute(
+                "UPDATE market_budget SET available_at=? WHERE id=1 AND available_at=?",
+                (max(backoff_until, wall_time()), lease_until),
+            )
+            if released.rowcount and backoff_until:
+                conn.execute(
+                    "UPDATE public_pause SET until=MAX(until,?) WHERE id=1",
+                    (backoff_until,),
+                )
+    return sent_any

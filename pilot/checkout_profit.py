@@ -13,7 +13,8 @@ def alert_rows(conn, user_id, alert_id=None):
         FROM pilot_alerts a LEFT JOIN native_orders o ON o.alert_id=a.id
           AND o.user_id=a.user_id AND o.listing_id=a.listing_id
           AND ((a.origin='public_search' AND a.account_ref='public' AND a.native_binding=o.binding)
-            OR (a.origin='browser_home' AND a.account_ref='home:'||o.binding
+            OR (((a.origin='browser_home' AND a.account_ref='home:'||o.binding)
+                  OR (a.origin='browser_search' AND a.account_ref='catalog:'||o.binding))
                 AND (a.native_binding=o.binding OR (a.native_binding IS NULL AND o.stage='purchased'))))
         LEFT JOIN native_devices d ON d.user_id=o.user_id AND d.binding=o.binding AND d.username=o.username
         WHERE a.user_id=?"""
@@ -43,9 +44,7 @@ def valuation_at_checkout(row, listing, now):
         or not quote.get("quote_id")
     ):
         return valuation, None
-    amounts = [
-        quote.get(k) for k in ("item_pence", "buyer_fee_pence", "shipping_pence", "total_pence")
-    ]
+    amounts = [quote.get(k) for k in ("item_pence", "buyer_fee_pence", "shipping_pence", "total_pence")]
     if not all(pence(n) for n in amounts) or sum(amounts[:3]) != amounts[3]:
         return valuation, None
 

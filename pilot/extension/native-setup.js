@@ -36,7 +36,22 @@ async function display(){
   const {nativePairing:p,pilotOrigin}=await chrome.storage.local.get(["nativePairing","pilotOrigin"]);
   $("pair").hidden=Boolean(p); $("paired").hidden=!p; $("confirm").hidden=true;
   if(p)$("paired-name").textContent="Finder "+p.pilot_username+" · Vinted @"+p.vinted_username+" · "+p.origin;
-  else $("origin").value=pilotOrigin||$("origin").value;
+  else {
+    const {finderPairDraft:draft}=await chrome.storage.session.get("finderPairDraft");
+    if(draft){
+      await chrome.storage.session.remove("finderPairDraft");
+      if(draft.expires>Date.now() && originOf(draft.origin) && /^[A-Za-z0-9_-]{25,80}$/.test(draft.code)){
+        $("origin").value=draft.origin;$("code").value=draft.code;
+        message("Finder filled in the address and one-use code. Choose Check accounts to review both usernames.");
+        return;
+      }
+    }
+    if(pilotOrigin){$("origin").value=pilotOrigin;return;}
+    try{
+      const response=await fetch(chrome.runtime.getURL("finder-site.json"));
+      $("origin").value=originOf((await response.json()).origin||"") || $("origin").value;
+    }catch{/* A locally built copy can also use the dashboard pairing button. */}
+  }
 }
 let inspectionVersion=0;
 function resetInspection(){

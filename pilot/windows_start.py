@@ -97,6 +97,11 @@ def local_environment(data):
                 if not values[cap].isascii() or not values[cap].isdecimal() or not 0 < int(values[cap]) <= 1_000_000_000:
                     raise ValueError(f"Set a positive whole number for {cap} before enabling {switch}.")
             env.update({name: values[name] for name in (switch, key, *limits)})
+    if values["PILOT_PUBLIC_SEARCH_ENABLED"] == "1":
+        for key in ("PILOT_PUBLIC_SEARCH_REQUESTS_PER_SECOND", "PILOT_PUBLIC_SEARCH_CONCURRENCY"):
+            if not values[key].isascii() or not values[key].isdecimal() or not 1 <= int(values[key]) <= 100:
+                raise ValueError(f"Set {key} to a whole number between 1 and 100.")
+            env[key] = values[key]
     if values["PILOT_MISTRAL_ENABLED"] == "1" and values["PILOT_MISTRAL_MODEL"]:
         env["PILOT_MISTRAL_MODEL"] = values["PILOT_MISTRAL_MODEL"]
     return env

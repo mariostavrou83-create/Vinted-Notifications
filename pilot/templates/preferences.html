@@ -12,7 +12,7 @@
         <label>Quiet hours start<input type="time" name="quiet_start" required value="{{ settings.quiet_start|default('23:00', true) }}"></label>
         <label>Quiet hours end<input type="time" name="quiet_end" required value="{{ settings.quiet_end|default('07:00', true) }}"></label>
       </div>
-      <p class="field-note">Quiet hours follow UK local time. Home alerts require a verified upload time under three minutes. In Chrome, open Vinted Home and choose <b>Watch this Home tab</b>.</p>
+      <p class="field-note">Quiet hours follow UK local time. Home alerts require a verified upload time under three minutes. In Chrome, open Vinted Home and choose <b>Watch this Home tab</b>. Finder checks the visible Home cards every second while Chrome keeps the tab active.</p>
     </section>
     <section class="panel stack-form"{% if not buyer_provider_available and not buyer_provider_linked %} hidden{% endif %}>
       <h2>Provider delivery options</h2>
@@ -52,7 +52,7 @@
   <section id="account" class="panel account-panel">
     <h2>Connected accounts</h2>
     <div class="account-line"{% if not buyer_provider_available and not buyer_provider_linked %} hidden{% endif %}><div><h3>Buying account at provider</h3><p id="buyer-account-status" class="muted">Checking connection…</p><p id="extension-profile-hint" hidden>Selected in Chrome: <output id="extension-profile-name"></output></p></div><div><button type="button" class="button secondary" id="connect-buyer-account" hidden>Connect account</button><button type="button" class="button secondary" id="disconnect-buyer-account" hidden>Disconnect</button></div></div>
-    <details class="extension-install"><summary>Set up the Chrome extension</summary><p><a href="/extension/download">Download Chrome extension</a>. Extract the ZIP, enable Developer mode at Chrome Extensions, then select <b>Load unpacked</b> and choose the extracted folder.</p></details>
+    <details class="extension-install" id="chrome-setup"><summary>Set up the Chrome extension</summary><p><a href="/extension/install">Open the Chrome installation guide</a>, then <a href="#chrome-checkout">pair your buying profile</a> to Finder. For a one-off import, use <a href="/import/vinted">Add from Chrome</a>.</p></details>
     <div class="account-line"><div><h3>Telegram</h3><p class="muted">{{ 'Linked for private buying alerts.' if links else 'Link your own chat for buying alerts and AutoBuy.' }}</p></div>{% if not links %}<button type="button" id="link-telegram" class="button secondary">Link Telegram</button>{% endif %}</div>
     <p role="alert" class="form-error" id="telegram-error" hidden></p>
     <p id="telegram-invite" hidden><a class="button secondary" rel="noopener noreferrer" target="_blank">Open Telegram</a> <span class="muted">Link expires in 10 minutes.</span></p>

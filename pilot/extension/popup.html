@@ -2,6 +2,9 @@
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Finder account selector</title><link rel="stylesheet" href="popup.css"></head>
 <body><main>
 <h1>Connect to Finder</h1>
+<button type="button" id="pair-dashboard" class="primary">Pair this Finder tab</button>
+<p class="hint">On your Finder dashboard, get a pairing code in Preferences → Chrome checkout, then press this button to use it.</p>
+<p id="pair-status" role="status"></p>
 <p>Open your account menu on Vinted UK to select your buying profile.</p>
 <button type="button" id="check">Check this tab</button>
 <p id="result" role="status"></p>
@@ -13,9 +16,14 @@
 <p class="hint">Review fresh items visible on Home or open one listing. Finder asks before adding anything to your private dashboard.</p>
 <button type="button" id="capture">Review visible items</button><p id="capture-result" role="status"></p>
 <h2>Home alerts for this tab</h2>
-<p class="hint">With your Vinted buying profile visible, send fresh Home matches from this open tab to your private Finder alerts. Chrome observes listings as Vinted displays them.</p>
+<p class="hint">With your Vinted buying profile visible, send fresh Home matches from this open tab to your private Finder alerts. Finder samples visible cards every second while this Home tab is visible. Vinted controls when new cards appear.</p>
 <label><input type="checkbox" id="verify-home-age" style="width:auto"> Check missing upload times in one separate Vinted tab</label>
 <p class="hint">Only newly appearing links are checked. Up to one listing every 30 seconds and 30 per hour.</p>
 <p id="home-watch-status" role="status"></p><button type="button" id="home-watch-toggle" disabled>Watch this Home tab</button>
+<h2>Saved-search alerts for this tab</h2>
+<p class="hint">Open an enabled saved Vinted catalogue and choose Watch this saved search. Finder checks the current cards every five seconds. Chrome can slow background tabs. Refreshing or changing the catalogue address ends this watch.</p>
+<label><input type="checkbox" id="verify-search-age" style="width:auto"> Verify missing upload times using the shared inspection tab</label>
+<label><input type="checkbox" id="show-new" style="width:auto"> Use Vinted’s visible “Show new results” button when offered (at most once per 30 seconds across this device)</label>
+<p id="search-watch-status" role="status"></p><button type="button" id="search-watch-toggle" disabled>Watch this saved search</button>
 <p><a href="native.html" target="_blank" rel="noopener">Pair Chrome for AutoBuy</a></p>
 </main><script src="profile.js"></script><script src="capture.js"></script><script src="popup.js"></script></body></html>

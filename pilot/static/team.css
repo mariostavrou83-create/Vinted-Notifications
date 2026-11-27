@@ -1,0 +1,10 @@
+.team-page { padding: 0 clamp(16px, 4vw, 48px) 48px; }
+.team-content { width: min(100%, 740px); margin: 0 auto; }
+.team-content .topline a { color: var(--ink); }
+.team-content .back { margin: 22px 0 5px; }
+.team-content h1 { margin: 8px 0 18px; }
+.team-panel { background: white; border: 1px solid var(--line); border-radius: 12px; padding: clamp(18px, 4vw, 32px); margin-top: 18px; }
+.team-panel h2, .team-content p { margin-bottom: 12px; }
+.team-panel .panel { padding: 14px 16px; margin-top: 14px; }
+.team-content .stack-form { margin-top: 14px; }
+.team-panel .button, .team-content #copy-link { justify-self: start; }

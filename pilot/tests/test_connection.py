@@ -70,6 +70,14 @@ class BuyerLinkTests(unittest.TestCase):
             manifest = json.loads(archive.read("manifest.json"))
             self.assertIn(manifest["action"]["default_popup"], archive.namelist())
             self.assertIn("profile.js", archive.namelist())
+            self.assertEqual(json.loads(archive.read("finder-site.json")), {"origin":"https://finder.example"})
+        result.close()
+
+    def test_preset_ignores_request_host(self):
+        self.app.config["FINDER_PUBLIC_URL"] = ""
+        result = self.client.get("/extension/download", base_url="https://untrusted.example")
+        with zipfile.ZipFile(io.BytesIO(result.data)) as archive:
+            self.assertEqual(json.loads(archive.read("finder-site.json")), {"origin":""})
         result.close()
 
     def test_local_selection_then_verified_link_with_single_user_one_time_state(self):

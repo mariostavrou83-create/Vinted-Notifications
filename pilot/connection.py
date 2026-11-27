@@ -3,6 +3,7 @@ import base64
 import hashlib
 import hmac
 import io
+import json
 import os
 import re
 import secrets
@@ -12,7 +13,7 @@ from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 from urllib.parse import urlsplit
 
-from flask import current_app, g, jsonify, redirect, request, send_file
+from flask import current_app, g, jsonify, redirect, render_template, request, send_file
 
 from .db import get_db
 from .partner import PartnerError, partner_configured, partner_request
@@ -94,11 +95,20 @@ def _state_hash(value):
 
 
 def register_connection(app):
+    @app.get("/extension/install")
+    def buyer_extension_install():
+        return render_template("chrome_install.html")
+
     @app.get("/extension/download")
     def download_buyer_extension():
         directory = Path(__file__).with_name("extension")
         archive = io.BytesIO()
         with ZipFile(archive, "w", compression=ZIP_DEFLATED) as zipped:
+            # Only the public canonical origin is embedded. Never trust a request Host
+            # header to select the destination of a paired device.
+            canonical=setting("FINDER_PUBLIC_URL").rstrip("/")
+            origin=_origin(canonical, local_preview=True)
+            zipped.writestr("finder-site.json", json.dumps({"origin": origin if origin == canonical else ""}))
             for name in ("manifest.json", "popup.html", "popup.css", "popup.js", "profile.js", "native.html", "native.css", "native-setup.js", "native-worker.js", "native-checkout.js", "capture.js", "home-observer.js", "home-watcher.js", "README.md"):
                 zipped.write(directory / name, name)
         archive.seek(0)

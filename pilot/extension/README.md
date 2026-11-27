@@ -4,9 +4,9 @@
 
 1. Open `chrome://extensions` and enable Developer mode for the invited pilot.
 2. Choose **Load unpacked** and select the directory containing this extension's `manifest.json`. Extract the pilot ZIP first when using a downloaded copy.
-3. Sign in to Vinted UK, open your own account menu, open the Finder extension, and choose **Check this tab**.
-4. Enter your Finder dashboard address and choose **Continue to Finder**. Sign in to your own Finder account. In **Preferences → Chrome checkout**, enter the username shown in your Vinted buying account and choose **Get pairing code**.
-5. Open the extension and choose **Pair Chrome for AutoBuy**. Enter the same dashboard address and pairing code, choose **Check accounts**, review both usernames, then choose **Enable for these accounts**. Before relying on AutoBuy, use **Check this checkout without paying** on an open Vinted checkout as described below.
+3. Open your own Vinted UK buying account and your Finder dashboard in the same Chrome profile. In Finder, choose **Preferences → Chrome checkout**, enter your Vinted buying username and choose **Get pairing code**.
+4. With that Finder tab still selected and the code visible, open the extension and choose **Pair this Finder tab**. Finder fills in the dashboard address and the one-use code. The hosted download also includes your dashboard's public address.
+5. Choose **Check accounts**. Verify the Finder name, dashboard address and Vinted username, then choose **Enable for these accounts**. To inspect an open checkout locally before using AutoBuy, choose **Check this checkout without paying**.
 
 The extension saves the Finder dashboard address on this device. When a Vinted UK tab shows your own username, the extension can pass that name to the dashboard as a hint. Pairing asks for access to Vinted UK, this dashboard address and Chrome's scheduled checks. Some pilot operators also offer an optional partner connection in **Preferences → Accounts**. Chrome pairing works independently of that service.
 
@@ -70,7 +70,7 @@ python -m unittest discover -s pilot/tests -p test_manual_import.py
 
 Pair your Chrome with your Finder account. Open your own Vinted UK homepage in a regular Chrome window and choose **Watch this Home tab** in the extension. The popup displays the paired Vinted username and Finder account. Fresh matches can be delivered to that user's linked private Telegram chat once delivery is configured. Use **Stop watching** in the popup to withdraw consent. Closing or navigating the tab ends the watch. Start it again after a page reload or browser restart.
 
-This opt-in observes naturally rendered listings while that Home tab is visible. It uses the member menu's visible buyer name and stops if the identity becomes ambiguous or changes. Finder never forces a reload or fetches the private Home feed. A closed PC, an inactive tab, or Home cards with insufficient publication-time evidence cannot supply live alerts. With **Check missing upload times in one separate Vinted tab** enabled, Finder can open a newly rendered Home listing in one regular background tab and read its normal product page. Finder quietly records all initially visible/rendered Home IDs, verifies the same profile and listing, and opens at most one product page per 30 seconds and 30 per hour. Taking over the inspection tab stops it being reused. A challenge ends the watch. The page may show a true asking price, item condition, seller profile, size, brand, model or category; missing evidence is kept unknown. You can also open a listing yourself and use **Review visible items** for a manual dashboard-only import.
+This opt-in checks the rendered listings every second while that Home tab is visible. Chrome and Vinted control when the page displays fresh inventory. It uses the member menu's visible buyer name and stops if the identity becomes ambiguous or changes. Finder never forces a reload or fetches the private Home feed. A closed PC, an inactive tab, or Home cards with insufficient publication-time evidence cannot supply live alerts. With **Check missing upload times in one separate Vinted tab** enabled, Finder can open a newly rendered Home listing in one regular background tab and read its normal product page. Finder quietly records all initially visible/rendered Home IDs, verifies the same profile and listing, and opens at most one product page per 30 seconds and 30 per hour. Taking over the inspection tab stops it being reused. A challenge ends the watch. The page may show a true asking price, item condition, seller profile, size, brand, model or category; missing evidence is kept unknown. You can also open a listing yourself and use **Review visible items** for a manual dashboard-only import.
 
 Run the render, identity-change and consecutive capture checks with:
 
@@ -79,3 +79,12 @@ node pilot/tests/visible-capture.browser.cjs
 node pilot/tests/home-detail.browser.cjs
 node --test pilot/tests/extension-profile.test.cjs pilot/tests/home-watcher.test.cjs
 ```
+
+
+## Watch a saved Vinted catalogue
+
+Save a Vinted UK catalogue link in Finder and enable the search. Open that exact catalogue from your dashboard in Chrome. Open the extension on the Vinted tab and choose **Watch this saved search**. Do this for each catalogue you want to watch. One open catalogue can supply multiple enabled Finder searches which use that same catalogue URL. Keep Home visible in a separate window if you want to observe Home alongside your catalogues.
+
+Finder samples each opted-in catalogue's rendered cards every five seconds. Background or sleeping Chrome tabs may run less frequently. The popup shows the latest local sample and the last change to the visible list. Vinted supplies new inventory on its own schedule. When the catalogue provides a **Show new results** button, you may separately enable the extension to use it while that tab is visible. Across all your tabs Finder can use the button once per 30 seconds. It does not reload catalogues on a timer.
+
+Initial items form a quiet baseline. Newly observed items need a verifiable upload time under three minutes, including any upper bound implied by a rounded age. The optional age-verification setting uses the same inspection tab and device-wide limits as Home. The dashboard updates its last contact when new results arrive and receives a heartbeat about once a minute while the tab is running. Reloading the tab, changing its catalogue URL, closing it, changing profiles, or restarting Chrome ends the watch. Reopen the matching catalogue and choose **Watch this saved search** to start again.

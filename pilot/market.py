@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 import click
 import requests
-from flask import current_app
+from flask import current_app, has_app_context
 
 from .db import get_db, transaction
 
@@ -52,7 +52,9 @@ def init_app(app):
     for key in ("PILOT_SCAVIO_ENABLED", "PILOT_SCAVIO_API_KEY", "PILOT_SCAVIO_MAX_SEARCHES"):
         app.config.setdefault(key, os.environ.get(key, ""))
     with app.app_context():
+        from .market_settings import init_settings
         get_db().executescript(SCHEMA)
+        init_settings(app)
     app.cli.add_command(import_command)
 
 
@@ -215,8 +217,12 @@ def _cached(conn, target, now):
     return [json.loads(row[0]) for row in rows]
 
 
-def _reserve(conn, digest, now, limit):
+def _reserve(conn, digest, now, limit, generation=None):
     with transaction(conn):
+        if generation is not None:
+            fresh = conn.execute("SELECT coalesce(sum(generation),0) FROM team_market_settings").fetchone()[0]
+            if generation != fresh:
+                return False
         prior = conn.execute("SELECT next_check FROM market_queries WHERE digest=?", (digest,)).fetchone()
         if prior and prior[0] > now:
             return False
@@ -245,7 +251,11 @@ def _search(key, query):
 def comparisons_for(conn, target, *, config=None, now=None):
     """Find public asking prices for one item. Call outside database transactions."""
     now = time.time() if now is None else now
-    config = current_app.config if config is None else config
+    if has_app_context() and (config is None or config is current_app.config):
+        from .market_runtime import config_for
+        config = config_for(conn, current_app.config)
+    elif config is None:
+        config = {}
     cached = _cached(conn, target, now)
     key = config.get("PILOT_SCAVIO_API_KEY")
     if str(config.get("PILOT_SCAVIO_ENABLED", "")).lower() not in ("1", "true") or not key:
@@ -265,7 +275,7 @@ def comparisons_for(conn, target, *, config=None, now=None):
         if estimate_resale(target, cached, now=now).get("resale_pence") is not None:
             return cached
     digest = hashlib.sha256(query.encode()).hexdigest()
-    if not _reserve(conn, digest, now, limit):
+    if not _reserve(conn, digest, now, limit, config.get('_market_generation')):
         return cached
 
     delay, query_delay = 0, 120

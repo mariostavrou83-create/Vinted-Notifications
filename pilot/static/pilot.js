@@ -65,7 +65,7 @@
     const hash = location.hash.slice(1);
     if (hash.startsWith('account_hint=')) return;
     let view = 'alerts';
-    if (['preferences', 'account', 'chrome-checkout', 'limits'].includes(hash)) view = 'preferences';
+    if (['preferences', 'account', 'chrome-checkout', 'chrome-setup', 'limits'].includes(hash)) view = 'preferences';
     if (hash === 'searches') view = 'searches';
     if (hash === 'new-search') {
       if (searches.length >= 100) {
@@ -92,7 +92,9 @@
       if (link.dataset.nav === (view === 'editor' ? 'searches' : view)) link.setAttribute('aria-current', 'page');
       else link.removeAttribute('aria-current');
     }
-    if (['account', 'chrome-checkout', 'limits'].includes(hash)) document.getElementById(hash).scrollIntoView({ block: 'start' });
+    schedulePolling(true);
+    if (hash === 'chrome-setup') document.getElementById(hash).open = true;
+    if (['account', 'chrome-checkout', 'chrome-setup', 'limits'].includes(hash)) document.getElementById(hash).scrollIntoView({ block: 'start' });
     else window.scrollTo(0, 0);
   }
 
@@ -179,32 +181,190 @@
 
   const refresh = document.getElementById('refresh-alerts');
   const alertResults = document.getElementById('alert-results');
-  let renderedAlerts = alertResults.innerHTML.trim();
-  async function refreshFeed(manual = false) {
-    if (document.hidden || document.getElementById('alerts').hidden || refresh.disabled) return;
-    refresh.disabled = true;
-    try {
-      const response = await fetch('/alerts/fragment', { credentials: 'same-origin', cache: 'no-store' });
-      if (!response.ok || response.redirected) throw new Error('Sign in again to refresh alerts.');
-      const html = (await response.text()).trim();
-      if (html !== renderedAlerts && !document.getElementById('alerts').hidden) {
-        const template = document.createElement('template');
-        template.innerHTML = html;
-        const expanded = new Set([...alertResults.querySelectorAll('details[open]')].map(el => el.closest('article')?.dataset.alertId));
-        for (const card of template.content.querySelectorAll('article[data-alert-id]')) {
-          if (expanded.has(card.dataset.alertId)) card.querySelector('details')?.setAttribute('open', '');
-        }
-        alertResults.replaceChildren(template.content);
-        renderedAlerts = html;
-      }
-      if (manual) notice('Alerts refreshed.');
-    } catch (err) {
-      if (manual) notice(err.message);
-    } finally { refresh.disabled = false; }
+  const sourceButtons = [...document.querySelectorAll('[data-source]')];
+  const found = document.getElementById('board-count');
+  let selectedSource = 'all';
+
+  const ukTime = new Intl.DateTimeFormat('en-GB', {day:'numeric', month:'short', hour:'2-digit', minute:'2-digit', timeZone:'Europe/London', timeZoneName:'short'});
+  function updateListingTimes() {
+    for (const node of alertResults.querySelectorAll('time[data-listing-time]')) {
+      const timestamp = Number(node.dataset.listingTime) * 1000;
+      if (!Number.isFinite(timestamp) || timestamp <= 0) continue;
+      const delta = Math.max(0, (Date.now() - timestamp) / 1000);
+      const date = new Date(timestamp);
+      const full = ukTime.format(date);
+      const ago = delta < 60 ? 'just now' : delta < 3600 ? Math.floor(delta/60) + ' min ago'
+        : delta < 86400 ? Math.floor(delta/3600) + ' hr ago' : full;
+      node.textContent = node.dataset.timeKind + ' ' + ago;
+      node.dateTime = date.toISOString();
+      node.title = full;
+    }
   }
-  refresh.addEventListener('click', () => refreshFeed(true));
-  window.setInterval(() => refreshFeed(), 20000);
-  document.addEventListener('visibilitychange', () => refreshFeed());
+
+  function filterBoard() {
+    let visible = 0;
+    for (const card of alertResults.querySelectorAll('[data-listing-source]')) {
+      card.hidden = selectedSource !== 'all' && card.dataset.listingSource !== selectedSource;
+      if (!card.hidden) visible++;
+    }
+    const emptyAll = alertResults.querySelector('[data-all-empty]');
+    if (emptyAll) emptyAll.hidden = selectedSource !== 'all';
+    found.textContent = visible + (visible === 1 ? ' listing' : ' listings');
+    for (const button of sourceButtons) button.setAttribute('aria-pressed', String(button.dataset.source === selectedSource));
+    const empty = document.getElementById('filtered-empty');
+    empty.hidden = selectedSource === 'all' || visible > 0;
+    if (!empty.hidden) {
+      const isHome = selectedSource === 'home';
+      document.getElementById('filtered-empty-title').textContent = isHome ? 'No Home listings yet' : 'No saved-search matches yet';
+      document.getElementById('filtered-empty-summary').textContent = isHome
+        ? 'Set up Finder in Chrome and choose “Watch this Home tab” on your Vinted Home page.'
+        : 'Open one of your saved searches on Vinted and watch its catalogue tab in Chrome.';
+      const action = document.getElementById('filtered-empty-action');
+      action.textContent = isHome ? 'Set up Chrome' : 'Manage searches';
+      action.href = isHome ? '/extension/install' : '#searches';
+    }
+    updateListingTimes();
+  }
+
+  for (const button of sourceButtons) button.addEventListener('click', () => {
+    selectedSource = button.dataset.source;
+    filterBoard();
+    schedulePolling(false);
+  });
+  function showPhotoFallback(image) {
+    if (!(image instanceof HTMLImageElement)) return;
+    image.hidden = true;
+    const fallback = image.parentElement?.querySelector('.missing-image');
+    if (fallback) fallback.hidden = false;
+  }
+  alertResults.addEventListener('error', event => showPhotoFallback(event.target), true);
+  for (const image of alertResults.querySelectorAll('.card-image img')) {
+    if (image.complete && !image.naturalWidth) showPhotoFallback(image);
+  }
+
+  let searchWatchBusy = false;
+  async function refreshSearchWatches() {
+    const rows = document.querySelectorAll('[data-search-row]');
+    if (document.hidden || document.getElementById('searches').hidden || !rows.length || searchWatchBusy) return;
+    searchWatchBusy = true;
+    try {
+      const result = await request('/api/native/search-status', {cache:'no-store'});
+      for (const row of rows) {
+        const label = row.querySelector('[data-chrome-watch]');
+        if (!label) continue;
+        const state = result.searches?.[row.dataset.searchRow];
+        let text = 'Chrome watch off.';
+        if (state?.enabled) {
+          text = state.state === 'stale' ? 'Chrome watch waiting for a tab update.' : state.state === 'starting' ? 'Chrome watch starting.' : 'Chrome watch enabled.';
+          if (state.last_contact_at) text += ' Last tab contact ' + ukTime.format(new Date(state.last_contact_at * 1000)) + '.';
+        }
+        label.textContent = text;
+      }
+    } catch {
+      for (const label of document.querySelectorAll('[data-chrome-watch]')) label.textContent = 'Chrome watch status unavailable.';
+    } finally { searchWatchBusy = false; }
+  }
+
+  const cardMarkup = new Map([...alertResults.querySelectorAll('[data-alert-id]')]
+    .map(card => [card.dataset.alertId, card.outerHTML]));
+  let renderedAlerts = alertResults.innerHTML.trim();
+  let seenVersion = null;
+  let boardBusy = false;
+  let forceAfter = false;
+  let manualAfter = false;
+  let pollTimer;
+  let lastTimeUpdate = 0;
+
+  function renderFragment(html) {
+    if (html === renderedAlerts) return;
+    const template = document.createElement('template');
+    template.innerHTML = html;
+    const oldList = alertResults.querySelector('.feed-list');
+    const newList = template.content.querySelector('.feed-list');
+    const incoming = [...template.content.querySelectorAll('[data-alert-id]')];
+    const nextMarkup = new Map(incoming.map(card => [card.dataset.alertId, card.outerHTML]));
+    if (oldList && newList) {
+      const existing = new Map([...oldList.children].map(card => [card.dataset.alertId, card]));
+      for (const [id, card] of existing) if (!nextMarkup.has(id)) card.remove();
+      incoming.forEach((fresh, index) => {
+        const id = fresh.dataset.alertId;
+        const old = existing.get(id);
+        let card = fresh;
+        if (old && cardMarkup.get(id) === nextMarkup.get(id)) card = old;
+        else if (old) {
+          if (old.querySelector('.evidence[open]')) fresh.querySelector('.evidence')?.setAttribute('open', '');
+          old.replaceWith(fresh);
+        }
+        if (oldList.children[index] !== card) oldList.insertBefore(card, oldList.children[index] || null);
+      });
+    } else {
+      alertResults.replaceChildren(template.content);
+    }
+    cardMarkup.clear();
+    for (const [id, markup] of nextMarkup) cardMarkup.set(id, markup);
+    renderedAlerts = html;
+    filterBoard();
+  }
+
+  async function refreshFeed(force = false, manual = false) {
+    if (document.hidden || document.getElementById('alerts').hidden) return;
+    if (boardBusy) {
+      forceAfter ||= force;
+      manualAfter ||= manual;
+      return;
+    }
+    boardBusy = true;
+    if (manual) refresh.disabled = true;
+    try {
+      let nextVersion = null;
+      try {
+        const data = await request('/api/board-version', {cache:'no-store'});
+        if (Number.isSafeInteger(data.version) && data.version >= 0) nextVersion = data.version;
+      } catch (error) {
+        if (!force) throw error;
+      }
+      if (document.hidden || document.getElementById('alerts').hidden) return;
+      if (force || (nextVersion !== null && nextVersion !== seenVersion)) {
+        const response = await fetch('/alerts/fragment', {credentials:'same-origin', cache:'no-store'});
+        if (!response.ok || response.redirected) throw new Error('Sign in again to refresh listings.');
+        const html = (await response.text()).trim();
+        if (document.hidden || document.getElementById('alerts').hidden) return;
+        renderFragment(html);
+        seenVersion = nextVersion;
+      }
+      if (Date.now() - lastTimeUpdate >= 15_000) {
+        updateListingTimes();
+        lastTimeUpdate = Date.now();
+      }
+      if (manual) notice('Listings refreshed.');
+    } catch (error) {
+      if (manual) notice(error.message);
+    } finally {
+      boardBusy = false;
+      refresh.disabled = false;
+      if (forceAfter || manualAfter) {
+        const wasManual = manualAfter;
+        manualAfter = forceAfter = false;
+        refreshFeed(true, wasManual);
+      }
+    }
+  }
+
+  function schedulePolling(force) {
+    clearInterval(pollTimer);
+    if (document.hidden) return;
+    if (!document.getElementById('alerts').hidden) {
+      refreshFeed(force);
+      pollTimer = window.setInterval(refreshFeed, selectedSource === 'search' ? 5000 : 1000);
+    } else if (!document.getElementById('searches').hidden) {
+      refreshSearchWatches();
+      pollTimer = window.setInterval(refreshSearchWatches, 5000);
+    }
+  }
+
+  filterBoard();
+  refresh.addEventListener('click', () => refreshFeed(true, true));
+  document.addEventListener('visibilitychange', () => schedulePolling(true));
   window.addEventListener('hashchange', route);
   route();
   const savedNotice = sessionStorage.getItem('finder-notice');

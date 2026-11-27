@@ -1,12 +1,20 @@
-# Finder pilot
+# Finder sourcing in Chrome
 
-An invite-only UK buyer dashboard with private Telegram alerts. Each buyer starts with zero searches and can add up to 100. Home alerts require a verified upload time under three minutes. The Chrome option observes listings as Vinted displays them in the selected Home tab. Public saved searches establish an initial baseline and rotate with a five-second minimum between checks of the same query.
+An invite-only UK buyer dashboard with private Telegram alerts. Each buyer starts with zero searches and can add up to 100. Home alerts require a verified upload time under three minutes. The Chrome option observes listings as Vinted displays them in the selected Home tab. Public saved searches establish an initial baseline. Every active search has a fixed five-second target. The dashboard reports missed checks and provider limits.
 
-## Try it on Windows
+## Open the sourcing board
 
-Extract the Windows download and double-click **Start-Finder-Windows.cmd**. The first run opens the private dashboard on your PC and creates a single-use invitation. Keep the launcher open while testing. Each tester can run a local copy. A shared installation for multiple remote users uses a separate HTTPS host. See the [Windows guide](WINDOWS.md).
+Open your private invitation in Google Chrome and choose a Finder username and password. **Sourcing board** shows the newest matching Vinted UK listings, with photos, prices and any comparable listings behind a resale estimate. Each new buyer starts with zero saved searches.
 
-## Run the pilot on a server
+Use **Chrome setup** in the dashboard to pair the Vinted buying profile in the same browser. Visit **Saved searches → Add search** to name a Vinted catalogue URL, add included or excluded words and attach reference pictures. From the extension, select the Home or catalogue tab to watch. Home and All use a one-second board clock. Saved searches use a five-second clock. Chrome watches listings that Vinted renders in each selected tab. The saved-search page also reports the last successful hosted source check when public monitoring is enabled.
+
+In **Preferences**, set your own filters, shipping and spending limits, collection point and couriers. The pilot owner can use **Team** in Chrome to invite testers, connect a dedicated Telegram bot and manage provider allowances. The existing Finder bot serves its own chats separately.
+
+## Hosted service
+
+The public Chrome application runs the dashboard and worker together with `python -m pilot.hosted`. Configure the HTTPS origin, an exclusive persistent volume, session secret, encrypted-settings key and hashed owner invitation on the isolated host. A single-use owner signup creates the Team administrator. Use the Team page to issue invitation links. Private bot and market-data settings saved through the site apply to the running pilot.
+
+## Other operator deployment options
 
 From this directory on a server with Docker Compose 2.24 or later, run:
 
@@ -58,7 +66,7 @@ Signed-in invitees can receive dashboard and private Telegram saved-search alert
 
 Supported catalogue links specify a text query, a brand, or one category; optional filters include size, condition, colour, material and price. The pilot requires confirmation of the filters in the provider response. Unsupported URL fields are reported against the relevant search in the dashboard state. Included and excluded words are checked against available public listing text. Search responses typically supply the title, and description-only matches can be missed on this route.
 
-Matching public queries are shared across users but each user's search filters and alerts remain private. Eligible queries rotate oldest-check-first with a five-second minimum repeat and a shared one-at-a-time provider limit. High query counts, provider response time and outages lengthen the actual interval. Scavio charges one credit per search, including a search yielding no matches. Once either explicit budget is exhausted, checks pause. Restarting the worker does not reset the counters. Public polling and price comparisons share the rate limiter but have separate usage counters.
+Equivalent provider queries share one request per five-second round. Each buyer’s private rules are evaluated against that result. For independent queries the worker uses the operator’s `PILOT_PUBLIC_SEARCH_REQUESTS_PER_SECOND` and `PILOT_PUBLIC_SEARCH_CONCURRENCY` (both default to 1, range 1–100). Set each to a ceiling permitted by your provider key. Controls run across the installation. Distinct source URLs above the configured capacity are marked paused, in the order the searches were created. Missing responses, missed rounds and exhausted allowances are visible per search. The worker starts the next round on a fixed wall-clock boundary. At full coverage, 100 distinct provider requests every five seconds would use 1,728,000 credits per 24 hours. Provider latency, limits and page overflow can prevent complete coverage. Scavio charges one credit per search, including a search yielding no matches. Once either explicit budget is exhausted, checks pause. Restarting the worker does not reset the counters. Public polling and price comparisons share the rate limiter but have separate usage counters.
 
 ## Pricing and measurement
 

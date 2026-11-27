@@ -1,4 +1,4 @@
-"""Local-only Telegram update transport for a dedicated pilot bot."""
+"""Private Telegram update transport for a dedicated pilot bot."""
 
 import logging
 import re
@@ -35,7 +35,7 @@ def polling_status(conn):
     if not identity:
         return "Configure a dedicated pilot bot username and token."
     row = conn.execute("SELECT status FROM pilot_polling WHERE bot_id=?", (identity[0],)).fetchone()
-    return row[0] if row else "Waiting for the local pilot worker."
+    return row[0] if row else "Waiting for the pilot worker."
 
 
 def receive_updates(conn, now):

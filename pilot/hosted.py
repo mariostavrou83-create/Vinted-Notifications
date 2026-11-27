@@ -34,24 +34,29 @@ def storage_path(env):
     mount = env.get("RAILWAY_VOLUME_MOUNT_PATH")
     if env.get("RAILWAY_PROJECT_ID") and not mount:
         raise ValueError("Attach the pilot's persistent volume before starting this service.")
-    if mount and (not Path(mount).is_absolute() or Path(mount).resolve() not in db.parents):
+    if mount and (
+        not Path(mount).is_absolute()
+        or Path(mount).resolve() == Path("/")
+        or Path(mount).resolve() not in db.parents
+    ):
         raise ValueError("FINDER_PILOT_DB must be inside the attached volume.")
     return db
 
 
 def prepare_storage(db, env):
-    # Railway attaches its volume as root. Only the database directory on this
-    # service's dedicated volume is initialised before dropping privileges.
+    # Hand ownership of the dedicated mount point to Finder, then create every
+    # nested directory as Finder. The mount itself can be root-only initially.
     os.umask(0o077)
-    db.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if env.get("RAILWAY_VOLUME_MOUNT_PATH") and os.geteuid() == 0:
+    mount = env.get("RAILWAY_VOLUME_MOUNT_PATH")
+    if mount and os.geteuid() == 0:
         import pwd
 
         user = pwd.getpwnam("finder")
-        os.chown(db.parent, user.pw_uid, user.pw_gid)
+        os.chown(mount, user.pw_uid, user.pw_gid)
         os.setgroups([])
         os.setgid(user.pw_gid)
         os.setuid(user.pw_uid)
+    db.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
 
 
 def serve(env):

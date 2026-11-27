@@ -19,8 +19,8 @@ from .partner import PartnerError, _NoRedirect, partner_configured, partner_requ
 log = logging.getLogger(__name__)
 
 
-def telegram(method, payload):
-    token = flow.tg_config("TELEGRAM_BOT_TOKEN")
+def telegram(method, payload, *, token=None):
+    token = flow.tg_config("TELEGRAM_BOT_TOKEN") if token is None else token
     if not re.fullmatch(r"\d+:[\w-]+", token):
         raise ValueError("Pilot Telegram bot is unconfigured.")
     req = Request(
@@ -151,9 +151,7 @@ def render_alert(row, valuation=None, checkout_cost=None):
     item = json.loads(row["listing"])
     price = flow.money(item["price_pence"])
     if checkout_cost and checkout_cost["total_pence"] is not None:
-        label = (
-            "Checkout at purchase" if checkout_cost["basis"] == "purchase" else "Quoted checkout"
-        )
+        label = "Checkout at purchase" if checkout_cost["basis"] == "purchase" else "Quoted checkout"
         price += f" · {label} {flow.money(checkout_cost['total_pence'])}"
     elif row["origin"] == "connected":
         price += f" · Estimated total {flow.money(item['total_pence'])}"
@@ -183,7 +181,7 @@ def render_alert(row, valuation=None, checkout_cost=None):
 def listing_keyboard(row):
     if row["origin"] == "connected":
         button = {"text": "AutoBuy", "callback_data": f"buy:{row['id']}"}
-    elif row["origin"] in {"public_search", "browser_home"} and row["native_binding"]:
+    elif row["origin"] in {"public_search", "browser_home", "browser_search"} and row["native_binding"]:
         button = {"text": "AutoBuy", "callback_data": f"nbuy:{row['id']}"}
     else:
         button = {"text": "Buy on Vinted", "url": json.loads(row["listing"])["listing_url"]}
@@ -196,7 +194,7 @@ def deliver(conn, now):
     with transaction(conn):
         row = conn.execute(
             """SELECT a.*,c.chat_id FROM pilot_alerts a JOIN pilot_chats c ON c.user_id=a.user_id
-                     WHERE delivery='new' AND deliver_after<=? AND (a.origin IN ('public_search','browser_home') OR
+                     WHERE delivery='new' AND deliver_after<=? AND (a.origin IN ('public_search','browser_home','browser_search') OR
                         (a.origin='connected' AND EXISTS (SELECT 1 FROM pilot_buyer_link b WHERE b.user_id=a.user_id
                           AND b.account_ref=a.account_ref AND b.revoke_pending=0))) ORDER BY a.id LIMIT 1""",
             (now,),
@@ -206,10 +204,18 @@ def deliver(conn, now):
         uid, aid = row["user_id"], row["id"]
         l = json.loads(row["listing"])
         from .home_watch import active
+        from .catalog_watch import eligible
 
         prefs = settings_for(conn, uid)
         if (
             flow.quiet(prefs, now)
+            or (
+                row["origin"] == "browser_search"
+                and (
+                    not eligible(conn, uid, row["account_ref"].removeprefix("catalog:"), l)
+                    or not 0 <= now - (flow.listing_time(l.get("listed_at")) or 0) < 180
+                )
+            )
             or (
                 row["origin"] == "browser_home"
                 and (
@@ -225,7 +231,7 @@ def deliver(conn, now):
             return True
         # Freeze the native purchase principal when this alert's button is issued.
         # A subsequently paired browser cannot inherit an existing alert's authority.
-        if row["origin"] in {"public_search", "browser_home"}:
+        if row["origin"] in {"public_search", "browser_home", "browser_search"}:
             bound = flow.native_button_binding(conn, row)
             conn.execute("UPDATE pilot_alerts SET native_binding=? WHERE id=?", (bound, aid))
             row = {**dict(row), "native_binding": bound}
@@ -365,7 +371,7 @@ def buy_job(conn, now):
         from .native_order import request_native
 
         issued = conn.execute(
-            "SELECT user_id,origin,account_ref,native_binding FROM pilot_alerts WHERE id=? AND user_id=?",
+            "SELECT user_id,origin,account_ref,native_binding,listing FROM pilot_alerts WHERE id=? AND user_id=?",
             (row["alert_id"], row["user_id"]),
         ).fetchone()
         if (
@@ -452,13 +458,18 @@ def run(app, stop=None):
     def loop(fn, idle):
         while not stop.is_set():
             delay = idle
+            started = time.time()
             try:
                 with app.app_context():
-                    if fn(get_db(), time.time()):
+                    if fn(get_db(), started):
                         delay = 0.01
             except Exception as exc:  # noqa: BLE001 -- keep independent worker lanes alive after a failed item
                 log.warning("Pilot %s paused after %s", fn.__name__, type(exc).__name__)
                 delay = 2
+            if fn is public_discover:
+                # Start a new round at the next fixed five-second boundary, independent of request latency.
+                finished = time.time()
+                delay = 0 if int(started // 5) < int(finished // 5) else 5 - finished % 5
             stop.wait(delay)
 
     lanes = [(discover, 0.25)] * 4 + [

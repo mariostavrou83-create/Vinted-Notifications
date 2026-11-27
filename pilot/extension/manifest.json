@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Finder \u00b7 Vinted account selector",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Select your Vinted UK account and optionally pair this Chrome to handle your own Finder checkout requests.",
   "permissions": [
     "activeTab",

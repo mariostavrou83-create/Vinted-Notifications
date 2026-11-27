@@ -247,30 +247,40 @@ def _public_description(item):
     }
 
 
-def _reserve_model_request():
-    # The local trial supplies an explicit lifetime request cap. Cache hits need no reservation.
-    cap = os.environ.get("PILOT_MISTRAL_MAX_REVIEWS")
-    if cap is None:
-        return
-    if not cap.isascii() or not cap.isdecimal() or not 0 < int(cap) <= 1_000_000_000:
-        raise ValueError("AI review budget is disabled")
+def _reserve_model_request(key=None, model=None, *, managed=False):
     from .db import get_db, transaction
+    cap = os.environ.get("PILOT_MISTRAL_MAX_REVIEWS")
+    if cap is None and not managed:
+        return
     conn = get_db()
     with transaction(conn):
-        conn.execute("CREATE TABLE IF NOT EXISTS pilot_model_budget (id INTEGER PRIMARY KEY CHECK(id=1), used INTEGER NOT NULL)")
-        conn.execute("INSERT OR IGNORE INTO pilot_model_budget VALUES(1,0)")
+        if managed:
+            from flask import current_app
+            from .market_runtime import config_for, enabled
+            latest = config_for(conn,current_app.config)
+            if (not enabled(latest["PILOT_MISTRAL_ENABLED"]) or key != latest["PILOT_MISTRAL_API_KEY"]
+                    or model != latest["PILOT_MISTRAL_MODEL"]):
+                raise ValueError("AI review settings changed")
+            cap = latest["PILOT_MISTRAL_MAX_REVIEWS"]
+        # The previous environment-only configuration permits an uncapped key.
+        # Browser-saved, enabled settings always have a positive cap.
+        if cap is None:
+            return
+        cap = str(cap)
+        if not cap.isascii() or not cap.isdecimal() or not 0 < int(cap) <= 1_000_000_000:
+            raise ValueError("AI review budget is disabled")
         changed = conn.execute("UPDATE pilot_model_budget SET used=used+1 WHERE id=1 AND used<?", (int(cap),))
         if not changed.rowcount:
             raise ValueError("AI review request cap reached")
 
 
 @lru_cache(maxsize=2)
-def _mistral_reviewer(key, model):
+def _mistral_reviewer(key, model, managed=False):
     # Distinct billing accounts/models get distinct caches. Cache only the product
     # matching judgement. Re-read asking prices and recompute profit for each user.
     @lru_cache(maxsize=256)
     def classify(product_data):
-        _reserve_model_request()
+        _reserve_model_request(key, model, managed=managed)
         response = requests.post(
             "https://api.mistral.ai/v1/chat/completions",
             headers={"Authorization": f"Bearer {key}"},
@@ -308,6 +318,14 @@ def _mistral_reviewer(key, model):
 
 def optional_mistral_reviewer():
     """Return an opt-in reviewer for the worker. Only product descriptions are transmitted."""
+    from flask import current_app, has_app_context
+    if has_app_context():
+        from .db import get_db
+        from .market_runtime import config_for, enabled
+        cfg = config_for(get_db(), current_app.config)
+        if not cfg["PILOT_MISTRAL_API_KEY"] or not enabled(cfg["PILOT_MISTRAL_ENABLED"]):
+            return None
+        return _mistral_reviewer(cfg["PILOT_MISTRAL_API_KEY"], cfg["PILOT_MISTRAL_MODEL"], managed=True)
     key = os.environ.get("PILOT_MISTRAL_API_KEY", "").strip()
     if not key:
         return None

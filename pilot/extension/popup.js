@@ -13,7 +13,35 @@ function pilotOrigin(input) {
   } catch { return null; }
 }
 
-chrome.storage.local.get("pilotOrigin").then(({pilotOrigin}) => {address.value = pilotOrigin || "";});
+async function sitePreset(){
+  try{
+    const result=await fetch(chrome.runtime.getURL("finder-site.json"));
+    return pilotOrigin((await result.json()).origin || "");
+  }catch{return null;}
+}
+(async()=>{
+  const {pilotOrigin:stored}=await chrome.storage.local.get("pilotOrigin");
+  if(!address.value)address.value=stored || await sitePreset() || "";
+})();
+document.getElementById("pair-dashboard").addEventListener("click",async()=>{
+  const status=document.getElementById("pair-status");
+  try{
+    const [tab]=await chrome.tabs.query({active:true,currentWindow:true});
+    const url=new URL(tab.url);
+    const origin=pilotOrigin(url.origin);
+    if(!origin || url.username || url.password || url.pathname!=="/")throw Error("source");
+    const preset=await sitePreset();
+    if(preset && preset!==origin){status.textContent="Open the Finder dashboard that provided this extension.";return;}
+    const [read]=await chrome.scripting.executeScript({target:{tabId:tab.id,frameIds:[0]},func:()=>{
+      const box=document.getElementById("native-code-box"),code=document.getElementById("native-pair-code");
+      return box?.getClientRects().length && code?.getClientRects().length ? code.textContent.trim() : "";
+    }});
+    if(typeof read.result!=="string" || !/^[A-Za-z0-9_-]{25,80}$/.test(read.result))throw Error("code");
+    await chrome.storage.session.set({finderPairDraft:{origin,code:read.result,expires:Date.now()+120000}});
+    await chrome.tabs.create({url:chrome.runtime.getURL("native.html")});
+    window.close();
+  }catch{status.textContent="Open Finder, choose Preferences → Chrome checkout → Get pairing code, then open this extension on that tab.";}
+});
 document.querySelector("#check").addEventListener("click", async () => {
   selectedName = "";
   try {
@@ -65,29 +93,37 @@ document.querySelector("#capture").addEventListener("click", async ()=>{
   }catch{feedback.textContent="Finder could not inspect this tab. Reload the Vinted page and try again.";}
 });
 
-(() => {
-  const status=document.getElementById("home-watch-status");
-  const button=document.getElementById("home-watch-toggle");
+for(const kind of ["home","search"]){
+  const status=document.getElementById(kind+"-watch-status");
+  const button=document.getElementById(kind+"-watch-toggle");
+  const verify=document.getElementById("verify-"+kind+"-age");
+  const prefix="finder-"+kind+"-";
   let watching=false;
   async function render(){
-    const state=await chrome.runtime.sendMessage({type:"finder-home-state"});
+    const state=await chrome.runtime.sendMessage({type:prefix+"state"});
     watching=Boolean(state?.watching);
-    button.textContent=watching?"Stop watching":"Watch this Home tab";
-    button.disabled=!state?.paired;
-    const verify=document.getElementById("verify-home-age");
-    verify.disabled=watching||!state?.paired;
+    button.textContent=watching?"Stop watching":kind==="home"?"Watch this Home tab":"Watch this saved search";
+    button.disabled=!state?.paired || (!watching && !state.eligible);
+    verify.disabled=watching||button.disabled;
     if(watching)verify.checked=Boolean(state.allowDetails);
-    status.textContent=watching?"Watching @"+state.username+" · "+state.accepted+" new matches accepted." :
-      state?.paired?"Use Vinted @"+state.username+" for Finder "+state.pilot+"." :
-        "Pair this Chrome before enabling Home alerts.";
+    if(kind==="search"){
+      const control=document.getElementById("show-new");
+      control.disabled=watching||button.disabled;
+      if(watching)control.checked=state.showNew===true;
+    }
+    const time=t=>new Date(t).toLocaleTimeString("en-GB");
+    const timing=state?.timing;
+    status.textContent=watching?"Watching @"+state.username+" · "+state.accepted+" accepted."+
+      (timing?.sampled?" Last sampled "+time(timing.sampled)+". "+(timing.changed?"Card list last changed "+time(timing.changed)+".":"Card list unchanged since this watch began."):" Waiting for a visible listing sample.") :
+      state?.paired?"Use Vinted @"+state.username+" for Finder "+state.pilot+"." : "Pair this Chrome to enable alerts.";
   }
   button.addEventListener("click",async()=>{
     button.disabled=true;
     try{
-      const result=await chrome.runtime.sendMessage({type:watching?"finder-home-stop":"finder-home-start",allowDetails:document.getElementById("verify-home-age").checked});
+      const response=await chrome.runtime.sendMessage({type:prefix+(watching?"stop":"start"),allowDetails:verify.checked,showNew:kind==="search" && document.getElementById("show-new").checked});
       await render();
-      if(!result?.ok)status.textContent=result?.error||"Check your signed-in Vinted Home tab and try again.";
-    } catch{ status.textContent="Finder could not update the Home watcher.";button.disabled=false;}
+      if(!response?.ok)status.textContent=response?.error||"Check this Vinted UK tab and try again.";
+    }catch{status.textContent="Finder could not update the watcher.";button.disabled=false;}
   });
-  render().catch(()=>{status.textContent="Home watcher unavailable.";});
-})();
+  render().catch(()=>{status.textContent="Watch status is unavailable.";});
+}

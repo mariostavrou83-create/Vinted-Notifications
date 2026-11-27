@@ -1,0 +1,49 @@
+{% extends 'base.html' %}
+{% block title %}Team · Finder{% endblock %}
+{% block scripts %}<link rel="stylesheet" href="{{ url_for('static', filename='team.css') }}"><script src="{{ url_for('static', filename='team.js') }}" defer></script>{% endblock %}
+{% block body %}
+<main class="team-page"><div class="team-content">
+<nav class="topline" aria-label="Finder"><a class="wordmark" href="/">Finder<span>.</span></a><a href="/team/market">Market settings</a></nav>
+<p class="back"><a href="/">Back to buying dashboard</a></p>
+<h1>Team</h1>
+{% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
+{% if message %}<p role="status">{{ message }}</p>{% endif %}
+{% if invite_path %}
+<div class="stack-form">
+<label>Private signup link<input id="invite-link" readonly value="{{ invite_path }}" spellcheck="false"></label>
+<button id="copy-link" class="button secondary" type="button">Copy link</button>
+</div>{% endif %}
+<section class="team-panel"><h2>Tester invitations</h2>
+<p>A link admits one person and expires after 72 hours.</p>
+<form class="stack-form" action="/team/invites" method="post">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<label>Tester name or label<input name="label" required maxlength="80" placeholder="e.g. Alex" autocomplete="off"></label>
+<button class="button primary" type="submit">Create invitation</button>
+</form>
+{% for invite in invites %}
+<div class="panel"><strong>{{ invite.label }}</strong> · {{ invite.state }}
+{% if invite.username %}<p>Joined as {{ invite.username }}.</p>{% endif %}
+{% if invite.state == 'Open' %}
+<p>Expires {{ invite.expiry }}.</p><form action="/team/invites/{{ invite.id }}/revoke" method="post">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button secondary" type="submit">Revoke invitation</button></form>
+{% endif %}</div>
+{% endfor %}
+</section><section class="team-panel"><h2>Dedicated Telegram bot</h2>
+{% if env_bot %}
+<p>The hosting settings manage the Telegram bot for this pilot.</p>
+{% elif not can_encrypt %}
+<p>The host needs a separate Finder configuration key before you can connect a bot.</p>
+{% elif not https %}
+<p>Open the hosted dashboard using its secure HTTPS address to manage your bot.</p>
+{% else %}
+{% if bot %}<p>Connected to <strong>@{{ bot.username }}</strong>. {{ transport_status }}</p>{% endif %}
+<p>Use a separate bot for Finder testers. Create one through <a href="https://t.me/BotFather" target="_blank" rel="noreferrer">@BotFather</a>, then enter its username and token here.</p>
+<form class="stack-form" action="/team/telegram" method="post" autocomplete="off">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<label>Bot username<input name="bot_username" value="{{ bot.username if bot else '' }}" required spellcheck="false" autocapitalize="none" placeholder="@YourFinderBot"></label>
+<label>BotFather token<input name="bot_token" type="password" required autocomplete="new-password" spellcheck="false"></label>
+<label class="check"><input type="checkbox" name="dedicated" value="yes" required> This bot is dedicated to this Finder pilot.</label>
+<button class="button primary" type="submit">{{ 'Update token' if bot else 'Verify and connect bot' }}</button>
+</form>{% endif %}
+</section></div></main>
+{% endblock %}

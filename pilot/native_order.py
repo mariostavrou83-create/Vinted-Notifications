@@ -16,6 +16,8 @@ from .flow import check_quote, quote_summary
 from .inputs import InputError
 
 DEVICE_ENDPOINTS = {
+    "native_search_watch",
+    "native_search_items",
     "native_home",
     "native_home_watch",
     "native_preview",
@@ -96,9 +98,7 @@ def _payment_identity(label):
     """Compare the displayed brand and last four independently of masking punctuation."""
     if label.casefold() == "vinted balance":
         return ("vinted balance", None)
-    brand = re.match(r"visa|mastercard|american express|amex|maestro", label, re.IGNORECASE)[
-        0
-    ].lower()
+    brand = re.match(r"visa|mastercard|american express|amex|maestro", label, re.IGNORECASE)[0].lower()
     return ("amex" if brand == "american express" else brand, label[-4:])
 
 
@@ -178,6 +178,13 @@ def _revoke(conn, uid, *, preserve_settings=False):
             (uid, device["binding"]),
         )
         cancel_home(conn, uid, device["binding"])
+        from .catalog_watch import stop
+
+        for watch in conn.execute(
+            "SELECT source_key FROM catalog_watches WHERE user_id=? AND binding=?",
+            (uid, device["binding"]),
+        ).fetchall():
+            stop(conn, uid, watch["source_key"])
     if not preserve_settings:
         conn.execute("DELETE FROM native_settings WHERE user_id=?", (uid,))
     conn.execute("DELETE FROM native_devices WHERE user_id=?", (uid,))
@@ -187,6 +194,12 @@ def _revoke(conn, uid, *, preserve_settings=False):
 def _source_current(conn, alert, device):
     if alert["native_binding"] != device["binding"]:
         return False
+    if alert["origin"] == "browser_search":
+        from .catalog_watch import eligible
+
+        return alert["account_ref"] == "catalog:" + device["binding"] and eligible(
+            conn, device["user_id"], device["binding"], alert["listing"]
+        )
     if alert["origin"] == "public_search":
         return alert["account_ref"] == "public"
     if alert["origin"] != "browser_home" or alert["account_ref"] != "home:" + device["binding"]:
@@ -227,7 +240,7 @@ def request_native(conn, uid, aid, confirmation=None):
             """SELECT a.*, d.username, d.binding FROM pilot_alerts a
             JOIN native_devices d ON d.user_id=a.user_id AND d.expires>?
             JOIN pilot_chats c ON c.user_id=a.user_id AND c.chat_id=a.sent_chat
-            WHERE a.id=? AND a.user_id=? AND a.origin IN ('public_search', 'browser_home')
+            WHERE a.id=? AND a.user_id=? AND a.origin IN ('public_search', 'browser_home', 'browser_search')
               AND a.native_binding=d.binding AND a.message_id IS NOT NULL""",
             (now, aid, uid),
         ).fetchone()
@@ -290,9 +303,7 @@ def request_native(conn, uid, aid, confirmation=None):
                 json.dumps(p),
             ),
         )
-        conn.execute(
-            "UPDATE pilot_alerts SET order_status='checking',updated=? WHERE id=?", (now, aid)
-        )
+        conn.execute("UPDATE pilot_alerts SET order_status='checking',updated=? WHERE id=?", (now, aid))
     return "Your paired Chrome will check the listing and your saved preferences.", None
 
 
@@ -331,17 +342,13 @@ def notify(conn, now):
         ).fetchone()
         if not item:
             return False
-        conn.execute(
-            "UPDATE native_notifications SET delivered=? WHERE id=?", (int(now), item["id"])
-        )
+        conn.execute("UPDATE native_notifications SET delivered=? WHERE id=?", (int(now), item["id"]))
     data = {
         "chat_id": item["chat_id"],
         "text": item["text"],
         "link_preview_options": {"is_disabled": True},
     }
-    valuation, checkout_cost = checkout_profit.for_alert(
-        conn, item["user_id"], item["alert_id"], now
-    )
+    valuation, checkout_cost = checkout_profit.for_alert(conn, item["user_id"], item["alert_id"], now)
     profit = checkout_profit.profit_line(valuation)
     if profit and checkout_cost:
         data["text"] += "\n" + profit + "\n" + checkout_cost["note"]
@@ -443,9 +450,7 @@ def _quote(body, order, alert, p, now):
     if type(subtotal) is int and q["item_pence"] + q["buyer_fee_pence"] > subtotal:
         return q, "blocked", "The item and buyer fee exceed the amount in your alert."
     if (
-        decision == "ok"
-        and not p["max_total"]
-        and type(listing.get("search_budget_pence")) is not int
+        decision == "ok" and not p["max_total"] and type(listing.get("search_budget_pence")) is not int
     ) and (type(subtotal) is not int or not p["max_shipping"]):
         return q, "confirm", "Review the full checkout total before buying."
     return q, decision, reason
@@ -529,9 +534,9 @@ def _accept_quote(db, order, alert, preferences, body, now):
                 + " · "
                 + postcode
                 + "\nItem £"
-                + f"{quote['item_pence']/100:.2f}"
+                + f"{quote['item_pence'] / 100:.2f}"
                 + " · Buyer fee £"
-                + f"{quote['buyer_fee_pence']/100:.2f}"
+                + f"{quote['buyer_fee_pence'] / 100:.2f}"
             )
             _end(db, order, "confirm", notice, keyboard)
         db.execute(
@@ -634,8 +639,7 @@ def init_native(app):
             "postcode": postcode,
             "preferred_courier": _label(b.get("preferred_courier"), 60),
             "allowed_couriers": list(dict.fromkeys(_label(x, 60) for x in alt)),
-            "allow_same_shop_fallback": mode == "pickup"
-            and b.get("allow_same_shop_fallback", False),
+            "allow_same_shop_fallback": mode == "pickup" and b.get("allow_same_shop_fallback", False),
             "payment_label": _payment(b.get("payment_label")),
         }
         get_db().execute(
@@ -661,8 +665,7 @@ def init_native(app):
             _revoke(
                 db,
                 uid,
-                preserve_settings=not previous
-                or previous["username"].casefold() == name.casefold(),
+                preserve_settings=not previous or previous["username"].casefold() == name.casefold(),
             )
             db.execute(
                 "INSERT INTO native_pair_codes VALUES(?,?,?,?)", (uid, _hash(code), name, expires)
@@ -696,8 +699,7 @@ def init_native(app):
             if request.endpoint == "native_preview":
                 return jsonify(**names, expires_at=row["expires"])
             if not all(
-                isinstance(b.get(k), str) and b[k].casefold() == v.casefold()
-                for k, v in names.items()
+                isinstance(b.get(k), str) and b[k].casefold() == v.casefold() for k, v in names.items()
             ):
                 return (
                     jsonify(error="The visible buying profile or Finder account does not match."),
