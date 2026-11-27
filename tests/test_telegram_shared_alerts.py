@@ -118,6 +118,7 @@ class SharedAlertTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         send = self.bot.send_photo.await_args.kwargs
         self.assertEqual(send["photo"], "offline-file-id")
         self.assertEqual(send["caption"], "<b>Vinted listing</b>")
+        self.assertIs(send["show_caption_above_media"], True)
         callbacks = [button.callback_data for row in send["reply_markup"].inline_keyboard for button in row]
         self.assertIn("shared:buy", callbacks)
         self.assertNotIn("buy:click", callbacks)

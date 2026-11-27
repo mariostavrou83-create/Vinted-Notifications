@@ -551,7 +551,9 @@ async def send(bot, group, row):
         response = None
         if row["photo_id"]:
             try:
-                response = await bot.send_photo(**common, photo=row["photo_id"], caption=row["body"])
+                response = await bot.send_photo(
+                    **common, photo=row["photo_id"], caption=row["body"], show_caption_above_media=True
+                )
             except BadRequest:
                 pass  # The cached file or caption was rejected; preserve the deal link.
         if not response and current() == group:
