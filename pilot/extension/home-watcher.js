@@ -241,19 +241,15 @@
     }
     if(action==="new-results"){
       if(!s.url || !s.showNew)return {ok:false};
-      const key="finderVisibleNewResults", now=Date.now();
-      const last=(await chrome.storage.local.get(key))[key]||0;
-      if(last>now-30000)return {ok:false};
+      if(typeof msg.label!=="string" || msg.label.length>50)return {ok:false};
       const active=await chrome.tabs.get(s.tabId);
       if(!active.active)return {ok:false};
-      await chrome.storage.local.set({[key]:now});
       const [result]=await chrome.scripting.executeScript({target:{tabId:s.tabId,documentIds:[s.documentId]},
-        func:(url,name)=>{
+        func:(url,name,id,label)=>{
           if(location.href!==url || readOwnProfile(true)?.toLowerCase()!==name.toLowerCase())return false;
-          const b=finderNewResultsButton();
-          if(!b || captureVisibleListings(true,true).error)return false;
-          b.click();return true;
-        },args:[s.url,s.username]});
+          const watch=globalThis.finderHomeObserver;
+          return Boolean(watch && watch.runId===id && watch.showBatch(label));
+        },args:[s.url,s.username,s.runId,msg.label]});
       return {ok:result.result===true};
     }
     if(action==="detail")return openDetail(s,msg.candidate);

@@ -242,6 +242,15 @@
     if (image.complete && !image.naturalWidth) showPhotoFallback(image);
   }
 
+  const checkTime = new Intl.DateTimeFormat('en-GB', {day:'numeric', month:'short', hour:'2-digit', minute:'2-digit', second:'2-digit', timeZone:'Europe/London', timeZoneName:'short'});
+  function showPublicCheck(node, timestamp) {
+    const seconds = Number(timestamp);
+    node.textContent = Number.isFinite(seconds) && seconds > 0
+      ? 'Last successful check ' + checkTime.format(new Date(seconds * 1000)) + '.'
+      : 'No successful check recorded.';
+  }
+  for (const node of document.querySelectorAll('[data-public-checked]')) showPublicCheck(node, node.dataset.publicChecked);
+
   let searchWatchBusy = false;
   async function refreshSearchWatches() {
     const rows = document.querySelectorAll('[data-search-row]');
@@ -250,6 +259,11 @@
     try {
       const result = await request('/api/native/search-status', {cache:'no-store'});
       for (const row of rows) {
+        const coverage = result.public_searches?.[row.dataset.searchRow];
+        const publicWatch = row.querySelector('[data-public-watch]');
+        const checkedAt = row.querySelector('[data-public-checked]');
+        if (publicWatch) publicWatch.textContent = coverage?.message || 'Status unavailable.';
+        if (checkedAt && coverage) showPublicCheck(checkedAt, coverage.last_checked_at);
         const label = row.querySelector('[data-chrome-watch]');
         if (!label) continue;
         const state = result.searches?.[row.dataset.searchRow];
@@ -262,6 +276,7 @@
       }
     } catch {
       for (const label of document.querySelectorAll('[data-chrome-watch]')) label.textContent = 'Chrome watch status unavailable.';
+      for (const label of document.querySelectorAll('[data-public-watch]')) label.textContent = 'Status unavailable.';
     } finally { searchWatchBusy = false; }
   }
 

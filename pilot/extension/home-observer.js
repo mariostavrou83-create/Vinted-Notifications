@@ -17,6 +17,35 @@ function beginFinderHomeObserver(expectedUsername, runId, allowDetails=false, ca
   const baseline=new Set(initial.rendered_ids||[]), sent=new Map(), inspected=new Set();
   let ready=baseline.size>0, registered=!catalogue, active=true, busy=false, interval;
   let fingerprint=initial.rendered_ids?.join(",")??null,lastChanged=0,lastReport=0,backoff=0;
+  let lastActivated = null;
+  function bannerLabel(button) {
+    return button.innerText.trim().replace(/\s+/g, " ").toLowerCase();
+  }
+  function eligibleBanner(signature) {
+    if (!showNew || !catalogue || document.hidden) return null;
+    const button = finderNewResultsButton();
+    if (!button) {
+      if (lastActivated) lastActivated.cleared = true;
+      return null;
+    }
+    const label = bannerLabel(button);
+    if (lastActivated && !lastActivated.cleared &&
+        (lastActivated.label === label || lastActivated.signature === signature)) return null;
+    return {button, label};
+  }
+  // Only the paired worker can ask this isolated document to use its own result
+  // control. Re-read the list and button together immediately before the click.
+  function showBatch(expectedLabel) {
+    if (!active || !isSource() || !matches() || !showNew || document.hidden) return false;
+    const latest = captureVisibleListings(true, true);
+    if (latest.error || latest.source !== "catalogue") return false;
+    const signature = (latest.rendered_ids || []).join(",");
+    const offer = eligibleBanner(signature);
+    if (!offer || offer.label !== expectedLabel) return false;
+    lastActivated = {label:offer.label, signature, cleared:false};
+    offer.button.click();
+    return true;
+  }
   function stop(){
     active=false;clearInterval(interval);
     removeEventListener("pagehide",leave);removeEventListener("popstate",changedPage);
@@ -41,11 +70,10 @@ function beginFinderHomeObserver(expectedUsername, runId, allowDetails=false, ca
         if(!response?.ok){backoff=Date.now()+30000;return;}
         registered=true;lastReport=Date.now();
       }
-      // Only ask to activate Vinted's own narrowly identified result control.
-      // The worker separately enforces the device-wide limit and identity.
-      if(showNew && catalogue && !document.hidden && finderNewResultsButton()){
-        const refresh=await emit("new-results");
-        if(refresh?.stop){stop();return;}
+      const offer = eligibleBanner(signature);
+      if (offer) {
+        const refresh = await emit("new-results", {label:offer.label});
+        if (refresh?.stop) {stop();return;}
       }
       const now=Date.now()/1000;
       for(const [key,expiry] of sent)if(expiry<=now)sent.delete(key);
@@ -69,7 +97,7 @@ function beginFinderHomeObserver(expectedUsername, runId, allowDetails=false, ca
       globalThis.finderHomeObserver.rendered=ids.length;
     }catch{leave();}finally{busy=false;}
   }
-  globalThis.finderHomeObserver={runId,stop,lastSampled:0,lastChanged:0,rendered:0};
+  globalThis.finderHomeObserver={runId,stop,showBatch,lastSampled:0,lastChanged:0,rendered:0};
   addEventListener("pagehide",leave);
   addEventListener("popstate",changedPage);
   interval=setInterval(sample,period);

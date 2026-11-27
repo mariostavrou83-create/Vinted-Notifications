@@ -52,7 +52,8 @@
         <article class="search-card" data-search-row="{{ search.id }}">
           <div class="search-info"><h3><a href="#search-{{ search.id }}">{{ search.name }}</a></h3>
             <p>{{ 'Enabled' if search.enabled else 'Paused' }} · {% if search.budget %}Up to £{{ search.budget }}{% else %}Any budget{% endif %}</p>
-            {% if search.enabled %}<p data-chrome-watch></p>{% if buyer_provider_linked %}<p>Connected buying provider is configured.</p>{% elif public_status and public_status.message %}<p>Public search · {{ public_status.message }}</p>{% endif %}{% endif %}
+            {% if search.enabled %}<p data-chrome-watch></p>{% if buyer_provider_linked %}<p>Connected buying provider is configured.</p>{% endif %}{% endif %}
+            <p>Public search · <span data-public-watch>{{ public_status.message if public_status else 'Status unavailable.' }}</span> <span data-public-checked="{{ public_status.last_checked_at if public_status and public_status.last_checked_at is number else '' }}"></span></p>
             {% if search.include_keywords %}<div class="chips">{% for tag in search.include_keywords[:4] %}<span>{{ tag }}</span>{% endfor %}</div>{% endif %}
           </div>
           <div class="actions"><a class="button secondary" href="{{ search.url }}" target="_blank" rel="noopener noreferrer">Open on Vinted <span aria-hidden="true">↗</span></a><a class="button secondary" href="#search-{{ search.id }}">Edit<span class="sr"> {{ search.name }}</span></a></div>

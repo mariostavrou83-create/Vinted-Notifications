@@ -61,6 +61,32 @@ const fs=require("node:fs"),path=require("node:path"),assert=require("node:asser
     await page.evaluate(()=>history.pushState(null,"","/catalog?search_text=other"));
     await page.clock.runFor(5100);
     assert.equal((await page.evaluate(()=>messages)).at(-1).type,"finder-search-ended");
+    await page.evaluate(url=>{
+      history.pushState(null,"",url);
+      const main=document.querySelector("main");
+      window.bannerClicks=0;
+      main.insertAdjacentHTML("afterbegin",'<button id="batch">Show 2 new results</button>');
+      main.addEventListener("click",e=>{if(e.target.id==="batch")bannerClicks++;});
+      chrome.runtime.sendMessage=async m=>m.type==="finder-search-new-results"
+        ? {ok:finderHomeObserver.showBatch(m.label)} : {ok:true};
+      beginFinderHomeObserver("buyer","batch-watch",false,url,true);
+    },url);
+    await page.clock.runFor(20);
+    assert.equal(await page.evaluate(()=>bannerClicks),1);
+    await page.evaluate(()=>{const b=document.querySelector("#batch");b.replaceWith(b.cloneNode(true));});
+    await page.clock.runFor(5000);
+    assert.equal(await page.evaluate(()=>bannerClicks),1,"same batch after rerender");
+    await page.evaluate(()=>{addTile("103");document.querySelector("#batch").textContent="Show 4 new items";});
+    await page.clock.runFor(5000);
+    assert.equal(await page.evaluate(()=>bannerClicks),2,"distinct platform batch on following tick");
+    await page.evaluate(()=>document.querySelector("#batch").remove());
+    await page.clock.runFor(5000);
+    await page.evaluate(()=>document.querySelector("main").insertAdjacentHTML("afterbegin",'<button id="batch">Show 4 new items</button>'));
+    await page.clock.runFor(5000);
+    assert.equal(await page.evaluate(()=>bannerClicks),3,"new banner after a cleared sample");
+    await page.evaluate(()=>{document.querySelector("header img").alt="other-buyer";document.querySelector("#batch").textContent="Show 5 new results";addTile("104");});
+    await page.clock.runFor(5000);
+    assert.equal(await page.evaluate(()=>bannerClicks),3,"account change blocks actuation");
     assert.deepEqual(visits,[url]);
     console.log("Chrome 5-second catalogue scan, quiet initial inventory, unchanged-card cadence, public evidence, heartbeat and exact URL stop passed.");
   }finally{await browser.close();}

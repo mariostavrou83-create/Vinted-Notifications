@@ -9,7 +9,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 from flask import g, jsonify, request
 
-from . import flow, native_order
+from . import flow, native_order, public_feed
 from .db import get_db, settings_for, transaction
 from .home_watch import checked_item
 from .inputs import InputError, money, search_url
@@ -156,7 +156,9 @@ def init_app(app):
                 rendered_count=w["rendered_count"] if w else None,
                 target_seconds=5,
             )
-        return jsonify(searches=results)
+        response = jsonify(searches=results, public_searches=public_feed.status(conn, uid)["searches"])
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.post("/api/native/search-watch")
     def native_search_watch():
