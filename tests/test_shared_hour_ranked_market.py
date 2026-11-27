@@ -49,7 +49,8 @@ class RankedMarket(unittest.TestCase):
         similar=[offer(2,1700),offer(3,1800)]
         plain=offer(4,800,title="Next cami top")
         worn=dict(offer(5,900),reported_wear=["peeling"])
-        self.assertEqual(estimate_resale(target,[plain,*similar,worn])["resale_pence"],750)
+        # The plain and intact-style peers span more than 2x after the worn £9 listing is excluded.
+        self.assertIsNone(estimate_resale(target,[plain,*similar,worn])["resale_pence"])
         result=estimate_resale(target,[plain,*similar,worn],rank_style=True)
         self.assertEqual(result["resale_pence"],1650)
         self.assertEqual(len(result["evidence"]),2)

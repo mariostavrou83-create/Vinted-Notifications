@@ -18,6 +18,7 @@ import trial_shared_hour
 
 CALLBACK = "shared:resale"
 _labels = OrderedDict()
+_withdrawn = set()
 _cards = OrderedDict()
 _rendering = {}
 _shown = OrderedDict()
@@ -195,13 +196,25 @@ def _schedule_label(identity):
         _rendering[identity] = asyncio.create_task(_render(identity, card))
 
 
+def withdraw(identity):
+    key = str(identity)
+    _withdrawn.add(key)
+    _cards.pop(key, None)
+    _labels[key] = "Resale · withdrawn"
+    _shown.pop(key, None)
+
+
 def button(identity):
+    if str(identity) in _withdrawn:
+        return InlineKeyboardButton("Resale · withdrawn", callback_data=CALLBACK)
     label = _labels.get(str(identity), "Resale check · view price")
     return InlineKeyboardButton(label, callback_data=CALLBACK)
 
 
 def remember(identity, result):
     identity = str(identity)
+    if identity in _withdrawn:
+        return
     evidence = [
         item
         for item in (result.get("evidence") or [])
@@ -245,6 +258,8 @@ def amount(pence):
 
 
 def brief(status, result):
+    if status == "withdrawn":
+        return (result or {}).get("explanation") or "This estimate has been withdrawn."
     rough = photo_range(result)
     external = external_range(result)
     photo = (result or {}).get("rough") or {}
@@ -288,7 +303,8 @@ def brief(status, result):
         elif n == 0 and result.get("context_evidence"):
             market += " Similar items found were weaker matches."
         unavailable = sum(
-            1 for row in (result.get("sources") or {}).values()
+            1
+            for row in (result.get("sources") or {}).values()
             if row.get("status") in {"blocked", "unavailable", "timeout", "hour_limit"}
         )
         note = f" {unavailable} market searches unavailable." if unavailable else ""

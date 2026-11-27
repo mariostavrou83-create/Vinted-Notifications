@@ -122,7 +122,7 @@ def _store(conn, observed, batch, now):
         return None
     if not window[0] - DURATION <= observed <= now < window[0]:
         return window[0]
-    from trial_market_hour import listing_fields
+    from trial_market_hour import listing_fields, merge_product_facts
     from trial_price_rules import field, grade
 
     records = []
@@ -145,18 +145,41 @@ def _store(conn, observed, batch, now):
             values.update(observed_at=observed, source="observed_catalogue")
             complete = (public and values["title"] and grade(values) and values["seller_id"]
                         and values["size"] and (values["ask_pence"] or 0) > 0)
-            payload = json.dumps(values) if complete else None
+            payload = values if complete else None
             records.append((identity, observed, field(values, "brand"), field(values, "size"),
                             values["seller_id"], payload))
         except (KeyError, ValueError, TypeError, AttributeError, OverflowError):
             continue
     with conn:
+        # Preserve item-specific evidence over successive summary cards. A new seller or a
+        # withdrawal cannot inherit another seller's condition or audience description.
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        ids = list(dict.fromkeys(r[0] for r in records))
+        previous = {}
+        if ids:
+            marks = ",".join("?" for _ in ids)
+            previous = {row[0]: (row[1], row[2], json.loads(row[3]))
+                        for row in conn.execute(
+                            f"SELECT id,observed,seller,payload FROM offers WHERE id IN ({marks}) AND observed>=? AND payload IS NOT NULL",
+                            (*ids, now - MAX_AGE))}
+        stored = []
+        for identity, when, brand, size, seller, item in records:
+            prior = previous.get(identity)
+            if item is not None and prior and prior[0] <= when and seller and prior[1] == seller:
+                item = merge_product_facts(item, prior[2])
+            if not prior or prior[0] <= when:
+                if item is None:
+                    previous.pop(identity, None)
+                else:
+                    previous[identity] = (when, seller, item)
+            stored.append((identity, when, brand, size, seller, json.dumps(item) if item is not None else None))
         conn.executemany("""
             INSERT INTO offers VALUES(?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET observed=excluded.observed, brand=excluded.brand,
                 size=excluded.size, seller=excluded.seller, payload=excluded.payload
             WHERE excluded.observed>=offers.observed
-        """, records)
+        """, stored)
         conn.execute("DELETE FROM offers WHERE observed<?", (now - MAX_AGE,))
         count = conn.execute("SELECT COUNT(*) FROM offers").fetchone()[0]
         if count > ROW_LIMIT:
