@@ -8,6 +8,9 @@ import vinted_order_messages as messages
 
 
 def install(app):
+    from web_ui_plugin.marketplace_controls import disable_retired_listing_actions
+
+    app.before_request(disable_retired_listing_actions)
     messages.ensure_schema()
 
     @app.get("/messages")

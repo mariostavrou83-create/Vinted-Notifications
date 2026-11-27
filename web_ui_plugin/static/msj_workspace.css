@@ -1,5 +1,12 @@
 /* A consistent, compact workspace. No refresh timers or external assets. */
 .topbar { height:76px; }
+.dashboard-switch { display:flex; gap:2px; border:1px solid var(--line); border-radius:8px; padding:3px; }
+.dashboard-switch a { border-radius:5px; color:var(--ink); font-weight:600; padding:4px 12px; }
+.dashboard-switch a[aria-current] { color:white; background:var(--green); }
+@media (max-width:480px) {
+  .topbar:has(.dashboard-switch) .brand-name { display:none; }
+  .dashboard-switch a { padding:4px 9px; }
+}
 .monogram { font-size:40px; }
 .main-nav { min-height:54px; }
 main { padding-top:32px; }

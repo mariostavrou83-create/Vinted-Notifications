@@ -331,11 +331,10 @@ class SavedDiagnosticTests(EbayFixture, unittest.TestCase):
             for field in ("item_id", "url", "price", "estimated_total"):
                 self.assertIsNone(row[field])
 
-    def test_saved_shared_editor_exposes_only_valid_existing_ebay_diagnostic(self):
+    def test_saved_shared_editor_omits_retired_ebay_diagnostic(self):
         html = self.client.get(f"/search/{self.identity}").text
-        self.assertEqual(html.count('id="check-saved-ebay"'), 1)
-        self.assertIn(f'data-url="/search/{self.identity}/check-ebay"', html)
-        self.assertIn("not unsaved changes", html)
+        self.assertNotIn('id="check-saved-ebay"', html)
+        self.assertNotIn(f'data-url="/search/{self.identity}/check-ebay"', html)
         self.assertIn("title or seller description", html)
         self.assertNotIn('id="check-saved-ebay"', self.client.get("/search/new").text)
         other = dashboard_store.save_search(

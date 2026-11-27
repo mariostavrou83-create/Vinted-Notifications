@@ -16,6 +16,10 @@ DEFAULT_POLL_SECONDS = 5
 MAX_LIVE_SEARCHES = 10
 MAX_DAILY_BUDGET = 10_000_000
 
+def listing_alerts_enabled():
+    return os.environ.get("FINDER_EBAY_ALERTS", "1") == "1"
+
+
 DEFAULTS = {
     "filter_mode": "manual",
     "search_url": "",
@@ -120,6 +124,8 @@ def parse_form(form, previous=None):
         "ebay_enabled": 0,
         "ebay": dict(DEFAULTS),
     }
+    if not listing_alerts_enabled():
+        return 1, 0, previous["ebay"]
     if "platform_mode" not in form:
         return previous["vinted_enabled"], previous["ebay_enabled"], previous["ebay"]
     mode = form.get("platform_mode")
@@ -182,6 +188,8 @@ def parse_shared_form(form, previous=None, maximum=None):
     mode = form.get("platform_mode") or (
         "both" if vinted_url and ebay_url else "ebay" if ebay_url else "vinted"
     )
+    if not listing_alerts_enabled():
+        mode = "vinted"
     if mode not in ("vinted", "ebay", "both"):
         raise ValueError("Choose Vinted only, eBay only, or both.")
     if type(maximum) is not int or not 100 <= maximum <= 100000:
@@ -190,7 +198,7 @@ def parse_shared_form(form, previous=None, maximum=None):
         form.get("shared_keywords", "\n".join(saved.get("shared_keywords", [])))
     )
     if mode == "vinted":
-        config = dict(DEFAULTS)
+        config = dict(DEFAULTS, **saved) if not listing_alerts_enabled() else dict(DEFAULTS)
     else:
         if configuration()["source"] != "browse":
             raise ValueError(
@@ -264,6 +272,8 @@ def save_platforms(conn, query_id, vinted, ebay, config):
 
 def live_ids(conn):
     """At most ten eligible searches, including after restart or concurrent edits."""
+    if not listing_alerts_enabled():
+        return []
     eligible = [r[0] for r in conn.execute("""SELECT q.id FROM queries q
         JOIN search_platforms s ON s.query_id=q.id
         LEFT JOIN search_dashboard d ON d.query_id=q.id
@@ -450,6 +460,8 @@ def save_configuration(form):
 
 
 def connection_summary():
+    if not listing_alerts_enabled():
+        return {"enabled": False, "active": 0, "missing": [], "live_ids": [], "interval": 0}
     config = configuration()
     from ebay_monitor import grouped_searches
     from ebay_quota import allowance_summary
@@ -468,6 +480,7 @@ def connection_summary():
     capacity_interval = call_spacing(config) * max(1, groups)
     target = config["target_interval"]
     return {
+        "enabled": True,
         "source": config["source"],
         "public_paused": bool(public_paused and public_paused[0]),
         "alert_target": ALERT_TARGET_SECONDS,

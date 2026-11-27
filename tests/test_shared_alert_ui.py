@@ -108,7 +108,6 @@ class SharedFormRendering(unittest.TestCase):
         fields = Fields(html).fields
         for name in (
             "query",
-            "ebay_search_url",
             "shared_keywords",
             "exclusions",
             "vinted_max_total",
@@ -125,6 +124,7 @@ class SharedFormRendering(unittest.TestCase):
             "resale_high",
             "must_have",
             "ebay_keywords",
+            "ebay_search_url",
             "ebay_min_price",
             "ebay_max_price",
             "ebay_include_shipping",
@@ -141,18 +141,16 @@ class SharedFormRendering(unittest.TestCase):
         self.assertIn("Listing photos", html)
         self.assertIn("Full description", html)
 
-    def test_urls_are_required_only_for_enabled_platforms_without_javascript(self):
+    def test_vinted_link_is_required_for_every_stored_platform_mode(self):
         for mode in ("vinted", "ebay", "both"):
             with self.subTest(mode=mode):
                 fields = Fields(
                     self.render("msj_edit.html", self.row(mode=mode))
                 ).fields
-                self.assertEqual("required" in fields["query"][0], mode != "ebay")
-                self.assertEqual(
-                    "required" in fields["ebay_search_url"][0], mode != "vinted"
-                )
+                self.assertIn("required", fields["query"][0])
+                self.assertNotIn("ebay_search_url", fields)
 
-    def test_legacy_form_keeps_old_fields_and_platform_tabs(self):
+    def test_legacy_form_keeps_vinted_fields(self):
         html = self.render("msj_edit.html", self.row(version=0))
         fields = Fields(html).fields
         for name in (
@@ -162,25 +160,27 @@ class SharedFormRendering(unittest.TestCase):
             "resale_low",
             "resale_high",
             "must_have",
-            "ebay_keywords",
         ):
             self.assertIn(name, fields)
+        self.assertNotIn("ebay_keywords", fields)
         self.assertNotIn("shared_keywords", fields)
         self.assertNotIn("data-shared-alert", html)
-        self.assertIn('role="tablist"', html)
-        self.assertIn("Copy keywords &amp; prices", html)
+        self.assertNotIn('role="tablist"', html)
+        self.assertNotIn("Copy keywords &amp; prices", html)
 
-    def test_shared_card_shows_budget_even_for_ebay_only_and_legacy_stays_separate(
+    def test_vinted_searches_show_budgets_and_retired_searches_are_hidden(
         self,
     ):
-        shared = self.render("msj_dashboard.html", self.row(mode="ebay"))
+        retired = self.render("msj_dashboard.html", self.row(mode="ebay"))
+        self.assertNotIn("Fur jackets", retired)
+        shared = self.render("msj_dashboard.html", self.row(mode="both"))
         self.assertIn("Maximum including fees &amp; postage", shared)
-        self.assertIn("Shared keywords: fur · fur hood", shared)
+        self.assertIn("Keywords: fur · fur hood", shared)
         self.assertNotIn("Item-price guide", shared)
         legacy = self.render("msj_dashboard.html", self.row(version=0))
         self.assertIn("Vinted total budget", legacy)
         self.assertIn("1 keyword searches: legacy", legacy)
-        self.assertNotIn("Shared keywords:", legacy)
+        self.assertNotIn("Keywords:", legacy)
 
 
 class SharedBrowserInitialization(unittest.TestCase):

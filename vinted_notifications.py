@@ -44,6 +44,14 @@ monitor_lock = threading.Lock()
 shutdown_requested = threading.Event()
 
 
+def ebay_history_process():
+    import asyncio
+    from ebay_monitor import run_delivery
+
+    logger.info("eBay listing alerts off; historical Telegram maintenance active")
+    asyncio.run(run_delivery())
+
+
 def scraper_process(items_queue):
     from polling import DEFAULT_WORKERS, Poller
 
@@ -192,12 +200,16 @@ def _monitor_processes(items_queue, telegram_queue, rss_queue, new_items_queue=N
             home_monitor_process, home_monitor_run, name="vinted-home-monitor"
         )
 
+    from ebay_store import listing_alerts_enabled
+
     if ebay_worker_process is None or not ebay_worker_process.is_alive():
         from ebay_monitor import ebay_process
 
-        ebay_worker_process = multiprocessing.Process(
-            target=ebay_process, name="ebay-monitor"
-        )
+        if listing_alerts_enabled():
+            target, name = ebay_process, "ebay-monitor"
+        else:
+            target, name = ebay_history_process, "ebay-history"
+        ebay_worker_process = multiprocessing.Process(target=target, name=name)
         ebay_worker_process.start()
 
     # Check if the query refresh delay has changed

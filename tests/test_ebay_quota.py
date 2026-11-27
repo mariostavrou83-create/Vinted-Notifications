@@ -265,7 +265,8 @@ class QuotaDashboardTests(EbayFixture, unittest.TestCase):
         )
         with patch("ebay_connections.BrowseClient") as browse:
             html = self.client.get("/connections").text
-            self.assertIn("Allowance not checked", html)
+            self.assertFalse(ebay_store.connection_summary()["allowance"]["checked"])
+            self.assertNotIn("eBay-reported allowance", html)
             browse.assert_not_called()
         api = Mock(token="private-token")
         api.session.get.return_value.status_code = 200
@@ -273,16 +274,17 @@ class QuotaDashboardTests(EbayFixture, unittest.TestCase):
         ebay_quota.check_allowance(api, ebay_store.configuration())
         api.session.get.reset_mock()
         html = self.client.get("/connections").text
-        self.assertIn("5000 search calls per 24 hours", html)
-        self.assertIn("Remaining when checked: <b>0</b>", html)
-        self.assertIn("configured allowance exceeds", html)
-        self.assertIn("reported limits do not cover", html)
-        self.assertIn("No completed live measurements in this window", html)
+        allowance = ebay_store.connection_summary()["allowance"]
+        self.assertEqual(allowance["rows"][0]["limit"], 5000)
+        self.assertEqual(allowance["rows"][0]["remaining"], 0)
+        self.assertTrue(allowance["exceeds_reported"])
+        self.assertFalse(allowance["meets_target"])
+        self.assertNotIn("eBay-reported allowance", html)
         for secret in ("private-id", "private-secret", "private-token"):
             self.assertNotIn(secret, html)
         api.session.get.assert_not_called()
         ebay_store.save_configuration({"client_id": "different-app"})
-        self.assertIn("Allowance not checked", self.client.get("/connections").text)
+        self.assertFalse(ebay_store.connection_summary()["allowance"]["checked"])
 
     def test_zero_enabled_and_public_mode_do_not_claim_live_api_capacity(self):
         api = Mock(token="test-token")
@@ -292,7 +294,7 @@ class QuotaDashboardTests(EbayFixture, unittest.TestCase):
         )
         ebay_quota.check_allowance(api, ebay_store.configuration())
         html = self.client.get("/connections").text
-        self.assertIn("No eBay searches are enabled yet", html)
+        self.assertEqual(ebay_store.connection_summary()["active"], 0)
         self.assertNotIn("reported limits cover the configured", html)
         ebay_store.save_configuration({"source": "public"})
         self.assertNotIn(

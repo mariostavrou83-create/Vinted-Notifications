@@ -7,6 +7,9 @@ ARG APP_USER=appuser
 
 WORKDIR /app
 
+# This deployment monitors Vinted only. Preserve historical eBay data and redactions.
+ENV FINDER_EBAY_ALERTS=0
+
 # System deps: gosu to drop privileges cleanly
 RUN apt-get update \
  && apt-get install -y --no-install-recommends gosu fonts-dejavu-core \
