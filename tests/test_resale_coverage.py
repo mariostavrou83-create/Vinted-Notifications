@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
-from test_resale_pilot import alert, market
+from test_resale_pilot import alert
 
 import photo_cards
 import resale_pilot as pilot
@@ -58,7 +58,9 @@ class PriceCoverage(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(seen[0]["alternatives"], [])
             self.assertNotIn("total_pence", seen[0]["garment"])
 
-    async def test_provider_limit_uses_local_estimates_without_repeated_calls(self):
+    async def test_provider_limit_does_not_substitute_a_category_price_or_repeat_calls(
+        self,
+    ):
         calls = []
 
         def limited(req):
@@ -76,7 +78,8 @@ class PriceCoverage(unittest.IsolatedAsyncioTestCase):
                         alert(identity), [], conn, client, "test"
                     )
                     self.assertEqual(
-                        (review["resale_pence"], review["basis"]), (1200, "category")
+                        (review["resale_pence"], review["basis"]),
+                        (None, "insufficient"),
                     )
                 _, empty, _ = await pilot.evaluate_one(
                     dict(alert("3"), title="Item"), [], conn, client, "test"
@@ -112,8 +115,6 @@ class PriceCoverage(unittest.IsolatedAsyncioTestCase):
                         conn,
                         None,
                         "",
-                        [],
-                        asyncio.Event(),
                         continuous=True,
                     )
                 )
@@ -129,18 +130,6 @@ class PriceCoverage(unittest.IsolatedAsyncioTestCase):
                 "SELECT summary FROM resale_trial_report"
             ).fetchone()
             self.assertEqual(json.loads(report)["unique_alerts"], 1)
-
-    def test_independent_brand_prices_override_a_category_and_an_alert_cannot_price_itself(
-        self,
-    ):
-        target = alert("91")
-        key = pricing.market_key(target)
-        with patch.dict(pricing._market_guides, {}, clear=True):
-            rows = [market(str(i), 3000) for i in range(1, 4)] + [market("91", 50)]
-            pricing.cache_guide(key, rows, time.time())
-            self.assertEqual(pricing.category_estimate(target)["resale_pence"], 2850)
-            pricing.forget_reference("1")
-            self.assertEqual(pricing.category_estimate(target)["basis"], "category")
 
 
 class AlertLayout(unittest.IsolatedAsyncioTestCase):
@@ -184,10 +173,10 @@ class AlertLayout(unittest.IsolatedAsyncioTestCase):
                     "Title: <b>Mesh top</b>",
                     "Brand: A &amp; B",
                     "Total: <b>£8.00</b>",
-                    "Est. profit: <b>£0.00</b>",
-                    "Est. resell: £8.00",
-                    "Buy: <b>No</b>",
-                    "Conf: ⬇️",
+                    "Est. profit: <b>Pending</b>",
+                    "Est. resell: Checking this item…",
+                    "Buy: <b>Pending</b>",
+                    "Conf: Pending",
                     "<b>Autobuy progress</b>",
                 ]
                 positions = [
@@ -196,7 +185,8 @@ class AlertLayout(unittest.IsolatedAsyncioTestCase):
                 ]
                 self.assertEqual(positions, sorted(positions))
                 self.assertEqual(
-                    delivery.initial_price(SimpleNamespace(caption_html=base)), "priced"
+                    delivery.initial_price(SimpleNamespace(caption_html=base)),
+                    "pending",
                 )
                 for hidden in (
                     "Fixture budget",
