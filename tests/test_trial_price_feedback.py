@@ -42,11 +42,11 @@ class TrialFeedbackTests(unittest.IsolatedAsyncioTestCase):
             with closing(sqlite3.connect(path)) as conn, conn:
                 conn.executescript(
                     "CREATE TABLE hour_window (id,started,ends,group_version);"
-                    "CREATE TABLE hour_alerts (item_id,reply_message,sent);"
+                    "CREATE TABLE hour_alerts (item_id,reply_message,sent,parent_message);"
                 )
                 conn.execute("INSERT INTO hour_window VALUES(1,?,?,?)", (now-90, now+60, group.version))
-                conn.execute("INSERT INTO hour_alerts VALUES('111',10,?)", (now-4,))
-                conn.execute("INSERT INTO hour_alerts VALUES('222',51,NULL)")
+                conn.execute("INSERT INTO hour_alerts VALUES('111',10,?,91)", (now-4,))
+                conn.execute("INSERT INTO hour_alerts VALUES('222',51,NULL,92)")
             with (
                 patch("trial_shared_hour.audit_path", return_value=path),
                 patch("trial_shared_hour.capture_active", return_value=True),
@@ -63,6 +63,13 @@ class TrialFeedbackTests(unittest.IsolatedAsyncioTestCase):
                 await reply(26, "fair", posted=now-45)
                 await reply(27, "fair", posted=now+61)
                 await reply(28, "Some unrelated discussion")
+                await reply(32, "low", target=92)  # ordinary group card, numeric label unconfirmed
+                with closing(sqlite3.connect(path)) as conn, conn:
+                    conn.execute("CREATE TABLE hour_numeric_cards (item_id PRIMARY KEY,shown,label)")
+                    conn.execute("INSERT INTO hour_numeric_cards VALUES('222',?,'£10–£15')", (now-5,))
+                await reply(33, "high", target=92, posted=now-10)  # before the numeric label was visible
+                await reply(34, "fair", target=92, user=2)  # replies to the labelled original card
+                await reply(35, "low", target=91)  # existing follow-up but unlabelled parent
                 current.return_value = group._replace(version="relinked")
                 await reply(29, "£17")
                 current.return_value = group
@@ -73,9 +80,11 @@ class TrialFeedbackTests(unittest.IsolatedAsyncioTestCase):
                     [
                         ("Finder hourly valuation feedback item=%s kind=%s pence=%s", "111", "suggested_price", 2000),
                         ("Finder hourly valuation feedback item=%s kind=%s pence=%s", "111", "sold_price", 950),
+                        ("Finder hourly valuation feedback item=%s kind=%s pence=%s", "222", "fair", None),
                     ],
                 )
             with closing(sqlite3.connect(path)) as conn:
                 self.assertEqual(conn.execute(
                     "SELECT item_id,role,kind,pence FROM hour_feedback ORDER BY message_id"
-                ).fetchall(), [("111", "owner", "suggested_price", 2000), ("111", "partner", "sold_price", 950)])
+                ).fetchall(), [("111", "owner", "suggested_price", 2000), ("111", "partner", "sold_price", 950),
+                               ("222", "partner", "fair", None)])

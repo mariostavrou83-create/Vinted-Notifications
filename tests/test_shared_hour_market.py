@@ -7,7 +7,7 @@ import tempfile
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 
 import httpx
 
@@ -24,6 +24,7 @@ def listing(identity, seller, ask=6, *, condition="Very good"):
 
 class Caps:
     def __init__(self):
+        self.path = Path("/unused-fixture-path")
         self.calls = []
     def reserve(self, key, limit):
         self.calls.append((key, limit))
@@ -31,6 +32,15 @@ class Caps:
 
 
 class SharedMarketTest(unittest.TestCase):
+    def setUp(self):
+        for name, value in (
+            ("trial_market_search.search_marketplaces", {"sources": {}, "fresh_requests": 0}),
+            ("trial_photo_price.rough_estimate", {"photo_status": "no_photo", "model_calls": 0}),
+        ):
+            mocked = patch(name, new_callable=AsyncMock)
+            mocked.start().return_value = value
+            self.addCleanup(mocked.stop)
+
     def test_projection_keeps_only_fields_and_uses_printed_condition(self):
         item = listing(100, 15)
         item.raw_data["user"]["login"] = "private"
@@ -70,12 +80,15 @@ class SharedMarketTest(unittest.TestCase):
                     return httpx.Response(200, json={"choices":[{"message":{"content":'{"matches":[0]}'}}]})
                 caps = Caps()
                 with patch.dict(os.environ, {"MISTRAL_API_KEY":"fixture"}, clear=True), \
-                     patch("trial_public_pool.candidates", return_value=[]):
+                     patch("trial_public_pool.candidates", return_value=[]), \
+                     patch("trial_vision_budget.reserve", return_value=42) as reserve, \
+                     patch("trial_vision_budget.record_usage"):
+
                     async with httpx.AsyncClient(transport=httpx.MockTransport(model)) as client:
                         got = await pricing.evaluate("100", database, client, caps)
                 assert got["baseline_pence"] == 350
                 assert got["resale_pence"] is None and got["model_status"] == "ai_reviewed"
-                assert got["market_calls"] == 0 and got["model_calls"] == 1 and caps.calls == [("model", 3)]
+                assert got["market_calls"] == 0 and got["model_calls"] == 1 and reserve.call_count == 1
         asyncio.run(replay())
 
 

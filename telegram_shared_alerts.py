@@ -14,6 +14,7 @@ from telegram.error import BadRequest, ChatMigrated, Forbidden, RetryAfter, Tele
 
 import alert_controls
 import photo_cards
+import trial_resale_button
 from logger import get_logger
 from search_settings import connection
 
@@ -192,7 +193,8 @@ def allowed_update(update, owner):
         return False
     if re.fullmatch(APPROVE_PATTERN, query.data or ""):
         return True
-    return bool(re.fullmatch(BUY_PATTERN, query.data or "") and member(current(), chat, sender))
+    return bool((query.data == trial_resale_button.CALLBACK or re.fullmatch(BUY_PATTERN, query.data or ""))
+                and member(current(), chat, sender))
 
 
 async def private_group(bot, chat_id):
@@ -514,7 +516,7 @@ def finish(row, *, message_id=None, delay=0, failed=False):
         )
 
 
-def markup(row, state=None, stop=None, *, progress=None):
+def markup(row, state=None, stop=None, *, progress=None, show_resale=False):
     states = {
         "in_progress": "Autobuy in progress",
         "preparing": "Autobuy in progress",
@@ -531,6 +533,8 @@ def markup(row, state=None, stop=None, *, progress=None):
                 else [InlineKeyboardButton("Autobuy", callback_data="shared:buy")])
     if stop:
         rows.append([InlineKeyboardButton("Stop Autobuy", callback_data=f"shared:stop:{stop}")])
+    if show_resale:
+        rows.append([trial_resale_button.button(row["item_id"])])
     return InlineKeyboardMarkup(rows)
 
 
@@ -549,7 +553,7 @@ async def send(bot, group, row):
         return
     state = (vinted_buying.result(row["item_id"]) or {}).get("state")
     body = resale_telegram.group_body(row["item_id"], row["body"])
-    common = dict(chat_id=group.chat, parse_mode="HTML", reply_markup=markup(row, state), **photo_cards.TIMEOUTS)
+    common = dict(chat_id=group.chat, parse_mode="HTML", reply_markup=markup(row, state, show_resale=trial_shared_hour.capture_active()), **photo_cards.TIMEOUTS)
     try:
         response = None
         if row["photo_id"]:
@@ -567,6 +571,8 @@ async def send(bot, group, row):
             logger.info("Telegram accepted shared Vinted alert initial_resale=%s guidance=%s source=%s",
                         resale_telegram.initial_price(response), resale_telegram.visible_guidance(response),
                         alert_controls.row_source(row))
+            if trial_shared_hour.capture_active():
+                trial_resale_button.observe(row["item_id"], bot, group, response, common["reply_markup"])
             trial_shared_hour.accepted(bot, group, row["item_id"], alert_controls.row_source(row), response.message_id)
         else:
             finish(row, failed=True)

@@ -1,7 +1,9 @@
 import sqlite3
 import tempfile
 import unittest
+from collections import OrderedDict
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import trial_public_pool as pool
@@ -51,6 +53,30 @@ class PublicComparisonPool(unittest.TestCase):
         self.assertEqual(self.rows(self.now+2), [])
         pool._store(self.conn, self.now+3601, [self.item()], self.now+3601)
         self.assertEqual(self.rows(self.now+3601), [])
+
+    def test_legacy_size_keys_retrieved_without_mixing_nearby_sizes(self):
+        pool._store(self.conn,self.now,[self.item("200"),self.item("201","56"),self.item("202","57")],self.now)
+        with self.conn:
+            self.conn.execute("UPDATE offers SET size='s uk 8 10' WHERE id='200'")
+            self.conn.execute("UPDATE offers SET size='s uk 6 8' WHERE id='201'")
+            self.conn.execute("UPDATE offers SET size='uk 8' WHERE id='202'")
+        self.assertEqual([r["id"] for r in self.rows()], ["200"])
+
+    def test_completed_pages_share_sampling_across_searches_and_page_positions(self):
+        captured = []
+        sink = SimpleNamespace(put_nowait=captured.append)
+        first = "https://www.vinted.co.uk/catalog?brand_ids[]=1"
+        other = "https://www.vinted.co.uk/catalog?brand_ids[]=2"
+        def page(now):
+            return SimpleNamespace(observed_at=now, catalogue_page=SimpleNamespace(_raw_items=list(range(96))))
+        with (patch.object(pool, "_next_offer", 0), patch.object(pool, "_writer", object()),
+              patch.object(pool, "_recent_urls", OrderedDict()), patch.object(pool, "_pages", sink),
+              patch.object(pool, "eligible_service", return_value=True), patch.object(pool.time,"time") as clock):
+            for url, seconds in ((first,0),(first,.3),(other,.31),(first,13),(first,26)):
+                clock.return_value = self.now + seconds
+                pool.offer(self.db,url,page(clock.return_value))
+        self.assertEqual([entry[2][0] for entry in captured], [0,0,32,64])
+        self.assertTrue(all(len(entry[2])<=pool.PAGE_LIMIT for entry in captured))
 
     def test_unactivated_service_has_no_pool(self):
         unused = self.db.parent / "fresh" / "original.db"

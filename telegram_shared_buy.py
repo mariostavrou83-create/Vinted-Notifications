@@ -10,6 +10,7 @@ from telegram.error import BadRequest, TelegramError
 import photo_cards
 import resale_telegram
 import telegram_shared_alerts as shared
+import trial_resale_button
 import vinted_buyer as buyer
 import vinted_buying as buying
 from finder_incidents import queue_buy_failure
@@ -91,6 +92,7 @@ async def callback(update, context):
         await photo_cards.answer(query, "This shared alert is no longer available.", alert=True)
         return
     item_id = row["item_id"]
+    trial_resale_button.purchase_control_pressed(item_id)
     key = (group.chat, message.message_id)
     edit_lock = photo_cards.lock("shared-buy", key)
     attempt_lock = buying.purchase_lock(key)
@@ -123,7 +125,8 @@ async def callback(update, context):
 
         def controls(show_caption):
             button_label = None if show_caption else label
-            rows = list(shared.markup(row, state, stop, progress=button_label).inline_keyboard)
+            rows = list(shared.markup(row, state, stop, progress=button_label,
+                                      show_resale=trial_resale_button.on_message(message)).inline_keyboard)
             if offer:
                 token = offer["token"]
                 rows.append((

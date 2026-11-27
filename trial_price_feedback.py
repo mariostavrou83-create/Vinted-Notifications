@@ -33,11 +33,17 @@ def price_opinion(text):
 def store(path, version, role, quoted, reply, posted, now, opinion):
     # Open only an existing trial database. A deployed but inactive trial has no receipts.
     with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=rw", uri=True, timeout=0.25)) as conn, conn:
+        receipts = "SELECT item_id,reply_message AS message,sent AS shown FROM hour_alerts"
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='hour_numeric_cards'").fetchone():
+            receipts += """ UNION ALL
+                SELECT a.item_id, a.parent_message, c.shown
+                  FROM hour_alerts a JOIN hour_numeric_cards c ON c.item_id=a.item_id"""
         entry = conn.execute(
-            """SELECT a.item_id FROM hour_alerts a JOIN hour_window w ON w.id=1
+            f"""WITH receipts AS ({receipts})
+               SELECT a.item_id FROM receipts a JOIN hour_window w ON w.id=1
                WHERE w.group_version=? AND w.started<=? AND ?<w.ends
-                 AND a.reply_message=? AND a.sent IS NOT NULL AND a.sent>=w.started
-                 AND a.sent<w.ends AND CAST(a.sent AS INTEGER)<=? AND ?<w.ends""",
+                 AND a.message=? AND a.shown>=w.started
+                 AND a.shown<w.ends AND CAST(a.shown AS INTEGER)<=? AND ?<w.ends""",
             (version, now, now, quoted, posted, posted),
         ).fetchone()
         if not entry:

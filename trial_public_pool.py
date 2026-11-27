@@ -1,10 +1,12 @@
 """Reuse verified public listings from completed UK catalogue pages for the one-hour trial."""
 
 import json
+import logging
 import queue
 import sqlite3
 import threading
 import time
+from collections import OrderedDict
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +20,9 @@ MAX_AGE = 15 * 60
 _pages = queue.Queue(maxsize=4)
 _writer = None
 _next_offer = 0.0
+_recent_urls = OrderedDict()
+_next_inventory_log = 0.0
+log = logging.getLogger(__name__)
 _stop_at = LAST_START + DURATION
 
 
@@ -48,8 +53,10 @@ def offer(database, url, page):
     now = time.time()
     if now < _next_offer or not EARLIEST <= now < _stop_at or not eligible_service():
         return
-    _next_offer = now + .2
     try:
+        last_seen, offset = _recent_urls.get(url, (0, 0))
+        if now - last_seen < 12:
+            return
         if urlsplit(url).hostname not in ("www.vinted.co.uk", "vinted.co.uk"):
             return
         observed = getattr(page, "observed_at", None)
@@ -59,7 +66,16 @@ def offer(database, url, page):
         rows = catalogue._raw_items if catalogue is not None else page
         if not rows:
             return
-        _pages.put_nowait((database, observed, rows[:PAGE_LIMIT]))
+        offset %= len(rows)
+        # Spread the bounded sample across filters and catalogue positions.
+        # The scheduler pays no cost to reparse the rest of a completed page.
+        sample = rows[offset:offset + PAGE_LIMIT]
+        _pages.put_nowait((database, observed, sample))
+        _next_offer = now + .2
+        _recent_urls[url] = (now, (offset + len(sample)) % len(rows))
+        _recent_urls.move_to_end(url)
+        if len(_recent_urls) > 768:
+            _recent_urls.popitem(last=False)
         if _writer is None:
             _writer = threading.Thread(target=_consume, daemon=True, name="trial-public-market")
             _writer.start()
@@ -146,23 +162,40 @@ def _store(conn, observed, batch, now):
         if count > ROW_LIMIT:
             conn.execute("DELETE FROM offers WHERE id IN (SELECT id FROM offers ORDER BY observed LIMIT ?)",
                          (count - ROW_LIMIT,))
+    _log_inventory(conn, now)
     return window[0]
 
 
+def _log_inventory(conn, now):
+    global _next_inventory_log
+    if now < _next_inventory_log:
+        return
+    _next_inventory_log = now + 60
+    rows, complete, sellers, brands = conn.execute("""
+        SELECT count(*),count(payload),count(DISTINCT CASE WHEN payload IS NOT NULL THEN seller END),
+               count(DISTINCT CASE WHEN payload IS NOT NULL AND brand!='' THEN brand END)
+        FROM offers WHERE observed BETWEEN ? AND ?""", (now - MAX_AGE, now)).fetchone()
+    log.info("Finder hourly market inventory unique_listings=%d complete=%d sellers=%d brands=%d",
+             rows, complete, sellers, brands)
+
+
 def candidates(database, target, now=None):
-    from trial_price_rules import field
+    from trial_price_rules import field, size_lookup_keys
     path = _path(database)
     if not path.is_file():
         return []
     now = time.time() if now is None else now
-    brand, size = field(target, "brand"), field(target, "size")
+    brand, sizes = field(target, "brand"), size_lookup_keys(target)
+    if not sizes:
+        return []
+    placeholders = ",".join("?" for _ in sizes)
     try:
         with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=.2)) as conn:
-            offers = conn.execute("""
-                SELECT payload FROM offers WHERE size=? AND (?='' OR brand IN (?, ''))
+            offers = conn.execute(f"""
+                SELECT payload FROM offers WHERE size IN ({placeholders}) AND (?='' OR brand IN (?, ''))
                   AND observed BETWEEN ? AND ? AND id<>? AND seller<>? AND payload IS NOT NULL
-                ORDER BY observed DESC LIMIT 500""",
-                (size, brand, brand, now - MAX_AGE, now, str(target.get("id")), str(target.get("seller_id"))))
+                ORDER BY (brand=?) DESC, observed DESC LIMIT 500""",
+                (*sizes, brand, brand, now - MAX_AGE, now, str(target.get("id")), str(target.get("seller_id")), brand))
             return [json.loads(row[0]) for row in offers]
     except (OSError, ValueError, sqlite3.Error):
         return []
