@@ -536,6 +536,7 @@ def markup(row, state=None, stop=None, *, progress=None):
 
 async def send(bot, group, row):
     import resale_telegram
+    import trial_shared_hour
     import vinted_alerts
     import vinted_buying
 
@@ -566,6 +567,7 @@ async def send(bot, group, row):
             logger.info("Telegram accepted shared Vinted alert initial_resale=%s guidance=%s source=%s",
                         resale_telegram.initial_price(response), resale_telegram.visible_guidance(response),
                         alert_controls.row_source(row))
+            trial_shared_hour.accepted(bot, group, row["item_id"], alert_controls.row_source(row), response.message_id)
         else:
             finish(row, failed=True)
     except RetryAfter as exc:

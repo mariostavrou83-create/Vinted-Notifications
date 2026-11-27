@@ -211,7 +211,7 @@ def reserve_search(conn, key, now, *, pilot_limit=None):
         return True
 
 
-async def warm(alerts, conn, client, token, maximum, *, pilot_limit=None):
+async def warm(alerts, conn, client, token, maximum, *, pilot_limit=None, normalize_listing=market_listing):
     groups = Counter(key for item in alerts if (key := search_key(item)))
     calls = updates = 0
     for key, _ in groups.most_common():
@@ -243,7 +243,7 @@ async def warm(alerts, conn, client, token, maximum, *, pilot_limit=None):
             listings = [
                 entry
                 for raw in data["items"][:96]
-                if (entry := market_listing(raw, "GBP"))
+                if (entry := normalize_listing(raw, "GBP"))
             ]
             with conn:
                 now = time.time()

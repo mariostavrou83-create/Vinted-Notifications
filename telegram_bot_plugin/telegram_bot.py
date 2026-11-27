@@ -85,6 +85,14 @@ class LeRobot:
             from telegram.ext import MessageHandler, filters
 
             from telegram_shared_buy import callback as shared_buy
+            from trial_price_feedback import FEEDBACK_TEXT, receive as receive_price_feedback
+
+            # The group access handler rejects ordinary conversation. This narrow handler
+            # independently verifies the two linked members and the exact trial reply.
+            self.app.add_handler(MessageHandler(
+                filters.ChatType.GROUPS & filters.REPLY & filters.Regex(FEEDBACK_TEXT),
+                receive_price_feedback,
+            ), group=-2)
 
             self.app.add_handler(CommandHandler("purchase_status", purchase_status_command, filters=filters.ChatType.PRIVATE))
             self.app.add_handler(MessageHandler(

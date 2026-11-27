@@ -1,0 +1,191 @@
+"""Reuse verified public listings from completed UK catalogue pages for the one-hour trial."""
+
+import json
+import queue
+import sqlite3
+import threading
+import time
+from contextlib import closing
+from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import urlsplit
+
+from trial_shared_hour import EARLIEST, LAST_START, DURATION, eligible_service
+
+PAGE_LIMIT = 32
+ROW_LIMIT = 8000
+MAX_AGE = 15 * 60
+_pages = queue.Queue(maxsize=4)
+_writer = None
+_next_offer = 0.0
+_stop_at = LAST_START + DURATION
+
+
+def _path(database):
+    return Path(database).resolve().with_name("shared-public-market-20261127.sqlite3")
+
+
+def activate(database, end_at):
+    now = time.time()
+    if not eligible_service() or not EARLIEST <= now < end_at <= LAST_START + DURATION:
+        return
+    with closing(sqlite3.connect(_path(database), timeout=1)) as conn, conn:
+        conn.executescript("""
+            PRAGMA journal_mode=WAL;
+            CREATE TABLE IF NOT EXISTS window(id INTEGER PRIMARY KEY, ends REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS offers(
+                id TEXT PRIMARY KEY, observed REAL NOT NULL, brand TEXT NOT NULL COLLATE NOCASE,
+                size TEXT NOT NULL COLLATE NOCASE, seller TEXT NOT NULL, payload TEXT);
+            CREATE INDEX IF NOT EXISTS market_matching ON offers(size, brand, observed);
+            CREATE INDEX IF NOT EXISTS market_age ON offers(observed);
+        """)
+        conn.execute("INSERT OR IGNORE INTO window VALUES (1,?)", (end_at,))
+
+
+def offer(database, url, page):
+    """Bounded in-memory handoff; the catalogue scheduler never waits for disk or price calculations."""
+    global _writer, _next_offer
+    now = time.time()
+    if now < _next_offer or not EARLIEST <= now < _stop_at or not eligible_service():
+        return
+    _next_offer = now + .2
+    try:
+        if urlsplit(url).hostname not in ("www.vinted.co.uk", "vinted.co.uk"):
+            return
+        observed = getattr(page, "observed_at", None)
+        if type(observed) not in (int, float) or not now - 60 <= observed <= now:
+            return
+        catalogue = getattr(page, "catalogue_page", None)
+        rows = catalogue._raw_items if catalogue is not None else page
+        if not rows:
+            return
+        _pages.put_nowait((database, observed, rows[:PAGE_LIMIT]))
+        if _writer is None:
+            _writer = threading.Thread(target=_consume, daemon=True, name="trial-public-market")
+            _writer.start()
+    except (ValueError, AttributeError, TypeError, RuntimeError, queue.Full):
+        return
+
+
+def _consume():
+    global _stop_at
+    while time.time() < _stop_at:
+        try:
+            database, observed, batch = _pages.get(timeout=6)
+        except queue.Empty:
+            continue
+        try:
+            path = _path(database)
+            if path.is_file():
+                with closing(sqlite3.connect(path, timeout=.15)) as conn:
+                    ends = _store(conn, observed, batch, time.time())
+                    if ends:
+                        _stop_at = min(_stop_at, ends)
+        except (sqlite3.Error, OSError, KeyError, ValueError, TypeError, AttributeError, OverflowError):
+            continue
+
+
+def _public_item(raw):
+    # Accept only product fields from the already returned card. Missing fields
+    # stay unknown; building a second marketplace client here would be wasteful.
+    box = raw.get("item_box") or {}
+    brand_line = box.get("first_line")
+    second_line = box.get("second_line") or ""
+    size = raw.get("size_title") or (second_line.split(" · ")[0] if " · " in second_line else "")
+    url = raw["url"]
+    if url.startswith("/items/"):
+        url = "https://www.vinted.co.uk" + url
+    return SimpleNamespace(id=raw["id"], title=raw["title"], url=url, raw_data=raw,
+                           brand_title=raw.get("brand_title") or (brand_line if brand_line != raw["title"] else ""),
+                           size_title=size, price=raw["price"]["amount"], currency=raw["price"]["currency_code"])
+
+
+def _store(conn, observed, batch, now):
+    window = conn.execute("SELECT ends FROM window WHERE id=1").fetchone()
+    if not window:
+        return None
+    if not window[0] - DURATION <= observed <= now < window[0]:
+        return window[0]
+    from trial_market_hour import listing_fields
+    from trial_price_rules import field, grade
+
+    records = []
+    for candidate in batch[:PAGE_LIMIT]:
+        try:
+            item = _public_item(candidate) if isinstance(candidate, dict) else candidate
+            raw = item.raw_data
+            values = listing_fields(item)
+            identity = values["id"]
+            if not identity or values["url"] != "https://www.vinted.co.uk/items/" + identity:
+                continue
+            user = raw.get("user")
+            country = raw.get("seller_country_code") or raw.get("seller_country")
+            if not country and isinstance(user, dict):
+                country = user.get("country_iso_code") or user.get("country_code")
+            is_uk = not country or str(country).casefold() in ("gb", "uk", "united kingdom")
+            public = (values["currency"] == "GBP" and is_uk and values["active"]
+                      and raw.get("can_buy") is not False and raw.get("is_visible") is not False
+                      and raw.get("is_available") is not False and raw.get("available") is not False)
+            values.update(observed_at=observed, source="observed_catalogue")
+            complete = (public and values["title"] and grade(values) and values["seller_id"]
+                        and values["size"] and (values["ask_pence"] or 0) > 0)
+            payload = json.dumps(values) if complete else None
+            records.append((identity, observed, field(values, "brand"), field(values, "size"),
+                            values["seller_id"], payload))
+        except (KeyError, ValueError, TypeError, AttributeError, OverflowError):
+            continue
+    with conn:
+        conn.executemany("""
+            INSERT INTO offers VALUES(?,?,?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET observed=excluded.observed, brand=excluded.brand,
+                size=excluded.size, seller=excluded.seller, payload=excluded.payload
+            WHERE excluded.observed>=offers.observed
+        """, records)
+        conn.execute("DELETE FROM offers WHERE observed<?", (now - MAX_AGE,))
+        count = conn.execute("SELECT COUNT(*) FROM offers").fetchone()[0]
+        if count > ROW_LIMIT:
+            conn.execute("DELETE FROM offers WHERE id IN (SELECT id FROM offers ORDER BY observed LIMIT ?)",
+                         (count - ROW_LIMIT,))
+    return window[0]
+
+
+def candidates(database, target, now=None):
+    from trial_price_rules import field
+    path = _path(database)
+    if not path.is_file():
+        return []
+    now = time.time() if now is None else now
+    brand, size = field(target, "brand"), field(target, "size")
+    try:
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=.2)) as conn:
+            offers = conn.execute("""
+                SELECT payload FROM offers WHERE size=? AND (?='' OR brand IN (?, ''))
+                  AND observed BETWEEN ? AND ? AND id<>? AND seller<>? AND payload IS NOT NULL
+                ORDER BY observed DESC LIMIT 500""",
+                (size, brand, brand, now - MAX_AGE, now, str(target.get("id")), str(target.get("seller_id"))))
+            return [json.loads(row[0]) for row in offers]
+    except (OSError, ValueError, sqlite3.Error):
+        return []
+
+
+def latest_unavailable(database, ids, now=None):
+    """A later withdrawal or incomplete observation supersedes an older price from any source."""
+    path = _path(database)
+    if not path.is_file() or not ids:
+        return {}
+    now = time.time() if now is None else now
+    unique = list(dict.fromkeys(str(i) for i in ids))
+    missing = {}
+    try:
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=.2)) as conn:
+            for index in range(0, len(unique), 400):
+                batch = unique[index:index + 400]
+                placeholders = ",".join("?" for _ in batch)
+                missing.update(conn.execute(
+                    f"SELECT id,observed FROM offers WHERE id IN ({placeholders}) "
+                    "AND payload IS NULL AND observed BETWEEN ? AND ?",
+                    (*batch, now - MAX_AGE, now),
+                ))
+    except sqlite3.Error:
+        return {}
+    return missing
