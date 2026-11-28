@@ -151,7 +151,7 @@ def create_app(config=None):
             response.headers["Content-Security-Policy"] = "frame-ancestors https://web.telegram.org https://*.telegram.org"
         else:
             response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
         return response
 
     @app.errorhandler(InputError)
