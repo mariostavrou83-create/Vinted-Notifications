@@ -284,9 +284,9 @@ def _record_decision(item, observed, outcome, role, query_id=None):
 
 
 class Monitor:
-    def __init__(self, *, clock=time.time, fetch=None, role="seller"):
-        self.role = role
-        self.roles = (role,)
+    def __init__(self, *, clock=time.time, fetch=None, source_role="seller"):
+        self.role = source_role
+        self.roles = (source_role,)
         self.clock = clock
         self.reader = HomeReader()
         self.fetch = fetch if fetch is not None else self.read_page
@@ -950,7 +950,7 @@ def run():
                     next_source_check = now + 5
                     include_buyer = enabled() and controls.source_selected("buyer")
                     if include_buyer and buying_monitor is None:
-                        buying_monitor = Monitor(role="buyer")
+                        buying_monitor = Monitor(source_role="buyer")
                         logger.info("Buying account Home feed enabled")
                     elif not include_buyer and buying_monitor is not None:
                         buying_monitor.reader.close()
