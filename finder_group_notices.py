@@ -50,12 +50,16 @@ def finish(group, row, *, retry_after=None):
                       row["event_key"], row["attempts"] + 1))
 
 
-async def deliver(bot, group):
+async def deliver(bot, group, *, reserve_slot=None):
     from photo_cards import TIMEOUTS
     from telegram_shared_alerts import current
 
     row = claim(group, time.time())
-    if not row or current() != group:
+    if not row:
+        return False
+    if reserve_slot is not None:
+        await reserve_slot()
+    if current() != group:
         return False
     try:
         message = await bot.send_message(chat_id=group.chat, text=row["body"], disable_web_page_preview=True, **TIMEOUTS)

@@ -2,8 +2,10 @@
 
 import json
 import unittest
+from unittest.mock import patch
 
 import vinted_home_feed as feed
+import vinted_page_data as page_data
 
 
 def native(**changes):
@@ -370,7 +372,9 @@ class HomeFeedTests(unittest.TestCase):
             self.assertFalse(feed.listing_age(listing(), "123", now)["verified"])
 
     def test_listing_details_bound_to_same_item_and_structural_ids(self):
-        result = feed.parse_listing(listing(), "123", 1000)
+        with patch.object(page_data, "_records", wraps=page_data._records) as decode:
+            result = feed.parse_listing(listing(), "123", 1000)
+            decode.assert_called_once()
         self.assertEqual(result["reason"], "ok")
         item = result["item"]
         self.assertEqual(item["id"], "123")

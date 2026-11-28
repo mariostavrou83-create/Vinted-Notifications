@@ -538,6 +538,11 @@ def _clear_item_queue(items_queue, new_items_queue):
             )
             if recorded is not False:
                 to_notify.append(item)
+                if isinstance(observed_at, (int, float)):
+                    logger.info(
+                        "Saved search alert queued: item=%s first_seen_to_queue_seconds=%.3f",
+                        item.id, max(0, time() - observed_at),
+                    )
 
         # New items/outbox entries above retain their own durable commits.
         # Finish the small metadata batch together only after every item

@@ -210,6 +210,14 @@ def _records(scripts):
     return roots, rows
 
 
+def _page_records(html):
+    """Decode the bounded scripts once for all checks on the same listing page."""
+    parser = _Scripts()
+    parser.feed(html)
+    roots, rows = _records(parser.scripts)
+    return roots, rows, len(parser.scripts)
+
+
 def _resolve(value, rows):
     seen = set()
     for _ in range(8):
@@ -321,7 +329,7 @@ def parse_offer_item(html, item_id, *, diagnostics=None):
     return _parse_transaction_item(html, item_id, diagnostics=diagnostics, require_price=False)
 
 
-def _parse_transaction_item(html, item_id, *, diagnostics, require_price):
+def _parse_transaction_item(html, item_id, *, diagnostics, require_price, page_records=None):
     def reject(reason, **facts):
         if isinstance(diagnostics, dict):
             diagnostics.update(reason=reason, **facts)
@@ -330,11 +338,9 @@ def _parse_transaction_item(html, item_id, *, diagnostics, require_price):
     item_id = _item_id(item_id)
     if not item_id or not isinstance(html, str) or len(html) > MAX_HTML:
         return reject("invalid_input")
-    parser = _Scripts()
-    parser.feed(html)
-    roots, rows = _records(parser.scripts)
+    roots, rows, script_count = _page_records(html) if page_records is None else page_records
     if isinstance(diagnostics, dict):
-        diagnostics.update(html_chars=len(html), scripts=len(parser.scripts),
+        diagnostics.update(html_chars=len(html), scripts=script_count,
                            roots=len(roots), flight_rows=len(rows))
     pending = deque((root, 0) for root in roots)
     candidates = []
@@ -441,14 +447,12 @@ def _parse_transaction_item(html, item_id, *, diagnostics, require_price):
     return candidates[0]
 
 
-def parse_page_data(html, item_id, *, full_description=False):
+def parse_page_data(html, item_id, *, full_description=False, page_records=None):
     """Return only target-listing data from supported JSON and Flight records."""
     item_id = _item_id(item_id)
     if not item_id or not isinstance(html, str) or len(html) > MAX_HTML:
         return _empty()
-    parser = _Scripts()
-    parser.feed(html)
-    roots, rows = _records(parser.scripts)
+    roots, rows, _ = _page_records(html) if page_records is None else page_records
     # Give each Flight record a turn before descending into a large bootstrap
     # record. Current pages put the listing after thousands of translation and
     # configuration values; depth-first traversal exhausts the bound first.
