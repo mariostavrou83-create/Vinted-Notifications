@@ -7,7 +7,7 @@ import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
-from . import connection, flow
+from . import buyer_access, connection, flow
 from .catalogue_rules import CatalogueMatcher, catalogue_filter, digest
 from .db import get_db, settings_for, transaction
 from .partner import PartnerError, partner_configured, partner_request
@@ -45,7 +45,7 @@ def init(conn):
           SELECT user_id,'home' FROM pilot_buyer_link WHERE revoke_pending=0;
     """)
     with transaction(conn):
-        for table in ("searches", "settings", "pilot_buyer_link", "account_health"):
+        for table in ("searches", "settings", "pilot_buyer_link", "account_health", "hosted_members"):
             for event in ("INSERT", "UPDATE", "DELETE"):
                 conn.execute(f"""CREATE TRIGGER IF NOT EXISTS hosted_rules_{table}_{event} AFTER {event} ON {table}
                     BEGIN UPDATE hosted_settings_version SET version=version+1 WHERE id=1; END""")
@@ -62,7 +62,8 @@ def claim_homes(conn, now, limit):
     if not limit:
         return []
     criteria = """FROM pilot_sources s JOIN pilot_buyer_link b USING(user_id) JOIN account_health h USING(user_id)
-        WHERE s.source='home' AND b.revoke_pending=0 AND h.expired=0 AND s.next_at<=?
+        JOIN hosted_members m USING(user_id)
+        WHERE m.paused=0 AND s.source='home' AND b.revoke_pending=0 AND h.expired=0 AND s.next_at<=?
         AND (SELECT retry_at FROM hosted_catalogue WHERE id=1)<=?"""
     if not conn.execute("SELECT 1 " + criteria + " LIMIT 1", (now, now)).fetchone():
         return []
@@ -87,7 +88,7 @@ def check_home(app, job):
         cursor = job["cursor"] if job["fingerprint"] == revision else None
         state = "quiet"
         try:
-            if not flow.quiet(settings_for(conn, uid), time.time()):
+            if buyer_access.active(conn, uid) and not flow.quiet(settings_for(conn, uid), time.time()):
                 result = partner_request("POST", "/v1/feed", {
                     "account_ref": ref, "source": "home", "cursor": cursor, "searches": []})
                 if (result.get("account_ref") != ref or result.get("source") != "home"
@@ -147,7 +148,8 @@ def rules(conn, now):
     rows = conn.execute("""SELECT s.*,b.account_ref,h.revision,base.fingerprint AS baseline
         FROM searches s JOIN pilot_buyer_link b USING(user_id) JOIN account_health h USING(user_id)
         LEFT JOIN hosted_search_baseline base ON base.search_id=s.id
-        WHERE s.enabled=1 AND b.revoke_pending=0 AND h.expired=0 ORDER BY s.id""")
+        JOIN hosted_members m USING(user_id)
+        WHERE m.paused=0 AND s.enabled=1 AND b.revoke_pending=0 AND h.expired=0 ORDER BY s.id""")
     prefs, compiled, filters = {}, {}, {}
     for row in rows:
         uid = row["user_id"]

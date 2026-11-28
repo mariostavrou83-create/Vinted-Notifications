@@ -19,7 +19,7 @@ class MemberSetupBrowserTests(unittest.TestCase):
 
         code, owner_password, admin_password = (secrets.token_urlsafe(24) for _ in range(3))
         with tempfile.TemporaryDirectory() as folder:
-            app = create_app({"TESTING":True, "MULTIPLE_ACCOUNTS":True,
+            app = create_app({"TESTING":True, "MULTIPLE_ACCOUNTS":True, "FINDER_SUPPORT_EMAIL":"support@example.test",
                               "DATABASE":str(Path(folder) / "test.db"),
                               "FINDER_PILOT_OWNER_INVITE_HASH":digest(code)})
             server = create_server(app, host="127.0.0.1", port=0, threads=3)
@@ -49,6 +49,8 @@ class MemberSetupBrowserTests(unittest.TestCase):
                 page.wait_for_url("**/setup")
                 expect(page.get_by_role("heading",name="Set up Finder")).to_be_visible()
                 expect(page.get_by_text("0 of 4 steps complete")).to_be_visible()
+                self.assertEqual(page.locator(".setup-steps h2").all_text_contents()[:2],
+                                 ["Link your Telegram","Connect your Vinted buying account"])
                 expect(page.get_by_text("Awaiting Telegram",exact=True)).to_be_visible()
                 expect(page.get_by_role("button",name="Link Telegram",exact=True)).to_have_count(0)
                 page.get_by_role("link",name="Choose filters").click()
@@ -106,5 +108,27 @@ class MemberSetupBrowserTests(unittest.TestCase):
                 for width in (390,1280):
                     page.set_viewport_size({"width":width,"height":844})
                     self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"),width)
+                page.get_by_role("button",name="Pause access").click()
+                expect(page.get_by_text("Access paused for finder-owner.")).to_be_visible()
+                page.get_by_role("link",name="Delete account").click()
+                page.get_by_role("link",name="Cancel").click()
+                expect(page.get_by_role("button",name="Resume access")).to_be_visible()
+                page.get_by_role("button",name="Sign out of admin").click()
+                page.get_by_role("link",name="Buyer sign-in").click()
+                page.locator("[name=username]").fill("finder-owner")
+                page.locator("[name=password]").fill(owner_password)
+                page.get_by_role("button",name="Sign in",exact=True).click()
+                expect(page.get_by_role("heading",name="Your Finder access is paused")).to_be_visible()
+                expect(page.get_by_role("link",name="support@example.test")).to_have_attribute("href","mailto:support@example.test")
+                page.goto(url+"/admin/login")
+                page.get_by_label("Admin username").fill("finder-admin")
+                page.get_by_label("Admin password").fill(admin_password)
+                page.get_by_role("button",name="Sign in as admin").click()
+                page.get_by_role("button",name="Resume access").click()
+                expect(page.get_by_text("Access resumed for finder-owner.")).to_be_visible()
+                page.get_by_role("link",name="Delete account").click()
+                page.locator("[name=confirm_name]").fill("finder-owner")
+                page.get_by_role("button",name="Permanently delete Finder account").click()
+                expect(page.get_by_text("0 of 10 buyer places used",exact=False)).to_be_visible()
                 self.assertEqual(errors,[])
                 browser.close()

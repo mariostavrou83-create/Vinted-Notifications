@@ -17,19 +17,24 @@
 <h2>Buyer accounts</h2>
 <p>{{ seats.joined }} of {{ seats.limit }} buyer places used · {{ seats.reserved }} open invitations · {{ seats.limit - seats.joined - seats.reserved }} available. Your admin login is separate.</p>
 {% if members %}<div class="member-table"><table><caption class="sr">Buyer setup and recent activity, UK time</caption>
-<thead><tr><th scope="col">Buyer</th><th scope="col">Setup</th><th scope="col">Connections</th><th scope="col">Saved searches</th><th scope="col">Last activity · UK time</th></tr></thead>
+<thead><tr><th scope="col">Buyer</th><th scope="col">Setup</th><th scope="col">Connections</th><th scope="col">Saved searches</th><th scope="col">Last activity · UK time</th><th scope="col">Manage access</th></tr></thead>
 <tbody>{% for buyer in members %}<tr>
-<th scope="row">{{ buyer.username }}</th>
+<th scope="row">{{ buyer.username }}<span class="buyer-state{{ ' paused' if buyer.paused else '' }}">{{ 'Paused' if buyer.paused else 'Active' }}</span></th>
 <td data-label="Setup"><strong>{{ buyer.setup.count }} of 4 complete</strong><span>Filters · {{ 'Saved' if buyer.setup.steps.filters else 'To review' }}</span><span>Delivery · {{ 'Saved' if buyer.setup.steps.delivery else 'To set up' }}</span></td>
 <td data-label="Connections"><span>Vinted · {{ buyer.setup.vinted_state if services.vinted else 'Awaiting service' }}</span><span>Telegram · {{ ('Linked' if buyer.setup.telegram_linked else 'To link') if services.telegram else 'Awaiting bot' }}</span></td>
-<td data-label="Saved searches">{{ buyer.active_searches }} active / {{ buyer.searches }} saved</td>
+<td data-label="Saved searches">{{ 0 if buyer.paused else buyer.active_searches }} active / {{ buyer.searches }} saved</td>
 <td data-label="Last activity"><span>Home check · {{ buyer.last_home }}</span><span>Telegram delivery · {{ buyer.last_sent }}</span></td>
+<td data-label="Manage access"><div class="buyer-actions"><form method="post" action="{{ url_for('admin_buyer_access', uid=buyer.id, action='resume' if buyer.paused else 'pause') }}">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button secondary" type="submit">{{ 'Resume access' if buyer.paused else 'Pause access' }}</button></form>
+<a class="delete-buyer" href="{{ url_for('admin_delete_buyer', uid=buyer.id) }}">Delete account</a></div></td>
 </tr>{% endfor %}</tbody></table></div>{% else %}<p>Create an invitation below to add your first buyer.</p>{% endif %}
 </section>
-<section class="team-panel"><h2>Service connections</h2>
-<p><strong>Hosted Vinted</strong> · {{ 'Configured' if services.vinted else 'Awaiting configuration' }}{% if not services.vinted %}. Buyers can choose filters now. Personal Home, checkout and location lookup need the hosted Vinted connection.{% endif %}</p>
-{% if not services.vinted %}<details><summary>How to enable hosted Vinted</summary><p>In Railway, open the <strong>finder-sourcing</strong> service and its Variables page. Set <code>FINDER_PARTNER_URL</code> and <code>FINDER_PARTNER_TOKEN</code> for the hosted buying integration. Once it is configured, buyers can sign in from Set up Finder.</p></details>{% endif %}
-<p><strong>Private Telegram</strong> · {{ 'Configured' if services.telegram else 'Awaiting configuration' }}. <a href="#admin-telegram">Manage Telegram bot</a></p>
+<section class="team-panel"><h2>Set up Finder for your first buyer</h2>
+<ol class="admin-start">
+<li><strong>Connect one Telegram bot for everyone.</strong> Each buyer gets a private chat with it. <a href="#admin-telegram">Set up the Finder bot</a>. <span>{{ 'Configured' if services.telegram else 'Awaiting configuration' }}.</span></li>
+<li><strong>Check hosted Vinted sign-in.</strong> {{ 'Configured.' if services.vinted else 'Awaiting configuration. Buyers can test Telegram and save filters now. Live Home alerts and AutoBuy need the hosted Vinted connection.' }}
+{% if not services.vinted %}<details><summary>What the server needs</summary><p>The hosted buying integration supplies sign-in, each buyer’s Home feed and checkout. Configure its <code>FINDER_PARTNER_URL</code> and <code>FINDER_PARTNER_TOKEN</code> in the Railway <strong>finder-sourcing</strong> service.</p></details>{% endif %}</li>
+<li><strong>Invite your buyer.</strong> <a href="#admin-invites">Create an invitation</a> and send its private signup link to that person. Finder guides them through Telegram, Vinted, filters and delivery.</li></ol>
 </section>
 <section class="team-panel"><h2>Buyer limit</h2>
 <p>Start with 10 places. You can raise the limit to 50 on this service.</p>
@@ -38,7 +43,7 @@
 <label>Places available on this service<input type="number" min="10" max="50" name="limit" required value="{{ seats.limit }}"></label>
 <button class="button secondary" type="submit">Save member limit</button>
 </form></section>{% endif %}
-<section class="team-panel"><h2>{{ 'Member invitations' if multiple_accounts else 'Tester invitations' }}</h2>
+<section id="admin-invites" class="team-panel"><h2>{{ 'Member invitations' if multiple_accounts else 'Tester invitations' }}</h2>
 <p>A link admits one person and expires after 72 hours.</p>
 <form class="stack-form" action="/team/invites" method="post">
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -62,7 +67,7 @@
 <p>Open the hosted dashboard using its secure HTTPS address to manage your bot.</p>
 {% else %}
 {% if bot %}<p>Connected to <strong>@{{ bot.username }}</strong>. {{ transport_status }}</p>{% endif %}
-<p>Use a separate bot for Finder members. Create one through <a href="https://t.me/BotFather" target="_blank" rel="noreferrer">@BotFather</a>, then enter its username and token here.</p>
+<p>{% if multiple_accounts %}Create one bot for all buyers. Each buyer opens their own private chat with it. In Telegram, send <strong>/newbot</strong> to{% else %}Create a dedicated Finder bot through{% endif %} <a href="https://t.me/BotFather" target="_blank" rel="noreferrer">@BotFather</a>, then follow the prompts. Enter the bot username and token here.</p>
 <form class="stack-form" action="/team/telegram" method="post" autocomplete="off">
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 <label>Bot username<input name="bot_username" value="{{ bot.username if bot else '' }}" required spellcheck="false" autocapitalize="none" placeholder="@YourFinderBot"></label>

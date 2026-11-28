@@ -46,7 +46,8 @@ def invite_available(db):
 
 def at_capacity(db, invitation):
     seats = capacity(db)
-    owner = db.execute("SELECT bootstrap_digest FROM team_owner WHERE user_id IS NULL").fetchone()
+    owner = db.execute("""SELECT t.bootstrap_digest FROM team_owner t JOIN invitations i ON i.digest=t.bootstrap_digest
+                          WHERE t.user_id IS NULL AND i.used_at IS NULL""").fetchone()
     reserve_owner = bool(owner and owner[0] != invitation)
     return seats["joined"] + int(reserve_owner) >= seats["limit"]
 

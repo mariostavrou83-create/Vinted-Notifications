@@ -24,12 +24,26 @@
     target.hidden = !text;
   }
 
+  function checkAccess(response) {
+    if (!hosted) return;
+    if (response.headers.get('X-Finder-Access') === 'paused') location.replace('/account/paused');
+    else if (response.status === 401) location.replace('/login');
+  }
+
+  async function refreshAccess() {
+    if (document.hidden || !hosted) return;
+    try {
+      checkAccess(await fetch('/api/board-version', {method:'HEAD', credentials:'same-origin', cache:'no-store'}));
+    } catch { /* Keep the current page available while the network reconnects. */ }
+  }
+
   async function request(url, options = {}) {
     const response = await fetch(url, {
       ...options,
       credentials: 'same-origin',
       headers: { ...options.headers, 'X-CSRF-Token': csrf, 'Accept': 'application/json' },
     });
+    checkAccess(response);
     if (response.status === 401) throw new Error('Your session has ended. Sign in again.');
     const data = await response.json().catch(() => ({}));
     if (!response.ok || data.error) throw new Error(data.error || 'Could not save this change. Please try again.');
@@ -404,6 +418,14 @@
     }
   }
 
+  if (hosted) {
+    window.addEventListener('pageshow', refreshAccess);
+    document.addEventListener('visibilitychange', refreshAccess);
+    // The board and saved searches already check access as part of their normal polling.
+    window.setInterval(() => {
+      if (document.getElementById('alerts').hidden && document.getElementById('searches').hidden) refreshAccess();
+    }, 20000);
+  }
   filterBoard();
   refresh.addEventListener('click', () => refreshFeed(true, true));
   document.addEventListener('visibilitychange', () => schedulePolling(true));

@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 from flask import current_app, g, jsonify, redirect, render_template, request, send_file
 
+from . import buyer_access
 from .db import get_db, transaction
 from .partner import PartnerError, partner_configured, partner_request
 
@@ -67,7 +68,9 @@ def init_connection(conn):
     """)
 
 
-def linked_account(conn, user_id):
+def linked_account(conn, user_id, *, include_paused=False):
+    if not include_paused and not buyer_access.active(conn, user_id):
+        return None
     row = conn.execute(
         """SELECT b.account_ref FROM pilot_buyer_link b JOIN account_health h USING(user_id)
            WHERE b.user_id=? AND b.revoke_pending=0 AND h.expired=0""", (user_id,),
@@ -130,6 +133,9 @@ def start_authorization(user_id, expected, renew, *, telegram_chat=None, receipt
     state, verifier = secrets.token_urlsafe(32), secrets.token_urlsafe(48)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode()
     conn.execute("BEGIN IMMEDIATE")
+    if not buyer_access.active(conn, user_id):
+        conn.rollback()
+        return jsonify(error=buyer_access.paused_message()), 403
     previous = conn.execute(
         """SELECT b.username,b.account_ref,b.revoke_pending,h.revision FROM pilot_buyer_link b
            JOIN account_health h USING(user_id) WHERE user_id=?""", (user_id,)
@@ -265,8 +271,17 @@ def register_connection(app):
             (user_id, digest, int(time.time())),
         )
         if not current.rowcount:
-            conn.rollback()
+            # A grant exchange can finish just after an administrator pauses or deletes the buyer.
+            # Release the new grant only if no existing buyer owns the returned reference.
+            if current_app.config.get("MULTIPLE_ACCOUNTS") and not buyer_access.active(conn, user_id):
+                conn.execute("""INSERT OR IGNORE INTO hosted_revocations(account_ref)
+                                SELECT ? WHERE NOT EXISTS(SELECT 1 FROM pilot_buyer_link WHERE account_ref=?)""", (ref, ref))
+            conn.commit()
             return _callback_result("expired")
+        if (current_app.config.get("MULTIPLE_ACCOUNTS") and
+                conn.execute("SELECT 1 FROM hosted_revocations WHERE account_ref=?", (ref,)).fetchone()):
+            conn.commit()
+            return _callback_result("unavailable")
         if attempt["renewal_ref"]:
             if ref != attempt["renewal_ref"]:
                 conn.commit()

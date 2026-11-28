@@ -13,7 +13,7 @@ from urllib.request import Request, build_opener
 import requests
 from flask import current_app
 
-from . import flow
+from . import buyer_access, flow
 from .connection import linked_account
 from .db import get_db, searches_for, settings_for, transaction
 from .partner import PartnerError, _NoRedirect, partner_configured, partner_request
@@ -199,7 +199,8 @@ def deliver(conn, now):
             recent = conn.execute("SELECT count(*) FROM hosted_deliveries WHERE last_at>?", (now - 1,)).fetchone()[0]
             if recent >= 25:
                 return False
-            queue_order = """ AND coalesce((SELECT last_at FROM hosted_deliveries WHERE chat_id=c.chat_id),0)<=?
+            queue_order = """ AND EXISTS (SELECT 1 FROM hosted_members m WHERE m.user_id=a.user_id AND m.paused=0)
+                AND coalesce((SELECT last_at FROM hosted_deliveries WHERE chat_id=c.chat_id),0)<=?
                 ORDER BY coalesce((SELECT last_at FROM hosted_deliveries WHERE chat_id=c.chat_id),0),a.id LIMIT 1"""
         row = conn.execute(
             """SELECT a.*,c.chat_id FROM pilot_alerts a JOIN pilot_chats c ON c.user_id=a.user_id
@@ -255,6 +256,10 @@ def deliver(conn, now):
                          (row["chat_id"], now))
         conn.execute("UPDATE pilot_alerts SET delivery='sending',updated=? WHERE id=?", (int(now), aid))
     try:
+        if managed and not conn.execute("""SELECT 1 FROM pilot_alerts a JOIN hosted_members m USING(user_id)
+                    WHERE a.id=? AND a.attempt_key=? AND a.delivery='sending' AND m.paused=0""",
+                    (aid, row["attempt_key"])).fetchone():
+            return True
         out = telegram(
             "sendMessage",
             {
@@ -269,19 +274,20 @@ def deliver(conn, now):
     except TelegramRetry as exc:
         after = time.time() + exc.seconds
         with transaction(conn):
-            conn.execute("UPDATE pilot_alerts SET delivery='new',deliver_after=? WHERE id=?", (after, aid))
+            conn.execute("UPDATE pilot_alerts SET delivery='new',deliver_after=? WHERE id=? AND attempt_key=? AND delivery='sending'", (after, aid, row["attempt_key"]))
             if managed:
                 conn.execute("UPDATE hosted_deliveries SET last_at=max(last_at,?) WHERE chat_id=?", (after - 1, row["chat_id"]))
         return True
     except (ValueError, KeyError, TypeError):
         # A timeout could follow successful dispatch. Mark the outcome rather than create duplicate buttons.
-        conn.execute("UPDATE pilot_alerts SET delivery='unconfirmed' WHERE id=?", (aid,))
+        conn.execute("UPDATE pilot_alerts SET delivery='unconfirmed' WHERE id=? AND attempt_key=? AND delivery='sending'", (aid, row["attempt_key"]))
         return True
-    conn.execute(
-        "UPDATE pilot_alerts SET delivery='sent',message_id=?,sent_chat=?,sent_at=? WHERE id=?",
-        (msg_id, row["chat_id"], time.time(), aid),
+    delivered = conn.execute(
+        """UPDATE pilot_alerts SET delivery='sent',message_id=?,sent_chat=?,sent_at=?
+           WHERE id=? AND attempt_key=? AND delivery='sending'""",
+        (msg_id, row["chat_id"], time.time(), aid, row["attempt_key"]),
     )
-    if row["source"] == "search" and type(l.get("search_id")) is int:
+    if delivered.rowcount and row["source"] == "search" and type(l.get("search_id")) is int:
         send_references(conn, uid, l["search_id"], row["chat_id"], msg_id)
     return True
 
@@ -293,7 +299,7 @@ def send_references(conn, uid, search_id, chat, msg_id):
                          WHERE s.user_id=? AND s.id=? AND c.chat_id=? ORDER BY p.id LIMIT 8""",
         (uid, search_id, chat),
     ).fetchall()
-    if not photos:
+    if not photos or not buyer_access.active(conn, uid):
         return
     files = {f"pic{i}": (f"reference-{i + 1}.jpg", row[0], "image/jpeg") for i, row in enumerate(photos)}
     data = {"chat_id": chat, "reply_parameters": json.dumps({"message_id": msg_id})}
@@ -334,6 +340,9 @@ def buy_job(conn, now):
         conn.execute(
             "UPDATE pilot_buy_jobs SET started=? WHERE update_id=?", (int(now), row["update_id"])
         )
+    if not buyer_access.active(conn, row["user_id"]):
+        conn.execute("UPDATE pilot_buy_jobs SET finished=1 WHERE update_id=?", (row["update_id"],))
+        return True
     if row["native"]:
         from .native_order import request_native
 
@@ -353,8 +362,8 @@ def buy_job(conn, now):
         else:
             msg, keyboard = request_native(conn, row["user_id"], row["alert_id"], row["confirmation"])
     else:
-        msg, keyboard = flow.request_buy(conn, row["user_id"], row["alert_id"], row["confirmation"])
-    if not conn.execute(
+        msg, keyboard = flow.request_buy(conn, row["user_id"], row["alert_id"], row["confirmation"], job_id=row["update_id"])
+    if not buyer_access.active(conn, row["user_id"]) or not conn.execute(
         "SELECT 1 FROM pilot_chats WHERE user_id=? AND chat_id=?", (row["user_id"], row["chat_id"])
     ).fetchone():
         conn.execute("UPDATE pilot_buy_jobs SET finished=1 WHERE update_id=?", (row["update_id"],))
@@ -368,6 +377,8 @@ def buy_job(conn, now):
 
 
 def reconcile(conn, now):
+    if current_app.config.get("MULTIPLE_ACCOUNTS") and buyer_access.revoke_next(conn, now):
+        return True
     with transaction(conn):
         row = conn.execute(
             """SELECT * FROM pilot_alerts WHERE origin='connected' AND order_status IN ('unknown','submitting','pending','action_required')
@@ -377,7 +388,7 @@ def reconcile(conn, now):
         if not row:
             return False
         conn.execute("UPDATE pilot_alerts SET updated=? WHERE id=?", (int(now), row["id"]))
-    if linked_account(conn, row["user_id"]) != row["account_ref"]:
+    if linked_account(conn, row["user_id"], include_paused=True) != row["account_ref"]:
         return True
     result = partner_request(
         "POST",
@@ -390,11 +401,12 @@ def reconcile(conn, now):
     )
     status = flow.order_result(result, row)
     if status in {"purchased", "declined", "action_required", "pending"}:
-        flow._status(conn, row["id"], status)
+        flow._status(conn, row["id"], status, attempt_key=row["attempt_key"])
         if (
             status != row["order_status"]
             and status in {"purchased", "declined"}
             and row["sent_chat"]
+            and buyer_access.active(conn, row["user_id"])
             and conn.execute(
                 "SELECT 1 FROM pilot_chats WHERE user_id=? AND chat_id=?",
                 (row["user_id"], row["sent_chat"]),

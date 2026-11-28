@@ -15,6 +15,7 @@
     checking = true;
     try {
       const response = await fetch('/setup/steps', {credentials:'same-origin', cache:'no-store'});
+      if (response.headers.get('X-Finder-Access') === 'paused') { location.replace('/account/paused'); return; }
       if (response.ok && !response.redirected) {
         const html = (await response.text()).trim();
         if (html !== steps.innerHTML.trim()) steps.innerHTML = html;
@@ -44,7 +45,7 @@
         if (url.origin !== 'https://t.me') throw new Error('Telegram could not verify this link.');
         const link = document.createElement('a');
         link.href = url.href; link.target = '_blank'; link.rel = 'noopener noreferrer';
-        link.className = 'button primary'; link.textContent = 'Open Telegram and tap Start';
+        link.className = 'button primary'; link.textContent = 'Open Telegram';
         control.replaceWith(link); link.focus();
       } else location.assign(data.authorization_url);
     } catch (error) { message.textContent = error.message; }

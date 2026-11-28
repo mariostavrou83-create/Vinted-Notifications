@@ -30,7 +30,7 @@
   <main id="main" tabindex="-1" data-initial-view="{{ initial }}">
     <div class="topline"><span class="market">Vinted UK{% if multiple_accounts %} · Multiple accounts method{% endif %}</span>{% if multiple_accounts %}<a href="#account">Connected accounts</a>{% else %}<a class="chrome-shortcut" href="/extension/install"><span class="chrome-icon" aria-hidden="true"></span>Chrome setup</a>{% endif %}</div>
     {% if multiple_accounts %}<section id="setup" data-view="setup" aria-labelledby="setup-title"{% if initial != 'setup' %} hidden{% endif %}>
-      <div class="page-head"><div><h1 id="setup-title">Set up Finder</h1><p class="lede">Connect your accounts and choose how you want to receive listings and collect purchases.</p></div></div>
+      <div class="page-head"><div><h1 id="setup-title">Set up Finder</h1><p class="lede">Start with your own Telegram account. Then connect Vinted, choose your alerts and set up delivery.</p></div></div>
       <div id="setup-steps">{% include 'setup_steps.html' %}</div>
       <p id="setup-message" role="status" aria-live="polite"></p>
       <div class="actions"><a class="button secondary" href="#alerts">Open sourcing board</a><a href="#new-search">Add a saved search</a></div>

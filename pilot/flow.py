@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 from flask import current_app, g, jsonify, request
 
-from . import checkout_profit, home_filters, pickup
+from . import buyer_access, checkout_profit, home_filters, pickup
 from .inputs import InputError
 from .db import get_db, settings_for, transaction
 from .partner import PartnerError, partner_request
@@ -316,6 +316,8 @@ def telegram_available(conn):
 
 
 def new_link(conn, uid):
+    if not buyer_access.active(conn, uid):
+        return jsonify(error=buyer_access.paused_message()), 403
     reason = telegram_unavailable_reason(conn)
     if reason:
         return jsonify(error=reason), 503
@@ -340,7 +342,7 @@ def pair_chat(conn, text, chat_id):
         "SELECT user_id FROM pilot_link_codes WHERE code_hash=? AND expires>?",
         (digest, int(time.time())),
     ).fetchone()
-    if not row:
+    if not row or not buyer_access.active(conn, row[0]):
         conn.execute("ROLLBACK TO telegram_pair")
         conn.execute("RELEASE telegram_pair")
         return "This link has expired or has already been used. Create a fresh link in your dashboard."
@@ -465,12 +467,19 @@ def _quote_terms(q):
     return [q.get(k) for k in fields]
 
 
-def request_buy(conn, uid, aid, confirmation=None):
+def request_buy(conn, uid, aid, confirmation=None, *, job_id=None):
     from .connection import linked_account
 
     now = int(time.time())
     conn.execute("BEGIN IMMEDIATE")
+    if job_id is not None and not conn.execute("""SELECT 1 FROM pilot_buy_jobs
+            WHERE update_id=? AND user_id=? AND alert_id=? AND finished=0""", (job_id, uid, aid)).fetchone():
+        conn.rollback()
+        return "This AutoBuy request has ended.", None
     row = conn.execute("SELECT * FROM pilot_alerts WHERE id=? AND user_id=?", (aid, uid)).fetchone()
+    if not buyer_access.active(conn, uid):
+        conn.rollback()
+        return buyer_access.paused_message(), None
     account = linked_account(conn, uid)
     if row and row["origin"] != "connected":
         conn.rollback()
@@ -584,7 +593,7 @@ def request_buy(conn, uid, aid, confirmation=None):
             final = order_result(result, row)
         except PartnerError:
             final = "unknown"
-        _status(conn, aid, final)
+        _status(conn, aid, final, attempt_key=row["attempt_key"])
         if final == "purchased":
             return "Purchased · " + quote_summary(q), None
         if final == "declined":
@@ -614,11 +623,11 @@ def order_result(result, row):
     return status if status in {"purchased", "declined", "action_required", "pending"} else "unknown"
 
 
-def _status(conn, aid, status, check_token=None):
+def _status(conn, aid, status, check_token=None, *, attempt_key=None):
     conn.execute(
         """UPDATE pilot_alerts SET order_status=?,updated=?,check_token=NULL
-                    WHERE id=? AND (? IS NULL OR check_token=?)""",
-        (status, int(time.time()), aid, check_token, check_token),
+                    WHERE id=? AND (? IS NULL OR check_token=?) AND (? IS NULL OR attempt_key=?)""",
+        (status, int(time.time()), aid, check_token, check_token, attempt_key, attempt_key),
     )
     conn.commit()
 
@@ -644,6 +653,11 @@ def telegram_update(conn, update):
         return dict(ok=True)
     if chat.get("type") != "private" or type(chat_id) is not int or chat_id <= 0 or chat_id != sender:
         return dict(ok=True)
+    if managed and conn.execute("""SELECT 1 FROM pilot_chats c JOIN hosted_members m USING(user_id)
+                                   WHERE c.chat_id=? AND m.paused=1""", (chat_id,)).fetchone():
+        if cb:
+            return dict(method="answerCallbackQuery", callback_query_id=cb.get("id"), text=buyer_access.paused_message(), show_alert=True)
+        return dict(method="sendMessage", chat_id=chat_id, text=buyer_access.paused_message())
     if not cb:
         command = str(msg.get("text", "")).strip()
         if managed and command == "/reconnect":

@@ -7,7 +7,7 @@
     <div class="wordmark">Finder<span>.</span></div>
     <p class="market-label">Vinted UK{% if multiple_accounts %} · Multiple accounts method{% endif %}</p>
     <h1>{{ 'Create your account' if mode == 'signup' else 'Welcome back' }}</h1>
-    <p class="lede">{{ 'Use your invitation to set up your private buying dashboard.' if mode == 'signup' else 'Sign in to your buying dashboard.' }}</p>
+    <p class="lede">{{ 'Choose a Finder username and password. Next, link your own Telegram to the Finder bot and sign in to your Vinted buying account.' if multiple_accounts and mode == 'signup' else 'Use your invitation to set up your private buying dashboard.' if mode == 'signup' else 'Sign in to your buying dashboard.' }}</p>
     {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
     <form class="stack-form" action="{{ '/signup' if mode == 'signup' else '/login' }}" method="post">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

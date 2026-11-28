@@ -1,23 +1,24 @@
 <ol class="setup-steps">
-  <li><div class="step-info"><h2>Connect your Vinted buying account</h2>
-    <p>This account provides your personal Home and makes purchases when you tap AutoBuy.</p>
-    {% if not services.vinted %}<p class="step-note">Waiting for the administrator to enable Vinted. You can set your Home filters now.</p>{% endif %}
-    </div><div class="step-action">{% if setup.steps.vinted %}<span class="done">Connected · @{{ setup.vinted_username }}</span>
-    {% elif services.vinted %}<button class="button primary" type="button" data-setup-connect data-renew="{{ 'yes' if setup.expired else 'no' }}">{{ 'Reconnect Vinted' if setup.expired else 'Connect Vinted' }}</button>
-    {% else %}<span class="waiting">Awaiting Vinted</span>{% endif %}</div></li>
-  <li><div class="step-info"><h2>Link your private Telegram chat</h2>
-    <p>Open Finder’s bot and tap <strong>Start</strong>. Your alerts and AutoBuy buttons arrive in that chat.</p>
-    {% if not services.telegram %}<p class="step-note">The administrator needs to connect the Finder bot first.</p>{% endif %}
+  <li><div class="step-info"><h2>Link your Telegram</h2>
+    <p>Your admin sets up one Finder bot for everyone. Tap <strong>Link Telegram</strong>, then <strong>Open Telegram</strong>. In your private chat, tap <strong>Start</strong>. Return here to see <strong>Linked</strong>.</p>
+    {% if not services.telegram %}<p class="step-note">Your admin still needs to connect the bot. You can choose your filters now.</p>{% endif %}
     </div><div class="step-action">{% if setup.steps.telegram %}<span class="done">Linked</span>
     {% elif services.telegram %}<button class="button primary" type="button" data-setup-telegram>Link Telegram</button>
     {% else %}<span class="waiting">Awaiting Telegram</span>{% endif %}</div></li>
-  <li><div class="step-info"><h2>Choose your Home filters</h2>
-    <p>Choose the categories and sizes you want, or keep all listings. Save the hours when you want alerts paused.</p>
+  <li><div class="step-info"><h2>Connect your Vinted buying account</h2>
+    <p>Tap <strong>Connect Vinted</strong> and sign in to the Vinted account you want to buy from. Finder uses its Home page for alerts and the same account for AutoBuy.</p>
+    {% if not services.vinted %}<p class="step-note">Your admin needs to enable Vinted sign-in before you can connect.</p>{% endif %}
+    <p class="step-note">If it disconnects later, choose <strong>Reconnect Vinted</strong> here or type <strong>/reconnect</strong> in your private Finder chat. Sign in again to the same Vinted account.</p>
+    </div><div class="step-action">{% if setup.steps.vinted %}<span class="done">Connected · @{{ setup.vinted_username }}</span><a class="button secondary" href="#account">Manage connection</a>
+    {% elif services.vinted %}<button class="button primary" type="button" data-setup-connect data-renew="{{ 'yes' if setup.expired else 'no' }}">{{ 'Reconnect Vinted' if setup.expired else 'Connect Vinted' }}</button>
+    {% else %}<span class="waiting">Awaiting Vinted</span>{% endif %}</div></li>
+  <li><div class="step-info"><h2>Choose which Home alerts you want</h2>
+    <p>Pick your categories and sizes, or leave them on <strong>All</strong>. Choose quiet hours if you want them, then tap <strong>Save Home filters</strong>.</p>
     </div><div class="step-action">{% if setup.steps.filters %}<span class="done">Saved</span>{% endif %}
     <a href="#home-filters" class="button secondary" data-setup-edit>{{ 'Edit filters' if setup.steps.filters else 'Choose filters' }}</a></div></li>
-  <li><div class="step-info"><h2>Set up delivery for AutoBuy</h2>
-    <p>Choose a pickup point and preferred courier, or select a saved home address. Set your spending limits before your first purchase.</p>
-    {% if not setup.steps.vinted %}<p class="step-note">Location lookup becomes available when Vinted is connected.</p>{% endif %}
+  <li><div class="step-info"><h2>Choose delivery for AutoBuy</h2>
+    <p>Choose a pickup point or a saved home address. Pick your preferred courier, check your spending limits, then tap <strong>Save preferences</strong>.</p>
+    {% if not setup.steps.vinted %}<p class="step-note">Connect Vinted first to see locations for your buying account.</p>{% endif %}
     </div><div class="step-action">{% if setup.steps.delivery %}<span class="done">Saved</span>{% endif %}
     <a href="#delivery" class="button secondary" data-setup-edit>Delivery settings</a></div></li>
 </ol>
