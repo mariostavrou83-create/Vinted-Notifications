@@ -1,4 +1,4 @@
-<section class="form-card guide-section" id="vinted-buying">
+<section class="form-card guide-section" id="buyer-tools">
 <h2>Vinted buying account</h2>
 <p>Tap <b>Autobuy</b>, or reply <b>BUY</b> to the original Vinted alert, to purchase using your saved delivery and payment choices. Finding a listing alone never purchases it.</p>
 {% if not accounts_separate %}<p>Buying is paused while you connect your different buying account below. Your current account continues to handle offers and messages.</p>{% endif %}
@@ -24,7 +24,7 @@
 </form></details>
 
 {% if buyer.checkout_health %}
-<div class="guide-section" role="alert"><b>Autobuy checkout needs attention{% if buyer.checkout_health.http_status %} · HTTP {{buyer.checkout_health.http_status}}{% endif %}{% if buyer.checkout_health.api_code is defined and buyer.checkout_health.api_code is not none %} · Vinted code {{buyer.checkout_health.api_code}}{% endif %}</b>
+<div class="guide-section" id="purchase-status" role="alert"><b>Autobuy checkout needs attention{% if buyer.checkout_health.http_status %} · HTTP {{buyer.checkout_health.http_status}}{% endif %}{% if buyer.checkout_health.api_code is defined and buyer.checkout_health.api_code is not none %} · Vinted code {{buyer.checkout_health.api_code}}{% endif %}</b>
 <p>The last attempt stopped while {{buyer.checkout_health.phase}}. {% if buyer.checkout_health.payment_started %}Payment may have been submitted; check Vinted before retrying.{% else %}No payment was sent.{% endif %}</p>
 {% if buyer.checkout_health.reason=='api_cookie_scope' %}<p>The saved access cookie does not apply to the required Vinted API service. No API request was sent. <a href="#vinted-browser-cookie-details">Reconnect with original browser cookie details.</a></p>
 {% elif buyer.checkout_health.reason in ('security_challenge','forbidden') %}<p>Vinted refused this checkout request. This alone does not mean your login disconnected. For a refusal before payment, review the item in your normal Vinted app or browser and complete any required check there.</p>{% endif %}
@@ -78,7 +78,7 @@
 {% endif %}
 </details>
 {% if buyer.connected and (buyer.access.reason in ['refresh_rejected','signin_redirect'] or (buyer.access.reason == 'credentials' and buyer.access.stage_code == 'identity')) %}<p><b>A saved-account check could not authenticate your Vinted buyer.</b> Reconnect the same account above. Your searches and spending limits stay saved; you do not need to disconnect first.</p>{% elif buyer.connected and buyer.access.reason == 'renewal_failed' %}<p><b>The saved session renewal was not accepted.</b> Check the connection status above for the latest account verification and scheduled retry.</p>{% endif %}
-<details class="guide-section" {{'open' if not buyer.connected}}>
+<details class="guide-section" id="buyer-existing-session" {{'open' if not buyer.connected}}>
 <summary><b>{{'Reconnect your existing Vinted login' if buyer.connected else 'Connect an existing Vinted login'}}</b></summary>
 <p>Already signed in with Google, Apple or email? You can link that Vinted session here. Being signed in on your phone keeps listing links signed in, but does not connect this bot.</p>
 <p><small>This setup needs desktop Chrome. iPhone Safari does not expose the required session values directly. This option verifies an existing session; supported security checks use the private connection settings above.</small></p>

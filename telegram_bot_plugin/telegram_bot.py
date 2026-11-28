@@ -86,6 +86,12 @@ class LeRobot:
             # BUY replies use the same private alert and purchase controls.
             from telegram.ext import MessageHandler, filters
 
+            from telegram_reconnect import menu as reconnect_menu, check as reconnect_check
+            self.app.add_handler(CommandHandler("reconnect", reconnect_menu, filters=filters.ChatType.PRIVATE))
+            self.app.add_handler(CommandHandler("reconnect", shared.open_private_control, filters=filters.ChatType.GROUPS))
+            self.app.add_handler(CommandHandler("start", reconnect_menu, filters=filters.ChatType.PRIVATE &
+                filters.Regex(r"^/start(?:@\w+)?\s+reconnect\s*$")))
+            self.app.add_handler(CallbackQueryHandler(reconnect_check, pattern=r"^finder:reconnect:(offers|alerts|alerts-buyer|home|autobuy)$"))
             from telegram_shared_buy import callback as shared_buy
             self.app.add_handler(CommandHandler("purchase_status", purchase_status_command, filters=filters.ChatType.PRIVATE))
             self.app.add_handler(MessageHandler(
@@ -159,7 +165,7 @@ class LeRobot:
         states = await asyncio.to_thread(alert_controls.set_paused, source, paused)
         home = "paused" if states["home"].paused else "active"
         searches = "paused" if states["search"].paused else "active"
-        await update.effective_message.reply_text(f"MSJ Home is {home}. Saved-search alerts are {searches}.")
+        await update.effective_message.reply_text(f"Home alerts are {home}. Saved-search alerts are {searches}.")
 
     async def open_dashboard(self, update, context):
         if getattr(update.effective_chat, "type", None) != "private":

@@ -41,6 +41,7 @@ class AuthResultTests(DatabaseFixture, unittest.TestCase):
             buyer_auth_results=buyer.public_auth_results(),
             buyer_connection_result=buyer.public_connection_result(),
             csrf="offline-csrf",
+            url_for=lambda endpoint: "/" + endpoint,
         )
 
     def test_password_block_and_native_renewal_remain_distinct_after_fresh_session_link(

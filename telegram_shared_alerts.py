@@ -32,6 +32,7 @@ GROUP_START = re.compile(r"^/start(?:@\w+)?\s+shared_alerts\s*\Z", re.I)
 PRIVATE_COMMAND = re.compile(r"^/(start|share_alerts|purchase_status)(?:@(\w+))?\Z", re.I)
 MENU_COMMANDS = [
     ("dashboard", "Open your search dashboard"),
+    ("reconnect", "Reconnect offers, alerts or Autobuy"),
     ("purchase_status", "Check or confirm a purchase"),
     *((command, label) for command, (_, _, label) in alert_controls.COMMANDS.items()),
     ("share_alerts", "Set up shared alerts and Autobuy"),
@@ -229,10 +230,14 @@ async def update_group_menu(bot, group, *, clear=False):
 
 async def open_private_control(update, context):
     chat, user = update.effective_chat, update.effective_user
-    if not member(current(), chat, user):
+    group = current()
+    if not member(group, chat, user):
         return
     command = update.effective_message.text.split(maxsplit=1)[0][1:].split("@")[0].lower()
-    label = "Open dashboard" if command == "dashboard" else "Check purchase status"
+    if command == "reconnect" and user.id != group.owner:
+        return
+    label = {"dashboard": "Open dashboard", "reconnect": "Open private reconnect",
+             "purchase_status": "Check purchase status"}[command]
     button = InlineKeyboardButton(label, url=f"https://t.me/{context.bot.username}?start={command}")
     await update.effective_message.reply_text(
         "Open this in your private Finder chat.",
@@ -550,8 +555,13 @@ async def send(bot, group, row):
     import vinted_buying
 
     from home_routing_store import native_row_allowed
-    if (current() != group or not native_row_allowed(row, "shared-"+group.version)
-            or not alert_controls.state(alert_controls.row_source(row)).allows(row["found_at"])):
+    from finder_connections import allows_listing
+    def eligible():
+        with closing(connection()) as conn:
+            return (current(conn) == group and allows_listing(row["found_at"], conn)
+                    and native_row_allowed(row, "shared-"+group.version, conn)
+                    and alert_controls.state(alert_controls.row_source(row), conn).allows(row["found_at"]))
+    if not eligible():
         finish(row, failed=True)
         return
     details = vinted_alerts.get_details(row) or {}
@@ -565,14 +575,14 @@ async def send(bot, group, row):
         from home_routing_delivery import native_transport
         bot = await native_transport(bot, group.chat, row["item_id"])
         response = None
-        if row["photo_id"]:
+        if row["photo_id"] and eligible():
             try:
                 response = await bot.send_photo(
                     **common, photo=row["photo_id"], caption=body, show_caption_above_media=True
                 )
             except BadRequest:
                 pass  # The cached file or caption was rejected; preserve the deal link.
-        if not response and current() == group:
+        if not response and eligible():
             response = await bot.send_message(**common, text=body, link_preview_options=LinkPreviewOptions(is_disabled=True))
         if response:
             finish(row, message_id=response.message_id)
@@ -615,6 +625,10 @@ async def run(bot):
                 verified, verify_at = group, now + 60
                 if not menus_ready:
                     menus_ready = await update_group_menu(bot, group)
+            from finder_group_notices import deliver as deliver_notice
+            if await deliver_notice(bot, group):
+                await asyncio.sleep(3)
+                continue
             row = claim(group, now)
             if row:
                 await send(bot, group, row)

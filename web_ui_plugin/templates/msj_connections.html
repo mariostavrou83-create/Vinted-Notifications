@@ -1,14 +1,12 @@
 {% extends 'msj_base.html' %}
 {% block content %}
 <script src="{{ url_for('static', filename='msj_account_options.js', v=asset_version) }}" defer></script>
-{% if selling_settings %}
-{% include 'msj_seller.html' %}
-{% if not accounts_separate %}<a href="/connections#vinted-buying">Open buying account settings</a>{% endif %}
+{% if selected_service %}
+{% include 'msj_service_reconnect.html' %}
 {% else %}
-<div class="page-heading compact">
-<div><span class="eyebrow">MSJ ALERTS</span><h1>Connections</h1><p class="muted">Your buying account, delivery settings and checking speed. <a href="/connections?account=selling#vinted-selling">Selling account settings</a></p></div><a class="secondary" href="/">Back to searches</a>
-</div>
-<nav class="connection-jump" aria-label="Connection sections"><a href="#vinted-buying">Vinted &amp; buying</a><a href="#home-routing">Home alert chats</a><a href="#monitoring">Speed &amp; cost</a><a href="#connection-tools">Tests &amp; backups</a></nav>
+{% include 'msj_connection_cards.html' %}
+<details id="other-connection-settings" class="other-settings"><summary>Other settings</summary>
+<nav class="connection-jump" aria-label="Connection sections"><a href="#buyer-tools">Buying settings</a><a href="#home-discovery">Home feed</a><a href="#home-routing">Home alert chats</a><a href="#monitoring">Speed &amp; cost</a><a href="#connection-tools">Tests &amp; backups</a></nav>
 <div class="connection-overview">
 <div><span>Vinted buying account</span><b>{{buyer.username if buyer.connected else 'Connect an account'}}</b><small>{% if buyer.connection_health is defined %}{{buyer.connection_health.state|replace('_',' ')}} · {% endif %}Autobuy permission {{'on' if buyer.enabled else 'off'}}</small></div>
 <div><span>Buyer proxy</span><b>{{'Saved' if buyer.network.proxy else 'Needs setup'}}</b><small>CapSolver {{'enabled' if buyer.network.enabled else 'off'}}</small></div>
@@ -35,6 +33,7 @@
 <details class="form-card guide-section setup-details" id="connection-tools"><summary>Tests &amp; backups</summary>
 <h2>Telegram pictures &amp; buttons</h2><p>Check the actual photo upload and both picture buttons using one labelled test alert. Use the photo buttons to switch between the listing and your saved examples.</p>{% for control in photo_controls if control.platform == 'vinted' %}<div class="guide-section"><h3>{{control.name}}</h3><p>Last confirmed picture switch: {{control.last_success}}{% if control.error %} · {{control.error}}{% endif %}</p><form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary" name="action" value="test_{{control.platform}}_photos">Test {{control.name}} photo &amp; buttons</button></form></div>{% endfor %}<small>iPhone previews need a photo in the first message. Telegram does not report what your phone displays; check the new test notification on your lock screen.</small>
 {% if supabase_enabled %}<p><a href="{{url_for('supabase.backup')}}">Manage encrypted Supabase backups →</a></p>{% endif %}
+</details>
 </details>
 {% endif %}
 {% endblock %}

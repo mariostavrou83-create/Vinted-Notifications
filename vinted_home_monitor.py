@@ -1,7 +1,6 @@
 """Bounded Home discovery; only existing Telegram user taps can purchase.
 
-Only the original MSJ Vinted account supplies recommendations. Every bounded page read
-uses the existing seller lock and a verified connection to the saved seller account.
+Each selected Home feed uses its own verified account and lock.
 No cookie copies, login, renewal, solver tasks or checkout writes originate here.
 """
 
@@ -150,7 +149,7 @@ def global_filters_allow(item):
 
 
 def _account_ready(role):
-    if role != "seller":
+    if not controls.source_selected(role):
         return "source_not_selected"
     if not vinted_accounts.separated():
         return "not_separated"
@@ -169,11 +168,12 @@ def _account_ready(role):
 
 
 def _page(role, url):
-    if role != "seller":
-        raise buyer.BuyerError("Only the MSJ Vinted account supplies Home recommendations.", reason="account_changed")
-    with seller.exclusive():
+    if not controls.source_selected(role):
+        raise buyer.BuyerError("This Home account is not selected.", reason="account_changed")
+    account = seller if role == "seller" else buyer
+    with vinted_accounts.account_scope(role), account.exclusive():
         yield_to_purchase()
-        client = seller.connected_client(solve_challenges=False, allow_refresh=False)
+        client = account.connected_client(solve_challenges=False, allow_refresh=False)
         try:
             if client.account_role != role:
                 raise buyer.BuyerError(
@@ -194,7 +194,7 @@ def _publish(item, search, match, age, role, *, now):
     """One atomic global seen/outbox insertion, without search watermark changes."""
     import vinted_alerts
 
-    if role != "seller" or not womens_clothing(item) or not has_listing_title(item):
+    if not controls.source_selected(role) or not womens_clothing(item) or not has_listing_title(item):
         return False
     observed = age.get("checked_at")
     upper = age.get("max_age_seconds")
@@ -284,42 +284,44 @@ def _record_decision(item, observed, outcome, role, query_id=None):
 
 
 class Monitor:
-    def __init__(self, *, clock=time.time, fetch=None):
+    def __init__(self, *, clock=time.time, fetch=None, role="seller"):
+        self.role = role
+        self.roles = (role,)
         self.clock = clock
         self.reader = HomeReader()
         self.fetch = fetch if fetch is not None else self.read_page
         self.started = False
-        self.next_home = {role: 0 for role in ROLES}
-        self.empty_home_at = dict.fromkeys(ROLES, None)
-        self.pending = {role: deque() for role in ROLES}
-        self.deadline = {role: 0 for role in ROLES}
-        self.page_reads = {role: deque() for role in ROLES}
-        self.detail_reads = {role: deque() for role in ROLES}
-        self.last_stage = dict.fromkeys(ROLES, None)
-        self.counts = {role: dict.fromkeys(COUNTERS, 0) for role in ROLES}
+        self.next_home = {role: 0 for role in self.roles}
+        self.empty_home_at = dict.fromkeys(self.roles, None)
+        self.pending = {role: deque() for role in self.roles}
+        self.deadline = {role: 0 for role in self.roles}
+        self.page_reads = {role: deque() for role in self.roles}
+        self.detail_reads = {role: deque() for role in self.roles}
+        self.last_stage = dict.fromkeys(self.roles, None)
+        self.counts = {role: dict.fromkeys(COUNTERS, 0) for role in self.roles}
         self.examined = OrderedDict()
         # One later recommendation may complete missing listing data. New cards
         # always get the available read slots first.
         self.recheck_until = {}
         self.searches = []
         self.searches_until = 0
-        self.retry_at = dict.fromkeys(ROLES, 0)
-        self.rate_limit_level = dict.fromkeys(ROLES, 0)
-        self.rate_recovery_at = dict.fromkeys(ROLES, 0)
-        self.next_detail_at = dict.fromkeys(ROLES, 0)
-        self.detail_retry_at = dict.fromkeys(ROLES, 0)
-        self.last_detail_failure = dict.fromkeys(ROLES, 0)
-        self.last_detail_ok = dict.fromkeys(ROLES, 0)
-        self.last_home_at = dict.fromkeys(ROLES, 0)
-        self.measured_seconds = dict.fromkeys(ROLES, None)
+        self.retry_at = dict.fromkeys(self.roles, 0)
+        self.rate_limit_level = dict.fromkeys(self.roles, 0)
+        self.rate_recovery_at = dict.fromkeys(self.roles, 0)
+        self.next_detail_at = dict.fromkeys(self.roles, 0)
+        self.detail_retry_at = dict.fromkeys(self.roles, 0)
+        self.last_detail_failure = dict.fromkeys(self.roles, 0)
+        self.last_detail_ok = dict.fromkeys(self.roles, 0)
+        self.last_home_at = dict.fromkeys(self.roles, 0)
+        self.measured_seconds = dict.fromkeys(self.roles, None)
         self.target = controls.target_seconds()
         self.check_target_at = 0
         self.scheduled_seconds = max(self.target, FAST_START_SECONDS)
         self.speedup_at = self.clock() + FAST_STEP_SECONDS
         self.fast_checks = 0
-        self.last_status = dict.fromkeys(ROLES, None)
-        self.read_delays = {role: {"home": 0, "listing": 0} for role in ROLES}
-        for role in ROLES:
+        self.last_status = dict.fromkeys(self.roles, None)
+        self.read_delays = {role: {"home": 0, "listing": 0} for role in self.roles}
+        for role in self.roles:
             try:
                 saved = json.loads(
                     db.get_parameter("home_monitor_status_" + role) or "{}"
@@ -470,7 +472,7 @@ class Monitor:
         if not enabled():
             if self.started:
                 self.reader.close()
-                for role in ROLES:
+                for role in self.roles:
                     self.pending[role].clear()
                     self.finish_empty_home_window(role)
                     self.status(role, "disabled", "idle")
@@ -478,7 +480,7 @@ class Monitor:
             self.searches_until = 0
             return
         if not self.started:
-            self.next_home = {"seller": now}
+            self.next_home = {self.role: now}
             self.started = True
         if now >= self.check_target_at:
             target = controls.target_seconds()
@@ -489,12 +491,12 @@ class Monitor:
                 self.scheduled_seconds = max(target, FAST_START_SECONDS)
                 self.speedup_at = now + FAST_STEP_SECONDS
                 self.fast_checks = 0
-                for role in ROLES:
+                for role in self.roles:
                     self.pending[role].clear()
                     self.measured_seconds[role] = None
                     self.finish_empty_home_window(role)
                     self.next_home[role] = max(now, self.retry_at[role])
-        for role in ROLES:
+        for role in self.roles:
             if now < self.retry_at[role]:
                 continue
             reads = self.page_reads[role]
@@ -613,7 +615,7 @@ class Monitor:
     def wait_seconds(self):
         if not self.target or not self.started:
             return 1
-        role = ROLES[0]
+        role = self.role
         next_read = self.next_home[role]
         if self.pending[role] and len(self.detail_reads[role]) < MAX_DETAILS:
             next_detail = max(self.next_detail_at[role], self.detail_retry_at[role])
@@ -876,7 +878,7 @@ class Monitor:
         self.status(role, "checked", "listing", 200)
 
     def notify_item(self, item, age, role, searches):
-        if role != "seller":
+        if not controls.source_selected(role):
             return
         if not womens_clothing(item):
             self.counts[role]["scope_miss"] += 1
@@ -932,7 +934,8 @@ def run():
     if alarm is not None:
         previous = signal.signal(signal.SIGALRM, signal.SIG_DFL)
         alarm(WORKER_STALL_SECONDS)
-    monitor = None
+    monitor = buying_monitor = None
+    next_source_check = 0
     try:
         monitor = Monitor()
         logger.info(
@@ -942,6 +945,18 @@ def run():
         while True:
             try:
                 monitor.tick()
+                now = time.monotonic()
+                if now >= next_source_check:
+                    next_source_check = now + 5
+                    include_buyer = enabled() and controls.source_selected("buyer")
+                    if include_buyer and buying_monitor is None:
+                        buying_monitor = Monitor(role="buyer")
+                        logger.info("Buying account Home feed enabled")
+                    elif not include_buyer and buying_monitor is not None:
+                        buying_monitor.reader.close()
+                        buying_monitor = None
+                if buying_monitor is not None:
+                    buying_monitor.tick()
             except (KeyboardInterrupt, SystemExit):
                 return
             except Exception as exc:  # noqa: BLE001 -- isolated background worker
@@ -951,8 +966,10 @@ def run():
                 # as responsive ticks. Alert volume never controls the timer.
                 if alarm is not None:
                     alarm(WORKER_STALL_SECONDS)
-            time.sleep(monitor.wait_seconds())
+            time.sleep(min(monitor.wait_seconds(), buying_monitor.wait_seconds()) if buying_monitor else monitor.wait_seconds())
     finally:
+        if buying_monitor is not None:
+            buying_monitor.reader.close()
         if monitor is not None:
             monitor.reader.close()
         if alarm is not None:

@@ -2371,12 +2371,17 @@ def feedback_buttons(row, feedback=None):
         }.get(reason, label)
     buttons = [[InlineKeyboardButton(label, callback_data="buy:status")]]
     if state in {"setup_required", "failed_before_payment"} and reason in {
-        "credentials", "refresh_rejected"
+        "credentials", "refresh_rejected", "not_connected"
     }:
         from vinted_connection_notices import dashboard_url
         reconnect = dashboard_url(reconnect=True)
         if reconnect:
-            buttons.append([InlineKeyboardButton("Reconnect buying account ↗", url=reconnect)])
+            buttons.append([InlineKeyboardButton("Check buying account in Telegram", callback_data="finder:reconnect:autobuy"),
+                            InlineKeyboardButton("Open Finder ↗", url=reconnect)])
+    elif state in {"setup_required", "failed_before_payment"} and reason in {
+        "renewal_cooldown", "renewal_blocked", "renewal_failed"
+    }:
+        buttons.append([InlineKeyboardButton("Check buying account in Telegram", callback_data="finder:reconnect:autobuy")])
     if state in ("in_progress", "stopping", "closed"):
         token = feedback.get("stop_token")
         if (

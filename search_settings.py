@@ -11,7 +11,7 @@ from pathlib import Path
 
 import db
 
-SCHEMA_VERSION = "39"
+SCHEMA_VERSION = "40"
 
 
 def connection():
@@ -54,7 +54,7 @@ def ensure_schema():
             conn.execute("BEGIN IMMEDIATE")
             from home_routing_store import migrate as migrate_home_routing
             migrate_home_routing(conn)
-            if version and version[0] in {"37", "38"}:
+            if version and version[0] in {"37", "38", "39"}:
                 from vinted_accounts import account_scope
                 from vinted_connection_notices import migrate as migrate_notices
 
@@ -65,6 +65,8 @@ def ensure_schema():
                 for role in ("buyer", "seller"):
                     with account_scope(role):
                         migrate_notices(conn)
+                from finder_connections import migrate as migrate_connections
+                migrate_connections(conn)
                 conn.execute("UPDATE parameters SET value=? WHERE key='msj_search_schema'", (SCHEMA_VERSION,))
                 return str(backup)
             conn.execute("""CREATE TABLE IF NOT EXISTS search_preferences (
@@ -236,6 +238,8 @@ def ensure_schema():
 
             with account_scope("seller"):
                 migrate_connection_notices(conn)
+            from finder_connections import migrate as migrate_connections
+            migrate_connections(conn)
             from vinted_budget import migrate as migrate_budgets
 
             migrate_budgets(conn)

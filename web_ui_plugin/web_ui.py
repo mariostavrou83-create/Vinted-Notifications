@@ -108,6 +108,8 @@ def create_app(test_config=None):
         # an owner cookie/CSRF form. All dashboard routes stay protected.
         if request.endpoint == "ebay_account_deletion":
             return None
+        from finder_connections import SERVICE_TARGETS
+        destination = request.args.get("reconnect") if request.endpoint == "connections" and request.method == "GET" else None
         reconnect_api = (request.endpoint or "").startswith(
             "vinted_reconnect."
         ) and request.endpoint != "vinted_reconnect.page"
@@ -155,6 +157,7 @@ def create_app(test_config=None):
                             requires_sign_in=requires_sign_in,
                             login_path=url_for(hosted_auth.login_endpoint),
                             retry_path=(
+                                url_for("connections", reconnect=destination) if destination in SERVICE_TARGETS else
                                 url_for(request.endpoint, **(request.view_args or {}))
                                 if request.method == "GET" and request.endpoint
                                 else url_for("dashboard")
@@ -170,6 +173,8 @@ def create_app(test_config=None):
                         "state": "stopped",
                         "message": "Sign into your private dashboard again before reconnecting.",
                     }, 401
+                if destination in SERVICE_TARGETS:
+                    session["after_login_connection"] = destination
                 return redirect(url_for(hosted_auth.login_endpoint))
             return None
         if request.endpoint not in public and not session.get("owner"):
@@ -179,6 +184,8 @@ def create_app(test_config=None):
                     "state": "stopped",
                     "message": "Sign into your private dashboard before reconnecting.",
                 }, 401
+            if destination in SERVICE_TARGETS:
+                session["after_login_connection"] = destination
             return redirect(url_for("login"))
         if request.endpoint not in public and not auth_row()["password_hash"]:
             session.clear()
@@ -244,6 +251,8 @@ def create_app(test_config=None):
             )
 
     def signed_in():
+        from finder_connections import SERVICE_TARGETS
+        selected = session.get("after_login_connection")
         session.clear()
         session["owner"] = True
         session["csrf"] = secrets.token_urlsafe(32)
@@ -252,7 +261,7 @@ def create_app(test_config=None):
             conn.execute(
                 "UPDATE dashboard_auth SET attempts=0,window_start=0 WHERE id=1"
             )
-        return redirect(url_for("dashboard"))
+        return redirect(url_for("connections", reconnect=selected) if selected in SERVICES else url_for("dashboard"))
 
     @app.route("/setup", methods=["GET", "POST"])
     def setup():
@@ -794,10 +803,32 @@ def create_app(test_config=None):
     @app.route("/connections", methods=["GET", "POST"])
     def connections():
         import vinted_buyer
+        from finder_connections import SERVICES, SERVICE_TARGETS, gate
 
+        selected = request.args.get("reconnect") or ("offers" if request.args.get("account") == "selling" else None)
+        if selected is not None and selected not in SERVICE_TARGETS:
+            abort(404)
+        if request.method == "POST" and selected and request.args.get("reconnect"):
+            role = SERVICE_TARGETS[selected][1]
+            if request.form.get("action") not in {role + suffix for suffix in
+                                                  ("_recheck", "_session_records", "_signin", "_code")}:
+                abort(400)
         if request.method == "POST":
             try:
                 action = request.form.get("action", "save")
+                if selected and request.args.get("reconnect") and action in {role + "_signin", role + "_code"}:
+                    import vinted_seller
+
+                    account = vinted_seller if role == "seller" else vinted_buyer
+                    if action.endswith("_signin"):
+                        account.start_login("", request.form.get("password", ""), reconnect=True)
+                        if account.settings()["reconnect_code"]:
+                            flash("Enter the sign-in code Vinted sent you.", "success")
+                            return redirect(url_for("connections", reconnect=selected), code=303)
+                    else:
+                        account.verify_code(request.form.get("code", "").strip(), reconnect=True)
+                    flash("Vinted verified your MSJ account." if role == "seller" else "Vinted verified your Autobuy account.", "success")
+                    return redirect(url_for("connections"), code=303)
                 if action == "save":
                     ebay_store.save_configuration(request.form)
                     flash(
@@ -809,6 +840,12 @@ def create_app(test_config=None):
 
                     vinted_home_controls.configure(request.form.get("home_enabled", ""))
                     flash("Home discovery setting saved.", "success")
+                elif action == "home_sources":
+                    import vinted_home_controls
+
+                    vinted_home_controls.configure_sources(request.form.get("include_buying_home", "0"))
+                    flash("Home feeds updated.", "success")
+                    return redirect(url_for("connections"), code=303)
                 elif action == "home_rate":
                     import vinted_home_controls
 
@@ -854,7 +891,9 @@ def create_app(test_config=None):
                 elif action == "buyer_check":
                     flash(vinted_buyer.check_signin(), "success")
                 elif action == "buyer_recheck":
-                    flash(vinted_buyer.check_saved_connection(), "success")
+                    message = (vinted_buyer.check_saved_connection(solve_challenges=False)
+                               if request.args.get("reconnect") else vinted_buyer.check_saved_connection())
+                    flash(message, "success")
                 elif action == "buyer_failed_checkout_check":
                     import vinted_failed_checkout_check
 
@@ -1002,8 +1041,13 @@ def create_app(test_config=None):
                     return redirect(url_for("connections"), code=303)
                 elif action == "seller_recheck":
                     import vinted_seller
-                    vinted_seller.check_saved_connection()
+                    if request.args.get("reconnect"):
+                        vinted_seller.check_saved_connection(solve_challenges=False)
+                    else:
+                        vinted_seller.check_saved_connection()
                     flash("Vinted verified your saved selling account.", "success")
+                    if request.args.get("reconnect"):
+                        return redirect(url_for("connections"), code=303)
                     return redirect(url_for("connections", account="selling", _anchor="vinted-selling"), code=303)
                 elif action == "seller_session_records":
                     import vinted_seller
@@ -1133,7 +1177,12 @@ def create_app(test_config=None):
                     vinted_buyer.record_connection_result(
                         action, exc.reason, exc.stage, exc.status
                     )
-                flash(str(exc), "error")
+                if selected and request.args.get("reconnect") and getattr(exc, "reason", None) == "security_challenge":
+                    flash("Vinted requires a check on its website. Complete it on Vinted, then use the Chrome option below.", "error")
+                else:
+                    flash(str(exc), "error")
+                if selected and request.args.get("reconnect"):
+                    return redirect(url_for("connections", reconnect=selected), code=303)
                 if action == "seller_recheck":
                     return redirect(url_for("connections", account="selling", _anchor="vinted-selling"), code=303)
                 if action.startswith(("buyer_", "seller_")):
@@ -1141,6 +1190,10 @@ def create_app(test_config=None):
                     return redirect(url_for("connections"), code=303)
         return render_template(
             "msj_connections.html",
+            connection_services=SERVICES,
+            selected_service=selected,
+            connection_targets=SERVICE_TARGETS,
+            blocked_accounts=gate()[0],
             home_routing=__import__("home_routing_web").view_state(),
             home_pairing=session.pop("home_pairing", None),
             home_destination_pairing=session.pop("home_destination_pairing", None),

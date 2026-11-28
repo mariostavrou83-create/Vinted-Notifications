@@ -339,7 +339,15 @@ if (connectionNavigation) {
   const panels = links.map(link => document.querySelector(link.getAttribute('href'))).filter(Boolean);
   panels.forEach(panel => panel.classList.add('connection-panel'));
   function showConnectionSection() {
-    const selected = panels.find(panel => '#' + panel.id === location.hash) || panels[0];
+    const target = location.hash && document.getElementById(location.hash.slice(1));
+    const more = document.getElementById('other-connection-settings');
+    if (target && more && more.contains(target)) {
+      more.open = true;
+      for (let node = target; node && node !== more; node = node.parentElement) {
+        if (node.tagName === 'DETAILS') node.open = true;
+      }
+    }
+    const selected = panels.find(panel => target && panel.contains(target)) || panels[0];
     panels.forEach(panel => {
       panel.hidden = panel !== selected;
       if (panel === selected && panel.tagName === 'DETAILS') panel.open = true;

@@ -41,7 +41,10 @@ class ListingCancelled(Exception):
 def photo_allowed(row):
     """Recheck an automatic edit, without disabling buttons on sent alerts."""
     with closing(connection()) as conn:
-        if alert_controls.state(alert_controls.row_source(row), conn).allows(row["found_at"]):
+        from finder_connections import allows_listing
+        if (row["platform"] != "vinted" or allows_listing(row["found_at"], conn)) and (
+            alert_controls.state(alert_controls.row_source(row), conn).allows(row["found_at"])
+        ):
             return True
         with conn:
             conn.execute(

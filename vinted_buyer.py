@@ -919,6 +919,7 @@ def settings():
     row["password_saved"] = False
     pending = decrypt(row.pop("pending"))
     row["pending_code"] = bool(pending and pending.get("expires", 0) > time.time())
+    row["reconnect_code"] = row["pending_code"] and bool(row["user_id"] and pending.get("reconnect_user_id") == row["user_id"])
     row.pop("browser_info")
     row.pop("network")
     config = network_configuration(validate=False)
@@ -2636,14 +2637,26 @@ def link_session(access_token, refresh_token):
             client.session.close()
 
 
-def start_login(email, password):
-    if not email or not password or len(email) > 254 or len(password) > 1024:
+def _linked_login_account():
+    with closing(connection()) as conn:
+        row = conn.execute(f"SELECT user_id,username FROM {account_table('vinted_buyer')} WHERE id=1").fetchone()
+    if not row or not all(row):
+        raise BuyerError("This account must already be linked in Finder.")
+    return row[0], row[1]
+
+
+def start_login(email, password, *, reconnect=False):
+    if (not reconnect and not email) or not password or len(email) > 254 or len(password) > 1024:
         raise BuyerError(
             "Enter your Vinted username or email and password in this form."
         )
     with exclusive():
+        if reconnect:
+            expected_id, email = _linked_login_account()
         reserve_connection_attempt()
         client = Client()
+        if reconnect:
+            client.solver_attempted = True
         try:
             client.homepage()
             result = client.request(
@@ -2664,6 +2677,8 @@ def start_login(email, password):
                     challenge_id=result["challenge_id"],
                     expires=time.time() + 600,
                 )
+                if reconnect:
+                    pending["reconnect_user_id"] = expected_id
                 with closing(connection()) as conn, conn:
                     conn.execute(
                         f"UPDATE {account_table('vinted_buyer')} SET pending=? WHERE id=1",
@@ -2730,7 +2745,7 @@ def check_signin():
             client.session.close()
 
 
-def verify_code(code):
+def verify_code(code, *, reconnect=False):
     if not re.fullmatch(r"[0-9A-Za-z-]{4,12}", code):
         raise BuyerError("Enter the sign-in code from Vinted.")
     with exclusive():
@@ -2742,7 +2757,11 @@ def verify_code(code):
             )
         if not pending or pending["expires"] < time.time():
             raise BuyerError("The sign-in attempt expired. Start again.")
+        if reconnect and pending.get("reconnect_user_id") != _linked_login_account()[0]:
+            raise BuyerError("Start a new sign-in for this account before entering a code.")
         client = Client(pending)
+        if reconnect or pending.get("reconnect_user_id"):
+            client.solver_attempted = True
         try:
             client.request(
                 "POST",
@@ -3044,7 +3063,7 @@ def connected_client(
         raise
 
 
-def check_saved_connection():
+def check_saved_connection(*, solve_challenges=True):
     """Owner-requested identity check; never creates a checkout or payment."""
     with exclusive():
         with closing(connection()) as conn, conn:
@@ -3058,7 +3077,7 @@ def check_saved_connection():
             conn.execute(
                 f"UPDATE {account_table('vinted_buyer_access')} SET last_probe=? WHERE id=1", (time.time(),)
             )
-        client = connected_client()
+        client = connected_client() if solve_challenges else connected_client(solve_challenges=False)
         client.session.close()
     return (
         "Vinted verified your saved buyer session. No checkout or payment was created."

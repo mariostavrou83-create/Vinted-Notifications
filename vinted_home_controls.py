@@ -64,8 +64,33 @@ def configure(value):
     alert_controls.set_paused("home", value == "0")
 
 
-def seller_status(conn):
-    row = conn.execute("SELECT value FROM parameters WHERE key='home_monitor_status_seller'").fetchone()
+def source_roles(conn=None):
+    if conn is None:
+        with closing(connection()) as opened:
+            return source_roles(opened)
+    from vinted_accounts import separated
+    choice = conn.execute("SELECT value FROM parameters WHERE key='home_include_buying_feed'").fetchone()
+    return ("seller", "buyer") if choice and choice[0] == "1" and separated(conn) else ("seller",)
+
+
+def source_selected(role, conn=None):
+    return role == "seller" or (role == "buyer" and role in source_roles(conn))
+
+
+def configure_sources(value):
+    if value not in ("0", "1"):
+        raise ValueError("Choose the Home accounts to follow.")
+    from vinted_accounts import separated
+    with closing(connection()) as conn, conn:
+        if value == "1" and not separated(conn):
+            raise ValueError("Connect a separate buying account to include its Home feed.")
+        conn.execute("INSERT OR REPLACE INTO parameters(key,value) VALUES('home_include_buying_feed',?)",(value,))
+
+
+def seller_status(conn, role="seller"):
+    if role not in ("seller", "buyer"):
+        raise ValueError("Unknown Home account.")
+    row = conn.execute("SELECT value FROM parameters WHERE key=?", ("home_monitor_status_" + role,)).fetchone()
     try:
         raw = json.loads(row[0]) if row else {}
     except (ValueError, TypeError):
@@ -73,7 +98,8 @@ def seller_status(conn):
     if not isinstance(raw, dict):
         raw = {}
     code = raw.get("code", "waiting")
-    value = {"role": "seller", "label": "MSJ Vinted",
+    name = conn.execute(f"SELECT username FROM vinted_{role} WHERE id=1").fetchone()
+    value = {"role": role, "label": (name[0] if name and name[0] else ("MSJ Vinted" if role == "seller" else "Buying account")),
              "state": CODES.get(code, "Check incomplete") if isinstance(code, str) else "Check incomplete"}
     target = target_seconds(conn)
     value["target_seconds"] = target
@@ -110,18 +136,23 @@ def seller_status(conn):
 
 def summary():
     with closing(connection()) as conn:
-        account = seller_status(conn)
+        accounts = [seller_status(conn, role) for role in source_roles(conn)]
         enabled = conn.execute("SELECT value FROM parameters WHERE key='home_monitor_enabled'").fetchone()
         # Home cards have had a stable house prefix since the feature launched.
         # Restrict the scan to recent finds using the existing found_at index.
         from vinted_home_activity import HOME_ALERT
-        totals = dict(conn.execute(
-            "SELECT status,COUNT(*) FROM alert_outbox WHERE found_at>=? AND " + HOME_ALERT + " GROUP BY status",
+        deliveries = conn.execute(
+            "SELECT status,COUNT(*),MAX(sent_at) FROM alert_outbox WHERE found_at>=? AND " + HOME_ALERT + " GROUP BY status",
             (time.time() - 86400,),
-        ))
+        ).fetchall()
+        totals = {status: count for status, count, _ in deliveries}
+        stamp = next((when for status, _, when in deliveries if status == "sent"), None)
+        last_sent = (datetime.fromtimestamp(stamp, ZoneInfo("Europe/London")).strftime("%d %b %H:%M:%S %Z")
+                     if type(stamp) in (int, float) and 0 < stamp < 4102444800 else None)
     return {
         "sent_24h": totals.get("sent", 0),
+        "last_sent": last_sent,
         "pending_24h": totals.get("pending", 0),
         "enabled": bool(enabled and enabled[0] == "1"),
-        "accounts": [account],
+        "accounts": accounts,
     }
