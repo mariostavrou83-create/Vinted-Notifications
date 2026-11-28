@@ -27,6 +27,7 @@ def digest(text):
 def create_app(config=None):
     app = Flask(__name__, instance_relative_config=True)
     app.config.from_mapping(
+        MULTIPLE_ACCOUNTS=os.environ.get("FINDER_MULTIPLE_ACCOUNTS") == "1",
         DATABASE=os.environ.get("FINDER_PILOT_DB", str(Path(app.instance_path) / "finder-pilot.sqlite3")),
         SECRET_KEY=os.environ.get("FINDER_PILOT_SECRET_KEY"),
         SESSION_COOKIE_NAME="finder_pilot_session",
@@ -40,6 +41,7 @@ def create_app(config=None):
     )
     if config:
         app.config.update(config)
+    app.jinja_env.globals["multiple_accounts"] = app.config["MULTIPLE_ACCOUNTS"]
     app.teardown_appcontext(close_db)
     database_path = Path(app.config["DATABASE"])
     database_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -66,24 +68,40 @@ def create_app(config=None):
         manual_import.register_manual_import(app)
         flow.init_flow(app)
         native_order.init_native(app)
-        market.init_app(app)
-        public_feed.init_app(app)
+        if not app.config["MULTIPLE_ACCOUNTS"]:
+            market.init_app(app)
+            public_feed.init_app(app)
         board_changes.init_board_changes(app)
+        if app.config["MULTIPLE_ACCOUNTS"]:
+            from . import hosted_feeds, telegram_reconnect
+            hosted_feeds.init(conn)
+            telegram_reconnect.register(app)
 
     @app.cli.command("invite")
     def invite_command():
         """Create a one-use 72-hour signup invitation."""
         token = secrets.token_urlsafe(24)
-        get_db().execute("INSERT INTO invitations(digest,expires_at) VALUES(?,?)",
-                         (digest(token), int(time.time()) + 72 * 3600))
+        db = get_db()
+        with transaction(db):
+            if app.config["MULTIPLE_ACCOUNTS"] and not team.invite_available(db):
+                raise click.ClickException("All places are taken or reserved by open invitations.")
+            db.execute("INSERT INTO invitations(digest,expires_at) VALUES(?,?)",
+                       (digest(token), int(time.time()) + 72 * 3600))
         click.echo(token)
 
     from .home_companion import DEVICE_ENDPOINTS as companion_endpoints
     device_endpoints = native_order.DEVICE_ENDPOINTS | companion_endpoints
     public = {"static", "login", "signup", "health", "buyer_extension_install", "download_buyer_extension", "pilot_telegram_webhook"} | device_endpoints
+    if app.config["MULTIPLE_ACCOUNTS"]:
+        public |= {"telegram_reconnect_page", "telegram_reconnect_start", "connection_callback"}
 
     @app.before_request
     def authenticate():
+        if app.config["MULTIPLE_ACCOUNTS"] and (
+            request.path.startswith(("/native/", "/api/native/", "/api/home/", "/api/home-routes", "/api/home-groups",
+                                     "/extension/", "/import/", "/api/imports/", "/team/market"))
+        ):
+            return jsonify(error="Use your linked Vinted account in Preferences."), 404
         g.user = None
         if "user_id" in session:
             row = get_db().execute("SELECT id,username FROM users WHERE id=?", (session["user_id"],)).fetchone()
@@ -93,7 +111,7 @@ def create_app(config=None):
             if request.path.startswith("/api/") or request.method != "GET":
                 return jsonify(error="Sign in to Finder."), 401
             return redirect(url_for("login"))
-        if request.method in ("POST", "PUT", "PATCH", "DELETE") and request.endpoint not in (device_endpoints | {"pilot_telegram_webhook"}):
+        if request.method in ("POST", "PUT", "PATCH", "DELETE") and request.endpoint not in (device_endpoints | {"pilot_telegram_webhook", "telegram_reconnect_start"}):
             expected = session.get("csrf_token", "")
             supplied = request.headers.get("X-CSRF-Token") or request.form.get("csrf_token", "")
             if not expected or not hmac.compare_digest(str(expected).encode(), str(supplied).encode()):
@@ -104,7 +122,10 @@ def create_app(config=None):
         if request.endpoint != "static":
             response.headers["Cache-Control"] = "private, no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
+        if request.endpoint == "telegram_reconnect_page":
+            response.headers["Content-Security-Policy"] = "frame-ancestors https://web.telegram.org https://*.telegram.org"
+        else:
+            response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
         return response
 
@@ -178,6 +199,8 @@ def create_app(config=None):
         password_hash = generate_password_hash(password)
         try:
             with transaction(conn):
+                if app.config["MULTIPLE_ACCOUNTS"] and team.at_capacity(conn, invitation):
+                    return auth_form("signup", "All places are taken. Your invitation has not been used.", 409)
                 unused = conn.execute("""UPDATE invitations SET used_at=? WHERE digest=? AND expires_at>?
                                           AND used_at IS NULL""", (now, invitation, now))
                 if unused.rowcount != 1:
@@ -205,10 +228,16 @@ def create_app(config=None):
         return {
             "user": g.user, "settings": settings_for(conn, owner), "searches": searches_for(conn, owner),
             "alerts": flow.alerts_for_user(conn, owner), "telegram_linked": flow.telegram_linked(conn, owner),
-            "csrf_token": csrf_token(), "public_feed": public_feed.status(conn, owner),
+            "csrf_token": csrf_token(), "public_feed": {} if app.config["MULTIPLE_ACCOUNTS"] else public_feed.status(conn, owner),
+            "monitoring": hosted_feeds.status(conn, owner, time.time()) if app.config["MULTIPLE_ACCOUNTS"] else {},
             "buyer_provider_available": connection.connection_available(),
             "buyer_provider_linked": bool(connection.linked_account(conn, owner)),
         }
+
+    if app.config["MULTIPLE_ACCOUNTS"]:
+        @app.get("/api/monitoring")
+        def monitoring():
+            return jsonify(hosted_feeds.status(get_db(), g.user["id"], time.time()))
 
     @app.get("/")
     def dashboard():
@@ -273,6 +302,11 @@ def create_app(config=None):
             if len(existing_photos - removed_photos) + len(pictures) > 8:
                 raise InputError("A search can have up to eight reference pictures.")
             fields = search_fields(data, previous)
+            if app.config["MULTIPLE_ACCOUNTS"] and fields["enabled"]:
+                try:
+                    hosted_feeds.catalogue_filter(fields["url"])
+                except ValueError as error:
+                    raise InputError(str(error)) from error
             values = (fields["name"], fields["url"], json.dumps(fields["include_keywords"]),
                       json.dumps(fields["exclude_keywords"]), fields["budget_pence"], int(fields["enabled"]))
             if search_id is None:

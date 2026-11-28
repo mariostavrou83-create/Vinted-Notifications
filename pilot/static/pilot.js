@@ -1,5 +1,6 @@
 (() => {
   'use strict';
+  const hosted = document.documentElement.hasAttribute('data-hosted-accounts');
   const searches = JSON.parse(document.getElementById('search-data').textContent);
   const csrf = document.querySelector('meta[name="csrf-token"]').content;
   const editor = document.getElementById('search-form');
@@ -93,8 +94,8 @@
       else link.removeAttribute('aria-current');
     }
     schedulePolling(true);
-    if (hash === 'chrome-setup') document.getElementById(hash).open = true;
-    if (['account', 'chrome-checkout', 'chrome-setup', 'limits', 'home-sharing'].includes(hash)) document.getElementById(hash).scrollIntoView({ block: 'start' });
+    if (!hosted && hash === 'chrome-setup') document.getElementById(hash).open = true;
+    if (['account', 'chrome-checkout', 'chrome-setup', 'limits', 'home-sharing'].includes(hash)) document.getElementById(hash)?.scrollIntoView({ block: 'start' });
     else window.scrollTo(0, 0);
   }
 
@@ -216,12 +217,14 @@
     if (!empty.hidden) {
       const isHome = selectedSource === 'home';
       document.getElementById('filtered-empty-title').textContent = isHome ? 'No Home listings yet' : 'No saved-search matches yet';
-      document.getElementById('filtered-empty-summary').textContent = isHome
+      document.getElementById('filtered-empty-summary').textContent = hosted
+        ? (isHome ? 'Check your linked Vinted account and Home filters in Preferences.' : 'Add a saved search or check its latest feed status.')
+        : isHome
         ? 'Set up Finder in Chrome and choose “Watch this Home tab” on your Vinted Home page.'
         : 'Open one of your saved searches on Vinted and watch its catalogue tab in Chrome.';
       const action = document.getElementById('filtered-empty-action');
-      action.textContent = isHome ? 'Set up Chrome' : 'Manage searches';
-      action.href = isHome ? '/extension/install' : '#searches';
+      action.textContent = isHome ? (hosted ? 'Connected accounts' : 'Set up Chrome') : 'Manage searches';
+      action.href = isHome ? (hosted ? '#account' : '/extension/install') : '#searches';
     }
     updateListingTimes();
   }
@@ -254,12 +257,19 @@
   let searchWatchBusy = false;
   async function refreshSearchWatches() {
     const rows = document.querySelectorAll('[data-search-row]');
-    if (document.hidden || document.getElementById('searches').hidden || !rows.length || searchWatchBusy) return;
+    if (document.hidden || searchWatchBusy || (!hosted && (document.getElementById('searches').hidden || !rows.length))) return;
     searchWatchBusy = true;
     try {
-      const result = await request('/api/native/search-status', {cache:'no-store'});
+      const result = await request(hosted ? '/api/monitoring' : '/api/native/search-status', {cache:'no-store'});
+      const home = document.getElementById('hosted-home-status');
+      if (home && result.home) {
+        home.textContent = 'Home · ' + result.home.message + ' ';
+        const checked = document.createElement('span');
+        showPublicCheck(checked, result.home.last_checked_at);
+        home.append(checked);
+      }
       for (const row of rows) {
-        const coverage = result.public_searches?.[row.dataset.searchRow];
+        const coverage = (hosted ? result.searches : result.public_searches)?.[row.dataset.searchRow];
         const publicWatch = row.querySelector('[data-public-watch]');
         const checkedAt = row.querySelector('[data-public-checked]');
         if (publicWatch) publicWatch.textContent = coverage?.message || 'Status unavailable.';
@@ -275,6 +285,8 @@
         label.textContent = text;
       }
     } catch {
+      const home = document.getElementById('hosted-home-status');
+      if (home) home.textContent = 'Home · Status unavailable.';
       for (const label of document.querySelectorAll('[data-chrome-watch]')) label.textContent = 'Chrome watch status unavailable.';
       for (const label of document.querySelectorAll('[data-public-watch]')) label.textContent = 'Status unavailable.';
     } finally { searchWatchBusy = false; }
@@ -348,6 +360,7 @@
       }
       if (Date.now() - lastTimeUpdate >= 15_000) {
         updateListingTimes();
+        if (hosted) refreshSearchWatches();
         lastTimeUpdate = Date.now();
       }
       if (manual) notice('Listings refreshed.');
@@ -368,6 +381,7 @@
     clearInterval(pollTimer);
     if (document.hidden) return;
     if (!document.getElementById('alerts').hidden) {
+      if (hosted) refreshSearchWatches();
       refreshFeed(force);
       pollTimer = window.setInterval(refreshFeed, selectedSource === 'search' ? 5000 : 1000);
     } else if (!document.getElementById('searches').hidden) {

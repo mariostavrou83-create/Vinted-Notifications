@@ -1,0 +1,18 @@
+{% extends 'base.html' %}
+{% block title %}Reconnect Vinted · Finder{% endblock %}
+{% block scripts %}{% if not outcome %}
+<script src="https://telegram.org/js/telegram-web-app.js?65"></script>
+<script src="{{ url_for('static', filename='telegram-reconnect.js') }}" defer></script>
+{% endif %}{% endblock %}
+{% block body %}
+<main class="auth-wrap"><div class="auth-card">
+<div class="wordmark">Finder<span>.</span></div>
+{% if outcome == 'reconnected' %}
+<h1>Vinted reconnected</h1><p>Your Home alerts and AutoBuy can use your account again. You can return to Telegram.</p>
+{% elif outcome %}
+<h1>Reconnect Vinted</h1><p role="status">{{ 'A different Vinted account was selected.' if outcome == 'mismatch' else 'Finder could not renew this connection.' }} Open a new reconnect request in your private Finder chat.</p>
+{% else %}
+<h1>Reconnect Vinted</h1><p id="reconnect-status" role="status">Checking your private Telegram connection…</p>
+<a id="vinted-sign-in" class="button primary" hidden rel="noreferrer">Continue to Vinted</a>
+{% endif %}</div></main>
+{% endblock %}

@@ -1,6 +1,6 @@
 <section id="preferences" data-view="preferences" hidden aria-labelledby="preferences-title">
   <div class="page-head"><div><h1 id="preferences-title">Preferences</h1><p class="lede">Choose what reaches your feed and where your purchases go.</p></div></div>
-  <nav class="pref-jumps" aria-label="Preference sections"><a href="#preferences">Home filters</a><a href="#home-sharing">Home sharing</a><a href="#limits">Purchase limits</a><a href="#chrome-checkout">Chrome checkout</a><a href="#account">Accounts</a></nav>
+  <nav class="pref-jumps" aria-label="Preference sections"><a href="#preferences">Home filters</a>{% if not multiple_accounts %}<a href="#home-sharing">Home sharing</a>{% endif %}<a href="#limits">Purchase limits</a>{% if not multiple_accounts %}<a href="#chrome-checkout">Chrome checkout</a>{% endif %}<a href="#account">Accounts</a></nav>
   <form id="settings-form" class="stack-form">
     <section id="home-filters" class="panel stack-form">
       <h2>Home filters</h2>
@@ -9,14 +9,14 @@
         <label>Sizes <small>Separate by comma. Leave blank for all.</small><input name="sizes" value="{{ settings.sizes|default([])|join(', ') }}" placeholder="UK 8, UK 10"></label>
       </div>
       <div class="field-grid">
-        <label>Quiet hours start<input type="time" name="quiet_start" required value="{{ settings.quiet_start|default('23:00', true) }}"></label>
-        <label>Quiet hours end<input type="time" name="quiet_end" required value="{{ settings.quiet_end|default('07:00', true) }}"></label>
+        <label>Quiet hours start<input type="time" name="quiet_start" {% if not multiple_accounts %}required{% endif %} value="{{ settings.quiet_start if multiple_accounts else settings.quiet_start|default('23:00', true) }}"></label>
+        <label>Quiet hours end<input type="time" name="quiet_end" {% if not multiple_accounts %}required{% endif %} value="{{ settings.quiet_end if multiple_accounts else settings.quiet_end|default('07:00', true) }}"></label>
       </div>
-      <p class="field-note">Quiet hours follow UK local time. Home alerts require a verified upload time under three minutes. In Chrome, open Vinted Home and choose <b>Watch this Home tab</b>. Finder checks the visible Home cards every second while Chrome keeps the tab active.</p>
+      <p class="field-note">Quiet hours follow UK local time. Home alerts require a verified upload time under three minutes. {% if multiple_accounts %}Leave both quiet hours blank for 24-hour alerts. Your Home is checked on the server while your devices are off.{% else %}In Chrome, open Vinted Home and choose <b>Watch this Home tab</b>. Finder checks the visible Home cards every second while Chrome keeps the tab active.{% endif %}</p>
     </section>
-    <section class="panel stack-form"{% if not buyer_provider_available and not buyer_provider_linked %} hidden{% endif %}>
-      <h2>Provider delivery options</h2>
-      <p class="field-note">Look up delivery options through your connected buying provider. For checkout in your browser, use <a href="#chrome-checkout">Chrome checkout</a>.</p>
+    <section class="panel stack-form"{% if not multiple_accounts and not buyer_provider_available and not buyer_provider_linked %} hidden{% endif %}>
+      <h2>Delivery preferences</h2>
+      <p class="field-note">Choose where your linked account receives purchases.{% if multiple_accounts and not buyer_provider_linked %} <a href="#account">Connect your Vinted account</a> to look up pickup points, saved addresses and couriers.{% endif %}{% if not multiple_accounts %} For checkout in your browser, use <a href="#chrome-checkout">Chrome checkout</a>.{% endif %}</p>
       <label>Delivery method<select name="delivery_mode"><option value="pickup" {% if settings.delivery_mode != 'home' %}selected{% endif %}>Pickup point</option><option value="home" {% if settings.delivery_mode == 'home' %}selected{% endif %}>Home delivery</option></select></label>
       <div id="delivery-selector" class="stack-form">
         <div class="selected-place"><span id="selected-place-kind">Pickup point</span><strong id="selected-place-name">No pickup point selected</strong><small id="selected-place-summary"></small></div>
@@ -48,7 +48,7 @@
     <p class="form-error" role="alert" data-error hidden></p>
     <div class="actions"><button type="submit" class="button primary">Save preferences</button></div>
   </form>
-  <section id="home-sharing" class="panel stack-form" aria-labelledby="home-sharing-title">
+  {% if not multiple_accounts %}<section id="home-sharing" class="panel stack-form" aria-labelledby="home-sharing-title">
     <h2 id="home-sharing-title">Home sharing</h2>
     <p class="field-note">Receive Home listings from more than one Vinted profile in your linked Telegram. AutoBuy uses your own buying account and delivery preferences.</p>
     <div class="stack-form">
@@ -84,12 +84,12 @@
     </div>
     <p id="home-sharing-status" class="field-note" role="status" aria-live="polite"></p>
   </section>
-  {% include 'chrome_checkout.html' %}
+  {% include 'chrome_checkout.html' %}{% endif %}
   <section id="account" class="panel account-panel">
     <h2>Connected accounts</h2>
-    <div class="account-line"><div><h3>Vinted in your browser</h3><p class="muted">Open Vinted on this device to sign in. To resume watching your Home or use Chrome checkout, open the paired desktop Chrome profile.</p></div><div><a class="button secondary" href="https://www.vinted.co.uk/" target="_blank" rel="noopener noreferrer">Open Vinted</a> <a href="#chrome-checkout">Desktop Chrome setup</a></div></div>
-    <div class="account-line"{% if not buyer_provider_available and not buyer_provider_linked %} hidden{% endif %}><div><h3>Linked buying account</h3><p id="buyer-account-status" class="muted">Checking connection…</p><p id="extension-profile-hint" hidden>Selected in Chrome: <output id="extension-profile-name"></output></p></div><div><button type="button" class="button secondary" id="connect-buyer-account" hidden>Connect account</button><button type="button" class="button secondary" id="disconnect-buyer-account" hidden>Disconnect</button></div></div>
-    <details class="extension-install" id="chrome-setup"><summary>Set up the Chrome extension</summary><p><a href="/extension/install">Open the Chrome installation guide</a>, then <a href="#chrome-checkout">pair your buying profile</a> to Finder. For a one-off import, use <a href="/import/vinted">Add from Chrome</a>.</p></details>
+    {% if not multiple_accounts %}<div class="account-line"><div><h3>Vinted in your browser</h3><p class="muted">Open Vinted on this device to sign in. To resume watching your Home or use Chrome checkout, open the paired desktop Chrome profile.</p></div><div><a class="button secondary" href="https://www.vinted.co.uk/" target="_blank" rel="noopener noreferrer">Open Vinted</a> <a href="#chrome-checkout">Desktop Chrome setup</a></div></div>{% endif %}
+    <div class="account-line"{% if not multiple_accounts and not buyer_provider_available and not buyer_provider_linked %} hidden{% endif %}><div><h3>Linked buying account</h3><p id="buyer-account-status" class="muted">Checking connection…</p>{% if multiple_accounts %}<p class="field-note">This account supplies your personal Home and handles AutoBuy. Use /reconnect in your private Finder chat to sign in again on your phone or computer.</p>{% endif %}<p id="extension-profile-hint" hidden>Selected in Chrome: <output id="extension-profile-name"></output></p></div><div><button type="button" class="button secondary" id="connect-buyer-account" hidden>Connect account</button><button type="button" class="button secondary" id="disconnect-buyer-account" hidden>Disconnect</button></div></div>
+    {% if not multiple_accounts %}<details class="extension-install" id="chrome-setup"><summary>Set up the Chrome extension</summary><p><a href="/extension/install">Open the Chrome installation guide</a>, then <a href="#chrome-checkout">pair your buying profile</a> to Finder. For a one-off import, use <a href="/import/vinted">Add from Chrome</a>.</p></details>{% endif %}
     <div class="account-line"><div><h3>Telegram</h3><p class="muted">{{ 'Linked for private buying alerts.' if links else 'Link your own chat for buying alerts and AutoBuy.' }}</p></div>{% if not links %}<button type="button" id="link-telegram" class="button secondary">Link Telegram</button>{% endif %}</div>
     <p role="alert" class="form-error" id="telegram-error" hidden></p>
     <p id="telegram-invite" hidden><a class="button secondary" rel="noopener noreferrer" target="_blank">Open Telegram</a> <span class="muted">Link expires in 10 minutes.</span></p>
