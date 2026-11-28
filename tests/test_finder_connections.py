@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from lxml import html
+from test_search_controls import DatabaseFixture
 
 import alert_controls
 import finder_connections as connections
@@ -12,7 +13,6 @@ import finder_group_notices as notices
 import search_settings
 import telegram_reconnect
 import telegram_shared_alerts as shared
-from test_search_controls import DatabaseFixture
 from vinted_accounts import preserve_seller
 
 
@@ -82,6 +82,7 @@ class PersonalConnectionsTests(DatabaseFixture, unittest.TestCase):
 
     def test_three_visible_entry_points_only_and_separate_post_handlers(self):
         from test_dashboard import DashboardTests
+
         from web_ui_plugin.web_ui import create_app
         self.app = create_app({"TESTING": True, "SESSION_COOKIE_SECURE": False})
         self.client = self.app.test_client()
@@ -101,10 +102,10 @@ class PersonalConnectionsTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(self.client.get("/connections?reconnect=other").status_code, 404)
 
     def test_both_opted_in_home_feeds_use_separate_accounts_and_one_delivery_per_item(self):
+        import vinted_alerts
         import vinted_home_activity as activity
         import vinted_home_controls as controls
         import vinted_home_monitor as monitor
-        import vinted_alerts
         from vinted_accounts import account_scope
 
         self.assertFalse(controls.source_selected("buyer"))
@@ -114,7 +115,7 @@ class PersonalConnectionsTests(DatabaseFixture, unittest.TestCase):
         self.assertEqual(controls.source_roles(), ("seller", "buyer"))
         for role, name in (("seller","vinted_seller"),("buyer","vinted_buyer")):
             client = SimpleNamespace(account_role=role, session=SimpleNamespace(close=lambda: None))
-            with patch(name+".exclusive",side_effect=lambda:account_scope(role)), \
+            with patch(name+".exclusive",side_effect=lambda selected_role=role:account_scope(selected_role)), \
                  patch(name+".connected_client",return_value=client) as identity, \
                  patch.object(monitor,"yield_to_purchase"), patch.object(monitor,"read_html",return_value=("page",self.now)):
                 self.assertEqual(monitor._page(role, "https://www.vinted.co.uk/"), ("page", self.now))
@@ -135,9 +136,28 @@ class PersonalConnectionsTests(DatabaseFixture, unittest.TestCase):
         controls.configure_sources("0")
         self.assertFalse(vinted_alerts.home_discovery_fresh(vinted_alerts.get_details({"item_id":"123"}),now=self.now))
 
-    def test_phone_signin_and_code_are_bound_to_selected_existing_account(self):
-        import vinted_buyer as buyer
+    def test_telegram_link_keeps_the_chosen_home_account_after_dashboard_login(self):
         from test_dashboard import DashboardTests
+
+        from web_ui_plugin.web_ui import create_app
+
+        self.app = create_app({"TESTING": True, "SESSION_COOKIE_SECURE": False})
+        self.client = self.app.test_client()
+        DashboardTests.owner(self)
+        with self.client.session_transaction() as session:
+            session.clear()
+        url = "/connections?reconnect=alerts-buyer"
+        self.assertEqual(self.client.get(url).location, "/login")
+        self.client.get("/login")
+        with self.client.session_transaction() as session:
+            csrf = session["csrf"]
+        reply = self.client.post("/login", data={"csrf":csrf, "password":"offline test password"})
+        self.assertEqual(reply.location, url)
+
+    def test_phone_signin_and_code_are_bound_to_selected_existing_account(self):
+        from test_dashboard import DashboardTests
+
+        import vinted_buyer as buyer
         from web_ui_plugin.web_ui import create_app
 
         self.app = create_app({"TESTING": True, "SESSION_COOKIE_SECURE": False})
@@ -192,8 +212,8 @@ class GroupAndBotTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
     async def test_group_photo_rejection_rechecks_connection_before_text_fallback(self):
         from telegram.error import BadRequest
         group = shared.save_group(-654,123,456)
-        row = dict(item_id="471",found_at=time.time(),platform="vinted",content="Listing",
-                   body="Listing",photo_id="offline",title="Dress",url="https://example.test/dress",attempts=0)
+        row = {"item_id":"471","found_at":time.time(),"platform":"vinted","content":"Listing",
+               "body":"Listing","photo_id":"offline","title":"Dress","url":"https://example.test/dress","attempts":0}
         allowed = True
         async def photo(**kwargs):
             nonlocal allowed

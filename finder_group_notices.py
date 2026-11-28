@@ -4,7 +4,8 @@ import logging
 import time
 from contextlib import closing
 
-from telegram.error import BadRequest, RetryAfter, NetworkError
+from telegram.error import BadRequest, NetworkError, RetryAfter
+
 from search_settings import connection
 
 LOGGER = logging.getLogger(__name__)
@@ -50,8 +51,8 @@ def finish(group, row, *, retry_after=None):
 
 
 async def deliver(bot, group):
-    from telegram_shared_alerts import current
     from photo_cards import TIMEOUTS
+    from telegram_shared_alerts import current
 
     row = claim(group, time.time())
     if not row or current() != group:

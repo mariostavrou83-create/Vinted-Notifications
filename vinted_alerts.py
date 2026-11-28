@@ -104,9 +104,9 @@ def prepare_listing(row, details=None):
         home_detail = saved_details.get("home_discovery")
         source = "home" if "home_discovery" in saved_details else alert_controls.row_source(current)
         source_state = alert_controls.state(source, conn)
+        from finder_connections import allows_listing
         from home_routing_store import native_allowed
         from vinted_home_controls import source_selected
-        from finder_connections import allows_listing
         if not allows_listing(current["found_at"], conn):
             reason = "Listing withheld while a Finder account needed reconnection"
         elif source == "home" and not native_allowed(conn, row["item_id"], "owner"):

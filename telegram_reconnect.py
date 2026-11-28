@@ -4,7 +4,7 @@ import asyncio
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
-from finder_connections import SERVICES, SERVICE_TARGETS, gate, service_url
+from finder_connections import SERVICE_TARGETS, SERVICES, gate, service_url
 from vinted_home_controls import source_selected
 from vinted_owner_controls import private_owner
 

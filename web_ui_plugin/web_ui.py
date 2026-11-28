@@ -261,7 +261,7 @@ def create_app(test_config=None):
             conn.execute(
                 "UPDATE dashboard_auth SET attempts=0,window_start=0 WHERE id=1"
             )
-        return redirect(url_for("connections", reconnect=selected) if selected in SERVICES else url_for("dashboard"))
+        return redirect(url_for("connections", reconnect=selected) if selected in SERVICE_TARGETS else url_for("dashboard"))
 
     @app.route("/setup", methods=["GET", "POST"])
     def setup():
@@ -803,7 +803,7 @@ def create_app(test_config=None):
     @app.route("/connections", methods=["GET", "POST"])
     def connections():
         import vinted_buyer
-        from finder_connections import SERVICES, SERVICE_TARGETS, gate
+        from finder_connections import SERVICE_TARGETS, SERVICES, gate
 
         selected = request.args.get("reconnect") or ("offers" if request.args.get("account") == "selling" else None)
         if selected is not None and selected not in SERVICE_TARGETS:

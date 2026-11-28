@@ -86,7 +86,8 @@ class LeRobot:
             # BUY replies use the same private alert and purchase controls.
             from telegram.ext import MessageHandler, filters
 
-            from telegram_reconnect import menu as reconnect_menu, check as reconnect_check
+            from telegram_reconnect import check as reconnect_check
+            from telegram_reconnect import menu as reconnect_menu
             self.app.add_handler(CommandHandler("reconnect", reconnect_menu, filters=filters.ChatType.PRIVATE))
             self.app.add_handler(CommandHandler("reconnect", shared.open_private_control, filters=filters.ChatType.GROUPS))
             self.app.add_handler(CommandHandler("start", reconnect_menu, filters=filters.ChatType.PRIVATE &
