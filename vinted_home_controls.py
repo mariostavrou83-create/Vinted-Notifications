@@ -2,6 +2,7 @@
 
 import json
 import math
+import sqlite3
 import time
 from contextlib import closing
 from datetime import datetime
@@ -65,12 +66,16 @@ def configure(value):
 
 
 def source_roles(conn=None):
-    if conn is None:
-        with closing(connection()) as opened:
-            return source_roles(opened)
     from vinted_accounts import separated
-    choice = conn.execute("SELECT value FROM parameters WHERE key='home_include_buying_feed'").fetchone()
-    return ("seller", "buyer") if choice and choice[0] == "1" and separated(conn) else ("seller",)
+    try:
+        if conn is None:
+            with closing(connection()) as opened:
+                return source_roles(opened)
+        choice = conn.execute("SELECT value FROM parameters WHERE key='home_include_buying_feed'").fetchone()
+        return ("seller", "buyer") if choice and choice[0] == "1" and separated(conn) else ("seller",)
+    except sqlite3.OperationalError:
+        # A new or migrating database has not confirmed the second feed yet.
+        return ("seller",)
 
 
 def source_selected(role, conn=None):
