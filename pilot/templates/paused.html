@@ -1,0 +1,11 @@
+{% extends 'base.html' %}
+{% block title %}Access paused · Finder{% endblock %}
+{% block body %}
+<main class="auth-wrap"><div class="auth-card">
+<div class="wordmark">Finder<span>.</span></div>
+<h1>Your Finder access is paused</h1>
+<p class="lede">{% if contact %}Email <a href="mailto:{{ contact }}">{{ contact }}</a> for more info.{% else %}Contact your Finder administrator for more info.{% endif %}</p>
+<div class="actions"><a class="button secondary" href="/">Check access again</a>
+<form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="button secondary">Sign out</button></form></div>
+</div></main>
+{% endblock %}

@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from werkzeug.security import generate_password_hash
 
-from pilot import flow, home_filters, pickup, team
+from pilot import buyer_access, flow, home_filters, hosted_feeds, pickup, team
 from pilot.app import create_app, digest
 from pilot.db import get_db, settings_for
 from pilot.partner import PartnerError
@@ -19,7 +19,7 @@ class MemberSetupTests(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
-        self.app = create_app({"TESTING": True, "MULTIPLE_ACCOUNTS": True,
+        self.app = create_app({"TESTING": True, "MULTIPLE_ACCOUNTS": True, "FINDER_SUPPORT_EMAIL":"support@example.test",
                                "DATABASE": str(Path(folder.name) / "finder.sqlite"),
                                "FINDER_PUBLIC_URL": "https://finder.example",
                                "FINDER_PARTNER_URL": "https://source.example", "FINDER_PARTNER_TOKEN": "fixture"})
@@ -58,6 +58,156 @@ class MemberSetupTests(unittest.TestCase):
     def select_point(self):
         self.assertEqual(len(self.lookup(self.directory_rows()).json["destinations"]), 1)
         self.assertEqual(self.save({"pickup_id":"corner", "preferred_courier":"Evri"}).status_code, 200)
+
+    def admin_client(self):
+        self.db.execute("INSERT INTO finder_admin VALUES(1,'admin','unused','admin-key')")
+        client = self.app.test_client()
+        with client.session_transaction() as session:
+            session.update(admin_session="admin-key", csrf_token="admin-csrf")
+        return client
+
+    def test_pause_blocks_sessions_telegram_and_both_feeds_then_resumes_only_that_buyer(self):
+        administrator = self.admin_client()
+        form = {"csrf_token": "admin-csrf"}
+        self.link()
+        self.db.execute("INSERT INTO pilot_buyer_link VALUES(2,'buyer2','vinted-2',0)")
+        for uid in (1, 2):
+            self.db.execute("INSERT INTO pilot_chats VALUES(?,?)", (uid,100+uid))
+            self.db.execute("""INSERT INTO searches(user_id,name,url,include_keywords,exclude_keywords,enabled)
+                               VALUES(?,'Vintage','https://www.vinted.co.uk/catalog?search_text=vintage','[]','[]',1)""", (uid,))
+        self.db.execute("INSERT INTO pilot_link_codes VALUES('unused',1,?)", (time.time()+30,))
+        self.db.execute("INSERT INTO settings VALUES(1,?)", (json.dumps({"sizes":["S","M"]}),))
+        item = {"id":"250","listed_at":time.time(),"currency":"GBP","price_pence":500,"total_pence":875,
+                "title":"Vintage jacket","listing_url":"https://www.vinted.co.uk/items/250"}
+        aid = flow.record_listing(self.db,1,"buyerref",item,"home",{},time.time())
+        self.db.execute("INSERT INTO pilot_buy_jobs(update_id,user_id,chat_id,alert_id) VALUES(71,1,101,?)", (aid,))
+        old_home = next(j for j in hosted_feeds.claim_homes(self.db,time.time(),2) if j["user_id"]==1)
+        self.assertEqual(self.member.post("/admin/buyers/1/pause", headers=self.headers).status_code,403)
+        self.assertEqual(administrator.post("/admin/buyers/1/pause").status_code,403)
+        self.assertEqual(administrator.post("/admin/buyers/1/pause",data=form).location,"/admin")
+        self.assertEqual(administrator.post("/admin/buyers/1/pause",data=form).location,"/admin")
+        self.assertIn("Resume access",administrator.get("/admin").text)
+        self.assertEqual(team.capacity(self.db)["joined"],2)
+        for path in ("/","/setup","/alerts/fragment","/account/paused"):
+            resp=self.member.get(path)
+            self.assertEqual(resp.status_code,403)
+            self.assertIn("mailto:"+buyer_access.support_email(),resp.text)
+            self.assertNotIn("Vintage jacket",resp.text)
+        self.assertEqual(self.member.get("/api/state").json["error"],buyer_access.paused_message())
+        self.assertEqual(self.save({"sizes":["XL"]}).status_code,403)
+        self.assertEqual(self.db.execute("SELECT count(*) FROM pilot_link_codes WHERE user_id=1").fetchone()[0],0)
+        self.assertEqual(self.db.execute("SELECT delivery FROM pilot_alerts WHERE id=?",(aid,)).fetchone()[0],"expired")
+        self.assertEqual(self.db.execute("SELECT finished FROM pilot_buy_jobs WHERE update_id=71").fetchone()[0],1)
+        self.assertEqual({r["user_id"] for r in hosted_feeds.rules(self.db,time.time())[0].values()},{2})
+        with patch("pilot.hosted_feeds.partner_request") as source, patch("pilot.flow.partner_request") as checkout:
+            hosted_feeds.check_home(self.app,old_home)
+            self.assertEqual(flow.request_buy(self.db,1,aid)[0],buyer_access.paused_message())
+            source.assert_not_called()
+            checkout.assert_not_called()
+        incoming = {"chat":{"type":"private","id":101},"from":{"id":101},"text":"/reconnect"}
+        self.assertEqual(flow.telegram_update(self.db,{"message":incoming})["text"],buyer_access.paused_message())
+        tap = {"id":"tap","message":incoming,"from":{"id":101},"data":f"buy:{aid}"}
+        self.assertEqual(flow.telegram_update(self.db,{"callback_query":tap})["text"],buyer_access.paused_message())
+        other = self.app.test_client()
+        with other.session_transaction() as s:
+            s["user_id"] = 2
+        self.assertEqual(other.get("/api/state").status_code,200)
+        self.member.get("/login")
+        self.assertEqual(self.member.post("/login",data={"username":"owner","password":self.owner_password,
+                                                       "csrf_token":"csrf"}).location,"/account/paused")
+        self.assertEqual(administrator.post("/admin/buyers/1/resume",data=form).location,"/admin")
+        self.assertEqual(self.member.get("/api/state").status_code,200)
+        self.assertEqual(settings_for(self.db,1)["sizes"],["S","M"])
+        self.assertEqual({r["user_id"] for r in hosted_feeds.rules(self.db,time.time())[0].values()},{1,2})
+        self.assertEqual(self.member.get("/account/paused").location,"/")
+        with patch("pilot.flow.partner_request") as checkout:
+            self.assertIn("ended",flow.request_buy(self.db,1,aid,job_id=71)[0])
+            checkout.assert_not_called()
+
+    def test_delete_purges_only_this_buyer_and_their_sessions_cannot_be_reused(self):
+        administrator = self.admin_client()
+        client = self.app.test_client()
+        with client.session_transaction() as session:
+            session.update(user_id=2, csrf_token="old")
+        self.db.execute("INSERT INTO pilot_buyer_link VALUES(2,'removed-ref','removed-vinted',0)")
+        self.db.execute("INSERT INTO pilot_chats VALUES(2,102)")
+        self.db.execute("INSERT INTO hosted_deliveries VALUES(102,?)",(time.time(),))
+        self.db.execute("INSERT INTO pilot_link_codes VALUES('removecode',2,?)",(time.time()+30,))
+        self.db.execute("INSERT INTO invitations VALUES('spent',?,?)",(time.time()+600,time.time()))
+        self.db.execute("""INSERT INTO team_invites(digest,label,created_at,accepted_by) VALUES('spent','personal label',0,2)""")
+        sid = self.db.execute("""INSERT INTO searches(user_id,name,url,include_keywords,exclude_keywords,enabled)
+            VALUES(2,'saved','https://www.vinted.co.uk/catalog','[]','[]',1)""").lastrowid
+        self.db.execute("INSERT INTO search_photos(search_id,image) VALUES(?,?)",(sid,b'fixture'))
+        item = {"id":"260","listed_at":time.time(),"currency":"GBP","price_pence":500,"total_pence":875,
+                "title":"Vintage jacket","listing_url":"https://www.vinted.co.uk/items/260"}
+        aid = flow.record_listing(self.db,2,"removed-ref",item,"home",{},time.time())
+        self.db.execute("INSERT INTO pilot_buy_jobs(update_id,user_id,chat_id,alert_id) VALUES(72,2,102,?)",(aid,))
+        self.db.execute("""INSERT INTO native_orders(alert_id,user_id,chat_id,username,binding,listing_id,stage,expires,prefs)
+                          VALUES(?,2,102,'removed-vinted','bind','260','issued',0,'{}')""",(aid,))
+        self.db.execute("INSERT INTO native_notifications(alert_id,text) VALUES(?,'fixture')",(aid,))
+        path="/admin/buyers/2/delete"
+        form={"csrf_token":"admin-csrf","confirm_name":"second-buyer"}
+        self.assertEqual(self.member.post(path,data=form).status_code,403)
+        self.assertEqual(administrator.get(path).status_code,200)
+        self.assertEqual(administrator.post(path,data={**form,"confirm_name":"owner"}).status_code,400)
+        self.assertEqual(administrator.post(path,data={"confirm_name":"second-buyer"}).status_code,403)
+        self.assertEqual(administrator.post(path,data=form).location,"/admin")
+        self.assertEqual(administrator.post(path,data=form).status_code,404)
+        self.assertEqual(self.db.execute("PRAGMA foreign_key_check").fetchall(),[])
+        self.assertEqual(team.capacity(self.db)["joined"],1)
+        self.assertEqual(self.db.execute("SELECT count(*) FROM search_photos WHERE search_id=?",(sid,)).fetchone()[0],0)
+        self.assertFalse(self.db.execute("SELECT 1 FROM team_invites WHERE label='personal label'").fetchone())
+        self.assertIsNotNone(self.db.execute("SELECT used_at FROM invitations WHERE digest='spent'").fetchone()[0])
+        for table in ("pilot_chats","pilot_sources","pilot_buy_jobs","pilot_alerts","native_orders","pilot_link_codes","pilot_buyer_link"):
+            self.assertFalse(self.db.execute(f"SELECT 1 FROM {table} WHERE user_id=2").fetchone(), table)
+        self.assertFalse(self.db.execute("SELECT 1 FROM native_notifications WHERE alert_id=?", (aid,)).fetchone())
+        now=time.time()
+        with patch("pilot.buyer_access.partner_request",side_effect=PartnerError("offline")) as revoke:
+            self.assertFalse(buyer_access.revoke_next(self.db,now))
+            revoke.assert_called_once_with("POST","/v1/connections/revoke",{"account_ref":"removed-ref"})
+        with patch("pilot.buyer_access.partner_request",return_value={}) as revoke:
+            self.assertFalse(buyer_access.revoke_next(self.db,now+5))
+            self.assertTrue(buyer_access.revoke_next(self.db,now+61))
+            revoke.assert_called_once()
+        invite=secrets.token_urlsafe()
+        self.db.execute("INSERT INTO invitations VALUES(?,?,NULL)", (digest(invite),now+600))
+        newcomer=self.app.test_client()
+        newcomer.get("/signup")
+        with newcomer.session_transaction() as s:
+            csrf=s["csrf_token"]
+        joined=newcomer.post("/signup",data={"csrf_token":csrf,"invite":invite,"username":"second-buyer","password":"new-identity-fixture"})
+        self.assertEqual(joined.location,"/setup")
+        self.assertGreater(self.db.execute("SELECT id FROM users WHERE username='second-buyer'").fetchone()[0],2)
+        self.assertEqual(client.get("/api/state").status_code,401)
+        self.assertEqual(newcomer.get("/api/state").status_code,200)
+
+    def test_in_flight_home_and_checkout_are_invalidated_when_paused(self):
+        administrator=self.admin_client()
+        self.link()
+        job=hosted_feeds.claim_homes(self.db,time.time(),1)[0]
+        item={"id":"288","title":"Home jacket","currency":"GBP","price_pence":500,"total_pence":875,
+              "listed_at":time.time(),"listing_url":"https://www.vinted.co.uk/items/288"}
+        def pause_and_resume():
+            for action in ("pause","resume"):
+                self.assertEqual(administrator.post(f"/admin/buyers/1/{action}",data={"csrf_token":"admin-csrf"}).status_code,303)
+        def feed(*args):
+            pause_and_resume()
+            return {"account_ref":"buyerref","source":"home","next_cursor":"old","listings":[item]}
+        with patch("pilot.hosted_feeds.partner_request",side_effect=feed):
+            hosted_feeds.check_home(self.app,job)
+        self.assertFalse(self.db.execute("SELECT 1 FROM pilot_alerts WHERE listing_id='288'").fetchone())
+        self.select_point()
+        aid=flow.record_listing(self.db,1,"buyerref",item,"home",settings_for(self.db,1),time.time())
+        def quote(method,path,body):
+            self.assertEqual(path,"/v1/checkout/quote")
+            pause_and_resume()
+            return {"account_ref":"buyerref","listing_id":"288","currency":"GBP","quote_id":"q","expires_at":time.time()+60,
+                    "item_pence":500,"total_pence":875,"shipping_pence":200,"payment_label":"Saved card","delivery_mode":"pickup",
+                    "pickup_id":"route-1","physical_point_id":"corner","courier":"Evri","pickup_label":"Corner shop"}
+        with patch("pilot.flow.partner_request",side_effect=quote) as provider:
+            flow.request_buy(self.db,1,aid)
+            self.assertEqual(provider.call_count,1)
+        self.assertEqual(self.db.execute("SELECT order_status FROM pilot_alerts WHERE id=?",(aid,)).fetchone()[0],"blocked")
 
     def test_new_buyer_and_separate_admin_signin(self):
         code = secrets.token_urlsafe()

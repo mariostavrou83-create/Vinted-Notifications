@@ -52,9 +52,13 @@ def partner_request(method, path, payload=None, *, config=None):
     identity = None
     if managed and isinstance(payload, dict) and payload.get("account_ref") and path != "/v1/connections/revoke":
         from .db import get_db
-        identity = get_db().execute("""SELECT h.user_id,h.revision,h.expired FROM account_health h
-            JOIN pilot_buyer_link b USING(user_id) WHERE b.account_ref=? AND b.revoke_pending=0""",
+        identity = get_db().execute("""SELECT h.user_id,h.revision,h.expired,m.paused FROM account_health h
+            JOIN pilot_buyer_link b USING(user_id) JOIN hosted_members m USING(user_id)
+            WHERE b.account_ref=? AND b.revoke_pending=0""",
             (payload["account_ref"],)).fetchone()
+        if identity and identity["paused"] and path != "/v1/checkout/status":
+            from .buyer_access import paused_message
+            raise PartnerError(paused_message())
         if not identity or identity["expired"]:
             raise PartnerError("Reconnect the linked Vinted account.")
     body = None if payload is None else json.dumps(payload, allow_nan=False).encode()

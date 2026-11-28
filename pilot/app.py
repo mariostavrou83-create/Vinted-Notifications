@@ -28,6 +28,7 @@ def create_app(config=None):
     app = Flask(__name__, instance_relative_config=True)
     app.config.from_mapping(
         MULTIPLE_ACCOUNTS=os.environ.get("FINDER_MULTIPLE_ACCOUNTS") == "1",
+        FINDER_SUPPORT_EMAIL=os.environ.get("FINDER_SUPPORT_EMAIL", ""),
         DATABASE=os.environ.get("FINDER_PILOT_DB", str(Path(app.instance_path) / "finder-pilot.sqlite3")),
         SECRET_KEY=os.environ.get("FINDER_PILOT_SECRET_KEY"),
         SESSION_COOKIE_NAME="finder_pilot_session",
@@ -49,7 +50,7 @@ def create_app(config=None):
     fd = os.open(database_path, os.O_CREAT | os.O_RDWR, 0o600)
     os.close(fd)
     from . import connection, destinations, flow, manual_import, market, public_feed
-    from . import admin, board_changes, home_filters, member_setup, native_order, team
+    from . import admin, board_changes, buyer_access, home_filters, member_setup, native_order, team
     from .report import command as report_command
     app.cli.add_command(report_command)
     with app.app_context():
@@ -75,6 +76,7 @@ def create_app(config=None):
         if app.config["MULTIPLE_ACCOUNTS"]:
             from . import hosted_feeds, telegram_reconnect
             conn.execute(admin.SCHEMA)
+            buyer_access.init(conn)
             hosted_feeds.init(conn)
             telegram_reconnect.register(app)
 
@@ -104,16 +106,30 @@ def create_app(config=None):
         ):
             return jsonify(error="Use your linked Vinted account in Preferences."), 404
         g.user = None
+        paused = False
         if "user_id" in session:
-            row = get_db().execute("SELECT id,username FROM users WHERE id=?", (session["user_id"],)).fetchone()
+            query = ("SELECT u.id,u.username,m.paused FROM users u JOIN hosted_members m ON m.user_id=u.id WHERE u.id=?"
+                     if app.config["MULTIPLE_ACCOUNTS"] else "SELECT id,username,0 AS paused FROM users WHERE id=?")
+            row = get_db().execute(query, (session["user_id"],)).fetchone()
             if row:
-                g.user = dict(row)
+                g.user = {"id": row["id"], "username": row["username"]}
+                paused = bool(row["paused"])
+            else:
+                session.pop("user_id", None)
         is_admin_route = app.config["MULTIPLE_ACCOUNTS"] and (request.path == "/admin" or request.path.startswith(("/admin/", "/team/")) or request.path == "/team")
         if is_admin_route and request.endpoint not in {"admin_login","admin_activate"}:
             if not admin.signed_in():
                 if request.method == "GET":
                     return redirect("/admin/login")
                 return jsonify(error="Sign in as the Finder administrator."), 403
+        elif paused and request.endpoint not in public and request.endpoint != "logout":
+            if request.path.startswith("/api/") or request.method not in ("GET", "HEAD"):
+                response = jsonify(code="buyer_paused", error=buyer_access.paused_message())
+            else:
+                response = app.make_response(render_template("paused.html", contact=buyer_access.support_email(), csrf_token=csrf_token()))
+            response.status_code = 403
+            response.headers["X-Finder-Access"] = "paused"
+            return response
         elif request.endpoint and request.endpoint not in public and not g.user:
             if request.endpoint == "dashboard" and app.config["MULTIPLE_ACCOUNTS"] and admin.signed_in():
                 return redirect("/admin")
@@ -156,6 +172,8 @@ def create_app(config=None):
         session.permanent = True
         session["user_id"] = user_id
         csrf_token()
+        if app.config["MULTIPLE_ACCOUNTS"] and not buyer_access.active(get_db(), user_id):
+            return redirect("/account/paused")
         if app.config["MULTIPLE_ACCOUNTS"] and not member_setup.progress(get_db(), user_id, member_setup.services(get_db()))["complete"]:
             return redirect("/setup")
         return redirect(url_for("dashboard"))
@@ -221,8 +239,10 @@ def create_app(config=None):
                     return auth_form("signup", "This invitation is invalid or expired.", 400)
                 if app.config["MULTIPLE_ACCOUNTS"] and conn.execute("SELECT 1 FROM finder_admin WHERE username=?", (name,)).fetchone():
                     raise sqlite3.IntegrityError("Username in use")
-                new_id = conn.execute("INSERT INTO users(username,password_hash) VALUES(?,?)",
-                                      (name, password_hash)).lastrowid
+                # Never hand a deleted buyer's ID to a new login with an old signed session still in circulation.
+                reserved_id = conn.execute("INSERT INTO hosted_members DEFAULT VALUES").lastrowid if app.config["MULTIPLE_ACCOUNTS"] else None
+                new_id = conn.execute("INSERT INTO users(id,username,password_hash) VALUES(?,?,?)",
+                                      (reserved_id, name, password_hash)).lastrowid
                 team.consume_invite(conn, invitation, new_id)
         except sqlite3.IntegrityError:
             return auth_form("signup", "Choose a different username.", 409)
@@ -260,6 +280,11 @@ def create_app(config=None):
             return jsonify(hosted_feeds.status(get_db(), g.user["id"], time.time()))
 
     if app.config["MULTIPLE_ACCOUNTS"]:
+        @app.get("/account/paused")
+        def paused_account():
+            # Paused buyers receive their notice from the access check above.
+            return redirect("/")
+
         @app.get("/setup")
         def setup_page():
             return render_template("dashboard.html", initial_view="setup", **state())
@@ -286,6 +311,8 @@ def create_app(config=None):
     def save_settings():
         conn, owner = get_db(), g.user["id"]
         with transaction(conn):
+            if not buyer_access.active(conn, owner):
+                return jsonify(code="buyer_paused", error=buyer_access.paused_message()), 403
             previous = settings_for(conn, owner)
             data = request.get_json(silent=True)
             saved = updated_settings(previous, data, size_limit=200 if app.config["MULTIPLE_ACCOUNTS"] else 80)
@@ -326,6 +353,8 @@ def create_app(config=None):
             raise InputError("Invalid picture selection.") from exc
         pictures = [reference_photo(u) for u in uploads]
         with transaction(conn):
+            if not buyer_access.active(conn, owner):
+                return jsonify(code="buyer_paused", error=buyer_access.paused_message()), 403
             previous = {}
             if search_id is not None:
                 previous = next((s for s in searches_for(conn, owner) if s["id"] == search_id), None)

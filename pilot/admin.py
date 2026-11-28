@@ -4,7 +4,7 @@ import re
 import secrets
 import sqlite3
 
-from flask import redirect, render_template, request, session
+from flask import abort, flash, redirect, render_template, request, session
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from .db import get_db, transaction
@@ -23,7 +23,7 @@ def signed_in():
 
 
 def register(app, csrf, login_limit):
-    from . import team
+    from . import buyer_access, team
 
     def form(mode, error="", status=200):
         registered = get_db().execute("SELECT 1 FROM finder_admin WHERE id=1").fetchone() is not None
@@ -80,6 +80,34 @@ def register(app, csrf, login_limit):
     @app.get("/admin")
     def admin_dashboard():
         return team.team_page()
+
+    @app.post("/admin/buyers/<int:uid>/<any(pause,resume):action>")
+    def admin_buyer_access(uid, action):
+        db = get_db()
+        with transaction(db):
+            buyer = db.execute("SELECT username FROM users WHERE id=?", (uid,)).fetchone()
+            if not buyer:
+                abort(404)
+            buyer_access.set_paused(db, uid, action == "pause")
+        state = "paused" if action == "pause" else "resumed"
+        flash(f"Access {state} for {buyer['username']}.", "team")
+        return redirect("/admin", code=303)
+
+    @app.route("/admin/buyers/<int:uid>/delete", methods=["GET", "POST"])
+    def admin_delete_buyer(uid):
+        db = get_db()
+        with transaction(db):
+            buyer = db.execute("SELECT id,username FROM users WHERE id=?", (uid,)).fetchone()
+            if not buyer:
+                abort(404)
+            if request.method == "GET":
+                return render_template("delete_buyer.html", buyer=buyer, csrf_token=csrf())
+            if request.form.get("confirm_name", "").strip() != buyer["username"]:
+                return render_template("delete_buyer.html", buyer=buyer, csrf_token=csrf(),
+                                       error="Enter the buyer’s exact Finder username to delete this account."), 400
+            buyer_access.delete(db, uid)
+        flash(f"Finder account {buyer['username']} deleted. One buyer place is available again.", "team")
+        return redirect("/admin", code=303)
 
     @app.post("/admin/logout")
     def admin_logout():

@@ -45,19 +45,19 @@ def progress(db, uid, available, settings=None):
 
 
 def buyers(db, available):
-    rows = db.execute("""SELECT u.id,u.username,
+    rows = db.execute("""SELECT u.id,u.username,m.paused,
         (SELECT count(*) FROM searches s WHERE s.user_id=u.id) AS searches,
         (SELECT count(*) FROM searches s WHERE s.user_id=u.id AND enabled=1) AS active_searches,
         (SELECT last_ok FROM pilot_sources ps WHERE ps.user_id=u.id AND source='home') AS last_home,
         (SELECT max(sent_at) FROM pilot_alerts a WHERE a.user_id=u.id AND delivery='sent'
             AND origin='connected' AND message_id IS NOT NULL) AS last_sent
-        FROM users u ORDER BY username COLLATE NOCASE""")
+        FROM users u JOIN hosted_members m ON m.user_id=u.id ORDER BY username COLLATE NOCASE""")
     def stamp(timestamp):
         return datetime.fromtimestamp(timestamp, ZoneInfo("Europe/London")).strftime("%d %b, %H:%M:%S") if timestamp else "None recorded"
     result = []
     for row in rows:
         setup = progress(db, row["id"], available)
-        result.append({"username":row["username"], "setup":setup, "searches":row["searches"],
+        result.append({"id":row["id"], "username":row["username"], "paused":bool(row["paused"]), "setup":setup, "searches":row["searches"],
                        "active_searches":row["active_searches"], "last_home":stamp(row["last_home"]),
                        "last_sent":stamp(row["last_sent"])})
     return result

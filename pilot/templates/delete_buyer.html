@@ -1,0 +1,16 @@
+{% extends 'base.html' %}
+{% block title %}Delete buyer · Finder{% endblock %}
+{% block scripts %}<link rel="stylesheet" href="{{ url_for('static', filename='member-setup.css') }}">{% endblock %}
+{% block body %}
+<main class="auth-wrap"><div class="auth-card">
+<a class="wordmark" href="/admin">Finder<span>.</span></a>
+<h1>Delete {{ buyer.username }}?</h1>
+<p class="lede">This permanently deletes their Finder login, alerts, saved searches and settings. Finder unlinks their Telegram and Vinted accounts and frees one buyer place.</p>
+<p>Purchases already placed stay on Vinted. Pausing keeps their settings if you plan to give them access again later.</p>
+{% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
+<form method="post" class="stack-form">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<label>Type <strong>{{ buyer.username }}</strong> to confirm<input name="confirm_name" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="50" required></label>
+<div class="actions"><button class="button danger" type="submit">Permanently delete Finder account</button><a href="/admin" class="button secondary">Cancel</a></div>
+</form></div></main>
+{% endblock %}

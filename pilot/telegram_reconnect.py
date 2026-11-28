@@ -8,7 +8,7 @@ from urllib.parse import parse_qsl
 
 from flask import jsonify, render_template, request
 
-from . import connection, flow
+from . import buyer_access, connection, flow
 from .db import get_db, transaction
 
 
@@ -79,6 +79,8 @@ def register(app):
         owner = get_db().execute("SELECT user_id FROM pilot_chats WHERE chat_id=?", (chat,)).fetchone()
         if not owner:
             return jsonify(error="Link your private Telegram chat in Finder first."), 403
+        if not buyer_access.active(get_db(), owner[0]):
+            return jsonify(error=buyer_access.paused_message()), 403
         return connection.start_authorization(owner[0], "", True, telegram_chat=chat, receipt=receipt)
 
 
@@ -87,15 +89,15 @@ def notify(conn, now):
         return False
     with transaction(conn):
         row = conn.execute("""SELECT h.user_id,h.revision,c.chat_id,b.username FROM account_health h
-            JOIN pilot_buyer_link b USING(user_id) JOIN pilot_chats c USING(user_id)
-            WHERE b.revoke_pending=0 AND h.expired=1 AND h.notice_after BETWEEN 0 AND ?
+            JOIN pilot_buyer_link b USING(user_id) JOIN pilot_chats c USING(user_id) JOIN hosted_members m USING(user_id)
+            WHERE m.paused=0 AND b.revoke_pending=0 AND h.expired=1 AND h.notice_after BETWEEN 0 AND ?
             ORDER BY h.notice_after,h.user_id LIMIT 1""", (now,)).fetchone()
         if not row:
             return False
         conn.execute("UPDATE account_health SET notice_after=? WHERE user_id=?", (now + 300, row["user_id"]))
     from .flow_worker import telegram
     reply = private_reply(conn, row["chat_id"])
-    if "reply_markup" not in reply:
+    if "reply_markup" not in reply or not buyer_access.active(conn, row["user_id"]):
         return True
     reply.pop("method")
     reply["text"] = f"Vinted needs you to sign in again to @{row['username']}. Your Home alerts and AutoBuy are paused."
