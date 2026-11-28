@@ -550,7 +550,7 @@ def markup(row, state=None, stop=None, *, progress=None):
     return InlineKeyboardMarkup(rows)
 
 
-async def send(bot, group, row):
+async def send(bot, group, row, *, reserve_slot=None):
     import vinted_alerts
     import vinted_buying
 
@@ -575,14 +575,22 @@ async def send(bot, group, row):
         from home_routing_delivery import native_transport
         bot = await native_transport(bot, group.chat, row["item_id"])
         response = None
-        if row["photo_id"] and eligible():
+        async def can_send():
+            if reserve_slot is not None:
+                await reserve_slot()
+            return eligible() and vinted_alerts.home_discovery_fresh(details)
+
+        if row["photo_id"]:
+            if not await can_send():
+                finish(row, failed=True)
+                return
             try:
                 response = await bot.send_photo(
                     **common, photo=row["photo_id"], caption=body, show_caption_above_media=True
                 )
             except BadRequest:
                 pass  # The cached file or caption was rejected; preserve the deal link.
-        if not response and eligible():
+        if not response and await can_send():
             response = await bot.send_message(**common, text=body, link_preview_options=LinkPreviewOptions(is_disabled=True))
         if response:
             finish(row, message_id=response.message_id)
@@ -606,6 +614,15 @@ async def run(bot):
     logger.info("Telegram shared alerts ready; can_join_groups=%s", getattr(bot.bot, "can_join_groups", None))
     verified, verify_at = None, 0
     menu_group, menus_ready = None, False
+    next_send = 0
+
+    async def reserve_slot():
+        nonlocal next_send
+        delay = next_send - time.monotonic()
+        if delay > 0:
+            await asyncio.sleep(delay)
+        next_send = time.monotonic() + 3.05
+
     while True:
         try:
             group = current()
@@ -626,15 +643,13 @@ async def run(bot):
                 if not menus_ready:
                     menus_ready = await update_group_menu(bot, group)
             from finder_group_notices import deliver as deliver_notice
-            if await deliver_notice(bot, group):
-                await asyncio.sleep(3)
+            if await deliver_notice(bot, group, reserve_slot=reserve_slot):
                 continue
             row = claim(group, now)
             if row:
-                await send(bot, group, row)
-                await asyncio.sleep(3)  # Telegram's per-group send allowance.
+                await send(bot, group, row, reserve_slot=reserve_slot)
             else:
-                await asyncio.sleep(0.25)
+                await asyncio.sleep(0.15)
         except (Forbidden, ChatMigrated):
             if group:
                 await suspend(bot, group)

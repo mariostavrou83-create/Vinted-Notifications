@@ -245,6 +245,9 @@ def _publish(item, search, match, age, role, *, now):
             "expires_at": observed + MAX_AGE - upper,
         },
     )
+    first_seen_at = age.get("first_seen_at")
+    if type(first_seen_at) in (int, float) and math.isfinite(first_seen_at) and 0 < first_seen_at <= now:
+        details["home_discovery"]["first_seen_at"] = first_seen_at
     # Discovery uses its own proven style evidence. Existing keyword searches
     # still require their exact words, unchanged in the normal alert pipeline.
     details.pop("keyword_evidence", None)
@@ -363,7 +366,15 @@ class Monitor:
     def read_page(self, role, url):
         return self.reader.fetch(role, url) if self.target else _page(role, url)
 
+    def can_share_home_slots(self, role):
+        return (
+            self.target and self.scheduled_seconds < DETAIL_SPACING_SECONDS
+            and not self.rate_limit_level[role] and self.empty_home_at[role] is None
+        )
+
     def detail_spacing(self, role):
+        if self.can_share_home_slots(role):
+            return self.scheduled_seconds
         return min(INTERVAL, DETAIL_SPACING_SECONDS * 2 ** self.rate_limit_level[role])
 
     def next_read_delay(self, role, stage):
@@ -604,8 +615,13 @@ class Monitor:
         while pending and pending[0]["_home_verify_until"] <= now:
             pending.popleft()
         home_due = now >= self.next_home[role]
+        # After the ordinary detail allowance, alternate between refreshing
+        # Home and spending a due refresh slot on its newest unverified card.
+        detail_slot = len(self.detail_reads[role]) < MAX_DETAILS or (
+            home_due and self.can_share_home_slots(role)
+        )
         listing_due = (
-            pending and len(self.detail_reads[role]) < MAX_DETAILS
+            pending and detail_slot
             and now >= max(self.next_detail_at[role], self.detail_retry_at[role])
         )
         if listing_due and (not home_due or self.last_stage[role] == "home"):
@@ -642,6 +658,7 @@ class Monitor:
         self.next_home[role] = now + (self.scheduled_seconds if self.target else INTERVAL)
         self.counts[role] = dict.fromkeys(COUNTERS, 0)
         html, observed = self.fetch(role, buyer.BASE + "/")
+        received_at = self.clock()
         result = parse_home(html)
         if result.get("reason") != "ok":
             self.reader.close()
@@ -676,7 +693,6 @@ class Monitor:
             return
         candidates = result["items"]
         self.counts[role]["candidates"] = len(candidates)
-        received_at = self.clock()
         try:
             first_seen = activity.save_feed(role, candidates, observed, seen_at=received_at)
         except sqlite3.Error as exc:
@@ -715,7 +731,10 @@ class Monitor:
                 stamp = None
             # Prior visibility proves a minimum age only. A first appearance
             # can never establish that a listing is recent enough to alert.
-            already_old = received_at - first_seen.get(identifier, received_at) >= MAX_AGE
+            first_observed = first_seen.get(identifier, received_at)
+            if previous:
+                first_observed = min(first_observed, previous.get("_home_first_seen_at", received_at))
+            already_old = received_at - first_observed >= MAX_AGE
             if already_old or (stamp is not None and self.clock() >= stamp + MAX_AGE):
                 self.recheck_until.pop(identifier, None)
                 self.counts[role]["rejected_age"] += 1
@@ -725,8 +744,9 @@ class Monitor:
                 continue
             if (stamp is None or item.get("home_available") is not True
                     or not womens_clothing(item) or not has_listing_title(item)):
+                item = dict(item, _home_first_seen_at=first_observed)
                 if self.target:
-                    deadline = first_seen.get(identifier, received_at) + MAX_AGE
+                    deadline = first_observed + MAX_AGE
                     if stamp is not None:
                         deadline = min(deadline, stamp + MAX_AGE)
                     if previous:
@@ -734,7 +754,10 @@ class Monitor:
                     item = dict(item, _home_verify_until=deadline)
                 candidates_for_detail.append(item)
                 continue
-            age = {"verified": True, "checked_at": observed, "max_age_seconds": math.ceil(observed - stamp)}
+            age = {
+                "verified": True, "checked_at": observed, "max_age_seconds": math.ceil(observed - stamp),
+                "first_seen_at": first_observed,
+            }
             self.counts[role]["fresh"] += 1
             self.counts[role]["feed_verified"] += 1
             self.notify_item(item, age, role, self.searches)
@@ -779,6 +802,8 @@ class Monitor:
             self.counts[role]["duplicates"] += 1
             return
         try:
+            if self.target and len(self.detail_reads[role]) >= MAX_DETAILS:
+                self.next_home[role] = now + self.scheduled_seconds
             self.page_reads[role].append(now)
             self.detail_reads[role].append(now)
             self.next_detail_at[role] = now + self.detail_spacing(role)
@@ -814,7 +839,7 @@ class Monitor:
         self.remember(candidate["id"], self.clock())
         self.counts[role]["checked"] += 1
         parsed = parse_listing(html, candidate["id"], observed, home_card=candidate)
-        age = parsed.get("age") or {}
+        age = dict(parsed.get("age") or {}, first_seen_at=candidate.get("_home_first_seen_at"))
         upper = age.get("max_age_seconds")
         unverified = (
             age.get("verified") is not True
@@ -905,6 +930,12 @@ class Monitor:
             self.counts[role]["matched"] += 1
         if enabled() and _publish(item, search, match, age, role, now=self.clock()):
             self.counts[role]["alerts"] += 1
+            first_seen = age.get("first_seen_at")
+            if first_seen is not None:
+                logger.info(
+                    "Home alert queued: role=%s item=%s first_seen_to_queue_seconds=%.3f",
+                    role, item["id"], max(0, self.clock() - first_seen),
+                )
             _record_decision(item, age["checked_at"], "qualified" if match else "recommendation", role,
                              search["id"] if search else None)
             if not match and eligible and self.clock() + 6 < age["checked_at"] + MAX_AGE - age["max_age_seconds"]:
@@ -927,36 +958,23 @@ class Monitor:
 
 
 
-def run():
+def run(source_role="seller"):
     # This entry point runs in its own process. The existing parent replaces
     # an exited child. A kernel timer also covers hangs inside native I/O.
     alarm = getattr(signal, "alarm", None)
     if alarm is not None:
         previous = signal.signal(signal.SIGALRM, signal.SIG_DFL)
         alarm(WORKER_STALL_SECONDS)
-    monitor = buying_monitor = None
-    next_source_check = 0
+    monitor = None
     try:
-        monitor = Monitor()
+        monitor = Monitor(source_role=source_role)
         logger.info(
-            "Vinted Home monitor ready: source=MSJ_Vinted role=seller category=womens_clothing maximum_age_seconds=180 enabled=%s stall_timeout_seconds=%s target_seconds=%s",
-            enabled(), WORKER_STALL_SECONDS if alarm is not None else 0, monitor.target,
+            "Vinted Home monitor ready: role=%s category=womens_clothing maximum_age_seconds=180 enabled=%s stall_timeout_seconds=%s target_seconds=%s",
+            source_role, enabled(), WORKER_STALL_SECONDS if alarm is not None else 0, monitor.target,
         )
         while True:
             try:
                 monitor.tick()
-                now = time.monotonic()
-                if now >= next_source_check:
-                    next_source_check = now + 5
-                    include_buyer = enabled() and controls.source_selected("buyer")
-                    if include_buyer and buying_monitor is None:
-                        buying_monitor = Monitor(source_role="buyer")
-                        logger.info("Buying account Home feed enabled")
-                    elif not include_buyer and buying_monitor is not None:
-                        buying_monitor.reader.close()
-                        buying_monitor = None
-                if buying_monitor is not None:
-                    buying_monitor.tick()
             except (KeyboardInterrupt, SystemExit):
                 return
             except Exception as exc:  # noqa: BLE001 -- isolated background worker
@@ -966,10 +984,8 @@ def run():
                 # as responsive ticks. Alert volume never controls the timer.
                 if alarm is not None:
                     alarm(WORKER_STALL_SECONDS)
-            time.sleep(min(monitor.wait_seconds(), buying_monitor.wait_seconds()) if buying_monitor else monitor.wait_seconds())
+            time.sleep(monitor.wait_seconds())
     finally:
-        if buying_monitor is not None:
-            buying_monitor.reader.close()
         if monitor is not None:
             monitor.reader.close()
         if alarm is not None:

@@ -20,11 +20,10 @@ from listing_text import clean_description
 from vinted_page_data import (
     MAX_DEPTH,
     MAX_HTML,
-    _records,
+    _page_records,
+    _parse_transaction_item,
     _resolve,
-    _Scripts,
     parse_page_data,
-    parse_purchase_item,
 )
 
 MAX_NODES = 20000
@@ -137,9 +136,7 @@ def age_bounds(value):
 
 def _home_uploads(body, cards):
     """Use only same-item listing creation fields already supplied with visible cards."""
-    scripts = _Scripts()
-    scripts.feed(body)
-    roots, refs = _records(scripts.scripts)
+    roots, refs, _ = _page_records(body)
     listed = {card["id"]: card for card in cards}
     stamps, category_ids, available, unavailable = {}, {}, set(), set()
     missing_titles = {}
@@ -662,11 +659,9 @@ def listing_age(body, item_id, now, *, side=None, attrs=None, home_card=None):
     return result
 
 
-def _native_attributes(body, identity):
+def _native_attributes(body, identity, page_records=None):
     """Optional exact attributes from complete same-item records, never neighbors."""
-    scripts = _Scripts()
-    scripts.feed(body)
-    roots, rows = _records(scripts.scripts)
+    roots, rows, _ = _page_records(body) if page_records is None else page_records
     pending = deque((root, 0) for root in roots)
     fields, conflicts, visited = {}, set(), 0
     creation_times = set()
@@ -785,13 +780,14 @@ def parse_listing(body, item_id, now, *, home_card=None):
     identity = str(item_id)
     tree = _tree(body)
     side = _sidebar(tree, identity) if tree is not None else None
-    attrs = _native_attributes(body, identity) if side is not None else {}
+    records = _page_records(body) if side is not None else None
+    attrs = _native_attributes(body, identity, records) if side is not None else {}
     age = listing_age(body, item_id, now, side=side, attrs=attrs, home_card=home_card)
     result = {"age": age, "item": None, "reason": "listing_unverified"}
     if not age["verified"]:
         return result
     diagnostic = {}
-    native = parse_purchase_item(body, identity, diagnostics=diagnostic)
+    native = _parse_transaction_item(body, identity, diagnostics=diagnostic, require_price=True, page_records=records)
     public_stock = _visible_stock(side)
     if attrs.get("unavailable") or public_stock is False:
         result["reason"] = "unavailable"
@@ -821,7 +817,7 @@ def parse_listing(body, item_id, now, *, home_card=None):
                 return result
         except InvalidOperation:
             return result
-    details = parse_page_data(body, identity, full_description=True)
+    details = parse_page_data(body, identity, full_description=True, page_records=records)
     descriptions = side.xpath('.//*[@itemprop="description"]')
     full_text = (
         _text(descriptions[0])

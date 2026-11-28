@@ -460,6 +460,8 @@ class WatchdogTests(unittest.TestCase):
             "offers_worker_process": Mock(),
             "order_messages_process": Mock(),
             "home_monitor_process": Mock(),
+            "buying_home_monitor_process": None,
+            "stop_process": Mock(return_value=True),
             "scrape_process": Mock(),
             "item_extractor_process": Mock(),
             "dispatcher_process": Mock(),
@@ -476,7 +478,9 @@ class WatchdogTests(unittest.TestCase):
             {"monitor_processes", "_monitor_processes"},
             namespace,
         )["monitor_processes"]
-        with patch("process_watchdog.ensure_running", return_value=Mock()) as ensure:
+        with patch("process_watchdog.ensure_running", return_value=Mock()) as ensure, patch(
+            "vinted_home_controls.source_selected", return_value=False
+        ):
             monitor("items", "telegram", "rss", "new")
         self.assertEqual(
             {c.kwargs["name"] for c in ensure.call_args_list},
@@ -490,6 +494,18 @@ class WatchdogTests(unittest.TestCase):
                 "vinted-home-monitor",
             },
         )
+        with patch("vinted_home_controls.source_selected", return_value=True), patch(
+            "process_watchdog.ensure_running", side_effect=lambda process, *args, **kwargs: process or Mock()
+        ) as ensure:
+            monitor("items", "telegram", "rss", "new")
+            worker = namespace["buying_home_monitor_process"]
+            self.assertIsNot(worker, namespace["home_monitor_process"])
+            buyer_call = next(c for c in ensure.call_args_list if c.kwargs["name"] == "vinted-buying-home-monitor")
+            self.assertEqual(buyer_call.args[2], ("buyer",))
+        with patch("vinted_home_controls.source_selected", return_value=False), patch("process_watchdog.ensure_running"):
+            monitor("items", "telegram", "rss", "new")
+            namespace["stop_process"].assert_called_once_with(worker, name="vinted-buying-home-monitor")
+            self.assertIsNone(namespace["buying_home_monitor_process"])
         namespace["shutdown_requested"].set()
         with patch("process_watchdog.ensure_running") as ensure:
             monitor("items", "telegram", "rss", "new")
@@ -498,8 +514,9 @@ class WatchdogTests(unittest.TestCase):
         cleanup_loops = [n for n in ast.walk(tree) if isinstance(n, ast.For)
                          and isinstance(n.target, ast.Name) and n.target.id == "process"
                          and isinstance(n.iter, ast.Tuple)]
-        self.assertTrue(any(any(isinstance(value, ast.Name) and value.id == "home_monitor_process"
-                                for value in loop.iter.elts) for loop in cleanup_loops))
+        self.assertTrue(any({"home_monitor_process", "buying_home_monitor_process"} <=
+                            {v.id for v in loop.iter.elts if isinstance(v, ast.Name)}
+                            for loop in cleanup_loops))
         queues = [
             n
             for n in ast.walk(tree)

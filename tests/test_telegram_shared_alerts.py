@@ -162,6 +162,16 @@ class SharedAlertTests(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.bot.send_photo.assert_not_awaited()
         self.bot.send_message.assert_not_awaited()
 
+    async def test_group_rechecks_pause_after_waiting_for_a_send_slot(self):
+        group = await self.activate()
+        self.accepted()
+        job = shared.claim(group, time.time())
+        slot = AsyncMock(side_effect=lambda: alert_controls.set_paused("search", True))
+        await shared.send(self.bot, group, job, reserve_slot=slot)
+        slot.assert_awaited_once()
+        self.bot.send_photo.assert_not_awaited()
+        self.bot.send_message.assert_not_awaited()
+
     async def test_stranger_stale_message_and_unlinked_group_cannot_invoke_autobuy(self):
         group = await self.ready()
         with patch.object(vinted_buying, "buy", side_effect=AssertionError("No purchase")) as buy:

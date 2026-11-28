@@ -34,6 +34,7 @@ ebay_worker_process = None
 offers_worker_process = None
 order_messages_process = None
 home_monitor_process = None
+buying_home_monitor_process = None
 scrape_process = None
 item_extractor_process = None
 dispatcher_process = None
@@ -159,7 +160,7 @@ def monitor_processes(items_queue, telegram_queue, rss_queue, new_items_queue=No
 
 def _monitor_processes(items_queue, telegram_queue, rss_queue, new_items_queue=None):
     global telegram_process, rss_process, ebay_worker_process, offers_worker_process
-    global order_messages_process, home_monitor_process
+    global order_messages_process, home_monitor_process, buying_home_monitor_process
     global scrape_process, item_extractor_process, dispatcher_process, web_ui_process_instance
 
     if new_items_queue is not None:
@@ -194,11 +195,20 @@ def _monitor_processes(items_queue, telegram_queue, rss_queue, new_items_queue=N
         order_messages_process = ensure_running(
             order_messages_process, order_messages_run, name="vinted-order-messages"
         )
+        from vinted_home_controls import source_selected
         from vinted_home_monitor import run as home_monitor_run
 
         home_monitor_process = ensure_running(
             home_monitor_process, home_monitor_run, name="vinted-home-monitor"
         )
+        if source_selected("buyer"):
+            buying_home_monitor_process = ensure_running(
+                buying_home_monitor_process, home_monitor_run, ("buyer",), name="vinted-buying-home-monitor"
+            )
+        elif buying_home_monitor_process is not None and stop_process(
+            buying_home_monitor_process, name="vinted-buying-home-monitor"
+        ):
+            buying_home_monitor_process = None
 
     from ebay_store import listing_alerts_enabled
 
@@ -519,6 +529,7 @@ if __name__ == "__main__":
                 offers_worker_process,
                 order_messages_process,
                 home_monitor_process,
+                buying_home_monitor_process,
                 telegram_process,
                 rss_process,
                 buyer_check_process,

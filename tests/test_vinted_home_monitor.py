@@ -7,6 +7,7 @@ import sqlite3
 import time
 import unittest
 from contextlib import closing, nullcontext
+from itertools import pairwise
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -177,7 +178,9 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
             ]
             self.worker.tick()
         listings = [at for _, url, at in calls if "/items/" in url]
-        self.assertEqual(len(listings), home.MAX_DETAILS)
+        self.assertEqual(len(listings), 12)
+        self.assertLessEqual(max(b - a for a, b in pairwise(listings)), 6)
+        self.assertLessEqual(len(calls), 60 + home.MAX_DETAILS)
         self.assertLess(listings[0] - 1000, 1)
         self.assertGreater(sum(url == home.buyer.BASE + "/" for _, url, _ in calls), 50)
 
@@ -191,6 +194,46 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         self.worker.tick()
         self.fetch.assert_not_called()
         self.assertEqual(self.worker.speedup_at, 2611)
+
+    def test_fast_detail_backlog_trades_only_due_home_slots_and_respects_backoff(self):
+        home.controls.save_target("1")
+        self.worker = home.Monitor(clock=lambda: self.now, fetch=self.fetch)
+        self.worker.scheduled_seconds = 1
+        self.worker.speedup_at = 2000
+        calls = []
+
+        def fetch(role, url):
+            calls.append((self.now, url == home.buyer.BASE + "/"))
+            return "page", self.now
+
+        self.fetch.side_effect = fetch
+        with patch.object(home.activity, "save_feed", return_value={}), patch.object(
+            home.activity, "alerted_ids", return_value=set()
+        ), patch.object(home, "parse_listing", return_value={"reason": "unavailable"}):
+            for index in range(480):
+                self.now = 1000 + index / 4
+                home.parse_home.return_value["items"] = [
+                    dict(self.item, id=str(index * 10 + i), url=f"{home.buyer.BASE}/items/{index * 10 + i}-top")
+                    for i in range(6)
+                ]
+                self.worker.tick()
+
+        for is_home in (True, False):
+            starts = [at for at, home_read in calls if home_read == is_home]
+            self.assertGreater(len(starts), 50)
+            self.assertLessEqual(max(b - a for a, b in pairwise(starts)), 2)
+        for at, _ in calls:
+            self.assertLessEqual(sum(at - 60 < t <= at for t, _ in calls), 60 + home.MAX_DETAILS)
+        self.worker.next_home["seller"] = self.now
+        self.worker.last_stage["seller"] = "home"
+        self.worker.rate_limit_level["seller"] = 1
+        self.assertEqual(self.worker.fast_stage("seller", self.now), "home")
+        self.worker.rate_limit_level["seller"] = 0
+        self.worker.empty_home_at["seller"] = self.now
+        self.assertEqual(self.worker.fast_stage("seller", self.now), "home")
+        self.worker.empty_home_at["seller"] = None
+        self.worker.detail_retry_at["seller"] = self.now + 60
+        self.assertEqual(self.worker.fast_stage("seller", self.now), "home")
 
     def test_fresh_alert_preserves_watermark_search_and_description(self):
         self.discover()
@@ -214,6 +257,7 @@ class HomeMonitorTests(DatabaseFixture, unittest.TestCase):
         self.assertFalse(details["description_pending"])
         self.assertEqual(details["home_discovery"]["expires_at"], 1120)
         self.assertEqual(details["home_discovery"]["source_role"], "seller")
+        self.assertEqual(details["home_discovery"]["first_seen_at"], 1000)
         self.assertEqual(details["photos"], self.item["photos"])
         self.assertEqual(self.status()["alerts"], 1)
 
