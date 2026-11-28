@@ -49,7 +49,7 @@ def create_app(config=None):
     fd = os.open(database_path, os.O_CREAT | os.O_RDWR, 0o600)
     os.close(fd)
     from . import connection, destinations, flow, manual_import, market, public_feed
-    from . import board_changes, native_order, team
+    from . import admin, board_changes, home_filters, member_setup, native_order, team
     from .report import command as report_command
     app.cli.add_command(report_command)
     with app.app_context():
@@ -74,6 +74,7 @@ def create_app(config=None):
         board_changes.init_board_changes(app)
         if app.config["MULTIPLE_ACCOUNTS"]:
             from . import hosted_feeds, telegram_reconnect
+            conn.execute(admin.SCHEMA)
             hosted_feeds.init(conn)
             telegram_reconnect.register(app)
 
@@ -93,7 +94,7 @@ def create_app(config=None):
     device_endpoints = native_order.DEVICE_ENDPOINTS | companion_endpoints
     public = {"static", "login", "signup", "health", "buyer_extension_install", "download_buyer_extension", "pilot_telegram_webhook"} | device_endpoints
     if app.config["MULTIPLE_ACCOUNTS"]:
-        public |= {"telegram_reconnect_page", "telegram_reconnect_start", "connection_callback"}
+        public |= {"telegram_reconnect_page", "telegram_reconnect_start", "connection_callback","admin_login","admin_activate"}
 
     @app.before_request
     def authenticate():
@@ -107,7 +108,15 @@ def create_app(config=None):
             row = get_db().execute("SELECT id,username FROM users WHERE id=?", (session["user_id"],)).fetchone()
             if row:
                 g.user = dict(row)
-        if request.endpoint and request.endpoint not in public and not g.user:
+        is_admin_route = app.config["MULTIPLE_ACCOUNTS"] and (request.path == "/admin" or request.path.startswith(("/admin/", "/team/")) or request.path == "/team")
+        if is_admin_route and request.endpoint not in {"admin_login","admin_activate"}:
+            if not admin.signed_in():
+                if request.method == "GET":
+                    return redirect("/admin/login")
+                return jsonify(error="Sign in as the Finder administrator."), 403
+        elif request.endpoint and request.endpoint not in public and not g.user:
+            if request.endpoint == "dashboard" and app.config["MULTIPLE_ACCOUNTS"] and admin.signed_in():
+                return redirect("/admin")
             if request.path.startswith("/api/") or request.method != "GET":
                 return jsonify(error="Sign in to Finder."), 401
             return redirect(url_for("login"))
@@ -147,6 +156,8 @@ def create_app(config=None):
         session.permanent = True
         session["user_id"] = user_id
         csrf_token()
+        if app.config["MULTIPLE_ACCOUNTS"] and not member_setup.progress(get_db(), user_id, member_setup.services(get_db()))["complete"]:
+            return redirect("/setup")
         return redirect(url_for("dashboard"))
 
     def auth_form(mode, error=None, status=200):
@@ -163,6 +174,9 @@ def create_app(config=None):
             conn.execute("""INSERT INTO login_attempts VALUES(?,?,1)
                             ON CONFLICT(bucket) DO UPDATE SET attempts=attempts+1""", (key, now))
             return conn.execute("SELECT attempts FROM login_attempts WHERE bucket=?", (key,)).fetchone()[0] > 40
+
+    if app.config["MULTIPLE_ACCOUNTS"]:
+        admin.register(app, csrf_token, login_limit)
 
     @app.route("/login", methods=["GET", "POST"])
     def login():
@@ -205,6 +219,8 @@ def create_app(config=None):
                                           AND used_at IS NULL""", (now, invitation, now))
                 if unused.rowcount != 1:
                     return auth_form("signup", "This invitation is invalid or expired.", 400)
+                if app.config["MULTIPLE_ACCOUNTS"] and conn.execute("SELECT 1 FROM finder_admin WHERE username=?", (name,)).fetchone():
+                    raise sqlite3.IntegrityError("Username in use")
                 new_id = conn.execute("INSERT INTO users(username,password_hash) VALUES(?,?)",
                                       (name, password_hash)).lastrowid
                 team.consume_invite(conn, invitation, new_id)
@@ -225,8 +241,12 @@ def create_app(config=None):
     def state():
         conn = get_db()
         owner = g.user["id"]
+        prefs = settings_for(conn, owner)
+        available = member_setup.services(conn) if app.config["MULTIPLE_ACCOUNTS"] else {}
         return {
-            "user": g.user, "settings": settings_for(conn, owner), "searches": searches_for(conn, owner),
+            "user": g.user, "settings": member_setup.public_settings(prefs, connection.linked_account(conn, owner)) if available else prefs,
+            "services":available, "setup":member_setup.progress(conn, owner, available, prefs) if available else {},
+            "filter_options":home_filters.options(prefs) if available else {}, "searches": searches_for(conn, owner),
             "alerts": flow.alerts_for_user(conn, owner), "telegram_linked": flow.telegram_linked(conn, owner),
             "csrf_token": csrf_token(), "public_feed": {} if app.config["MULTIPLE_ACCOUNTS"] else public_feed.status(conn, owner),
             "monitoring": hosted_feeds.status(conn, owner, time.time()) if app.config["MULTIPLE_ACCOUNTS"] else {},
@@ -238,6 +258,17 @@ def create_app(config=None):
         @app.get("/api/monitoring")
         def monitoring():
             return jsonify(hosted_feeds.status(get_db(), g.user["id"], time.time()))
+
+    if app.config["MULTIPLE_ACCOUNTS"]:
+        @app.get("/setup")
+        def setup_page():
+            return render_template("dashboard.html", initial_view="setup", **state())
+
+        @app.get("/setup/steps")
+        def setup_steps():
+            db, uid = get_db(), g.user["id"]
+            available = member_setup.services(db)
+            return render_template("setup_steps.html", setup=member_setup.progress(db, uid, available), services=available)
 
     @app.get("/")
     def dashboard():
@@ -256,11 +287,17 @@ def create_app(config=None):
         conn, owner = get_db(), g.user["id"]
         with transaction(conn):
             previous = settings_for(conn, owner)
-            saved = updated_settings(previous, request.get_json(silent=True))
-            destinations.apply_selection(conn, owner, previous, saved)
+            data = request.get_json(silent=True)
+            saved = updated_settings(previous, data, size_limit=200 if app.config["MULTIPLE_ACCOUNTS"] else 80)
+            if app.config["MULTIPLE_ACCOUNTS"]:
+                home_filters.validate(previous, saved, data)
+                if {"categories","sizes","quiet_start","quiet_end"} <= data.keys():
+                    saved["filters_reviewed"] = True
+            if not app.config["MULTIPLE_ACCOUNTS"] or data.keys() & destinations.DELIVERY_FIELDS:
+                destinations.apply_selection(conn, owner, previous, saved)
             conn.execute("""INSERT INTO settings VALUES(?,?) ON CONFLICT(user_id)
                             DO UPDATE SET data=excluded.data""", (owner, json.dumps(saved)))
-        return jsonify(ok=True, settings=saved)
+        return jsonify(ok=True, settings=member_setup.public_settings(saved, connection.linked_account(conn, owner)) if app.config["MULTIPLE_ACCOUNTS"] else saved)
 
     @app.route("/api/searches", methods=["POST"], defaults={"search_id": None})
     @app.route("/api/searches/<int:search_id>", methods=["POST", "PUT", "DELETE"])

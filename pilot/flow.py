@@ -14,7 +14,8 @@ from zoneinfo import ZoneInfo
 
 from flask import current_app, g, jsonify, request
 
-from . import checkout_profit
+from . import checkout_profit, home_filters, pickup
+from .inputs import InputError
 from .db import get_db, settings_for, transaction
 from .partner import PartnerError, partner_request
 from .listing_metadata import display_fields, vinted_photo_url
@@ -120,6 +121,13 @@ def quiet(settings, now):
 
 def _matches_choice(values, actual):
     return not values or str(actual or "").casefold() in {str(v).casefold() for v in values}
+
+
+def home_matches(settings, item):
+    if current_app.config.get("MULTIPLE_ACCOUNTS"):
+        return home_filters.matches(settings, item)
+    return (_matches_choice(settings.get("categories"), item.get("category"))
+            and _matches_choice(settings.get("sizes"), item.get("size")))
 
 
 def valid_listing(item, *, allow_missing_total=False):
@@ -243,10 +251,7 @@ def _record(conn, uid, account, item, source, settings, now, origin, *, allow_mi
         posted = listing_time(item.get("listed_at"))
         if posted is None or not 0 <= now - posted < 180:
             return
-        if not (
-            _matches_choice(settings.get("categories", []), item.get("category"))
-            and _matches_choice(settings.get("sizes", []), item.get("size"))
-        ):
+        if not home_matches(settings, item):
             return
     item = dict(item)
     item["photo_url"] = vinted_photo_url(item.get("photo_url"))
@@ -293,20 +298,28 @@ def _record(conn, uid, account, item, source, settings, now, origin, *, allow_mi
     return row["id"] if row else None
 
 
-def new_link(conn, uid):
+def telegram_unavailable_reason(conn):
     name = tg_config("TELEGRAM_BOT_USERNAME").lstrip("@")
-    if (
-        not re.fullmatch(r"[A-Za-z0-9_]+", name)
-        or not tg_config("TELEGRAM_BOT_TOKEN")
-        or (tg_config("TELEGRAM_MODE") != "polling" and not tg_config("TELEGRAM_WEBHOOK_SECRET"))
-    ):
-        return jsonify(error="Private Telegram delivery has not been configured."), 503
+    if (not re.fullmatch(r"[A-Za-z0-9_]+", name) or not tg_config("TELEGRAM_BOT_TOKEN")
+            or (tg_config("TELEGRAM_MODE") != "polling" and not tg_config("TELEGRAM_WEBHOOK_SECRET"))):
+        return "Private Telegram delivery has not been configured."
     if tg_config("TELEGRAM_MODE") == "polling":
         from .telegram_poll import polling_status
-
         status = polling_status(conn)
         if status.startswith(("Polling paused", "The configured pilot bot")):
-            return jsonify(error=status), 503
+            return status
+    return ""
+
+
+def telegram_available(conn):
+    return not telegram_unavailable_reason(conn)
+
+
+def new_link(conn, uid):
+    reason = telegram_unavailable_reason(conn)
+    if reason:
+        return jsonify(error=reason), 503
+    name = tg_config("TELEGRAM_BOT_USERNAME").lstrip("@")
     code = secrets.token_urlsafe(24)
     conn.execute(
         "INSERT OR REPLACE INTO pilot_link_codes VALUES (?,?,?)",
@@ -394,6 +407,14 @@ def check_quote(quote, alert, prefs, now):
         return "blocked", "The item, shipping or total exceeds your limit."
     preferred = str(prefs.get("preferred_courier") or "").strip().casefold()
     courier = str(quote.get("courier") or "").strip().casefold()
+    if current_app.config.get("MULTIPLE_ACCOUNTS") and prefs.get("delivery_mode") == "pickup":
+        canonical = pickup.carrier(quote.get("courier"))
+        if (not pickup.verified(prefs, alert["account_ref"]) or canonical not in pickup.CARRIERS
+                or quote.get("physical_point_id", quote.get("pickup_id")) != prefs["pickup_id"]
+                or quote.get("pickup_id") != prefs["pickup_routes"].get(canonical)
+                or not quote.get("pickup_label") or quote.get("delivery_mode") != "pickup"):
+            return "blocked", "The courier or exact pickup point could not be verified."
+        return "ok", ""
     approved = {str(x).strip().casefold() for x in prefs.get("allowed_couriers", [])}
     if (
         not preferred
@@ -494,10 +515,19 @@ def request_buy(conn, uid, aid, confirmation=None):
     conn.commit()
     try:
         prefs = settings_for(conn, uid)
+        if (current_app.config.get("MULTIPLE_ACCOUNTS") and prefs.get("delivery_mode") == "home"
+                and (prefs.get("delivery_account_ref") != account or not prefs.get("home_address_ref"))):
+            raise InputError("Choose a saved home address for this buying account in Preferences.")
         payload = {"account_ref": account, "listing_id": row["listing_id"], "preferences": prefs}
         if confirmation:
             payload["quote_id"] = json.loads(row["offer"])["quote_id"]
-        q = partner_request("POST", "/v1/checkout/quote", payload)
+        if current_app.config.get("MULTIPLE_ACCOUNTS") and prefs.get("delivery_mode") == "pickup":
+            if confirmation:
+                _status(conn, aid, "blocked", check_token)
+                return "Review this item again at your verified pickup point.", None
+            q = pickup.get_quote(partner_request, account, row["listing_id"], prefs)
+        else:
+            q = partner_request("POST", "/v1/checkout/quote", payload)
         decision, reason = check_quote(q, row, prefs, time.time())
         if confirmation and decision in ("ok", "confirm"):
             if _quote_terms(q) == _quote_terms(json.loads(row["offer"])):
@@ -565,6 +595,9 @@ def request_buy(conn, uid, aid, confirmation=None):
                 None,
             )
         return "The purchase result is pending. Finder will check the result without resubmitting.", None
+    except InputError as error:
+        _status(conn, aid, "blocked", check_token)
+        return str(error), None
     except (PartnerError, ValueError, TypeError, KeyError):
         _status(conn, aid, "blocked", check_token)
         return "A verified checkout quote is unavailable.", None

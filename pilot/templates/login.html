@@ -19,7 +19,7 @@
       <button class="button primary" type="submit">{{ 'Create account' if mode == 'signup' else 'Sign in' }}</button>
     </form>
     <p class="auth-switch">{% if mode == 'signup' %}Already have an account? <a href="/login">Sign in</a>{% else %}Have an invite code? <a href="/signup">Create an account</a>{% endif %}</p>
-    {% if not multiple_accounts %}<p class="auth-switch"><a href="/extension/install">Set up the Chrome extension</a></p>{% endif %}
+    {% if multiple_accounts %}<p class="auth-switch"><a href="/admin/login">Admin sign-in</a></p>{% else %}<p class="auth-switch"><a href="/extension/install">Set up the Chrome extension</a></p>{% endif %}
   </div>
 </main>
 {% endblock %}

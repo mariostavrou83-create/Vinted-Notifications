@@ -13,7 +13,9 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 from unittest.mock import patch
 
-from pilot import connection, flow, flow_worker, hosted_feeds, partner, team, telegram_reconnect
+from werkzeug.security import generate_password_hash
+
+from pilot import connection, flow, flow_worker, hosted_feeds, partner, pickup, team, telegram_reconnect
 from pilot.app import create_app, digest
 from pilot.db import get_db, settings_for, transaction
 
@@ -61,9 +63,17 @@ class HostedAccountsTest(unittest.TestCase):
     def test_seats_persist_reserve_open_invites_and_prevent_concurrent_last_signup(self):
         self.members(9)
         self.db.execute("INSERT INTO team_owner VALUES(1,'fixture',1)")
+        self.db.execute("UPDATE users SET password_hash=? WHERE id=1", (generate_password_hash("owner-fixture-old"),))
         owner, member = self.client(1), self.client(2)
+        self.assertEqual(owner.post("/team/invites", data={"csrf_token":"proof","label":"unavailable"}).status_code, 403)
+        enrolled = owner.post("/admin/activate", data={"csrf_token":"proof", "owner":"user1",
+            "owner_password":"owner-fixture-old", "username":"ops-admin", "password":"admin-fixture-new"})
+        self.assertEqual(enrolled.location, "/admin")
+        with owner.session_transaction() as session:
+            admin_csrf = session["csrf_token"]
+            self.assertNotIn("user_id", session)
         self.assertEqual(team.capacity(self.db), {"joined": 9, "reserved": 0, "limit": 10})
-        form = {"csrf_token": "proof", "label": "member"}
+        form = {"csrf_token": admin_csrf, "label": "member"}
         self.assertEqual(owner.post("/team/invites", data=form).status_code, 200)
         self.assertEqual(owner.post("/team/invites", data=form).status_code, 409)
         self.assertEqual(member.post("/team/capacity", data={**form, "limit": "50"}).status_code, 403)
@@ -217,7 +227,9 @@ class HostedAccountsTest(unittest.TestCase):
             self.assertEqual(flow.telegram_update(self.db,update),{"ok":True})
         self.assertIn("web_app",flow.telegram_update(self.db,message(1001,1001))["reply_markup"]["inline_keyboard"][0][0])
         for uid in (1,2):
-            self.db.execute("INSERT INTO settings VALUES(?,?)",(uid,json.dumps({"preferred_courier":f"courier{uid}","pickup_id":f"shop{uid}","max_total":"20"})))
+            prefs = {"preferred_courier":"InPost" if uid == 1 else "Evri", "pickup_id":f"shop{uid}", "max_total":"20",
+                     "pickup_routes":{name:f"shop{uid}" for name in pickup.CARRIERS}, "delivery_account_ref":f"ref{uid}"}
+            self.db.execute("INSERT INTO settings VALUES(?,?)", (uid,json.dumps(prefs)))
         aid = flow.record_catalogue_listing(self.db,1,"ref1",item(75),settings_for(self.db,1),time.time())
         self.db.execute("UPDATE pilot_alerts SET sent_chat=1001,message_id=23,delivery='sent' WHERE id=?",(aid,))
         def tap(chat, update_id):
@@ -233,7 +245,7 @@ class HostedAccountsTest(unittest.TestCase):
                 self.assertEqual(data["preferences"]["pickup_id"],"shop1")
                 return {"account_ref":"ref1","listing_id":"75","quote_id":"q","currency":"GBP","item_pence":500,
                         "shipping_pence":250,"total_pence":900,"delivery_mode":"pickup","pickup_id":"shop1",
-                        "courier":"courier1","pickup_label":"Private shop","payment_label":"Saved card","expires_at":time.time()+60}
+                        "courier":"InPost","pickup_label":"Private shop","payment_label":"Saved card","expires_at":time.time()+60}
             self.assertEqual(path,"/v1/checkout/submit")
             submissions.append(data["idempotency_key"])
             return {**data,"status":"purchased"}

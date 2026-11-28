@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 
 from flask import current_app, g, jsonify, redirect, render_template, request, send_file
 
-from .db import get_db
+from .db import get_db, transaction
 from .partner import PartnerError, partner_configured, partner_request
 
 USERNAME = re.compile(r"[a-zA-Z0-9_.-]{1,80}\Z")
@@ -112,7 +112,8 @@ def connection_available():
 def _callback_result(status):
     if getattr(g, "reconnect_from_telegram", False):
         return render_template("telegram_reconnect.html", outcome=status)
-    response = redirect("/?connection=" + status + "#preferences", code=303)
+    target = "/setup?connection=" + status if current_app.config.get("MULTIPLE_ACCOUNTS") else "/?connection=" + status + "#preferences"
+    response = redirect(target, code=303)
     response.headers["Cache-Control"] = "no-store"
     response.headers["Referrer-Policy"] = "no-referrer"
     return response
@@ -308,7 +309,18 @@ def register_connection(app):
                 partner_request("POST", "/v1/connections/revoke", {"account_ref": row["account_ref"]})
             except PartnerError:
                 return jsonify(error="Disconnected in Finder. Retry to finish disconnecting at the provider."), 502
-            conn.execute("DELETE FROM pilot_buyer_link WHERE user_id=? AND account_ref=? AND revoke_pending=1",
-                         (user_id, row["account_ref"]))
-            conn.commit()
+            with transaction(conn):
+                removed = conn.execute("DELETE FROM pilot_buyer_link WHERE user_id=? AND account_ref=? AND revoke_pending=1",
+                                       (user_id, row["account_ref"]))
+                if removed.rowcount and current_app.config.get("MULTIPLE_ACCOUNTS"):
+                    conn.execute("DELETE FROM pilot_destination_choices WHERE user_id=? AND account_ref=?",
+                                 (user_id, row["account_ref"]))
+                    stored = conn.execute("SELECT data FROM settings WHERE user_id=?", (user_id,)).fetchone()
+                    if stored:
+                        prefs = json.loads(stored[0])
+                        for field in ("pickup_id", "pickup_label", "pickup_summary", "pickup_routes", "preferred_courier",
+                                      "delivery_account_ref", "home_address_ref", "home_address_label",
+                                      "delivery_couriers", "allowed_couriers", "allow_same_shop_fallback"):
+                            prefs.pop(field, None)
+                        conn.execute("UPDATE settings SET data=? WHERE user_id=?", (json.dumps(prefs), user_id))
         return jsonify(linked=False)

@@ -220,9 +220,7 @@ def deliver(conn, now):
         if (
             flow.quiet(prefs, now)
             or (managed and not flow.current_hosted_search(conn, uid, l))
-            or (managed and row["source"] == "home" and (
-                not flow._matches_choice(prefs.get("categories"), l.get("category"))
-                or not flow._matches_choice(prefs.get("sizes"), l.get("size"))))
+            or (managed and row["source"] == "home" and not flow.home_matches(prefs, l))
             or (
                 row["origin"] == "browser_search"
                 and (

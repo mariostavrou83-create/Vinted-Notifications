@@ -78,13 +78,13 @@ def search_fields(data, previous):
     }
 
 
-def updated_settings(current, data):
+def updated_settings(current, data, *, size_limit=80):
     if not isinstance(data, dict) or set(data) - DEFAULT_SETTINGS.keys():
         raise InputError("One or more preference fields are invalid.")
     result = current.copy()
     for key, value in data.items():
         if key in ("categories", "sizes", "allowed_couriers"):
-            result[key] = text_list(value, key)
+            result[key] = text_list(value, key, max_items=size_limit if key == "sizes" else 80)
         elif key in ("max_total", "max_shipping", "max_item_price"):
             amount = money(value)
             result[key] = "" if amount is None else f"{amount // 100}.{amount % 100:02d}"

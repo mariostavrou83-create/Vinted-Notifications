@@ -1,0 +1,26 @@
+{% extends 'base.html' %}
+{% block title %}Admin sign-in · Finder{% endblock %}
+{% block body %}
+<main class="auth-wrap"><div class="auth-card">
+  <div class="wordmark">Finder<span>.</span></div>
+  {% if mode == 'activate' %}
+  <h1>Create your admin login</h1>
+  <p class="lede">Verify your existing Finder owner account once. Then choose a different username and password for the admin dashboard.</p>
+  {% else %}
+  <h1>Admin sign-in</h1><p class="lede">Manage buyer setup, invitations and service connections.</p>
+  {% endif %}
+  {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
+  {% if mode == 'activate' or registered %}
+  <form class="stack-form" method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {% if mode == 'activate' %}
+    <label>Existing Finder owner username<input name="owner" required autocomplete="section-owner username" autocapitalize="none" spellcheck="false" maxlength="50"></label>
+    <label>Existing owner password<input type="password" name="owner_password" required autocomplete="section-owner current-password" maxlength="256"></label>
+    {% endif %}
+    <label>Admin username<input name="username" required autocomplete="section-admin username" autocapitalize="none" spellcheck="false" minlength="3" maxlength="50" {% if mode == 'activate' %}placeholder="e.g. finder-admin"{% endif %}></label>
+    <label>{{ 'New admin password' if mode == 'activate' else 'Admin password' }}{% if mode == 'activate' %}<small>At least 12 characters.</small>{% endif %}<input type="password" name="password" required {% if mode == 'activate' %}minlength="12" autocomplete="section-admin new-password"{% else %}autocomplete="section-admin current-password"{% endif %} maxlength="256"></label>
+    <button type="submit" class="button primary">{{ 'Create admin login' if mode == 'activate' else 'Sign in as admin' }}</button>
+  </form>
+  {% else %}<p class="auth-switch">The Finder owner sets up the admin login once. It uses a separate account outside the buyer limit.</p><a href="/admin/activate" class="button primary">Create admin login</a>{% endif %}
+  <p class="auth-switch"><a href="/login">Buyer sign-in</a></p>
+</div></main>{% endblock %}
