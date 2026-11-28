@@ -7,9 +7,11 @@ import re
 import secrets
 import time
 from concurrent.futures import ThreadPoolExecutor
+from urllib.error import HTTPError
 from urllib.request import Request, build_opener
 
 import requests
+from flask import current_app
 
 from . import flow
 from .connection import linked_account
@@ -17,6 +19,12 @@ from .db import get_db, searches_for, settings_for, transaction
 from .partner import PartnerError, _NoRedirect, partner_configured, partner_request
 
 log = logging.getLogger(__name__)
+
+
+class TelegramRetry(ValueError):
+    def __init__(self, seconds):
+        super().__init__("Telegram requested a delivery pause.")
+        self.seconds = seconds
 
 
 def telegram(method, payload, *, token=None):
@@ -36,6 +44,15 @@ def telegram(method, payload, *, token=None):
             obj = json.load(response)
         if obj.get("ok"):
             return obj["result"]
+    except HTTPError as exc:
+        if exc.code == 429:
+            try:
+                parameters = json.loads(exc.read(4096)).get("parameters", {})
+                delay = parameters.get("retry_after")
+            except (ValueError, OSError, AttributeError, TypeError):
+                delay = None
+            raise TelegramRetry(delay if type(delay) is int and delay > 0 else 30) from None
+        raise ValueError("Telegram delivery could not be confirmed.") from None
     except (ValueError, OSError):
         raise ValueError("Telegram delivery could not be confirmed.") from None
     raise ValueError("Telegram declined the operation.")
@@ -150,7 +167,7 @@ def discover(conn, now):
 def render_alert(row):
     item = json.loads(row["listing"])
     price = flow.money(item["price_pence"])
-    if row["origin"] == "connected":
+    if row["origin"] == "connected" and type(item.get("total_pence")) is int and not item.get("total_excludes_shipping"):
         price += f" · Estimated total {flow.money(item['total_pence'])}"
     elif type(item.get("subtotal_pence")) is int:
         price += f" · {flow.money(item['subtotal_pence'])} including buyer fee · shipping extra"
@@ -173,13 +190,23 @@ def listing_keyboard(row):
 def deliver(conn, now):
     if not flow.tg_config("TELEGRAM_BOT_TOKEN"):
         return False
+    managed = bool(current_app.config.get("MULTIPLE_ACCOUNTS"))
+    if not conn.execute("SELECT 1 FROM pilot_alerts WHERE delivery='new' AND deliver_after<=? LIMIT 1", (now,)).fetchone():
+        return False
     with transaction(conn):
+        queue_order = " ORDER BY a.id LIMIT 1"
+        if managed:
+            recent = conn.execute("SELECT count(*) FROM hosted_deliveries WHERE last_at>?", (now - 1,)).fetchone()[0]
+            if recent >= 25:
+                return False
+            queue_order = """ AND coalesce((SELECT last_at FROM hosted_deliveries WHERE chat_id=c.chat_id),0)<=?
+                ORDER BY coalesce((SELECT last_at FROM hosted_deliveries WHERE chat_id=c.chat_id),0),a.id LIMIT 1"""
         row = conn.execute(
             """SELECT a.*,c.chat_id FROM pilot_alerts a JOIN pilot_chats c ON c.user_id=a.user_id
-                     WHERE delivery='new' AND deliver_after<=? AND (a.origin IN ('public_search','browser_home','browser_search') OR
-                        (a.origin='connected' AND EXISTS (SELECT 1 FROM pilot_buyer_link b WHERE b.user_id=a.user_id
-                          AND b.account_ref=a.account_ref AND b.revoke_pending=0))) ORDER BY a.id LIMIT 1""",
-            (now,),
+                     WHERE delivery='new' AND deliver_after<=? AND ((?=0 AND a.origin IN ('public_search','browser_home','browser_search')) OR
+                        (a.origin='connected' AND EXISTS (SELECT 1 FROM pilot_buyer_link b JOIN account_health h USING(user_id)
+                          WHERE b.user_id=a.user_id AND b.account_ref=a.account_ref AND b.revoke_pending=0 AND h.expired=0)))""" + queue_order,
+            (now, int(managed), now - 1) if managed else (now, 0),
         ).fetchone()
         if not row:
             return False
@@ -192,6 +219,10 @@ def deliver(conn, now):
         prefs = settings_for(conn, uid)
         if (
             flow.quiet(prefs, now)
+            or (managed and not flow.current_hosted_search(conn, uid, l))
+            or (managed and row["source"] == "home" and (
+                not flow._matches_choice(prefs.get("categories"), l.get("category"))
+                or not flow._matches_choice(prefs.get("sizes"), l.get("size"))))
             or (
                 row["origin"] == "browser_search"
                 and (
@@ -209,7 +240,8 @@ def deliver(conn, now):
                     or not flow._matches_choice(prefs.get("sizes"), l.get("size"))
                 )
             )
-            or (row["source"] == "home" and now - (flow.listing_time(l.get("listed_at")) or 0) >= 180)
+            or ((row["source"] == "home" or current_app.config.get("MULTIPLE_ACCOUNTS"))
+                and not 0 <= now - (flow.listing_time(l.get("listed_at")) or 0) < 180)
             or now - row["created_at"] > 1200
         ):
             conn.execute("UPDATE pilot_alerts SET delivery='expired' WHERE id=?", (aid,))
@@ -220,6 +252,9 @@ def deliver(conn, now):
             bound = flow.native_button_binding(conn, row)
             conn.execute("UPDATE pilot_alerts SET native_binding=? WHERE id=?", (bound, aid))
             row = {**dict(row), "native_binding": bound}
+        if managed:
+            conn.execute("INSERT INTO hosted_deliveries VALUES(?,?) ON CONFLICT(chat_id) DO UPDATE SET last_at=excluded.last_at",
+                         (row["chat_id"], now))
         conn.execute("UPDATE pilot_alerts SET delivery='sending',updated=? WHERE id=?", (int(now), aid))
     try:
         out = telegram(
@@ -231,6 +266,15 @@ def deliver(conn, now):
             },
         )
         msg_id = out["message_id"]
+        if type(msg_id) is not int or msg_id <= 0:
+            raise ValueError("Missing Telegram receipt.")
+    except TelegramRetry as exc:
+        after = time.time() + exc.seconds
+        with transaction(conn):
+            conn.execute("UPDATE pilot_alerts SET delivery='new',deliver_after=? WHERE id=?", (after, aid))
+            if managed:
+                conn.execute("UPDATE hosted_deliveries SET last_at=max(last_at,?) WHERE chat_id=?", (after - 1, row["chat_id"]))
+        return True
     except (ValueError, KeyError, TypeError):
         # A timeout could follow successful dispatch. Mark the outcome rather than create duplicate buttons.
         conn.execute("UPDATE pilot_alerts SET delivery='unconfirmed' WHERE id=?", (aid,))
@@ -283,9 +327,9 @@ def buy_job(conn, now):
     with transaction(conn):
         row = conn.execute(
             """SELECT j.* FROM pilot_buy_jobs j JOIN pilot_chats c
-                 ON c.user_id=j.user_id AND c.chat_id=j.chat_id WHERE j.finished=0 AND j.started<?
+                 ON c.user_id=j.user_id AND c.chat_id=j.chat_id WHERE j.finished=0 AND j.started<? AND (?=0 OR j.native=0)
                  ORDER BY j.update_id LIMIT 1""",
-            (int(now) - 90,),
+            (int(now) - 90, int(bool(current_app.config.get("MULTIPLE_ACCOUNTS")))),
         ).fetchone()
         if not row:
             return False
@@ -408,6 +452,14 @@ def run(app, stop=None):
         (native_notify, 0.5),
         (reconcile, 3),
     ]
-    with ThreadPoolExecutor(max_workers=len(lanes)) as pool:
+    managed = app.config.get("MULTIPLE_ACCOUNTS")
+    if managed:
+        from . import hosted_feeds, telegram_reconnect
+        lanes = [(receive_updates, 2), (buy_job, 0.2), (reconcile, 3), (telegram_reconnect.notify, 2)]
+        lanes.extend([(deliver, 0.15)] * 4)
+    with ThreadPoolExecutor(max_workers=len(lanes) + (2 if managed else 0)) as pool:
+        if managed:
+            pool.submit(hosted_feeds.home_loop, app, stop)
+            pool.submit(hosted_feeds.catalogue_loop, app, stop)
         for fn, idle in lanes:
             pool.submit(loop, fn, idle)

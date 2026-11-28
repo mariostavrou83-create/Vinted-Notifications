@@ -42,18 +42,35 @@ def init_connection(conn):
     """)
     conn.execute("BEGIN IMMEDIATE")
     try:
-        if "renewal_ref" not in {row[1] for row in conn.execute("PRAGMA table_info(pilot_link_attempt)")}:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(pilot_link_attempt)")}
+        if "telegram_chat" not in columns:
+            conn.execute("ALTER TABLE pilot_link_attempt ADD COLUMN telegram_chat INTEGER")
+        if "revision" not in columns:
+            conn.execute("ALTER TABLE pilot_link_attempt ADD COLUMN revision TEXT")
+        if "renewal_ref" not in columns:
             conn.execute("ALTER TABLE pilot_link_attempt ADD COLUMN renewal_ref TEXT")
         conn.commit()
     except Exception:
         conn.rollback()
         raise
 
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS account_health(
+          user_id INTEGER PRIMARY KEY REFERENCES pilot_buyer_link(user_id) ON DELETE CASCADE,
+          revision TEXT NOT NULL, expired INTEGER NOT NULL DEFAULT 0, notice_after REAL NOT NULL DEFAULT 0);
+        CREATE TRIGGER IF NOT EXISTS init_account_health AFTER INSERT ON pilot_buyer_link BEGIN
+          INSERT OR REPLACE INTO account_health(user_id,revision) VALUES(NEW.user_id,hex(randomblob(16)));
+        END;
+        INSERT OR IGNORE INTO account_health(user_id,revision)
+          SELECT user_id,hex(randomblob(16)) FROM pilot_buyer_link;
+        CREATE UNIQUE INDEX IF NOT EXISTS finder_connection_state ON pilot_link_attempt(state_hash);
+    """)
+
 
 def linked_account(conn, user_id):
     row = conn.execute(
-        "SELECT account_ref FROM pilot_buyer_link WHERE user_id=? AND revoke_pending=0",
-        (user_id,),
+        """SELECT b.account_ref FROM pilot_buyer_link b JOIN account_health h USING(user_id)
+           WHERE b.user_id=? AND b.revoke_pending=0 AND h.expired=0""", (user_id,),
     ).fetchone()
     return row[0] if row else None
 
@@ -93,6 +110,8 @@ def connection_available():
 
 
 def _callback_result(status):
+    if getattr(g, "reconnect_from_telegram", False):
+        return render_template("telegram_reconnect.html", outcome=status)
     response = redirect("/?connection=" + status + "#preferences", code=303)
     response.headers["Cache-Control"] = "no-store"
     response.headers["Referrer-Policy"] = "no-referrer"
@@ -101,6 +120,61 @@ def _callback_result(status):
 
 def _state_hash(value):
     return hashlib.sha256(value.encode("ascii")).hexdigest()
+
+
+def start_authorization(user_id, expected, renew, *, telegram_chat=None, receipt=None):
+    if not connection_available():
+        return jsonify(error="Hosted Vinted sign-in is not configured."), 503
+    conn = get_db()
+    state, verifier = secrets.token_urlsafe(32), secrets.token_urlsafe(48)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode()
+    conn.execute("BEGIN IMMEDIATE")
+    previous = conn.execute(
+        """SELECT b.username,b.account_ref,b.revoke_pending,h.revision FROM pilot_buyer_link b
+           JOIN account_health h USING(user_id) WHERE user_id=?""", (user_id,)
+    ).fetchone()
+    if telegram_chat is not None:
+        paired = conn.execute("SELECT 1 FROM pilot_chats WHERE user_id=? AND chat_id=?", (user_id, telegram_chat)).fetchone()
+        if not paired or not previous:
+            conn.rollback()
+            return jsonify(error="Link this private chat and Vinted account in Finder first."), 409
+        conn.execute("DELETE FROM telegram_reconnect_uses WHERE expires<=?", (time.time(),))
+        used = conn.execute("INSERT OR IGNORE INTO telegram_reconnect_uses VALUES(?,?)",
+                            (receipt, int(time.time()) + LINK_TTL))
+        if not used.rowcount:
+            conn.rollback()
+            return jsonify(error="Reopen Reconnect Vinted in your private chat."), 409
+    if previous:
+        if not renew or previous["revoke_pending"] or (expected and expected.casefold() != previous["username"].casefold()):
+            conn.rollback()
+            return jsonify(error="Use Reconnect for the linked buying account. Disconnect it first to switch accounts."), 409
+        expected = previous["username"]
+    elif renew:
+        conn.rollback()
+        return jsonify(error="This buying account is no longer linked. Refresh the dashboard."), 409
+    conn.execute("""
+        INSERT OR REPLACE INTO pilot_link_attempt
+        (user_id,state_hash,verifier,expected_name,expires_at,claimed,renewal_ref,telegram_chat,revision) VALUES(?,?,?,?,?,0,?,?,?)
+    """, (user_id, _state_hash(state), verifier, expected, int(time.time()) + LINK_TTL,
+          previous["account_ref"] if previous else None, telegram_chat, previous["revision"] if previous else None))
+    conn.commit()
+    try:
+        result = partner_request("POST", "/v1/connections/start", {
+            "state": state, "redirect_uri": _callback(),
+            "code_challenge": challenge, "code_challenge_method": "S256",
+        })
+        address = result.get("authorization_url", "")
+        if (not isinstance(address, str) or len(address) > 8192
+                or any(ch.isspace() or ord(ch) < 32 for ch in address)
+                or "\\" in address or "#" in address
+                or _origin(address) != _trusted_auth_origin()):
+            raise ValueError("Unexpected authorization destination")
+    except (PartnerError, ValueError):
+        conn.execute("DELETE FROM pilot_link_attempt WHERE user_id=? AND state_hash=?",
+                     (user_id, _state_hash(state)))
+        conn.commit()
+        return jsonify(error="The buyer integration could not start account linking."), 502
+    return jsonify(authorization_url=address)
 
 
 def register_connection(app):
@@ -127,69 +201,42 @@ def register_connection(app):
     @app.get("/api/connection")
     def connection_status():
         row = get_db().execute(
-            "SELECT username,revoke_pending FROM pilot_buyer_link WHERE user_id=?", (g.user["id"],)
+            """SELECT b.username,b.revoke_pending,h.expired FROM pilot_buyer_link b
+               JOIN account_health h USING(user_id) WHERE user_id=?""", (g.user["id"],)
         ).fetchone()
         linked = bool(row and not row["revoke_pending"])
-        return jsonify(configured=connection_available(), linked=linked, username=row["username"] if linked else None,
+        return jsonify(configured=connection_available(), linked=linked, expired=bool(row and row["expired"]), username=row["username"] if linked else None,
                        revoke_pending=bool(row and row["revoke_pending"]))
 
     @app.post("/api/connection/start")
     def connection_start():
-        if not connection_available():
-            return jsonify(error="A buyer integration has not been configured for this pilot."), 503
         data = request.get_json(silent=True) or {}
-        expected = data.get("account_hint", "") if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            return jsonify(error="Choose a valid account."), 400
+        expected = data.get("account_hint", "")
         if not isinstance(expected, str) or (expected and not USERNAME.fullmatch(expected)):
             return jsonify(error="Choose a valid account name."), 400
-        user_id, conn = g.user["id"], get_db()
-        state, verifier = secrets.token_urlsafe(32), secrets.token_urlsafe(48)
-        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode()
-        conn.execute("BEGIN IMMEDIATE")
-        previous = conn.execute(
-            "SELECT username,account_ref,revoke_pending FROM pilot_buyer_link WHERE user_id=?", (user_id,)
-        ).fetchone()
-        renew = data.get("reconnect") is True
-        if previous:
-            if not renew or previous["revoke_pending"] or (expected and expected.casefold() != previous["username"].casefold()):
-                conn.rollback()
-                return jsonify(error="Use Reconnect for the linked buying account. Disconnect it first to switch accounts."), 409
-            expected = previous["username"]
-        elif renew:
-            conn.rollback()
-            return jsonify(error="This buying account is no longer linked. Refresh the dashboard."), 409
-        conn.execute("""
-            INSERT OR REPLACE INTO pilot_link_attempt
-            (user_id,state_hash,verifier,expected_name,expires_at,claimed,renewal_ref) VALUES(?,?,?,?,?,0,?)
-        """, (user_id, _state_hash(state), verifier, expected, int(time.time()) + LINK_TTL,
-              previous["account_ref"] if previous else None))
-        conn.commit()
-        try:
-            result = partner_request("POST", "/v1/connections/start", {
-                "state": state, "redirect_uri": _callback(),
-                "code_challenge": challenge, "code_challenge_method": "S256",
-            })
-            address = result.get("authorization_url", "")
-            if (not isinstance(address, str) or len(address) > 8192
-                    or any(ch.isspace() or ord(ch) < 32 for ch in address)
-                    or "\\" in address or "#" in address
-                    or _origin(address) != _trusted_auth_origin()):
-                raise ValueError("Unexpected authorization destination")
-        except (PartnerError, ValueError):
-            conn.execute("DELETE FROM pilot_link_attempt WHERE user_id=? AND state_hash=?",
-                         (user_id, _state_hash(state)))
-            conn.commit()
-            return jsonify(error="The buyer integration could not start account linking."), 502
-        return jsonify(authorization_url=address)
+        return start_authorization(g.user["id"], expected, data.get("reconnect") is True)
 
     @app.get("/connect/vinted/callback")
     def connection_callback():
-        user_id, conn = g.user["id"], get_db()
+        conn = get_db()
         state = request.args.get("state", "")
         if not connection_available() or not re.fullmatch(r"[A-Za-z0-9_-]{43}", state):
             return _callback_result("expired")
         digest = _state_hash(state)
         conn.execute("BEGIN IMMEDIATE")
-        attempt = conn.execute("SELECT * FROM pilot_link_attempt WHERE user_id=?", (user_id,)).fetchone()
+        attempt = conn.execute("SELECT * FROM pilot_link_attempt WHERE state_hash=?", (digest,)).fetchone()
+        if attempt and attempt["telegram_chat"] is not None:
+            g.reconnect_from_telegram = True
+            owner = conn.execute("SELECT 1 FROM pilot_chats WHERE user_id=? AND chat_id=?",
+                                 (attempt["user_id"], attempt["telegram_chat"])).fetchone()
+        else:
+            owner = g.user and attempt and g.user["id"] == attempt["user_id"]
+        if not owner:
+            conn.rollback()
+            return _callback_result("expired")
+        user_id = attempt["user_id"]
         if (not attempt or attempt["claimed"] or attempt["expires_at"] <= int(time.time())
                 or not hmac.compare_digest(attempt["state_hash"], digest)):
             conn.rollback()
@@ -220,13 +267,25 @@ def register_connection(app):
             conn.rollback()
             return _callback_result("expired")
         if attempt["renewal_ref"]:
-            linked = conn.execute(
-                "SELECT account_ref FROM pilot_buyer_link WHERE user_id=? AND revoke_pending=0", (user_id,)
-            ).fetchone()
-            conn.commit()
-            if not linked or linked["account_ref"] != ref or attempt["renewal_ref"] != ref:
+            if ref != attempt["renewal_ref"]:
+                conn.commit()
                 return _callback_result("mismatch")
-            return _callback_result("reconnected")
+            renewed = conn.execute("""UPDATE account_health SET expired=0,notice_after=0,revision=hex(randomblob(16))
+                WHERE user_id=? AND revision=? AND EXISTS (SELECT 1 FROM pilot_buyer_link
+                  WHERE user_id=? AND account_ref=? AND revoke_pending=0)""", (user_id, attempt["revision"], user_id, ref))
+            if attempt["telegram_chat"] is not None and not conn.execute(
+                "SELECT 1 FROM pilot_chats WHERE user_id=? AND chat_id=?", (user_id, attempt["telegram_chat"])
+            ).fetchone():
+                conn.rollback()
+                return _callback_result("expired")
+            if renewed.rowcount and current_app.config.get("MULTIPLE_ACCOUNTS"):
+                conn.execute("""INSERT INTO pilot_sources(user_id,source) VALUES(?,'home')
+                    ON CONFLICT(user_id,source) DO UPDATE SET lease=NULL,cursor=NULL,fingerprint=NULL,
+                    last_ok=NULL,next_at=0,status='waiting'""", (user_id,))
+                conn.execute("DELETE FROM hosted_search_baseline WHERE search_id IN (SELECT id FROM searches WHERE user_id=?)",
+                             (user_id,))
+            conn.commit()
+            return _callback_result("reconnected" if renewed.rowcount else "expired")
         try:
             conn.execute("INSERT INTO pilot_buyer_link(user_id,account_ref,username) VALUES(?,?,?)",
                          (user_id, ref, username))

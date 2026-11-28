@@ -71,6 +71,7 @@ def serve(env):
     app = create_app(
         {
             "DATABASE": str(db),
+            "MULTIPLE_ACCOUNTS": True,
             "FINDER_PUBLIC_URL": origin,
             "PREFERRED_URL_SCHEME": "https",
             "TRUSTED_HOSTS": [address.hostname, health_host],

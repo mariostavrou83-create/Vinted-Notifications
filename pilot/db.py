@@ -74,6 +74,8 @@ def transaction(conn):
 def settings_for(conn, user_id):
     settings = {**DEFAULT_SETTINGS, "categories": [], "sizes": [], "allowed_couriers": [],
                 "home_address_label": "", "pickup_summary": "", "delivery_couriers": []}
+    if current_app.config.get("MULTIPLE_ACCOUNTS"):
+        settings.update(quiet_start="", quiet_end="")
     row = conn.execute("SELECT data FROM settings WHERE user_id=?", (user_id,)).fetchone()
     if row:
         settings.update(json.loads(row["data"]))

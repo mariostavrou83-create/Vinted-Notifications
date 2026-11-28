@@ -62,7 +62,13 @@ def alerts_for_user(conn, user_id):
     now = time.time()
     answer = []
     search_names = dict(conn.execute("SELECT id,name FROM searches WHERE user_id=?", (user_id,)))
+    managed = current_app.config.get("MULTIPLE_ACCOUNTS")
+    if managed:
+        from .connection import linked_account
+        account = linked_account(conn, user_id)
     for r in rows:
+        if managed and (r["origin"] != "connected" or r["account_ref"] != account):
+            continue
         l = json.loads(r["listing"])
         if r["source"] == "search" and not l.get("search_name") and type(l.get("search_id")) is int:
             l["search_name"] = search_names.get(l["search_id"])
@@ -149,7 +155,13 @@ def valid_listing(item, *, allow_missing_total=False):
 
 def record_listing(conn, uid, account, item, source, settings, now):
     """Private account-specific feed, delivered only with a verified account link."""
-    return _record(conn, uid, account, item, source, settings, now, "connected")
+    return _record(conn, uid, account, item, source, settings, now, "connected",
+                   allow_missing_total=bool(current_app.config.get("MULTIPLE_ACCOUNTS")))
+
+
+def record_catalogue_listing(conn, uid, account, item, settings, now):
+    """A shared listing matched to this buyer. Checkout still needs a personal quote."""
+    return _record(conn, uid, account, item, "search", settings, now, "connected", allow_missing_total=True)
 
 
 def record_public_listing(conn, uid, item, settings, now):
@@ -181,6 +193,15 @@ def record_observed_search(conn, uid, binding, item, settings, now):
     return _record(conn, uid, "catalog:" + binding, item, "search", settings, now, "browser_search")
 
 
+def current_hosted_search(conn, uid, listing):
+    fingerprint = listing.get("search_fingerprint")
+    if fingerprint is None:
+        return True
+    return bool(conn.execute("""SELECT 1 FROM searches s JOIN hosted_search_baseline b ON b.search_id=s.id
+        WHERE s.id=? AND s.user_id=? AND s.enabled=1 AND b.fingerprint=?""",
+        (listing.get("search_id"), uid, fingerprint)).fetchone())
+
+
 def native_button_binding(conn, row):
     from .catalog_watch import eligible
     from .home_watch import active
@@ -208,8 +229,8 @@ def native_button_binding(conn, row):
     return None
 
 
-def _record(conn, uid, account, item, source, settings, now, origin):
-    if not valid_listing(item, allow_missing_total=origin != "connected"):
+def _record(conn, uid, account, item, source, settings, now, origin, *, allow_missing_total=False):
+    if not valid_listing(item, allow_missing_total=allow_missing_total or origin != "connected"):
         return None
     if origin != "browser" and quiet(settings, now):
         return None
@@ -299,7 +320,7 @@ def pair_chat(conn, text, chat_id):
     # A savepoint works both in the webhook request and inside the polling offset transaction.
     parts = text.split()
     if len(parts) != 2 or parts[0] != "/start":
-        return "Open your pilot dashboard and choose Connect Telegram."
+        return "Open your Finder dashboard and choose Link Telegram in Preferences."
     digest = hashlib.sha256(parts[1].encode()).hexdigest()
     conn.execute("SAVEPOINT telegram_pair")
     row = conn.execute(
@@ -436,6 +457,9 @@ def request_buy(conn, uid, aid, confirmation=None):
     if not row or not account or row["account_ref"] != account:
         conn.rollback()
         return "Connect the account that received this listing in your dashboard.", None
+    if current_app.config.get("MULTIPLE_ACCOUNTS") and not current_hosted_search(conn, uid, json.loads(row["listing"])):
+        conn.rollback()
+        return "This saved search changed. Review the listing on Vinted.", None
     status = row["order_status"]
     if status == "checking" and now - row["updated"] >= 60:
         status = "confirm" if row["confirmation"] else None
@@ -503,6 +527,7 @@ def request_buy(conn, uid, aid, confirmation=None):
         if (
             linked_account(conn, uid) != account
             or latest != prefs
+            or (current_app.config.get("MULTIPLE_ACCOUNTS") and not current_hosted_search(conn, uid, json.loads(row["listing"])))
             or not (listing_time(q.get("expires_at")) or 0) > time.time()
         ):
             conn.rollback()
@@ -579,14 +604,21 @@ def telegram_update(conn, update):
     chat_id = chat.get("id")
     author = cb.get("from") or msg.get("from") or {}
     sender = author.get("id") if isinstance(author, dict) else None
-    if not cb and chat.get("type") in {"group", "supergroup"}:
+    managed = current_app.config.get("MULTIPLE_ACCOUNTS")
+    if not managed and not cb and chat.get("type") in {"group", "supergroup"}:
         from .home_groups import register_command
         register_command(conn, msg)
         return dict(ok=True)
     if chat.get("type") != "private" or type(chat_id) is not int or chat_id <= 0 or chat_id != sender:
         return dict(ok=True)
     if not cb:
-        message = pair_chat(conn, str(msg.get("text", "")), chat_id)
+        command = str(msg.get("text", "")).strip()
+        if managed and command == "/reconnect":
+            from .telegram_reconnect import private_reply
+            return private_reply(conn, chat_id)
+        message = pair_chat(conn, command, chat_id)
+        if managed and message == "Your private Finder alerts are connected.":
+            message += " Use /reconnect if Vinted asks you to sign in again."
         return dict(method="sendMessage", chat_id=chat_id, text=message)
     callback = re.fullmatch(r"(nbuy|ncf|buy|cf):(\d{1,16})(?::([0-9a-f]{12}))?", str(cb.get("data", "")))
     if not callback or callback[1].endswith("cf") != bool(callback[3]):
@@ -599,6 +631,10 @@ def telegram_update(conn, update):
                           (?=0 AND a.origin='connected')) AND c.chat_id=? AND a.sent_chat=? AND a.message_id IS NOT NULL""",
         (int(callback[2]), int(native), int(native), chat_id, chat_id),
     ).fetchone()
+    if managed and row:
+        from .connection import linked_account
+        if native or linked_account(conn, row["user_id"]) != row["account_ref"]:
+            row = None
     if row and not callback[3] and msg.get("message_id") != row["message_id"]:
         row = None
     if row and native:

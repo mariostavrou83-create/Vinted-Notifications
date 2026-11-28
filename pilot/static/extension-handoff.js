@@ -14,7 +14,8 @@
       return sessionStorage.getItem(key) || "";
     } catch { return ""; }
   }
-  const hint = profileHint();
+  const hosted = document.documentElement.hasAttribute("data-hosted-accounts");
+  const hint = hosted ? "" : profileHint();
   const hintBox = document.querySelector("#extension-profile-hint");
   const hintName = document.querySelector("#extension-profile-name");
   const label = document.querySelector("#buyer-account-status");
@@ -39,10 +40,11 @@
       const response=await fetch("/api/connection",{credentials:"same-origin"});
       if(!response.ok) throw new Error();
       const state=await response.json();
-      const baseline=state.linked?"Connected buyer: @"+state.username :
+      const baseline=state.expired?"Reconnect @"+state.username+" in your private Finder chat or here." :
+        state.linked?"Connected buyer: @"+state.username :
         state.revoke_pending?"Disconnected in Finder. Finish disconnecting at the provider." :
         state.configured?"Choose and authorize your Vinted buying account." :
-        "Pair your Vinted buying account under Chrome checkout.";
+        hosted?"Hosted Vinted access is awaiting configuration." : "Pair your Vinted buying account under Chrome checkout.";
       label.textContent=[message,baseline].filter(Boolean).join(" ");
       linkedBuyer = state.linked ? state.username : null;
       connect.textContent = state.linked ? 'Reconnect buying account' : 'Connect buying account';

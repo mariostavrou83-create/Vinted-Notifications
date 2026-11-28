@@ -33,7 +33,10 @@
 <div class="empty-state board-empty" data-all-empty>
   <div class="empty-art" aria-hidden="true"><span class="empty-browser"><i></i><b></b></span><span class="empty-lens"></span></div>
   <h2>No listings yet</h2>
-  <p>Set up Chrome to bring in items from Vinted Home, or save a search for listings you want to follow.</p>
-  <div class="actions"><a class="button primary" href="/extension/install">Set up Chrome</a><a class="button secondary" href="#searches">Saved searches</a></div>
+  {% if multiple_accounts %}
+  <p>Connect your Vinted account for Home alerts or add your first saved search.</p>
+  <div class="actions"><a class="button primary" href="#account">Connected accounts</a><a class="button secondary" href="#new-search">Add search</a></div>
+  {% else %}<p>Set up Chrome to bring in items from Vinted Home, or save a search for listings you want to follow.</p>
+  <div class="actions"><a class="button primary" href="/extension/install">Set up Chrome</a><a class="button secondary" href="#searches">Saved searches</a></div>{% endif %}
 </div>
 {% endif %}

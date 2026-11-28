@@ -1,12 +1,22 @@
-# Pilot buyer integration
+# Finder buying integration
 
-Finder calls a separately supplied, authorised partner service. The operations below describe the contract the partner must implement. Public saved-search monitoring, deliberately shared browser items and direct links to a Vinted listing work independently of this connection. A verified partner connection can provide the account-specific feed and service-side one-tap purchasing described here. Each operation uses TLS and a server-held bearer credential. Redirects are rejected. Returned account references are opaque and uniquely linked to the invitee whose authorisation completed.
+Finder's hosted service uses these server-to-server operations for a buyer's delegated account and the UK catalogue. The personal Home and checkout use the same opaque account reference. TLS, a server-held bearer credential and the configured authorisation origin bind the integration. The catalogue contains public listing data. Each buyer's keywords, budget, reference photos, Telegram chat, delivery settings and payment method stay out of that feed.
+
+## Hosted catalogue changes
+
+A single authenticated `POST /v1/catalogue/changes` accepts `market: "GB"`, `currency: "GBP"` and an opaque `cursor` (initially null). It returns the complete sequence of new public UK listings for that interval. The supplier receives no saved searches. Finder indexes up to 5,000 filters and matches each new listing locally against category, brand, size, condition, colour, material, item price, catalogue keywords and each member's private rules.
+
+Return the same market and currency, `scope: "all_public_listings"`, `complete: true`, the input `from_cursor`, a nonempty `next_cursor`, UTC `through` watermark and `listings`. A complete interval may contain no listings. Declare completeness only if the whole interval was covered without truncation or gaps. Incomplete, mis-scoped or stale windows never advance the cursor. The first complete window after a long gap is a quiet baseline.
+
+Listings need a UK item ID and URL, title, GBP item price in integer pence and verified `listed_at`. Include the public description and brand text, available photo and buyer-fee-inclusive subtotal. Supply `attributes` mapping `category_ids` (including ancestors), `brand_ids`, `size_ids`, `status_ids`, `color_ids` and `material_ids` to arrays of positive integer catalogue IDs. Empty arrays indicate a verified absence. A missing field required by an active filter makes the window incomplete. Catalogue keywords match whole words in the available title, description and brand. Each filter dimension accepts the selected alternatives. All specified dimensions and price limits must match.
+
+For personal Home, `POST /v1/feed` uses `source: "home"`, the private buyer reference, its independent cursor and an empty `searches` list. Return the same account and source, a cursor and its personalised listings. On an expired or revoked buyer grant return HTTP 401 or 403 and JSON with that exact `account_ref` and `code` equal to `account_authorization_expired` or `account_authorization_revoked`. A generic service error must not invalidate the buyer. Return HTTP 429 with `Retry-After` on throttling. Finder pauses scheduled polling for the requested interval.
 
 ## User authorisation
 
-The Chrome extension assists with selecting the intended profile. The partner must establish account ownership. Configure `FINDER_PUBLIC_URL`, `FINDER_PARTNER_URL`, `FINDER_PARTNER_TOKEN` and, when different from the server origin, `FINDER_PARTNER_AUTH_ORIGIN`. Refer to `connection.py` for the start, exchange and revoke payloads and the user-bound callback. An expired or revoked authorisation must be rejected on every operation. A saved name alone grants no access.
+The hosted dashboard starts authorisation directly. Telegram reconnect verifies signed Mini App data, starts a single-use grant renewal and sends the member to the configured sign-in origin. The partner must establish account ownership. Configure `FINDER_PUBLIC_URL`, `FINDER_PARTNER_URL`, `FINDER_PARTNER_TOKEN` and, when different from the server origin, `FINDER_PARTNER_AUTH_ORIGIN`. Refer to `connection.py` for the start, exchange and revoke payloads and the user-bound callback. An expired or revoked authorisation must be rejected on every operation. A saved name alone grants no access.
 
-## Feed and delivery
+## Account feeds and delivery
 
 `POST /v1/feed` accepts `account_ref`, `source` (`home` or `search`), an opaque `cursor` (initially null), and `searches`. Each saved search supplies its local numeric ID, filtered UK Vinted URL, included keyword alternatives, excluded title phrases and optional all-in budget in pence. The partner must apply the supplied marketplace filters and scope the cursor, searches, results and account independently. The service returns:
 
@@ -42,7 +52,7 @@ A quote must bind immutable total, currency, item, destination, courier, account
 
 Use a dedicated private pilot bot. Set `FINDER_PILOT_TELEGRAM_BOT_USERNAME`, `FINDER_PILOT_TELEGRAM_BOT_TOKEN` and `FINDER_PILOT_TELEGRAM_WEBHOOK_SECRET`. Run `flask --app pilot.app:create_app telegram-webhook` after configuring the pilot HTTPS origin. It verifies the bot username, registers `/telegram/webhook` for messages and button callbacks, and confirms Telegram registered the intended URL. Use the bot owner's secret manager for tokens.
 
-Run `flask --app pilot.app:create_app worker` in addition to the web service, sharing its writable SQLite volume. The worker sends private alerts, then edits in the resale result. Saved-search reference photos are attached in the matched user's private chat. A Telegram link expires in ten minutes and works once. Account, chat and alert ownership are checked at each purchase callback. Public saved-search alerts use a direct Vinted listing link when no purchase-capable native browser was paired at delivery. Each native button binds to the specific pairing that received it. A browser item shared deliberately is dashboard-only. Neither source treats a public subtotal as an all-in checkout quote. Service-side purchase submission through this adapter requires a verified account and a running worker.
+The hosted entry point starts the worker. When running the web and worker as separate processes, give them the same private SQLite volume. The worker sends each buyer's alerts to their paired private chat. Saved-search reference photos are attached in the matched user's private chat. A Telegram link expires in ten minutes and works once. Account, chat and alert ownership are checked at each purchase callback. Public saved-search alerts use a direct Vinted listing link when no purchase-capable native browser was paired at delivery. Each native button binds to the specific pairing that received it. A browser item shared deliberately is dashboard-only. Neither source treats a public subtotal as an all-in checkout quote. Service-side purchase submission through this adapter requires a verified account and a running worker.
 
 ## Chrome Home alerts
 

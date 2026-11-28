@@ -1,4 +1,18 @@
-# Finder sourcing in Chrome
+# Finder multiple accounts method
+
+The hosted buying dashboard runs continuously from one service and one persistent volume. Each member connects one UK Vinted account for personal Home alerts and AutoBuy, links their own private Telegram, and can save up to 100 searches. New members start with zero searches. They can close their browser after connecting. The dashboard works on phones and computers.
+
+**Team → Member limit** starts at 10, including the owner. The owner can raise it up to 50 without a restart. Valid invitations reserve places. Private settings, buying limits, pickup point and courier stay with each member. **Preferences → Connected accounts** starts the browser authorisation. An expired grant pauses that member. The bot sends **Reconnect Vinted** or the member can type `/reconnect`. Telegram verifies the member, then the sign-in page checks that the same Vinted account was renewed.
+
+## Run the hosted service
+
+Start `python -m pilot.hosted` using a dedicated persistent data volume. Set `FINDER_PUBLIC_URL` to its canonical HTTPS origin. For separately invoked Flask management commands on this database, set `FINDER_MULTIPLE_ACCOUNTS=1` and the same `FINDER_PILOT_DB`. Preserve the signing and encrypted-settings keys across restarts. Reuse the same service, volume, bot and worker when raising the member limit. Run a single copy of the coordinator against its SQLite volume. Increase CPU or memory on the existing service if observed load warrants it.
+
+Home checks target one second per linked account. All active searches share one catalogue change request every five seconds. Each buyer gets only matching listings. One slow Home call occupies one account slot. Network time, source delays, provider throttling and Telegram queues affect when a listing appears. The dashboard shows the last successful Home response and the latest time covered for each search. Users can pause a search or set UK quiet hours. The first complete catalogue window sets the starting point for a new or edited search.
+
+The operator supplies a hosted buyer connection and a UK catalogue source implementing [the integration contract](PARTNER.md), plus a dedicated Telegram bot configured in **Team** or hosting settings. With the source unconfigured the dashboard and invitations work, and source status says it is awaiting configuration. A test response or a configured endpoint alone does not establish marketplace coverage. This service has no AI, eBay or Scavio worker.
+
+## Legacy Chrome deployment
 
 An invite-only UK buyer dashboard with private Telegram alerts. Each buyer starts with zero searches and can add up to 100. Home alerts require a verified upload time under three minutes. The Chrome option observes listings as Vinted displays them in the selected Home tab. Public saved searches establish an initial baseline. Every active search has a fixed five-second target. The dashboard reports missed checks and provider limits.
 
@@ -9,10 +23,6 @@ Open your private invitation in Google Chrome and choose a Finder username and p
 Use **Chrome setup** in the dashboard to pair the Vinted buying profile in the same browser. Visit **Saved searches → Add search** to name a Vinted catalogue URL, add included or excluded words and attach reference pictures. From the extension, select the Home or catalogue tab to watch. Home and All use a one-second board clock. Saved searches use a five-second clock. Chrome watches listings that Vinted renders in each selected tab. The saved-search page also reports the last successful hosted source check when public monitoring is enabled.
 
 In **Preferences**, set your own filters, shipping and spending limits, collection point and couriers. The pilot owner can use **Team** in Chrome to invite testers, connect a dedicated Telegram bot and manage provider allowances. The existing Finder bot serves its own chats separately.
-
-## Hosted service
-
-The public Chrome application runs the dashboard and worker together with `python -m pilot.hosted`. Configure the HTTPS origin, an exclusive persistent volume, session secret, encrypted-settings key and hashed owner invitation on the isolated host. A single-use owner signup creates the Team administrator. Use the Team page to issue invitation links. Telegram and optional public saved-search settings saved through the site apply to the running pilot.
 
 ## Other operator deployment options
 

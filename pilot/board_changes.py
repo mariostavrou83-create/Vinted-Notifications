@@ -16,6 +16,9 @@ def init_board_changes(app):
         "native_devices": ("DELETE",),
         "searches": ("UPDATE OF name", "DELETE"),
     }
+    if app.config.get("MULTIPLE_ACCOUNTS"):
+        changes["pilot_buyer_link"] = ("INSERT", "UPDATE OF revoke_pending", "DELETE")
+        changes["account_health"] = ("UPDATE OF expired",)
     for table, events in changes.items():
         for event in events:
             action = event.split()[0]

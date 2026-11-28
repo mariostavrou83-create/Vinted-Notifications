@@ -28,6 +28,27 @@ CREATE TABLE IF NOT EXISTS team_bot (
 );
 """
 LIFETIME = 72 * 3600
+MAX_MEMBERS = 50
+
+
+def capacity(db):
+    limit = db.execute("SELECT value FROM app_meta WHERE key='member_limit'").fetchone()
+    joined = db.execute("SELECT count(*) FROM users").fetchone()[0]
+    reserved = db.execute("SELECT count(*) FROM invitations WHERE used_at IS NULL AND expires_at>?",
+                          (int(time.time()),)).fetchone()[0]
+    return {"limit": int(limit[0]) if limit else 10, "joined": joined, "reserved": reserved}
+
+
+def invite_available(db):
+    seats = capacity(db)
+    return seats["joined"] + seats["reserved"] < seats["limit"]
+
+
+def at_capacity(db, invitation):
+    seats = capacity(db)
+    owner = db.execute("SELECT bootstrap_digest FROM team_owner WHERE user_id IS NULL").fetchone()
+    reserve_owner = bool(owner and owner[0] != invitation)
+    return seats["joined"] + int(reserve_owner) >= seats["limit"]
 
 
 def _option(key):
@@ -56,6 +77,8 @@ def init_team(app):
     app.add_url_rule("/team/invites", "team_invites", create_invite, methods=["POST"])
     app.add_url_rule("/team/invites/<int:invite_id>/revoke", "team_revoke", revoke_invite, methods=["POST"])
     app.add_url_rule("/team/telegram", "team_telegram", configure_bot, methods=["POST"])
+    if app.config.get("MULTIPLE_ACCOUNTS"):
+        app.add_url_rule("/team/capacity", "team_capacity", set_capacity, methods=["POST"])
 
 
 def _initial_tester(db):
@@ -160,13 +183,28 @@ def _page(message="", error="", status=200, invite_path=""):
         transport_status = polling_status(db)
     return render_template("team.html", invites=invites, bot=bot, transport_status=transport_status,
                            env_bot=_env_bot(), can_encrypt=bool(_cipher()), https=_bot_https(),
-                           message=message, error=error, invite_path=invite_path,
+                           message=message, error=error, invite_path=invite_path, seats=capacity(db),
                            csrf_token=session["csrf_token"]), status
 
 
 def team_page():
     _owner_only()
     return _page(message=" ".join(get_flashed_messages(category_filter=["team"])))
+
+
+def set_capacity():
+    _owner_only()
+    value = request.form.get("limit", "")
+    if not re.fullmatch(r"[0-9]{1,2}", value) or not 10 <= int(value) <= MAX_MEMBERS:
+        return _page(error="Choose a member limit from 10 to 50.", status=400)
+    db = get_db()
+    with transaction(db):
+        seats = capacity(db)
+        if int(value) < seats["joined"] + seats["reserved"]:
+            return _page(error="The limit must cover current members and open invitations.", status=409)
+        db.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('member_limit',?)", (value,))
+    flash("Member limit updated.", "team")
+    return redirect("/team", code=303)
 
 
 def create_invite():
@@ -178,6 +216,8 @@ def create_invite():
     digest = hashlib.sha256(token.encode()).hexdigest()
     db, now = get_db(), int(time.time())
     with transaction(db):
+        if current_app.config["MULTIPLE_ACCOUNTS"] and not invite_available(db):
+            return _page(error="All places are taken or reserved by open invitations.", status=409)
         db.execute("INSERT INTO invitations(digest,expires_at) VALUES(?,?)", (digest, now + LIFETIME))
         db.execute("INSERT INTO team_invites(digest,label,created_at) VALUES(?,?,?)", (digest, label, now))
     return _page(message="Copy this private invitation before leaving this page.", invite_path="/signup#invite=" + token)

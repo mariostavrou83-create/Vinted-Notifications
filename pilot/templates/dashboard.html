@@ -1,10 +1,10 @@
 {% extends 'base.html' %}
-{% block title %}Sourcing board · Finder{% endblock %}
+{% block title %}{{ "Multiple accounts method" if multiple_accounts else "Sourcing board" }} · Finder{% endblock %}
 {% block scripts %}
 <script src="{{ url_for('static', filename='pilot.js') }}" defer></script>
 <script src="{{ url_for('static', filename='delivery.js') }}" defer></script>
-<script src="{{ url_for('static', filename='home-sharing.js') }}" defer></script>
-<script src="{{ url_for('static', filename='chrome-checkout.js') }}" defer></script>
+{% if not multiple_accounts %}<script src="{{ url_for('static', filename='home-sharing.js') }}" defer></script>
+<script src="{{ url_for('static', filename='chrome-checkout.js') }}" defer></script>{% endif %}
 <script src="{{ url_for('static', filename='extension-handoff.js') }}" defer></script>
 {% endblock %}
 {% block body %}
@@ -25,7 +25,7 @@
     </div>
   </aside>
   <main id="main" tabindex="-1">
-    <div class="topline"><span class="market">Vinted UK</span><a class="chrome-shortcut" href="/extension/install"><span class="chrome-icon" aria-hidden="true"></span>Chrome setup</a></div>
+    <div class="topline"><span class="market">Vinted UK{% if multiple_accounts %} · Multiple accounts method{% endif %}</span>{% if multiple_accounts %}<a href="#account">Connected accounts</a>{% else %}<a class="chrome-shortcut" href="/extension/install"><span class="chrome-icon" aria-hidden="true"></span>Chrome setup</a>{% endif %}</div>
     <section id="alerts" data-view="alerts" aria-labelledby="alerts-title">
       <div class="page-head"><div><h1 id="alerts-title">Sourcing board</h1><p class="lede">Buying opportunities from your Vinted Home and saved searches.</p></div>{% if searches|length < 100 %}<a class="button primary" href="#new-search"><span aria-hidden="true">＋</span> Add search</a>{% endif %}</div>
       <div class="board-toolbar">
@@ -37,6 +37,7 @@
         <button type="button" class="refresh-button" id="refresh-alerts"><span aria-hidden="true">↻</span> Refresh</button>
       </div>
       <div class="board-subline"><span id="board-count" aria-live="polite">{{ feed|length }} {{ 'listing' if feed|length == 1 else 'listings' }}</span><span>Check settings · Home 1s · Saved searches 5s</span></div>
+      {% if multiple_accounts %}<p class="field-note" id="hosted-home-status" aria-live="polite">Home · {{ monitoring.home.message }} <span data-home-checked="{{ monitoring.home.last_checked_at or '' }}"></span></p>{% endif %}
       <div id="alert-results">{% include 'alerts_fragment.html' %}</div>
       <div id="filtered-empty" class="empty-state" hidden>
         <span class="empty-symbol" aria-hidden="true"><i class="icon search-icon"></i></span>
@@ -45,16 +46,16 @@
       </div>
     </section>
     <section id="searches" data-view="searches" hidden aria-labelledby="searches-title">
-      <div class="page-head"><div><h1 id="searches-title">Saved searches</h1><p class="lede">{{ searches|length }} of 100 searches used.</p><p class="field-note">To watch a search in Chrome, open its Vinted catalogue and choose <b>Watch this saved search</b> in the Finder extension. Finder checks the listings visible in that tab every five seconds while Chrome allows it. New listings depend on what Vinted displays.</p></div>{% if searches|length < 100 %}<a class="button primary" href="#new-search">Add search</a>{% endif %}</div>
+      <div class="page-head"><div><h1 id="searches-title">Saved searches</h1><p class="lede">{{ searches|length }} of 100 searches used.</p><p class="field-note">{% if multiple_accounts %}Finder checks every enabled search on the server every five seconds when the UK feed is available.{% else %}To watch a search in Chrome, open its Vinted catalogue and choose <b>Watch this saved search</b> in the Finder extension. Finder checks the listings visible in that tab every five seconds while Chrome allows it. New listings depend on what Vinted displays.{% endif %}</p></div>{% if searches|length < 100 %}<a class="button primary" href="#new-search">Add search</a>{% endif %}</div>
       {% if searches %}
       <div class="search-list">
         {% for search in searches %}
-        {% set public_status = public_feed.searches.get(search.id|string) if public_feed and public_feed.searches else none %}
+        {% set public_status = monitoring.searches.get(search.id|string) if multiple_accounts else (public_feed.searches.get(search.id|string) if public_feed and public_feed.searches else none) %}
         <article class="search-card" data-search-row="{{ search.id }}">
           <div class="search-info"><h3><a href="#search-{{ search.id }}">{{ search.name }}</a></h3>
             <p>{{ 'Enabled' if search.enabled else 'Paused' }} · {% if search.budget %}Up to £{{ search.budget }}{% else %}Any budget{% endif %}</p>
-            {% if search.enabled %}<p data-chrome-watch></p>{% if buyer_provider_linked %}<p>Connected buying provider is configured.</p>{% endif %}{% endif %}
-            <p>Public search · <span data-public-watch>{{ public_status.message if public_status else 'Status unavailable.' }}</span> <span data-public-checked="{{ public_status.last_checked_at if public_status and public_status.last_checked_at is number else '' }}"></span></p>
+            {% if search.enabled and not multiple_accounts %}<p data-chrome-watch></p>{% if buyer_provider_linked %}<p>Connected buying provider is configured.</p>{% endif %}{% endif %}
+            <p>{{ "Hosted search" if multiple_accounts else "Public search" }} · <span data-public-watch>{{ public_status.message if public_status else 'Status unavailable.' }}</span> <span data-public-checked="{{ public_status.last_checked_at if public_status and public_status.last_checked_at is number else '' }}"></span></p>
             {% if search.include_keywords %}<div class="chips">{% for tag in search.include_keywords[:4] %}<span>{{ tag }}</span>{% endfor %}</div>{% endif %}
           </div>
           <div class="actions"><a class="button secondary" href="{{ search.url }}" target="_blank" rel="noopener noreferrer">Open on Vinted <span aria-hidden="true">↗</span></a><a class="button secondary" href="#search-{{ search.id }}">Edit<span class="sr"> {{ search.name }}</span></a></div>
