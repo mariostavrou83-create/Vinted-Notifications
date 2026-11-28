@@ -12,6 +12,8 @@ Listings need a UK item ID and URL, title, GBP item price in integer pence and v
 
 For personal Home, `POST /v1/feed` uses `source: "home"`, the private buyer reference, its independent cursor and an empty `searches` list. Return the same account and source, a cursor and its personalised listings. On an expired or revoked buyer grant return HTTP 401 or 403 and JSON with that exact `account_ref` and `code` equal to `account_authorization_expired` or `account_authorization_revoked`. A generic service error must not invalidate the buyer. Return HTTP 429 with `Retry-After` on throttling. Finder pauses scheduled polling for the requested interval.
 
+Home category filters use the UK department and garment path. Supply `category_path` as an array of verified labels in hierarchy order, for example `["Women","Clothing","Coats & jackets","Biker jackets"]`, plus the display `size` such as `S / UK 8–10`. A department alone qualifies for broad department filters. A narrower selection requires evidence of that category.
+
 ## User authorisation
 
 The hosted dashboard starts authorisation directly. Telegram reconnect verifies signed Mini App data, starts a single-use grant renewal and sends the member to the configured sign-in origin. The partner must establish account ownership. Configure `FINDER_PUBLIC_URL`, `FINDER_PARTNER_URL`, `FINDER_PARTNER_TOKEN` and, when different from the server origin, `FINDER_PARTNER_AUTH_ORIGIN`. Refer to `connection.py` for the start, exchange and revoke payloads and the user-bound callback. An expired or revoked authorisation must be rejected on every operation. A saved name alone grants no access.
@@ -38,6 +40,8 @@ The sample is illustrative. Seller ID, brand, subtype, model, variant, material,
 
 `POST /v1/delivery/destinations` takes `account_ref`, `mode` (`pickup` or `home`), `country` (`GB`) and an optional collection-point postcode or town `query`. Return the exact account_ref and an array named `destinations` of `{id,label,summary,couriers:[]}`. A home destination uses a safe nickname and may include `postcode_area` (UK outward code, for example W2). Home address summaries and street address fields are discarded. Identifiers for a buyer's saved addresses belong only to that buyer.
 
+For hosted pickup, each directory result identifies a physical shop or locker and a route offered there. A single record with a stable location ID can list all its pickup couriers. For carrier-specific route IDs, supply the same explicit `physical_point_id` on each route. Finder requires Royal Mail, Evri, Relay and InPost at one verified location. It never groups by postcode or shop name. Home delivery uses the buyer’s saved address and its available couriers.
+
 ## Checkout
 
 | Operation | Request | Response |
@@ -45,6 +49,8 @@ The sample is illustrative. Seller ID, brand, subtype, model, variant, material,
 | `POST /v1/checkout/quote` | `account_ref`, `listing_id`, `preferences`, optional existing `quote_id` on confirmation | `quote_id`, `account_ref`, `listing_id`, GBP `currency`, `expires_at` (UTC), `item_pence`, `shipping_pence`, `total_pence`, `delivery_mode`, `courier`, `pickup_id` and `pickup_label` or `home_address_ref`, masked display-only `payment_label` |
 | `POST /v1/checkout/submit` | Exact `account_ref`, `listing_id`, `quote_id`, stable `idempotency_key` | Echo `account_ref`, `listing_id`, `idempotency_key` and `status` |
 | `POST /v1/checkout/status` | `account_ref`, `listing_id`, `idempotency_key` | Same result envelope. This operation must be read-only. |
+
+A hosted pickup quote requests one named courier, route ID and physical collection point. Echo the account, listing, courier, pickup route ID and physical point ID. A point-wide ID can identify both the route and the physical point. If this courier is unavailable, return the same binding with `code=courier_unavailable` and no quote ID (HTTP 200, 409 or 422). Finder then checks the next courier at the same point. A timeout, missing identity, changed location, spending-limit failure or uncertain payment stops purchasing. All alternatives are checked before submission and at most one purchase is submitted.
 
 A quote must bind immutable total, currency, item, destination, courier, account and saved payment method until expiry. Quote collection and refreshing never initiate a transaction. If any bound value changes, submission must fail and require a fresh quote. A confirmation re-fetch of the existing quote ID must return the original terms if still valid. The partner must atomically enforce quote validity and deduplicate submission using the idempotency key. Supported statuses are `purchased`, `declined`, `action_required` (user completes approval on Vinted) and `pending`. The pilot reconciles an uncertain outcome through the status operation without resubmitting.
 

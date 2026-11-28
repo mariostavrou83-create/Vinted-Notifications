@@ -2,7 +2,7 @@
 
 The hosted buying dashboard runs continuously from one service and one persistent volume. Each member connects one UK Vinted account for personal Home alerts and AutoBuy, links their own private Telegram, and can save up to 100 searches. New members start with zero searches. They can close their browser after connecting. The dashboard works on phones and computers.
 
-**Team → Member limit** starts at 10, including the owner. The owner can raise it up to 50 without a restart. Valid invitations reserve places. Private settings, buying limits, pickup point and courier stay with each member. **Preferences → Connected accounts** starts the browser authorisation. An expired grant pauses that member. The bot sends **Reconnect Vinted** or the member can type `/reconnect`. Telegram verifies the member, then the sign-in page checks that the same Vinted account was renewed.
+The separate **Admin dashboard** at `/admin` shows every buyer’s setup and recent Home and Telegram activity. On first use, **Admin sign-in → Create admin login** verifies the original owner and creates a separate administrator username and password. This credential uses zero buyer places. The limit starts at 10 and can be raised to 50 without a restart. Valid invitations reserve places. New buyers land on **Set up Finder** at `/setup` to connect Vinted, link Telegram, choose Home filters and set delivery. Private settings and buying limits stay with each member. An expired grant pauses that member. The bot sends **Reconnect Vinted** or the member can type `/reconnect`. Telegram verifies the member, then the sign-in page checks that the same Vinted account was renewed.
 
 ## Run the hosted service
 

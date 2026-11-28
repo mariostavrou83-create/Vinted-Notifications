@@ -74,6 +74,15 @@ def partner_request(method, path, payload=None, *, config=None):
             raise TypeError("Expected an object.")
         return response
     except HTTPError as exc:
+        if managed and path == "/v1/checkout/quote" and exc.code in (409, 422):
+            try:
+                refusal = json.loads(exc.read(4097))
+            except (ValueError, OSError, TypeError):
+                refusal = None
+            exc.close()
+            if isinstance(refusal, dict) and refusal.get("code") == "courier_unavailable" and not refusal.get("quote_id"):
+                return refusal
+            raise PartnerError("The buyer integration could not verify the quote.") from exc
         if managed and exc.code == 429:
             from .db import get_db
             retry = (exc.headers or {}).get("Retry-After", "")

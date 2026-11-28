@@ -1,0 +1,24 @@
+<ol class="setup-steps">
+  <li><div class="step-info"><h2>Connect your Vinted buying account</h2>
+    <p>This account provides your personal Home and makes purchases when you tap AutoBuy.</p>
+    {% if not services.vinted %}<p class="step-note">Waiting for the administrator to enable Vinted. You can set your Home filters now.</p>{% endif %}
+    </div><div class="step-action">{% if setup.steps.vinted %}<span class="done">Connected · @{{ setup.vinted_username }}</span>
+    {% elif services.vinted %}<button class="button primary" type="button" data-setup-connect data-renew="{{ 'yes' if setup.expired else 'no' }}">{{ 'Reconnect Vinted' if setup.expired else 'Connect Vinted' }}</button>
+    {% else %}<span class="waiting">Awaiting Vinted</span>{% endif %}</div></li>
+  <li><div class="step-info"><h2>Link your private Telegram chat</h2>
+    <p>Open Finder’s bot and tap <strong>Start</strong>. Your alerts and AutoBuy buttons arrive in that chat.</p>
+    {% if not services.telegram %}<p class="step-note">The administrator needs to connect the Finder bot first.</p>{% endif %}
+    </div><div class="step-action">{% if setup.steps.telegram %}<span class="done">Linked</span>
+    {% elif services.telegram %}<button class="button primary" type="button" data-setup-telegram>Link Telegram</button>
+    {% else %}<span class="waiting">Awaiting Telegram</span>{% endif %}</div></li>
+  <li><div class="step-info"><h2>Choose your Home filters</h2>
+    <p>Choose the categories and sizes you want, or keep all listings. Save the hours when you want alerts paused.</p>
+    </div><div class="step-action">{% if setup.steps.filters %}<span class="done">Saved</span>{% endif %}
+    <a href="#home-filters" class="button secondary" data-setup-edit>{{ 'Edit filters' if setup.steps.filters else 'Choose filters' }}</a></div></li>
+  <li><div class="step-info"><h2>Set up delivery for AutoBuy</h2>
+    <p>Choose a pickup point and preferred courier, or select a saved home address. Set your spending limits before your first purchase.</p>
+    {% if not setup.steps.vinted %}<p class="step-note">Location lookup becomes available when Vinted is connected.</p>{% endif %}
+    </div><div class="step-action">{% if setup.steps.delivery %}<span class="done">Saved</span>{% endif %}
+    <a href="#delivery" class="button secondary" data-setup-edit>Delivery settings</a></div></li>
+</ol>
+<p class="setup-progress" data-count="{{ setup.count }}">{{ setup.count }} of 4 steps complete</p>

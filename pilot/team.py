@@ -110,6 +110,11 @@ def is_owner():
 
 
 def _owner_only():
+    if current_app.config.get("MULTIPLE_ACCOUNTS"):
+        from .admin import signed_in
+        if signed_in():
+            return
+        abort(403)
     if not is_owner():
         abort(403)
 
@@ -181,7 +186,12 @@ def _page(message="", error="", status=200, invite_path=""):
     if bot and _cipher() and not _env_bot():
         from .telegram_poll import polling_status
         transport_status = polling_status(db)
-    return render_template("team.html", invites=invites, bot=bot, transport_status=transport_status,
+    members, services = [], {}
+    if current_app.config.get("MULTIPLE_ACCOUNTS"):
+        from . import member_setup
+        services = member_setup.services(db)
+        members = member_setup.buyers(db, services)
+    return render_template("team.html", members=members, services=services, invites=invites, bot=bot, transport_status=transport_status,
                            env_bot=_env_bot(), can_encrypt=bool(_cipher()), https=_bot_https(),
                            message=message, error=error, invite_path=invite_path, seats=capacity(db),
                            csrf_token=session["csrf_token"]), status
@@ -204,7 +214,7 @@ def set_capacity():
             return _page(error="The limit must cover current members and open invitations.", status=409)
         db.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('member_limit',?)", (value,))
     flash("Member limit updated.", "team")
-    return redirect("/team", code=303)
+    return redirect("/admin" if current_app.config.get("MULTIPLE_ACCOUNTS") else "/team", code=303)
 
 
 def create_invite():

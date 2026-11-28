@@ -66,6 +66,7 @@
       const data=await response.json();
       if(!response.ok){await refresh(data.error||"Please sign in and try again.");return;}
       if(data.authorization_url){location.assign(data.authorization_url);return;}
+      if (hosted && path.endsWith("/disconnect")) { location.assign("/setup"); return; }
       await refresh();
     }catch{await refresh("The request could not be completed.");}finally{button.disabled=false;}
   }

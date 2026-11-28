@@ -3,14 +3,17 @@ import json
 import re
 import time
 
-from flask import g, jsonify, request
+from flask import current_app, g, jsonify, request
 
+from . import pickup
 from .connection import linked_account
 from .db import get_db, transaction
 from .inputs import InputError
 from .partner import PartnerError, partner_configured, partner_request
 
 CHOICE_TTL = 24 * 3600
+DELIVERY_FIELDS = {"delivery_mode", "pickup_id", "pickup_label", "home_address_ref", "preferred_courier",
+                   "allowed_couriers", "allow_same_shop_fallback"}
 
 
 def init_destinations(conn):
@@ -19,6 +22,10 @@ def init_destinations(conn):
         account_ref TEXT NOT NULL, mode TEXT NOT NULL, id TEXT NOT NULL,
         label TEXT NOT NULL, summary TEXT NOT NULL, couriers TEXT NOT NULL, observed INTEGER NOT NULL,
         PRIMARY KEY(user_id,account_ref,mode,id))""")
+    with transaction(conn):
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(pilot_destination_choices)")}
+        if "routes" not in columns:
+            conn.execute("ALTER TABLE pilot_destination_choices ADD COLUMN routes TEXT NOT NULL DEFAULT '{}'")
 
 
 def display(value, limit):
@@ -56,6 +63,8 @@ def normalize(rows, mode):
 
 def apply_selection(conn, uid, current, saved):
     account = linked_account(conn, uid)
+    managed = current_app.config.get("MULTIPLE_ACCOUNTS")
+    active_row = None
     for mode, field, label_field in (("pickup", "pickup_id", "pickup_label"),
                                      ("home", "home_address_ref", "home_address_label")):
         selected = saved.get(field, "")
@@ -67,10 +76,13 @@ def apply_selection(conn, uid, current, saved):
                 saved["delivery_couriers"] = []
             continue
         changed = selected != current.get(field, "")
-        row = conn.execute("""SELECT label,summary,couriers FROM pilot_destination_choices
+        row = conn.execute("""SELECT label,summary,couriers,routes FROM pilot_destination_choices
                             WHERE user_id=? AND account_ref=? AND mode=? AND id=? AND observed>=?""",
                            (uid, account, mode, selected, int(time.time()) - CHOICE_TTL)).fetchone()
-        if changed and not row:
+        if mode == saved["delivery_mode"]:
+            active_row = row
+        switched = managed and mode == saved["delivery_mode"] and current.get("delivery_mode") != mode
+        if (changed or switched) and not row:
             raise InputError("Find and select a delivery location for your connected buying account.")
         if row:
             saved[label_field] = row["label"]
@@ -83,6 +95,12 @@ def apply_selection(conn, uid, current, saved):
             saved[label_field] = current.get(label_field, "")
             if current["delivery_mode"] != saved["delivery_mode"] and saved["delivery_mode"] == mode:
                 saved["delivery_couriers"] = []
+    if managed:
+        if saved["delivery_mode"] == "home" and active_row:
+            saved["delivery_account_ref"] = account
+        pickup.save_policy(current=current, saved=saved, account=account, row=active_row)
+        if saved["delivery_mode"] == "pickup":
+            return saved
     if saved["delivery_mode"] == "home":
         saved["allow_same_shop_fallback"] = False
     mode_field = "pickup_id" if saved["delivery_mode"] == "pickup" else "home_address_ref"
@@ -123,7 +141,13 @@ def register_destinations(app):
             result = partner_request("POST", "/v1/delivery/destinations", params)
             if result.get("account_ref") != account:
                 raise PartnerError("Invalid delivery account.")
-            options = normalize(result.get("destinations"), mode)
+            strict = mode == "pickup" and current_app.config.get("MULTIPLE_ACCOUNTS")
+            rejected = set()
+            rows = result.get("destinations")
+            if strict and isinstance(rows, list):
+                options, rejected = pickup.directory(rows, display)
+            else:
+                options = normalize(rows, mode)
         except PartnerError:
             return jsonify(error="Your delivery locations could not be verified. Try again later."), 502
         now = int(time.time())
@@ -131,9 +155,21 @@ def register_destinations(app):
             if linked_account(conn, uid) != account:
                 return jsonify(error="Your buying account changed. Search again."), 409
             conn.execute("DELETE FROM pilot_destination_choices WHERE observed<?", (now - CHOICE_TTL,))
-            conn.executemany("""INSERT INTO pilot_destination_choices VALUES(?,?,?,?,?,?,?,?)
+            if rejected:
+                conn.executemany("DELETE FROM pilot_destination_choices WHERE user_id=? AND account_ref=? AND mode='pickup' AND id=?",
+                                 ((uid, account, point) for point in rejected))
+                prefs = conn.execute("SELECT data FROM settings WHERE user_id=?", (uid,)).fetchone()
+                if prefs:
+                    saved = json.loads(prefs[0])
+                    if saved.get("delivery_account_ref") == account and saved.get("pickup_id") in rejected:
+                        saved["pickup_routes"] = {}
+                        if saved.get("delivery_mode") == "pickup":
+                            saved.update(delivery_couriers=[], allowed_couriers=[], allow_same_shop_fallback=False)
+                        conn.execute("UPDATE settings SET data=? WHERE user_id=?", (json.dumps(saved), uid))
+            conn.executemany("""INSERT INTO pilot_destination_choices(user_id,account_ref,mode,id,label,summary,couriers,observed,routes)
+                            VALUES(?,?,?,?,?,?,?,?,?)
                             ON CONFLICT(user_id,account_ref,mode,id) DO UPDATE SET label=excluded.label,
-                            summary=excluded.summary,couriers=excluded.couriers,observed=excluded.observed""",
+                            summary=excluded.summary,couriers=excluded.couriers,observed=excluded.observed,routes=excluded.routes""",
                              ((uid, account, mode, item["id"], item["label"], item["summary"],
-                               json.dumps(item["couriers"]), now) for item in options))
-        return jsonify(destinations=options)
+                               json.dumps(item["couriers"]), now, json.dumps(item.get("routes", {}))) for item in options))
+        return jsonify(destinations=[{k:v for k,v in item.items() if k != "routes"} for item in options])

@@ -1,11 +1,10 @@
 {% extends 'base.html' %}
-{% block title %}Team · Finder{% endblock %}
-{% block scripts %}<link rel="stylesheet" href="{{ url_for('static', filename='team.css') }}"><script src="{{ url_for('static', filename='team.js') }}" defer></script>{% endblock %}
+{% block title %}{{ "Admin dashboard" if multiple_accounts else "Team" }} · Finder{% endblock %}
+{% block scripts %}<link rel="stylesheet" href="{{ url_for('static', filename='team.css') }}">{% if multiple_accounts %}<link rel="stylesheet" href="{{ url_for('static', filename='member-setup.css') }}">{% endif %}<script src="{{ url_for('static', filename='team.js') }}" defer></script>{% endblock %}
 {% block body %}
-<main class="team-page"><div class="team-content">
-<nav class="topline" aria-label="Finder"><a class="wordmark" href="/">Finder<span>.</span></a>{% if not multiple_accounts %}<a href="/team/market">Saved-search provider</a>{% endif %}</nav>
-<p class="back"><a href="/">Back to buying dashboard</a></p>
-<h1>Team</h1>
+<main class="team-page"><div class="team-content{% if multiple_accounts %} admin-content{% endif %}">
+<nav class="topline" aria-label="Finder"><a class="wordmark" href="/">Finder<span>.</span></a>{% if multiple_accounts %}<form action="/admin/logout" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button secondary" type="submit">Sign out of admin</button></form>{% else %}<a href="/team/market">Saved-search provider</a>{% endif %}</nav>
+{% if multiple_accounts %}<div class="page-head"><div><h1>Admin dashboard</h1><p class="lede">Buyer accounts, setup progress and alert delivery.</p></div></div>{% else %}<p class="back"><a href="/">Back to buying dashboard</a></p><h1>Team</h1>{% endif %}
 {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
 {% if message %}<p role="status">{{ message }}</p>{% endif %}
 {% if invite_path %}
@@ -13,8 +12,27 @@
 <label>Private signup link<input id="invite-link" readonly value="{{ invite_path }}" spellcheck="false"></label>
 <button id="copy-link" class="button secondary" type="button">Copy link</button>
 </div>{% endif %}
-{% if multiple_accounts %}<section class="team-panel"><h2>Member limit</h2>
-<p>{{ seats.joined }} joined · {{ seats.reserved }} open invitations · {{ seats.limit }} places including the owner</p>
+{% if multiple_accounts %}
+<section class="team-panel">
+<h2>Buyer accounts</h2>
+<p>{{ seats.joined }} of {{ seats.limit }} buyer places used · {{ seats.reserved }} open invitations · {{ seats.limit - seats.joined - seats.reserved }} available. Your admin login is separate.</p>
+{% if members %}<div class="member-table"><table><caption class="sr">Buyer setup and recent activity, UK time</caption>
+<thead><tr><th scope="col">Buyer</th><th scope="col">Setup</th><th scope="col">Connections</th><th scope="col">Saved searches</th><th scope="col">Last activity · UK time</th></tr></thead>
+<tbody>{% for buyer in members %}<tr>
+<th scope="row">{{ buyer.username }}</th>
+<td data-label="Setup"><strong>{{ buyer.setup.count }} of 4 complete</strong><span>Filters · {{ 'Saved' if buyer.setup.steps.filters else 'To review' }}</span><span>Delivery · {{ 'Saved' if buyer.setup.steps.delivery else 'To set up' }}</span></td>
+<td data-label="Connections"><span>Vinted · {{ buyer.setup.vinted_state if services.vinted else 'Awaiting service' }}</span><span>Telegram · {{ ('Linked' if buyer.setup.telegram_linked else 'To link') if services.telegram else 'Awaiting bot' }}</span></td>
+<td data-label="Saved searches">{{ buyer.active_searches }} active / {{ buyer.searches }} saved</td>
+<td data-label="Last activity"><span>Home check · {{ buyer.last_home }}</span><span>Telegram delivery · {{ buyer.last_sent }}</span></td>
+</tr>{% endfor %}</tbody></table></div>{% else %}<p>Create an invitation below to add your first buyer.</p>{% endif %}
+</section>
+<section class="team-panel"><h2>Service connections</h2>
+<p><strong>Hosted Vinted</strong> · {{ 'Configured' if services.vinted else 'Awaiting configuration' }}{% if not services.vinted %}. Buyers can choose filters now. Personal Home, checkout and location lookup need the hosted Vinted connection.{% endif %}</p>
+{% if not services.vinted %}<details><summary>How to enable hosted Vinted</summary><p>In Railway, open the <strong>finder-sourcing</strong> service and its Variables page. Set <code>FINDER_PARTNER_URL</code> and <code>FINDER_PARTNER_TOKEN</code> for the hosted buying integration. Once it is configured, buyers can sign in from Set up Finder.</p></details>{% endif %}
+<p><strong>Private Telegram</strong> · {{ 'Configured' if services.telegram else 'Awaiting configuration' }}. <a href="#admin-telegram">Manage Telegram bot</a></p>
+</section>
+<section class="team-panel"><h2>Buyer limit</h2>
+<p>Start with 10 places. You can raise the limit to 50 on this service.</p>
 <form class="stack-form" action="/team/capacity" method="post">
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 <label>Places available on this service<input type="number" min="10" max="50" name="limit" required value="{{ seats.limit }}"></label>
@@ -35,7 +53,7 @@
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button secondary" type="submit">Revoke invitation</button></form>
 {% endif %}</div>
 {% endfor %}
-</section><section class="team-panel"><h2>Dedicated Telegram bot</h2>
+</section><section id="admin-telegram" class="team-panel"><h2>Dedicated Telegram bot</h2>
 {% if env_bot %}
 <p>The hosting settings manage the Telegram bot for this service.</p>
 {% elif not can_encrypt %}

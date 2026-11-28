@@ -3,6 +3,8 @@
   const saved = JSON.parse(document.getElementById('delivery-state').textContent);
   const form = document.getElementById('settings-form');
   const fields = form.elements;
+  const hosted = document.documentElement.hasAttribute('data-hosted-accounts');
+  const lookupAvailable = form.dataset.lookupAvailable !== 'no';
   const element = id => document.getElementById(id);
   const mode = () => fields.delivery_mode.value;
   const status = element('destination-status');
@@ -10,7 +12,7 @@
   let generation = 0;
 
   function savedChoice(kind, id, label, summary) {
-    if (!id) return null;
+    if (!id || (hosted && kind === 'pickup' && !saved.pickup_verified)) return null;
     const current = saved.delivery_mode === kind;
     const couriers = current && saved.delivery_couriers?.length ? saved.delivery_couriers
       : current ? [saved.preferred_courier, ...(saved.allowed_couriers || [])] : [];
@@ -35,8 +37,8 @@
     generation += 1;
     results.replaceChildren();
     setStatus('');
-    element('find-pickup').disabled = false;
-    element('find-home-address').disabled = false;
+    element('find-pickup').disabled = !lookupAvailable;
+    element('find-home-address').disabled = !lookupAvailable;
   }
 
   function addOption(select, value, label) {
@@ -47,6 +49,7 @@
   }
 
   function showFallbacks(choice) {
+    if (hosted) return;
     const alternatives = (choice?.couriers || []).filter(name => name !== fields.preferred_courier.value);
     const canFallback = mode() === 'pickup' && alternatives.length > 0;
     element('same-shop-label').hidden = !canFallback;
@@ -129,6 +132,7 @@
   }
 
   async function lookup(kind) {
+    if (!lookupAvailable) return;
     resetLookup();
     const call = generation;
     const pickup = kind === 'pickup';
@@ -153,7 +157,7 @@
       const list = data.destinations;
       renderResults(kind, list);
       setStatus(list.length ? (pickup ? 'Select a shop or locker.' : 'Select a saved address.')
-        : pickup ? 'No pickup points found. Try another postcode or town.' : 'This buying account returned no saved delivery addresses.');
+        : pickup ? (hosted ? 'No point in these results accepts all four couriers. Try another postcode or choose home delivery.' : 'No pickup points found. Try another postcode or town.') : 'This buying account returned no saved delivery addresses.');
     } catch (error) {
       if (call === generation) setStatus(error.message || 'Delivery choices are unavailable. Please try again.');
     } finally {
@@ -167,7 +171,7 @@
     if (choice) choice.preferred = fields.preferred_courier.value;
     showFallbacks(choice);
   });
-  fields.allow_same_shop_fallback.addEventListener('change', () => {
+  fields.allow_same_shop_fallback?.addEventListener('change', () => {
     const choice = choices[mode()];
     if (choice) choice.fallback = fields.allow_same_shop_fallback.checked;
     showFallbacks(choice);

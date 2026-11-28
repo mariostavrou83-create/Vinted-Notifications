@@ -1,0 +1,21 @@
+<div class="field-grid home-choices">
+  {% for name, title in [('categories','Categories'), ('sizes','Sizes')] %}
+  {% set choices = filter_options[name] %}
+  <div class="choice-field"><span id="{{ name }}-label">{{ title }}</span>
+    <details class="multi-choice" data-filter="{{ name }}">
+      <summary aria-labelledby="{{ name }}-label {{ name }}-summary"><span id="{{ name }}-summary">{{ choices.selected|join(', ') or ('All ' ~ title|lower) }}</span></summary>
+      <div class="choice-list" aria-labelledby="{{ name }}-label">
+        {% for group, values in choices.groups.items() %}
+        <fieldset data-choice-group="{{ group }}"><legend>{{ group }}</legend>
+          {% for value in values %}<label class="check"><input type="checkbox" name="{{ name }}" value="{{ value }}"{% if value in choices.selected %} checked{% endif %}>{{ value }}</label>{% endfor %}
+        </fieldset>{% endfor %}
+        {% if name == 'sizes' %}<p class="field-note" data-no-sizes hidden>Size does not apply to these categories.</p>{% endif %}
+        <div class="choice-actions"><button type="button" class="text-danger" data-clear-filter>Clear selection</button><button type="button" class="button secondary" data-finish-filter>Done</button></div>
+      </div>
+    </details>
+  </div>{% endfor %}
+</div>
+<script type="application/json" id="category-size-groups">{{ filter_options.size_groups|tojson }}</script>
+<div class="field-grid">{% for name,title in [('quiet_start','Quiet hours start'),('quiet_end','Quiet hours end')] %}
+  <label>{{ title }}<select name="{{ name }}"><option value="">Off</option>{% for clock in filter_options.times %}<option value="{{ clock }}"{% if settings[name] == clock %} selected{% endif %}>{{ clock }}</option>{% endfor %}</select></label>
+{% endfor %}</div>

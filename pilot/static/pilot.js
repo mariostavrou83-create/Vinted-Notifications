@@ -7,6 +7,11 @@
   const preferences = document.getElementById('settings-form');
   const status = document.getElementById('global-status');
   let currentSearch = null;
+  let editingSetup = false;
+  document.addEventListener('click', event => {
+    if (event.target.closest('[data-setup-edit]')) editingSetup = true;
+    else if (event.target.closest('[data-nav]')) editingSetup = false;
+  });
 
   function notice(text) {
     status.textContent = text;
@@ -65,8 +70,9 @@
   function route() {
     const hash = location.hash.slice(1);
     if (hash.startsWith('account_hint=')) return;
-    let view = 'alerts';
-    if (['preferences', 'account', 'chrome-checkout', 'chrome-setup', 'limits', 'home-sharing'].includes(hash)) view = 'preferences';
+    let view = hash ? 'alerts' : document.getElementById('main').dataset.initialView || 'alerts';
+    if (hosted && hash === 'setup') view = 'setup';
+    if (['preferences', 'delivery', 'home-filters', 'account', 'chrome-checkout', 'chrome-setup', 'limits', 'home-sharing'].includes(hash)) view = 'preferences';
     if (hash === 'searches') view = 'searches';
     if (hash === 'new-search') {
       if (searches.length >= 100) {
@@ -95,7 +101,7 @@
     }
     schedulePolling(true);
     if (!hosted && hash === 'chrome-setup') document.getElementById(hash).open = true;
-    if (['account', 'chrome-checkout', 'chrome-setup', 'limits', 'home-sharing'].includes(hash)) document.getElementById(hash)?.scrollIntoView({ block: 'start' });
+    if (['delivery', 'home-filters', 'account', 'chrome-checkout', 'chrome-setup', 'limits', 'home-sharing'].includes(hash)) document.getElementById(hash)?.scrollIntoView({ block: 'start' });
     else window.scrollTo(0, 0);
   }
 
@@ -141,21 +147,29 @@
 
   preferences.addEventListener('submit', async event => {
     event.preventDefault();
-    const error = preferences.querySelector('[data-error]');
-    const button = preferences.querySelector('button[type="submit"]');
-    const values = Object.fromEntries(new FormData(preferences));
+    const filtersOnly = hosted && event.submitter?.hasAttribute('data-save-filters');
+    const error = filtersOnly ? document.getElementById('filter-error') : preferences.querySelector('[data-error]');
+    const button = event.submitter || preferences.querySelector('button[type="submit"]');
+    const filterSaved = document.getElementById('filter-saved');
+    if (filterSaved) filterSaved.hidden = true;
+    const form = new FormData(preferences);
+    const values = Object.fromEntries(form);
     for (const field of ['categories', 'sizes']) {
-      values[field] = values[field].split(',').map(value => value.trim()).filter(Boolean);
+      values[field] = hosted ? form.getAll(field) : values[field].split(',').map(value => value.trim()).filter(Boolean);
     }
-    values.allow_same_shop_fallback = values.delivery_mode === 'pickup' && preferences.elements.allow_same_shop_fallback.checked;
+    values.allow_same_shop_fallback = !hosted && values.delivery_mode === 'pickup' && preferences.elements.allow_same_shop_fallback.checked;
     values.preferred_courier = preferences.elements.preferred_courier.value;
     values.allowed_couriers = values.allow_same_shop_fallback
       ? [...document.querySelectorAll('#courier-options input:checked')].map(box => box.value) : [];
     button.disabled = true;
     formError(error, '');
     try {
-      await request('/api/settings', { method: 'POST', body: JSON.stringify(values), headers: { 'Content-Type': 'application/json' } });
-      notice('Preferences saved.');
+      const payload = filtersOnly ? {categories:values.categories, sizes:values.sizes,
+        quiet_start:values.quiet_start, quiet_end:values.quiet_end} : values;
+      await request('/api/settings', { method: 'POST', body: JSON.stringify(payload), headers: { 'Content-Type': 'application/json' } });
+      if (editingSetup) { location.assign('/setup'); return; }
+      if (filtersOnly) filterSaved.hidden = false;
+      else notice('Preferences saved.');
     } catch (err) {
       formError(error, err.message);
     } finally { button.disabled = false; }
