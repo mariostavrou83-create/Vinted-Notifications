@@ -213,9 +213,12 @@ class OfferNotifier(ConnectionNotifier):
             if not await asyncio.to_thread(self.still_current, row):
                 await asyncio.to_thread(self.finish, row)
                 return "superseded"
+            from finder_group_notices import queue
+            notice = self.notice_text(row)
+            await asyncio.to_thread(queue, f"offers:{row['incident_id']}:{row['delivery_kind']}", notice)
             url = dashboard_url()
             sent = await self.bot.send_message(
-                chat_id=self.chat_id, text=self.notice_text(row),
+                chat_id=self.chat_id, text=notice,
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Open Offers", url=url)]]) if url else None,
                 disable_web_page_preview=True,
                 read_timeout=10, write_timeout=10, connect_timeout=10, pool_timeout=10,

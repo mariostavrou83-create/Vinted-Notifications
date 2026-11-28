@@ -1,0 +1,44 @@
+{% set title, role = connection_targets[selected_service] %}
+{% set account = seller if role == 'seller' else buyer %}
+{% set name = account.username or ('MSJ' if role == 'seller' else 'your buying account') %}
+<section class="form-card service-reconnect" id="{{ 'vinted-selling' if role == 'seller' else 'vinted-buying' }}">
+  <a class="text-button" href="{{url_for('connections')}}">← All connections</a>
+  <p class="service-account">{{ name }}</p>
+  <h1>{{ title }}</h1>
+  {% if selected_service in ("alerts","alerts-buyer") and home_discovery.accounts|length > 1 %}<nav class="connection-jump" aria-label="Home feed accounts"><a href="{{url_for('connections', reconnect='alerts')}}">{{seller.username or 'MSJ'}} Home</a><a href="{{url_for('connections', reconnect='alerts-buyer')}}">{{buyer.username or 'Buying account'}} Home</a></nav>{% endif %}
+  <p>{{ 'Offers, messages and Home alerts share this MSJ sign-in.' if role == 'seller' else ('Home recommendations and Autobuy share this sign-in.' if home_discovery.accounts|length > 1 else 'Autobuy uses this buying account.') }}</p>
+  {% if account.connected %}
+  <form method="post" action="{{url_for('connections', reconnect=selected_service)}}" class="check-saved">
+    <input type="hidden" name="csrf" value="{{csrf}}">
+    <button class="secondary" name="action" value="{{ role }}_recheck">Check saved connection</button>
+  </form>
+  <h2>Sign in to {{ name }}</h2>
+  {% if account.reconnect_code and not request.args.get("restart") %}
+  <form method="post" action="{{url_for('connections', reconnect=selected_service)}}">
+    <input type="hidden" name="csrf" value="{{csrf}}">
+    <label for="signin-code">Sign-in code from Vinted</label>
+    <input id="signin-code" name="code" type="text" autocomplete="one-time-code" maxlength="12" required>
+    <button class="primary" name="action" value="{{ role }}_code">Verify and reconnect</button>
+  </form>
+  <a href="{{url_for('connections', reconnect=selected_service, restart=1)}}">Start sign-in again</a>
+  {% else %}
+  <form method="post" action="{{url_for('connections', reconnect=selected_service)}}">
+    <input type="hidden" name="csrf" value="{{csrf}}">
+    <input type="text" name="username" value="{{ name }}" autocomplete="username" hidden readonly>
+    <label for="signin-password">Vinted password for {{ name }}</label>
+    <input id="signin-password" name="password" type="password" autocomplete="current-password" maxlength="1024" required>
+    <small>Finder sends your sign-in to Vinted and asks for a code if Vinted requires one.</small>
+    <button class="primary" name="action" value="{{ role }}_signin">Sign in and reconnect</button>
+  </form>
+  {% endif %}
+  <details class="guide-section"><summary>Use the Chrome connection helper instead</summary><p>In the Chrome profile signed into <b>{{ name }}</b>, open your connection helper and choose <b>Copy connection details</b>.</p>
+  <form method="post" action="{{url_for('connections', reconnect=selected_service)}}" autocomplete="off">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label for="connection-records">Connection details for {{ name }}</label>
+    <input type="password" id="connection-records" name="{{ role }}_session_records" maxlength="32768" autocomplete="off" spellcheck="false" required>
+    <small>Paste the details only here in your private Finder dashboard.</small>
+    <button class="primary" name="action" value="{{ role }}_session_records">Verify and reconnect {{ name }}</button>
+  </form>
+  <p class="muted"><a href="{{url_for('vinted_cookie_helper_download')}}">Download the Chrome connection helper</a>{% if role == 'buyer' %} · <a href="{{url_for('connections', _anchor='buyer-existing-session')}}">Use the two cookie fields</a>{% endif %}</p></details>
+  {% else %}<p>Connect the account in Finder to finish setup.</p><a class="primary" href="{{url_for('connections', _anchor='vinted-new-buyer') if role == 'buyer' and seller.connected else url_for('connections', _anchor='buyer-existing-session')}}">Open account setup</a>{% endif %}
+</section>

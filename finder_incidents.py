@@ -65,8 +65,19 @@ def write(conn, key, data):
     )
 
 
-def enqueue(conn, key, kind, message, now, *, target="alerts", review_item=None):
+def enqueue(conn, key, kind, message, now, *, target="alerts", review_item=None, group_message=None):
     value = {"kind": kind, "text": message, "at": now, "due": now, "target": target}
+    from finder_group_notices import enqueue as enqueue_group
+    # Group members receive operational status. Owner-only bank links, account
+    # controls and purchase-resolution tokens are generated only in private.
+    if group_message is not None:
+        shared = group_message
+    elif kind == "autobuy" or review_item is not None:
+        shared = message.split("\n", 1)[0]
+    else:
+        shared = message
+    if kind == "Listing alerts" or target not in {"reconnect", "seller_reconnect"}:
+        enqueue_group(conn, "incident:" + key, shared, now)
     if review_item is not None:
         value["review_item"] = review_item
     conn.execute(
@@ -132,19 +143,23 @@ def observe(conn, now, started, previous_poll=0):
 
     home = alert_state("home", conn)
     searches = alert_state("search", conn)
-    if not home.paused:
+    from vinted_home_controls import source_roles
+    for role in (() if home.paused else source_roles(conn)):
+        feed_label = "MSJ Vinted Home" if role == "seller" else "Buying account Home"
+        detail_label = "MSJ Home listing checks" if role == "seller" else "Buying Home listing checks"
         page = conn.execute(
-            "SELECT fetched_at FROM vinted_home_pages WHERE role='seller'"
+            "SELECT fetched_at FROM vinted_home_pages WHERE role=?", (role,)
         ).fetchone()
         last_page = page[0] if page else None
-        row = read(conn, "home_monitor_status_seller", {})
+        row = read(conn, "home_monitor_status_" + role, {})
         code, checked = row.get("code"), row.get("checked_at") or 0
         if code in HOME_ERRORS and checked > 0 and checked >= max(last_page or 0, home.changed_at):
             status = row.get("http_status")
             detail = HOME_ERRORS[code] + (f" (HTTP {status})" if status else "")
-            signals["MSJ Vinted Home"] = (code, f"{detail} at {uk(checked)}.", "alerts")
+            target = ("seller_reconnect" if role == "seller" else "reconnect") if code in {"credentials", "account_changed", "account_unavailable", "saved_session"} else "alerts"
+            signals[feed_label] = (code, f"{detail} at {uk(checked)}.", target)
         elif last_page and last_page >= home.changed_at and now - last_page < 300 and code == "checked":
-            signals["MSJ Vinted Home"] = (
+            signals[feed_label] = (
                 "",
                 f"Vinted returned the personalised page at {uk(last_page)}.",
                 "alerts",
@@ -153,7 +168,7 @@ def observe(conn, now, started, previous_poll=0):
             detail = "No successful page refresh for five minutes." + (
                 f" Last page at {uk(last_page)}." if last_page else ""
             )
-            signals["MSJ Vinted Home"] = ("stalled", detail, "alerts")
+            signals[feed_label] = ("stalled", detail, "alerts")
         # A readable Home feed can still produce verified-card alerts while
         # individual listing pages are unavailable. Track their recovery separately.
         retry = row.get("detail_retry_at")
@@ -166,9 +181,9 @@ def observe(conn, now, started, previous_poll=0):
             detail = f"Individual listing checks repeatedly failed, most recently at {uk(failed_at)}."
             if known_ok:
                 detail += f" Last successful listing check at {uk(last_ok)}."
-            signals["MSJ Home listing checks"] = ("unavailable", detail, "alerts")
+            signals[detail_label] = ("unavailable", detail, "alerts")
         elif retry == 0 and known_ok and last_ok >= home.changed_at:
-            signals["MSJ Home listing checks"] = (
+            signals[detail_label] = (
                 "", f"An individual listing check succeeded at {uk(last_ok)}.", "alerts",
             )
     account = conn.execute("""SELECT b.enabled, b.user_id IS NOT NULL AND b.session IS NOT NULL AS connected,
@@ -329,7 +344,7 @@ def observe(conn, now, started, previous_poll=0):
         recently_checked = any(
             not s[0]
             for key, s in signals.items()
-            if key in ("Saved searches", "MSJ Vinted Home")
+            if key in ("Saved searches", "MSJ Vinted Home", "Buying account Home")
         )
         detail = (
             " Finder is still checking listings."
@@ -371,6 +386,17 @@ def check_health(now):
                     f"Finder checks resumed at {uk(now)}. Its warning worker had recorded no heartbeat since {uk(last)} ({int((now - last) // 60)} minutes).",
                     now,
                 )
+            from finder_connections import gate
+            from vinted_accounts import separated
+            if separated(conn):
+                blocked, _ = gate(conn)
+                roles = ", ".join("MSJ" if role == "seller" else "Autobuy" for role in blocked)
+                detail = (f"Listing alerts are paused in the bot and group. {roles} needs reconnecting."
+                          if blocked else "Both accounts verified. Listing alerts follow your saved pause settings.")
+                signals["Listing alerts"] = (",".join(blocked), detail,
+                    ("seller_reconnect" if "seller" in blocked else "reconnect") if blocked else "alerts")
+                if blocked:
+                    signals.pop("30-minute listing update", None)
             for label, (code, detail, target) in signals.items():
                 before = state["signals"].get(label, "")
                 if before == code:
@@ -456,6 +482,9 @@ def recent(conn):
 
 
 def target_url(target):
+    if target == "seller_reconnect":
+        from finder_connections import service_url
+        return service_url("alerts")
     base = dashboard_url(reconnect=target == "reconnect")
     return (
         base.split("/connections#", 1)[0] + "/vinted-home"
@@ -475,6 +504,7 @@ async def deliver(notifier):
         try:
             url = target_url(event["target"])
             label = {
+                "seller_reconnect": "Reconnect MSJ alerts",
                 "reconnect": "Reconnect buying account",
                 "buyer": "Open buying account",
                 "alerts": "Open Finder",
@@ -486,7 +516,11 @@ async def deliver(notifier):
                     await asyncio.to_thread(finish, key, event["lease"], time.time())
                     continue
                 label, url = button
-            rows = [[InlineKeyboardButton(label, url=url)]] if url else []
+            if event["target"] in {"reconnect", "seller_reconnect"} and "payment_watch" not in event:
+                service = "alerts" if event["target"] == "seller_reconnect" else "autobuy"
+                rows = [[InlineKeyboardButton(label, callback_data="finder:reconnect:" + service)]]
+            else:
+                rows = [[InlineKeyboardButton(label, url=url)]] if url else []
             text = event["text"]
             review = event.get("review_item")
             if event.get("payment_watch", [None])[-1] == "unconfirmed":

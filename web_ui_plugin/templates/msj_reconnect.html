@@ -2,7 +2,9 @@
 <link rel="stylesheet" href="{{url_for('static',filename='msj_reconnect.css')}}">
 <script src="{{url_for('static',filename='msj_reconnect.js')}}" defer></script>
 <section class="form-card reconnect-card" data-reconnect data-csrf="{{csrf}}">
-<span class="eyebrow">YOUR VINTED CONNECTION</span><h1>Reconnect from this device</h1>
+<h1>Reconnect Autobuy</h1>
+<p><a class="primary" href="{{ url_for('connections', reconnect='autobuy') }}">Open the buying account reconnect</a></p>
+<details><summary>Try private Vinted sign-in on this device</summary>
 <p>First choose <b>Check private browser availability</b>. If the check passes, open private Vinted sign-in, sign into the <b>same Vinted account</b> you already linked, complete any Vinted checks, then choose <b>Verify connection</b>.</p>
 <p>Availability alone does not verify your Vinted account. Only a successful same-account verification replaces your saved connection, encrypted. Your password is not saved. Your searches, buying limits and delivery/payment choices stay as they are.</p>
 <button class="primary" type="button" data-start disabled>Open private Vinted sign-in</button>
@@ -20,5 +22,5 @@
 <button type="button" class="secondary" data-cancel>Cancel &amp; close private browser</button>
 </div>
 <p class="muted">The browser closes after verification, cancellation, five minutes without your input, or ten minutes in total. If the browser is unavailable, Vinted rejects sign-in, or same-account verification fails, the previous saved connection stays in place.</p>
-<a href="{{url_for('connections')}}#vinted-buying">Back to Connections →</a>
+</details><a href="{{url_for('connections')}}">All three connections →</a>
 </section>{% endblock %}

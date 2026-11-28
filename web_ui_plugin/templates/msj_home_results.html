@@ -3,12 +3,14 @@
   <p><strong>{{ home_panel.sent }}</strong> sent to Telegram in 24h{% if home_panel.last_sent %} · last accepted at {{ home_panel.last_sent }}{% endif %}{% if home_panel.waiting %} · {{ home_panel.waiting }} waiting{% endif %}</p>
   <a href="{{ '/finds?source=home' if home_panel.detail else '/vinted-home' }}">{{ 'All Home alerts' if home_panel.detail else 'Open Home feed' }} →</a>
 </div>
-{% if home_panel.account and home_panel.account.time != 'Not checked' %}
-<p class="muted">MSJ Home · {{ home_panel.account.state }}{% if home_panel.account.last_home %} · last refresh {{ home_panel.account.last_home }}{% endif %}</p>
+{% for account in home_panel.accounts %}
+{% if account and account.time != 'Not checked' %}
+<p class="muted">{{account.label}} Home · {{ account.state }}{% if account.last_home %} · last refresh {{ account.last_home }}{% endif %}{% if account.state in ['Account check refused', 'Account unavailable'] %} · <a href="/connections?reconnect={{'alerts' if account.role == 'seller' else 'alerts-buyer'}}">Reconnect {{account.label}}</a>{% endif %}</p>
 {% if home_panel.detail %}<details class="home-guide-links" data-home-section="check-status"><summary>Latest Home check</summary>
-  <p class="muted">{{ home_panel.account.candidates }} recommendations · {{ home_panel.account.duplicates }} repeats · {{ home_panel.account.age_expired }} outside the freshness limit · {{ home_panel.account.age_unverified }} age unconfirmed · {{ home_panel.account.scope_miss }} without a confirmed women’s clothing category · {{ home_panel.account.size_miss }} outside the size limit · {{ home_panel.account.alerts }} alerts queued</p>
+  <p class="muted">{{ account.candidates }} recommendations · {{ account.duplicates }} repeats · {{ account.age_expired }} outside the freshness limit · {{ account.age_unverified }} age unconfirmed · {{ account.scope_miss }} without a confirmed women’s clothing category · {{ account.size_miss }} outside the size limit · {{ account.alerts }} alerts queued</p>
 </details>{% endif %}
 {% endif %}
+{% endfor %}
 {% if home_panel.deals %}
 <div class="home-deals">
   {% for row in home_panel.deals %}<article class="home-deal">
@@ -29,7 +31,7 @@
   <ul>{% for event in home_panel.incidents %}<li><strong>{{ event.time }}</strong> · {{ event.text }} · {{ 'Sent to Telegram' if event.sent else 'Waiting for Telegram' }}</li>{% endfor %}</ul>
 </details>{% endif %}
 {% for page in home_panel.pages %}<details class="home-guide-links" data-home-section="{{ page.role }}">
-  <summary>MSJ Vinted · all {{ page.cards|length }} recommendations at {{ page.time }}</summary>
+  <summary>{{ page.account_label }} · all {{ page.cards|length }} recommendations at {{ page.time }}</summary>
   <p class="muted">The most recent saved snapshot in Vinted’s order. These recommendations include all categories.</p>
   <div class="home-deals">{% for card in page.cards %}<article class="home-deal">
     <a class="home-cover" href="{{ card.url }}" target="_blank" rel="noopener noreferrer">{% if card.photo %}<img src="{{ card.photo }}" loading="lazy" alt="">{% else %}<span>Vinted ↗</span>{% endif %}</a>

@@ -177,7 +177,8 @@ def home_cap(details):
     home = (details or {}).get("home_discovery") or {}
     budget = (details or {}).get("budget") or {}
     total = budget.get("total")
-    if (home.get("source_role") == "seller" and home.get("womens_clothing") is True
+    from vinted_home_controls import source_selected
+    if (source_selected(home.get("source_role")) and home.get("womens_clothing") is True
             and home.get("reason") == "recommendation" and type(total) is int and total > 0):
         return total
     return None

@@ -10,12 +10,13 @@ from zoneinfo import ZoneInfo
 
 from alert_images import safe_listing_photo
 from search_settings import connection
+from vinted_home_controls import source_roles, source_selected
 
 
 def original_home_source(item_column):
     # Callers pass a fixed column of the enclosing query.
     return ("EXISTS (SELECT 1 FROM vinted_alert_details hd WHERE hd.item_id=" + item_column
-            + " AND CASE WHEN json_valid(hd.payload) THEN json_extract(hd.payload,'$.home_discovery.source_role')='seller'"
+            + " AND CASE WHEN json_valid(hd.payload) THEN (json_extract(hd.payload,'$.home_discovery.source_role')='seller' OR (json_extract(hd.payload,'$.home_discovery.source_role')='buyer' AND EXISTS(SELECT 1 FROM parameters WHERE key='home_include_buying_feed' AND value='1')))"
             + " AND json_type(hd.payload,'$.home_discovery.womens_clothing')='true' END)")
 
 
@@ -48,7 +49,7 @@ def migrate(conn):
 def save_feed(role, items, observed, *, seen_at=None):
     """Keep page order and return when each visible item was first seen locally."""
     from vinted_home_feed import item_url
-    if role != "seller":
+    if not source_selected(role):
         return {}
     seen_at = time.time() if seen_at is None else seen_at
     cards = []
@@ -163,7 +164,7 @@ def marker(conn, detail=False):
     alerts = conn.execute("SELECT item_id,status FROM alert_outbox WHERE " + HOME_ALERT +
                           " ORDER BY found_at DESC,item_id DESC LIMIT ?", (12 if detail else 4,))
     seen = conn.execute("SELECT item_id FROM vinted_home_activity ORDER BY checked_at DESC LIMIT 1").fetchone()
-    pages = conn.execute("SELECT role,fetched_at FROM vinted_home_pages WHERE role='seller'").fetchall() if detail else []
+    pages = conn.execute("SELECT role,fetched_at FROM vinted_home_pages WHERE role IN (?,?)",("seller", source_roles(conn)[-1])).fetchall() if detail else []
     data = [list(map(tuple, alerts)), seen[0] if detail and seen else "", list(map(tuple, pages)), int(time.time() // 60)]
     return hashlib.blake2s(json.dumps(data).encode(), digest_size=12).hexdigest()
 
@@ -173,7 +174,7 @@ def panel(detail=False):
 
     since = time.time() - 86400
     with closing(connection()) as conn:
-        account = seller_status(conn)
+        accounts = [seller_status(conn, role) for role in source_roles(conn)]
         deliveries = conn.execute("SELECT status,count(*),MAX(sent_at) FROM alert_outbox WHERE " + HOME_ALERT +
                                   " AND found_at>=? GROUP BY status", (since,)).fetchall()
         totals = {status: count for status, count, _ in deliveries}
@@ -188,9 +189,10 @@ def panel(detail=False):
         for deal in deals:
             if username and re.fullmatch(r"[A-Za-z0-9_]{5,32}",username[0]) and deal["status"] == "sent":
                 deal["autobuy_url"] = f"https://t.me/{username[0]}?start=home_{deal['item_id']}"
-        pages = [dict(row) for row in conn.execute("SELECT * FROM vinted_home_pages WHERE role='seller' AND fetched_at>=? ORDER BY fetched_at DESC",
-                                                  (since,))] if detail else []
+        pages = [dict(row) for row in conn.execute("SELECT * FROM vinted_home_pages WHERE role IN (?,?) AND fetched_at>=? ORDER BY fetched_at DESC",
+                                                  ("seller",source_roles(conn)[-1],since))] if detail else []
         for page in pages:
+            page["account_label"] = next(a["label"] for a in accounts if a["role"] == page["role"])
             page["cards"] = json.loads(page["cards"])
             page["time"] = datetime.fromtimestamp(page["fetched_at"], ZoneInfo("Europe/London")).strftime("%d %b %H:%M:%S")
             ids = [card["id"] for card in page["cards"]]
@@ -218,5 +220,5 @@ def panel(detail=False):
         if "outcome" in row:
             row["reason"] = REASONS.get(row["outcome"], "")
     return {"sent": totals.get("sent", 0), "waiting": totals.get("pending", 0),
-            "account": account, "last_sent": last_sent,
+            "account": accounts[0], "accounts": accounts, "last_sent": last_sent,
             "deals": deals, "checked": checked, "guides": guides, "pages": pages, "incidents": incidents, "detail": detail}

@@ -35,6 +35,7 @@ def home_discovery_fresh(details, *, now=None):
     """Only Home discoveries expire; ordinary alert timing remains unchanged."""
     if "home_discovery" not in details:
         return True
+    from vinted_home_controls import source_selected
     evidence = details["home_discovery"]
     if not isinstance(evidence, dict):
         return False
@@ -46,7 +47,7 @@ def home_discovery_fresh(details, *, now=None):
         and evidence["version"] == 1
         and type(age) is int
         and 0 <= age < 180
-        and evidence.get("source_role") == "seller"
+        and source_selected(evidence.get("source_role"))
         and evidence.get("womens_clothing") is True
         and all(type(value) in (int, float) and math.isfinite(value)
                 for value in (observed, expires, now))
@@ -103,13 +104,17 @@ def prepare_listing(row, details=None):
         home_detail = saved_details.get("home_discovery")
         source = "home" if "home_discovery" in saved_details else alert_controls.row_source(current)
         source_state = alert_controls.state(source, conn)
+        from finder_connections import allows_listing
         from home_routing_store import native_allowed
-        if source == "home" and not native_allowed(conn, row["item_id"], "owner"):
+        from vinted_home_controls import source_selected
+        if not allows_listing(current["found_at"], conn):
+            reason = "Listing withheld while a Finder account needed reconnection"
+        elif source == "home" and not native_allowed(conn, row["item_id"], "owner"):
             reason = "This Home is no longer routed to the owner’s Telegram"
         elif not source_state.allows(current["found_at"]):
             reason = "Home discovery is paused" if source == "home" else alert_controls.PAUSED_MESSAGE
-        elif "home_discovery" in saved_details and isinstance(saved_details["home_discovery"], dict) and saved_details["home_discovery"].get("source_role") != "seller":
-            reason = "Home recommendation is outside the selected MSJ Vinted account"
+        elif "home_discovery" in saved_details and isinstance(saved_details["home_discovery"], dict) and not source_selected(saved_details["home_discovery"].get("source_role"), conn):
+            reason = "Home recommendation is outside the selected accounts"
         elif "home_discovery" in saved_details and isinstance(saved_details["home_discovery"],dict) and saved_details["home_discovery"].get("womens_clothing") is not True:
             reason = "Home listing has no verified women's clothing category"
         elif not home_discovery_fresh(saved_details):
@@ -274,7 +279,7 @@ def sections(row, details):
     heading = f"🔎 <b>{marketplace} saved search · #{row['query_id'] or '—'} · {name}</b>"
     discovery = details.get("home_discovery")
     if not ebay and isinstance(discovery, dict):
-        account = "MSJ Vinted Home" if discovery.get("source_role") == "seller" else "Vinted Home"
+        account = "MSJ Vinted Home" if discovery.get("source_role") == "seller" else "Buying account Home"
         source = account + (" · photo match" if discovery.get("reason") == "scraper_photo" else " · feed find")
         if not row["query_id"] and discovery.get("reason") == "recommendation":
             heading = f"🏠 <b>{account} · recommendation</b>"

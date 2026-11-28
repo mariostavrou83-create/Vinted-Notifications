@@ -1,0 +1,32 @@
+<div class="page-heading compact"><h1>Connections</h1></div>
+{% if blocked_accounts %}
+<div class="connection-hold" role="status"><strong>Listing alerts paused in the bot and group</strong>
+<p>Reconnect {% for role in blocked_accounts %}{{ (seller.username or 'MSJ') if role == 'seller' else (buyer.username or 'the buying account') }}{{ ' and ' if not loop.last }}{% endfor %} to resume.</p></div>
+{% endif %}
+<div class="service-connections">
+{% for service, (title, role) in connection_services.items() %}
+  {% set account = seller if role == 'seller' else buyer %}
+  {% set health = account.connection_health|default({}) %}
+  {% set home = home_discovery.accounts|first %}
+  <section class="service-card" {% if service == 'autobuy' %}id="vinted-buying" {% endif %}aria-labelledby="title-{{ service }}">
+    <span class="service-account">{{ account.username or ('MSJ selling account' if role=='seller' else 'Buying account') }}{% if service == 'alerts' and home_discovery.accounts|length > 1 %} + {{buyer.username or 'Buying account'}}{% endif %}</span>
+    <h2 id="title-{{ service }}">{{ title }}</h2>
+    {% if role in blocked_accounts or health.state == 'reconnect_required' or (service == 'alerts' and home_discovery.accounts|length > 1 and blocked_accounts) %}
+      <p class="service-state attention">Reconnect needed</p>
+    {% elif not account.connected %}<p class="service-state attention">Account setup needed</p>
+    {% elif health.state != 'verified' %}<p class="service-state attention">{{ health.state|default('Check connection', true)|replace('_',' ')|capitalize }}</p>
+    {% else %}<p class="service-state">Account verified</p>{% endif %}
+    <div class="service-detail">
+    {% if service == 'offers' %}<p>Sends offers and order messages from MSJ.</p>
+    {% elif service == 'alerts' %}
+      {% for feed in home_discovery.accounts %}<p>{{feed.label}} Home · {{ 'Reconnect needed' if feed.role in blocked_accounts else feed.state }}</p>{% endfor %}
+      {% if not home_discovery.enabled %}<p>Home is paused in your alert settings.</p>{% endif %}
+      <p>Last Home alert on Telegram · {{ home_discovery.last_sent or 'None in the past 24 hours' }}</p>
+    {% else %}<p>Buying permission {{ 'on' if buyer.enabled else 'off' }}.</p>
+      {% if buyer.checkout_health %}<p class="attention">Last checkout needs attention. <a href="#purchase-status">View purchase status</a></p>{% endif %}
+    {% endif %}
+    </div>
+    <a class="primary" aria-label="Reconnect {{ title }}" href="{{ url_for('connections', reconnect='alerts-buyer' if service == 'alerts' and home_discovery.accounts|length > 1 and 'buyer' in blocked_accounts and 'seller' not in blocked_accounts else service) }}">Reconnect</a>
+  </section>
+{% endfor %}
+</div>

@@ -64,11 +64,15 @@ def _destination(conn, job, now):
     owner, chat, item = job["owner"], job["chat"], job["item"]
     if owner != store.owner_id(conn) or job["expires"] <= now:
         return None
+    from finder_connections import gate
+    blocked, resumed = gate(conn)
+    if blocked:
+        return None
     dests = store._destinations(conn, owner)
     for source, dest, observed in conn.execute("""SELECT o.source,o.dest,e.observed FROM home_route_origins o
             JOIN home_route_events e ON (e.owner,e.source,e.item)=(o.owner,o.source,o.item)
             WHERE o.owner=? AND o.chat=? AND o.item=?""", (owner, chat, item)):
-        if dest in dests and dests[dest][1] == chat and dest in store.selected(conn, owner, source, dests):
+        if observed >= resumed and dest in dests and dests[dest][1] == chat and dest in store.selected(conn, owner, source, dests):
             if source == store.ORIGINAL:
                 from alert_controls import state
                 if not state("home", conn).allows(observed):

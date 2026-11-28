@@ -924,6 +924,8 @@ class DashboardIntegration:
                         request.form.get("password", ""),
                         now=self.clock(),
                     )
+                    from finder_connections import SERVICE_TARGETS
+                    selected = session.get("after_login_connection")
                     self.logout()
                     reference = secrets.token_urlsafe(32)
                     digest = hashlib.sha256(reference.encode()).hexdigest()
@@ -951,7 +953,7 @@ class DashboardIntegration:
                         csrf=secrets.token_urlsafe(32),
                     )
                     session.permanent = True
-                    return redirect(url_for("dashboard"))
+                    return redirect(url_for("connections", reconnect=selected) if selected in SERVICE_TARGETS else url_for("dashboard"))
                 except SupabaseError as exc:
                     error = str(exc)
             return render_template_string(LOGIN_PAGE, csrf=session["csrf"], error=error)

@@ -223,8 +223,8 @@ class HomeRecommendationsTests(DatabaseFixture, unittest.TestCase):
             parsed = feed.parse_home(fixture)["items"][0]
             self.assertNotIn("home_created_at",parsed)
 
-    def test_cooldown_feedback_links_to_buyer_signin(self):
+    def test_cooldown_feedback_offers_buyer_status_in_telegram(self):
         with patch.dict("os.environ",{"DASHBOARD_URL":"https://finder.example"}):
             buttons = vinted_buying.feedback_buttons({"query_id":1},
                 {"state":"failed_before_payment","reason":"renewal_cooldown"})
-        self.assertTrue(any(btn.url == "https://finder.example/vinted/reconnect" for row in buttons for btn in row))
+        self.assertTrue(any(btn.callback_data == "finder:reconnect:autobuy" for row in buttons for btn in row))

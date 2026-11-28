@@ -103,6 +103,8 @@ def preserve_seller(conn):
     if not row or not all(row):
         raise ValueError("Keep your existing selling account connected before adding a separate buyer.")
     migrate(conn)
+    # Notice migrations create an empty singleton before the first account split.
+    conn.execute("DELETE FROM vinted_seller_connection_notice WHERE id=1 AND buyer_id IS NULL")
     for source, destination in TABLES.items():
         conn.execute(f"INSERT INTO {destination} SELECT * FROM {source}")
     conn.execute("UPDATE vinted_seller SET enabled=0,pending=NULL WHERE id=1")

@@ -100,6 +100,9 @@ def record_failure(error, session_fingerprint, *, checked_at=None):
                 or hashlib.sha256(current[0]).hexdigest() != session_fingerprint
             ):
                 return False
+            from finder_connections import is_disconnect, mark_disconnected
+            if is_disconnect(error.reason, error.stage, status, getattr(error, "identity_rejected", False)):
+                mark_disconnected(conn, current_role(), now)
             previous = conn.execute(
                 f"SELECT * FROM {account_table('vinted_connection_notice')} WHERE id=1"
             ).fetchone()
@@ -342,17 +345,25 @@ class ConnectionNotifier:
             if not await asyncio.to_thread(self.still_current, row):
                 await asyncio.to_thread(self.finish, row)
                 return "superseded"
-            url = dashboard_url()
-            markup = (
-                InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("Open Vinted connection", url=url)]]
-                )
-                if url
-                else None
-            )
+            from finder_connections import gate, service_url
+            from finder_group_notices import queue
+            notice = self.notice_text(row)
+            role = current_role()
+            blocked, _ = await asyncio.to_thread(gate)
+            if row.get("channel") == "checkout" or not blocked:
+                key = row.get("event_id") or (str(row.get("incident_started")) + ":" + str(row["level"]))
+                await asyncio.to_thread(queue, f"account:{role}:{key}", notice)
+            service = "offers" if role == "seller" else "autobuy"
+            url = service_url(service) if blocked or role == "seller" else dashboard_url()
+            if blocked and role in blocked:
+                markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "Reconnect MSJ" if role == "seller" else "Reconnect Autobuy",
+                    callback_data="finder:reconnect:" + service)]])
+            else:
+                markup = InlineKeyboardMarkup([[InlineKeyboardButton("Open Vinted connection", url=url)]]) if url else None
             sent = await self.bot.send_message(
                 chat_id=self.chat_id,
-                text=self.notice_text(row),
+                text=notice,
                 reply_markup=markup,
                 disable_web_page_preview=True,
                 read_timeout=10,

@@ -69,7 +69,15 @@ def advance(now):
                         f"Vinted still has a payment window for {amount}. Open it so the check can run. It may finish without an app approval.")
         if kind and kind != row["notice"]:
             key = f"payment_{item}_{checkout}_{kind}"
-            incidents.enqueue(conn, key, "autobuy", f"{row['title']}\n{text}", now, target="buyer")
+            group_status = {
+                "paid": "Vinted confirmed the purchase.",
+                "failed": "Vinted reported a failed payment.",
+                "unconfirmed": "Payment is still unconfirmed. Check the order before trying again.",
+                "action": "Payment needs the owner’s confirmation.",
+                "window": "The owner has a payment check to complete.",
+            }[kind]
+            incidents.enqueue(conn, key, "autobuy", f"{row['title']}\n{text}", now, target="buyer",
+                              group_message=f"{row['title']}\n{group_status}")
             event = incidents.read(conn, incidents.PREFIX + key, {})
             event["payment_watch"] = [item, checkout, kind]
             incidents.write(conn, incidents.PREFIX + key, event)
