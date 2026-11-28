@@ -13,6 +13,56 @@ from pilot.db import get_db, settings_for
 
 @unittest.skipUnless(os.environ.get("FINDER_TEST_CHROME"), "set FINDER_TEST_CHROME to run buyer setup in a browser")
 class MemberSetupBrowserTests(unittest.TestCase):
+    def test_admin_can_verify_bot_from_the_https_dashboard(self):
+        from cryptography.fernet import Fernet
+        from playwright.sync_api import expect, sync_playwright
+        from werkzeug.security import generate_password_hash
+        from werkzeug.serving import make_server
+
+        password = secrets.token_urlsafe(24)
+        bot_name = "FinderFixtureBot"
+        bot_token = "12345:" + secrets.token_urlsafe(32)
+        with tempfile.TemporaryDirectory() as folder:
+            app = create_app({"TESTING": True, "MULTIPLE_ACCOUNTS": True,
+                              "DATABASE": str(Path(folder) / "test.db"),
+                              "FINDER_PILOT_CONFIG_KEY": Fernet.generate_key().decode()})
+            with app.app_context():
+                get_db().execute("INSERT INTO finder_admin VALUES(1,?,?,?)",
+                                 ("finder-admin", generate_password_hash(password), secrets.token_hex(32)))
+            with make_server("127.0.0.1", 0, app, ssl_context="adhoc", threaded=True) as server:
+                url = f"https://127.0.0.1:{server.server_port}"
+                app.config["FINDER_PUBLIC_URL"] = url
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+                try:
+                    with sync_playwright() as pw:
+                        browser = pw.chromium.launch(executable_path=os.environ["FINDER_TEST_CHROME"],
+                            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"])
+                        page = browser.new_page(ignore_https_errors=True)
+                        page.goto(url + "/admin")
+                        page.get_by_label("Admin username").fill("finder-admin")
+                        page.get_by_label("Admin password").fill(password)
+                        page.get_by_role("button", name="Sign in as admin").click()
+                        page.get_by_label("Bot username").fill(bot_name)
+                        page.get_by_label("BotFather token").fill("incomplete")
+                        page.get_by_label("This bot is dedicated").check()
+                        submit = page.get_by_role("button", name="Verify and connect bot")
+                        with page.expect_response(lambda r: r.url == url + "/team/telegram") as result:
+                            submit.click()
+                        self.assertEqual(result.value.status, 400)
+                        expect(page.get_by_label("BotFather token")).to_have_value("")
+                        page.get_by_label("Bot username").fill(bot_name)
+                        page.get_by_label("BotFather token").fill(bot_token)
+                        page.get_by_label("This bot is dedicated").check()
+                        me = {"id": 12345, "username": bot_name, "is_bot": True}
+                        with patch("pilot.flow_worker.telegram", side_effect=[me, {"url": ""}]) as telegram:
+                            submit.click()
+                            expect(page.get_by_text("Connected to @" + bot_name, exact=False)).to_be_visible()
+                        self.assertEqual([call.args[0] for call in telegram.call_args_list], ["getMe", "getWebhookInfo"])
+                        expect(page.get_by_label("BotFather token")).to_have_value("")
+                        browser.close()
+                finally:
+                    server.shutdown()
+
     def test_phone_setup_delivery_and_admin(self):
         from playwright.sync_api import expect, sync_playwright
         from waitress import create_server

@@ -192,10 +192,11 @@ def _page(message="", error="", status=200, invite_path=""):
         from . import member_setup
         services = member_setup.services(db)
         members = member_setup.buyers(db, services)
+    # Chrome needs the page's origin to submit the bot form back to this site.
     return render_template("team.html", members=members, services=services, invites=invites, bot=bot, transport_status=transport_status,
                            env_bot=_env_bot(), can_encrypt=bool(_cipher()), https=_bot_https(),
                            message=message, error=error, invite_path=invite_path, seats=capacity(db),
-                           csrf_token=session["csrf_token"]), status
+                           csrf_token=session["csrf_token"]), status, {"Referrer-Policy": "same-origin"}
 
 
 def team_page():
@@ -251,7 +252,8 @@ def revoke_invite(invite_id):
 def configure_bot():
     _owner_only()
     if not _bot_https():
-        abort(403)
+        abort(403, description="Open Finder's secure dashboard again and re-enter the bot details. "
+                               "Finder could not verify where this form came from.")
     if _env_bot():
         return _page(error="Hosting settings already manage a bot for this pilot.", status=409)
     cipher = _cipher()
@@ -283,5 +285,5 @@ def configure_bot():
                       username=excluded.username,ciphertext=excluded.ciphertext""",
                    (str(me["id"]), me["username"], cipher.encrypt(token.encode("ascii"))))
         db.execute("UPDATE pilot_polling SET verified_until=0,next_check=0 WHERE bot_id=? AND lease IS NULL", (str(me["id"]),))
-    flash("Telegram verified the dedicated bot. The pilot worker will pick it up automatically.", "team")
-    return redirect("/team", code=303)
+    flash("Telegram verified your bot. You can now invite a buyer to link their private chat.", "team")
+    return redirect("/admin" if current_app.config.get("MULTIPLE_ACCOUNTS") else "/team", code=303)
