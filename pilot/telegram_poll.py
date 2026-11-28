@@ -34,7 +34,9 @@ def polling_status(conn):
     identity = _identity()
     if not identity:
         return "Configure a dedicated pilot bot username and token."
-    row = conn.execute("SELECT status FROM pilot_polling WHERE bot_id=?", (identity[0],)).fetchone()
+    row = conn.execute("SELECT status,verified_until FROM pilot_polling WHERE bot_id=?", (identity[0],)).fetchone()
+    if row and row["status"] == "Listening for private Telegram updates." and row["verified_until"] <= time.time():
+        return "Waiting for the worker to check Telegram."
     return row[0] if row else "Waiting for the pilot worker."
 
 

@@ -1,12 +1,15 @@
 """Exercise a new member's actual setup forms and the separate administrator login in Chromium."""
 import os
+import re
 import secrets
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
+from pilot import flow
 from pilot.app import create_app, digest
 from pilot.db import get_db, settings_for
 
@@ -143,6 +146,34 @@ class MemberSetupBrowserTests(unittest.TestCase):
                 expect(page.get_by_text("3 of 4 steps complete")).to_be_visible()
                 page.get_by_role("link",name="Delivery settings").click()
                 expect(page.get_by_label("Preferred courier")).to_have_value("Relay")
+                app.config.update(PILOT_TELEGRAM_MODE="polling", PILOT_TELEGRAM_BOT_USERNAME="ExampleBot",
+                                  PILOT_TELEGRAM_BOT_TOKEN="1234:fixture")
+                page.goto(url + "/setup")
+                page.get_by_role("button", name="Link Telegram").click()
+                page.wait_for_url("**/setup/telegram")
+                app_link = page.get_by_role("link", name="Open Telegram app")
+                code = parse_qs(urlsplit(app_link.get_attribute("href")).query)["start"][0]
+                web_url = urlsplit(page.get_by_role("link", name="Open Telegram Web").get_attribute("href"))
+                self.assertEqual(web_url.netloc, "web.telegram.org")
+                deep_link = parse_qs(web_url.fragment.removeprefix("?"))["tgaddr"][0]
+                self.assertEqual(parse_qs(urlsplit(deep_link).query), {"domain":["ExampleBot"], "start":[code]})
+                page.reload()
+                expect(app_link).to_have_attribute("href", "https://t.me/ExampleBot?start=" + code)
+                page.get_by_text("Chat didn’t open or no reply?").click()
+                expect(page.get_by_label("One-time message")).to_have_value("/start " + code)
+                page.get_by_role("button", name="Copy message").click()
+                expect(page.locator("#link-copy-status")).to_have_text(re.compile("Copied|selected"))
+                page.get_by_role("link", name="Back to setup").click()
+                page.get_by_role("link", name="Connected accounts").click()
+                expect(page.get_by_role("heading", name="Connected accounts")).to_be_visible()
+                page.locator("#account").get_by_role("button", name="Link Telegram").click()
+                expect(app_link).to_have_attribute("href", "https://t.me/ExampleBot?start=" + code)
+                with app.app_context():
+                    msg = {"chat":{"type":"private","id":12345},"from":{"id":12345},"text":"/start " + code}
+                    self.assertIn("connected", flow.telegram_update(get_db(), {"message":msg})["text"])
+                expect(page.get_by_role("heading", name="Telegram linked")).to_be_visible(timeout=10000)
+                page.get_by_role("link", name="Continue setup").click()
+                expect(page.get_by_text("4 of 4 steps complete")).to_be_visible()
                 page.goto(url+"/admin")
                 page.get_by_role("link",name="Create admin login").click()
                 page.get_by_label("Existing Finder owner username").fill("finder-owner")
@@ -154,7 +185,7 @@ class MemberSetupBrowserTests(unittest.TestCase):
                 expect(page.get_by_role("heading",name="Admin dashboard")).to_be_visible()
                 expect(page.get_by_text("1 of 10 buyer places used",exact=False)).to_be_visible()
                 expect(page.get_by_role("rowheader",name="finder-owner")).to_be_visible()
-                expect(page.get_by_text("3 of 4 complete")).to_be_visible()
+                expect(page.get_by_text("4 of 4 complete")).to_be_visible()
                 for width in (390,1280):
                     page.set_viewport_size({"width":width,"height":844})
                     self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"),width)

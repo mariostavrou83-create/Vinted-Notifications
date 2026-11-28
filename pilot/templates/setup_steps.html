@@ -1,9 +1,10 @@
 <ol class="setup-steps">
   <li><div class="step-info"><h2>Link your Telegram</h2>
-    <p>Your admin sets up one Finder bot for everyone. Tap <strong>Link Telegram</strong>, then <strong>Open Telegram</strong>. In your private chat, tap <strong>Start</strong>. Return here to see <strong>Linked</strong>.</p>
+    <p>Tap <strong>Link Telegram</strong>, then open your private bot chat in the app or in Chrome. Press <strong>Start</strong> inside the chat.</p>
     {% if not services.telegram %}<p class="step-note">Your admin still needs to connect the bot. You can choose your filters now.</p>{% endif %}
     </div><div class="step-action">{% if setup.steps.telegram %}<span class="done">Linked</span>
-    {% elif services.telegram %}<button class="button primary" type="button" data-setup-telegram>Link Telegram</button>
+    {% elif services.telegram %}<form action="{{ url_for('setup_telegram') }}" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button primary" type="submit">Link Telegram</button></form>
     {% else %}<span class="waiting">Awaiting Telegram</span>{% endif %}</div></li>
   <li><div class="step-info"><h2>Connect your Vinted buying account</h2>
     <p>Tap <strong>Connect Vinted</strong> and sign in to the Vinted account you want to buy from. Finder uses its Home page for alerts and the same account for AutoBuy.</p>

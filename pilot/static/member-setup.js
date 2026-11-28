@@ -27,27 +27,19 @@
   window.addEventListener('hashchange', refresh);
   document.addEventListener('visibilitychange', refresh);
   steps.addEventListener('click', async event => {
-    const control = event.target.closest('[data-setup-connect],[data-setup-telegram]');
+    const control = event.target.closest('[data-setup-connect]');
     if (!control || control.disabled) return;
-    const telegram = control.hasAttribute('data-setup-telegram');
     control.disabled = true;
     message.textContent = '';
     try {
-      const response = await fetch(telegram ? '/api/telegram/link' : '/api/connection/start', {
+      const response = await fetch('/api/connection/start', {
         method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json',
           'X-CSRF-Token':document.querySelector('meta[name="csrf-token"]').content},
-        body:JSON.stringify(telegram ? {} : {reconnect:control.dataset.renew === 'yes'})
+        body:JSON.stringify({reconnect:control.dataset.renew === 'yes'})
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'The connection could not start.');
-      if (telegram) {
-        const url = new URL(data.url);
-        if (url.origin !== 'https://t.me') throw new Error('Telegram could not verify this link.');
-        const link = document.createElement('a');
-        link.href = url.href; link.target = '_blank'; link.rel = 'noopener noreferrer';
-        link.className = 'button primary'; link.textContent = 'Open Telegram';
-        control.replaceWith(link); link.focus();
-      } else location.assign(data.authorization_url);
+      location.assign(data.authorization_url);
     } catch (error) { message.textContent = error.message; }
     finally { control.disabled = false; }
   });
