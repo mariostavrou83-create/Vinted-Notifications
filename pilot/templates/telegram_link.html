@@ -1,0 +1,37 @@
+{% extends 'base.html' %}
+{% block title %}Link Telegram · Finder{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='telegram-link.js') }}" defer></script>{% endblock %}
+{% block body %}
+<main class="auth-wrap"><div class="auth-card">
+  <a class="wordmark" href="/setup">Finder<span>.</span></a>
+  {% if linked %}
+  <h1>Telegram linked</h1>
+  <p role="status">Your private Telegram chat is connected to <strong>{{ username }}</strong>.</p>
+  <a class="button primary" href="/setup">Continue setup</a>
+  {% else %}
+  <h1>Link your Telegram</h1>
+  <p>Finder account <strong>{{ username }}</strong></p>
+  {% if unavailable %}
+  <p role="alert">{{ unavailable }}</p>
+  {% elif app_url %}
+  <p>Open <strong>@{{ bot_name }}</strong> with the Telegram account you want to receive alerts. Press <strong>Start</strong> inside the private chat.</p>
+  <div class="actions">
+    <a class="button primary" href="{{ web_url }}" target="_blank" rel="noopener noreferrer">Open Telegram Web</a>
+    <a class="button secondary" href="{{ app_url }}" target="_blank" rel="noopener noreferrer">Open Telegram app</a>
+  </div>
+  <p id="link-status" role="status" data-link="{{ tag }}">Waiting for you to press Start.{% if listening %} The bot is listening.{% endif %}</p>
+  <details><summary>Chat didn’t open or no reply?</summary>
+    <p>In Telegram, search for <strong>@{{ bot_name }}</strong> and open its private chat. Copy the whole message below, paste it into that chat and press Send.</p>
+    <label>One-time message<input id="link-command" type="text" readonly autocomplete="off" spellcheck="false" value="/start {{ code }}"></label>
+    <button class="button secondary" type="button" id="copy-link-command">Copy message</button>
+    <span id="link-copy-status" role="status"></span>
+    <p class="field-note">The message is valid for 10 minutes.</p>
+  </details>
+  {% else %}
+  <p>{% if request.args.get('renew') == '1' %}Your previous link is no longer active. {% endif %}Get a fresh link for your private Telegram chat. It works for 10 minutes.</p>
+  <form method="post" action="{{ url_for('setup_telegram') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button primary" type="submit">Get Telegram link</button></form>
+  {% endif %}
+  <p><a href="/setup">Back to setup</a></p>
+  {% endif %}
+</div></main>
+{% endblock %}

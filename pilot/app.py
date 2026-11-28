@@ -194,7 +194,9 @@ def create_app(config=None):
             return conn.execute("SELECT attempts FROM login_attempts WHERE bucket=?", (key,)).fetchone()[0] > 40
 
     if app.config["MULTIPLE_ACCOUNTS"]:
+        from . import telegram_link
         admin.register(app, csrf_token, login_limit)
+        telegram_link.register(app, csrf_token)
 
     @app.route("/login", methods=["GET", "POST"])
     def login():
@@ -293,7 +295,8 @@ def create_app(config=None):
         def setup_steps():
             db, uid = get_db(), g.user["id"]
             available = member_setup.services(db)
-            return render_template("setup_steps.html", setup=member_setup.progress(db, uid, available), services=available)
+            return render_template("setup_steps.html", setup=member_setup.progress(db, uid, available),
+                                   services=available, csrf_token=csrf_token())
 
     @app.get("/")
     def dashboard():

@@ -1,5 +1,6 @@
 """Buyer and administrator separation, Home filters and exact-location pickup."""
 import json
+import re
 import secrets
 import tempfile
 import time
@@ -41,6 +42,43 @@ class MemberSetupTests(unittest.TestCase):
 
     def save(self, changes):
         return self.member.post("/api/settings", headers=self.headers, json=changes)
+
+    def test_private_telegram_link_reuse_expiry_and_separate_buyers(self):
+        self.app.config.update(PILOT_TELEGRAM_MODE="polling", PILOT_TELEGRAM_BOT_USERNAME="ExampleBot",
+                               PILOT_TELEGRAM_BOT_TOKEN="1234:fixture")
+        path = "/setup/telegram"
+        self.assertEqual(self.member.post(path).status_code, 403)
+        self.assertIsNone(self.db.execute("SELECT 1 FROM pilot_link_codes").fetchone())
+        def start(client):
+            result = client.post(path, headers=self.headers)
+            self.assertEqual((result.status_code, result.location), (303, path))
+            return re.search(r'value="/start ([A-Za-z0-9_-]+)"', client.get(path).text)[1]
+
+        first = start(self.member)
+        self.assertEqual(start(self.member), first)
+        first_status = self.member.get(path + "/status").json
+        self.assertFalse(first_status["linked"])
+        self.assertRegex(first_status["pending"], r"^[0-9a-f]{16}$")
+        other = self.app.test_client()
+        with other.session_transaction() as session:
+            session.update(user_id=2, csrf_token="csrf")
+        second = start(other)
+        self.assertNotEqual(first, second)
+        self.assertNotIn(first, other.get(path).text)
+
+        self.db.execute("UPDATE pilot_link_codes SET expires=0 WHERE user_id=1")
+        self.assertFalse(self.member.get(path + "/status").json["pending"])
+        self.assertNotIn(first, self.member.get(path).text)
+        fresh = start(self.member)
+        self.assertNotEqual(first, fresh)
+        self.assertIn("expired", flow.pair_chat(self.db, "/start " + first, 12345))
+        self.assertIn("connected", flow.pair_chat(self.db, "/start " + fresh, 12345))
+        self.assertEqual(self.member.get(path + "/status").json, {"linked": True, "pending": None})
+        self.assertIn("Telegram linked", self.member.get(path).text)
+        self.assertNotIn(fresh, self.member.get(path).text)
+        self.assertEqual(self.member.post("/api/telegram/link", headers=self.headers).json, {"linked": True})
+        self.assertTrue(other.get(path + "/status").json["pending"])
+        self.assertFalse(other.get(path + "/status").json["linked"])
 
     @staticmethod
     def directory_rows():

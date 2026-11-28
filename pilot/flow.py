@@ -315,19 +315,24 @@ def telegram_available(conn):
     return not telegram_unavailable_reason(conn)
 
 
+def issue_chat_code(conn, uid):
+    code = secrets.token_urlsafe(24)
+    conn.execute("INSERT OR REPLACE INTO pilot_link_codes VALUES (?,?,?)",
+                 (hashlib.sha256(code.encode()).hexdigest(), uid, int(time.time()) + 600))
+    return code
+
+
 def new_link(conn, uid):
-    if not buyer_access.active(conn, uid):
-        return jsonify(error=buyer_access.paused_message()), 403
     reason = telegram_unavailable_reason(conn)
     if reason:
         return jsonify(error=reason), 503
     name = tg_config("TELEGRAM_BOT_USERNAME").lstrip("@")
-    code = secrets.token_urlsafe(24)
-    conn.execute(
-        "INSERT OR REPLACE INTO pilot_link_codes VALUES (?,?,?)",
-        (hashlib.sha256(code.encode()).hexdigest(), uid, int(time.time()) + 600),
-    )
-    conn.commit()
+    with transaction(conn):
+        if not buyer_access.active(conn, uid):
+            return jsonify(error=buyer_access.paused_message()), 403
+        if current_app.config.get("MULTIPLE_ACCOUNTS") and telegram_linked(conn, uid):
+            return jsonify(linked=True)
+        code = issue_chat_code(conn, uid)
     return jsonify(url=f"https://t.me/{name}?start={code}", expires_in=600)
 
 
@@ -663,6 +668,12 @@ def telegram_update(conn, update):
         if managed and command == "/reconnect":
             from .telegram_reconnect import private_reply
             return private_reply(conn, chat_id)
+        if managed and command == "/start":
+            linked = conn.execute("SELECT 1 FROM pilot_chats WHERE chat_id=?", (chat_id,)).fetchone()
+            text = ("Your private Finder alerts are already connected." if linked else
+                    "In Finder, choose Link Telegram. Open this chat from that page and press Start, "
+                    "or copy the one-time message from Finder and send it here.")
+            return dict(method="sendMessage", chat_id=chat_id, text=text)
         message = pair_chat(conn, command, chat_id)
         if managed and message == "Your private Finder alerts are connected.":
             message += " Use /reconnect if Vinted asks you to sign in again."
